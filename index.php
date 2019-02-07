@@ -11,13 +11,11 @@
   </head>
   
   <body>
-    <!--<header class="site-header">-->
-        <ul> 
-            <li><a href="index.php">HM & KM Coder </a></li>
-        <!--<img src="site_name.jpg" width="200" height="50">  
-          <button> BOJ 문제 & 해설 </button>-->
-        </ul>
-    <!--</header>-->
+    <header class="site-header">
+      <a href="index.php">HM & KM Coder </a>
+      <!--<img src="site_name.jpg" width="200" height="50">  
+         <button> BOJ 문제 & 해설 </button>-->
+    </header>
     <h3 style="color: black"> 한민고등학교 && 국민대학교  </h3>
     <p>........공부한거 정리........(온라인 저지를 만들고 싶다..)</p>
     <p> 단지 HTML로 실험하는 commit 입니당</p>
@@ -30,4 +28,3 @@
     <input type="radio" value="3">3
 -->
   </body>
-</html>
