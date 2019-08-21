@@ -1,1 +1,0 @@
-# shinkeonkim.github.io
