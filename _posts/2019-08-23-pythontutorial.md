@@ -55,6 +55,7 @@ tags:
 ### 아나콘다 설치
 <a href = "https://www.anaconda.com/distribution/" >아나콘다 설치 링크 </a>
 컴퓨터의 OS에 맞추어 설치해주시면 됩니다.
+
 <img src = "../image/anaconda_python.jpg">
 
 설치 순서는 다음과 같습니다.
@@ -84,16 +85,17 @@ tags:
 7. 설치 완료
 
 아래 사진과 같이 뜨면 설치된 것입니다.
-<img src = "image/anaconda_install_check.jpg">
+<img src = "../image/anaconda_install_check.jpg">
 
 ### 간단한 python 실습
 
 간단하게 python 실습을 해보겠습니다.
-
 아래의 사진과 같이 있을떄, python 3.7을 실행시켜봅시다.
+
 <img src = "../image/python.png">
 
 아래와 같이 한 검은 창이 뜹니다.
+s
 <img src = "../image/python_tutoiral_1.jpg">
 
 한번 1+1을 python으로 계산해봅시다.
@@ -107,6 +109,6 @@ tags:
 답이 13680347014013681207640974304307631라고 나옵니다.
 
 이번엔 Hello World를 python으로 출력해봅시다.
-<img src = "../image/python_tutoiral_4.jpg">
+<img src = "../image/python_tutoiral_3.jpg">
 
 다음 시간부터 python에 대해 더 자세히 다루어보겠습니다.
