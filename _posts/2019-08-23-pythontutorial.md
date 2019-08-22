@@ -1,11 +1,9 @@
 ---
 layout: post
-title: "2019.08.24 tutorial"
+title: "python tutorial"
 categories: class
 tags:
     - python
-    - programming
-    - coding
 ---
 
 # 2019-08-22 Tutorial
