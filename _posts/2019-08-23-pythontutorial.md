@@ -48,7 +48,8 @@ tags:
 
 설치순서는 다음과 같습니다.
 1. 아래 체크박스 2개를 다 체크해주시고 Install Now를 눌러주시면됩니다.
-<img src = "../image/python_install_1.png">
+
+<img src = "../image/python_install_1.PNG">
 
 2. 설치 진행하시면 됩니다.
 
