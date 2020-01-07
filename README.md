@@ -9,6 +9,9 @@
 - Instagram
     - id: keon_119
 
+- Youtube
+    - channel : <a href = "https://www.youtube.com/channel/UCxnPVTZAKfgup-srzKe7ekQ"> happykoa </a>
+
 - <a href = "https://www.acmicpc.net/">BaekJoon Online Judge</a>
     - id: singun11
     - <a href = "https://www.acmicpc.net/user/singun11">프로필 링크</a>
