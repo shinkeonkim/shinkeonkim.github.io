@@ -27,7 +27,7 @@ const resource = [
   {% endfor %}
 
   /* --- Favicons --- */
-  {% assign favicon_path = "/assets/assets/img/favicons" | relative_url %}
+  {% assign favicon_path = "/assets/img/favicons" | relative_url %}
 
   '{{ favicon_path }}/android-chrome-192x192.png',
   '{{ favicon_path }}/android-chrome-512x512.png',
