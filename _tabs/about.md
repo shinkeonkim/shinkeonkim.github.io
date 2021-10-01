@@ -1,5 +1,5 @@
 ---
-title: About
+title: 소개
 icon: fas fa-info
 order: 4
 ---
