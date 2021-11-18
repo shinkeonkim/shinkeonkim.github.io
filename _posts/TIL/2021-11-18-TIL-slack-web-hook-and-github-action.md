@@ -96,3 +96,6 @@ if __name__ == "__main__":
 > [Github Repository](https://github.com/shinkeonkim/kmu-likelion-slack-noti-action)
 
 > 이번에 cron을 쉽게 만들려고 알아보던 중에, [cronmaker](http://www.cronmaker.com/)라는 사이트를 처음 알게 되었다. cron 정규 표현식을 더 쉽게 만들어준다.
+
+메세지가 잘 온다!
+![result](/assets/img/posts/2021-11-18/TIL-slack-web-hook-and-github-action/result.png)
