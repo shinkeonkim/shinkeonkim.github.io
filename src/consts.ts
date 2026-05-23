@@ -12,8 +12,10 @@ export const MAX_GRAPH_NODES = 400;
 export const NAV_ITEMS = [
   { href: '/', label: '홈' },
   { href: '/posts/', label: '글' },
+  { href: '/projects/', label: '프로젝트' },
   { href: '/notes/', label: '한줄노트' },
   { href: '/wiki/', label: '위키' },
+  { href: '/sources/', label: '출처' },
   { href: '/graph/', label: '그래프' },
   { href: '/search/', label: '검색' },
   { href: '/about/', label: '소개' },

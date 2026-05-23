@@ -1,6 +1,22 @@
 import { defineCollection, z } from 'astro:content';
 import { glob } from 'astro/loaders';
 
+const referenceInline = z.object({
+  title: z.string(),
+  url: z.string().url().optional(),
+  author: z.string().optional(),
+  note: z.string().optional(),
+});
+
+const referenceById = z.object({
+  id: z.string(),
+  page: z.number().optional(),
+  anchor: z.string().optional(),
+  note: z.string().optional(),
+});
+
+const referenceItem = z.union([referenceById, referenceInline]);
+
 const posts = defineCollection({
   loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/posts' }),
   schema: z.object({
@@ -17,6 +33,7 @@ const posts = defineCollection({
     coverAlt: z.string().optional(),
     coverCredit: z.string().optional(),
     thumbnail: z.string().optional(),
+    references: z.array(referenceItem).default([]),
   }),
 });
 
@@ -39,7 +56,53 @@ const wiki = defineCollection({
     cover: z.string().optional(),
     coverAlt: z.string().optional(),
     thumbnail: z.string().optional(),
+    references: z.array(referenceItem).default([]),
   }),
 });
 
-export const collections = { posts, notes, wiki };
+const sources = defineCollection({
+  loader: glob({ pattern: '**/*.md', base: './src/content/sources' }),
+  schema: z.object({
+    title: z.string(),
+    type: z.enum(['book', 'article', 'paper', 'website', 'video', 'talk', 'other']).default('other'),
+    author: z.string().optional(),
+    publisher: z.string().optional(),
+    year: z.number().optional(),
+    isbn: z.string().optional(),
+    doi: z.string().optional(),
+    url: z.string().url().optional(),
+    aliases: z.array(z.string()).default([]),
+    tags: z.array(z.string()).default([]),
+  }),
+});
+
+const projects = defineCollection({
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/projects' }),
+  schema: z.object({
+    title: z.string(),
+    summary: z.string(),
+    description: z.string().optional(),
+    start: z.coerce.date(),
+    end: z.coerce.date().optional(),
+    teamSize: z.number().min(1).default(1),
+    role: z.string().optional(),
+    thumbnail: z.string().optional(),
+    cover: z.string().optional(),
+    repos: z.array(z.object({
+      url: z.string().url(),
+      label: z.string().optional(),
+      track: z.boolean().default(true),
+    })).default([]),
+    stack: z.array(z.string()).default([]),
+    links: z.array(z.object({
+      url: z.string().url(),
+      label: z.string(),
+    })).default([]),
+    status: z.enum(['ongoing', 'completed', 'archived']).default('completed'),
+    featured: z.boolean().default(false),
+    draft: z.boolean().default(false),
+    tags: z.array(z.string()).default([]),
+  }),
+});
+
+export const collections = { posts, notes, wiki, sources, projects };
