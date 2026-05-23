@@ -1,0 +1,164 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PagefindConfig from 'astro-pagefind/components/PagefindConfig.astro';
+---
+<BaseLayout title="검색" description="글, 한줄 노트, 위키에서 검색">
+  <section class="mx-auto max-w-3xl px-5" data-pagefind-ignore="all">
+    <h1 class="mb-2 text-3xl font-bold tracking-tight">검색</h1>
+    <p class="mb-6 text-sm text-[color:var(--color-fg-muted)]">
+      글, 한줄 노트, 위키에서 검색합니다. 필터 버튼으로 범위를 좁힐 수 있습니다.
+    </p>
+
+    <div class="mb-4 flex flex-wrap gap-2 text-sm" id="section-filters">
+      <button data-filter="" class="filter-btn active rounded-full border border-[color:var(--color-accent)] bg-[color:var(--color-surface-elevated)] px-3 py-1 text-[color:var(--color-accent)]" type="button">전체</button>
+      <button data-filter="posts" class="filter-btn rounded-full border border-[color:var(--color-border)] px-3 py-1 hover:border-[color:var(--color-accent)]" type="button">글</button>
+      <button data-filter="notes" class="filter-btn rounded-full border border-[color:var(--color-border)] px-3 py-1 hover:border-[color:var(--color-accent)]" type="button">한줄 노트</button>
+      <button data-filter="wiki" class="filter-btn rounded-full border border-[color:var(--color-border)] px-3 py-1 hover:border-[color:var(--color-accent)]" type="button">위키</button>
+    </div>
+
+    <input
+      id="search-input"
+      type="search"
+      autocomplete="off"
+      placeholder="검색어를 입력하세요…"
+      class="w-full rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-4 py-3 text-base text-[color:var(--color-fg)] outline-none focus:border-[color:var(--color-accent)]"
+    />
+
+    <p id="search-stats" class="mt-4 text-xs text-[color:var(--color-fg-muted)]" aria-live="polite"></p>
+
+    <div id="search-results" class="mt-4 space-y-3"></div>
+  </section>
+
+  <PagefindConfig />
+
+  <script is:inline>
+    (function () {
+      const input = document.getElementById('search-input');
+      const results = document.getElementById('search-results');
+      const stats = document.getElementById('search-stats');
+      const filterButtons = document.querySelectorAll('.filter-btn');
+
+      let pagefindModule = null;
+      let pagefindReady = false;
+      let activeFilter = '';
+      let searchToken = 0;
+
+      const SECTION_LABELS = {
+        posts: '글',
+        notes: '한줄 노트',
+        wiki: '위키',
+      };
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      async function loadPagefind() {
+        if (pagefindReady) return pagefindModule;
+        try {
+          pagefindModule = await import('/pagefind/pagefind.js');
+          await pagefindModule.options({});
+          await pagefindModule.init();
+          pagefindReady = true;
+          return pagefindModule;
+        } catch (e) {
+          console.error('Pagefind load failed:', e);
+          stats.textContent = '검색 인덱스를 불러오지 못했습니다. (dev: pnpm build → pnpm preview 로 시도해주세요)';
+          return null;
+        }
+      }
+
+      function setActiveFilter(filter) {
+        activeFilter = filter;
+        filterButtons.forEach((btn) => {
+          const isActive = btn.dataset.filter === filter;
+          btn.classList.toggle('active', isActive);
+          if (isActive) {
+            btn.classList.add('border-[color:var(--color-accent)]', 'bg-[color:var(--color-surface-elevated)]', 'text-[color:var(--color-accent)]');
+            btn.classList.remove('border-[color:var(--color-border)]');
+          } else {
+            btn.classList.remove('border-[color:var(--color-accent)]', 'bg-[color:var(--color-surface-elevated)]', 'text-[color:var(--color-accent)]');
+            btn.classList.add('border-[color:var(--color-border)]');
+          }
+        });
+        if (input.value.trim()) doSearch(input.value);
+      }
+
+      filterButtons.forEach((btn) => {
+        btn.addEventListener('click', () => setActiveFilter(btn.dataset.filter || ''));
+      });
+
+      async function doSearch(query) {
+        const trimmed = query.trim();
+        const token = ++searchToken;
+
+        if (!trimmed) {
+          results.innerHTML = '';
+          stats.textContent = '';
+          return;
+        }
+
+        stats.textContent = '검색 중…';
+
+        const pf = await loadPagefind();
+        if (!pf || token !== searchToken) return;
+
+        const filters = activeFilter ? { section: activeFilter } : undefined;
+        const start = performance.now();
+        const search = await pf.search(trimmed, filters ? { filters } : undefined);
+        if (token !== searchToken) return;
+
+        const elapsed = (performance.now() - start).toFixed(0);
+
+        if (!search || search.results.length === 0) {
+          results.innerHTML = '';
+          stats.textContent = `"${escapeHtml(trimmed)}" 에 대한 결과가 없습니다 (${elapsed}ms).`;
+          return;
+        }
+
+        stats.textContent = `${search.results.length}개 결과 (${elapsed}ms)`;
+        const hits = await Promise.all(search.results.slice(0, 20).map((r) => r.data()));
+        if (token !== searchToken) return;
+
+        results.innerHTML = hits.map((h) => {
+          const section = h.filters && h.filters.section ? (Array.isArray(h.filters.section) ? h.filters.section[0] : h.filters.section) : '';
+          const sectionLabel = SECTION_LABELS[section] || '';
+          const title = escapeHtml(h.meta && h.meta.title ? h.meta.title : h.url);
+          const url = escapeHtml(h.url);
+          return `
+            <article class="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-elevated)] p-4">
+              <div class="mb-1 flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+                ${sectionLabel ? `<span class="rounded bg-[color:var(--color-surface)] px-1.5 py-0.5 uppercase">${sectionLabel}</span>` : ''}
+                <span class="truncate">${url}</span>
+              </div>
+              <a href="${url}" class="block text-base font-semibold no-underline hover:text-[color:var(--color-accent)]">${title}</a>
+              <p class="mt-1 text-sm text-[color:var(--color-fg-muted)]">${h.excerpt || ''}</p>
+            </article>
+          `;
+        }).join('');
+      }
+
+      let timer;
+      input.addEventListener('input', (e) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => doSearch(e.target.value), 120);
+      });
+
+      const params = new URLSearchParams(location.search);
+      const initial = params.get('q');
+      const initFilter = params.get('section');
+      if (initFilter && SECTION_LABELS[initFilter]) {
+        setActiveFilter(initFilter);
+      }
+      if (initial) {
+        input.value = initial;
+        doSearch(initial);
+      }
+      input.focus();
+    })();
+  </script>
+</BaseLayout>
