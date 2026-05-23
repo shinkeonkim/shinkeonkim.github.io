@@ -4,7 +4,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 const isDev = import.meta.env.DEV;
 ---
 <BaseLayout title="콘텐츠 에디터 (dev)" description="개발 환경 전용 마크다운 에디터" noIndex>
-  <section class="mx-auto max-w-7xl px-4" data-pagefind-ignore="all">
+  <section class="editor-shell w-full px-3" data-pagefind-ignore="all">
     {!isDev ? (
       <div class="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-elevated)] p-6 text-sm">
         <h1 class="mb-2 text-xl font-semibold">에디터는 dev 모드에서만 사용할 수 있습니다.</h1>
@@ -15,8 +15,9 @@ const isDev = import.meta.env.DEV;
         <header class="editor-toolbar">
           <h1 class="editor-title">콘텐츠 에디터 <span class="editor-tag">dev</span></h1>
           <div class="editor-actions">
+            <span id="editor-autosave-indicator" class="editor-autosave-indicator" aria-live="polite"></span>
             <span id="editor-status" class="editor-status" aria-live="polite">대기 중</span>
-            <button type="button" id="editor-new" class="editor-btn">새 파일</button>
+            <button type="button" id="editor-git-toggle" class="editor-btn" title="Git 패널 열기/닫기">🌿 Git</button>
             <button type="button" id="editor-save" class="editor-btn editor-btn-primary" disabled>저장 (⌘S)</button>
             <button type="button" id="editor-preview-link" class="editor-btn" style="display:none">미리보기 →</button>
           </div>
@@ -24,12 +25,10 @@ const isDev = import.meta.env.DEV;
 
         <div class="editor-layout">
           <aside class="editor-sidebar" aria-label="파일 목록">
-            {(['posts', 'notes', 'wiki'] as const).map((c) => (
-              <details open class="editor-collection">
-                <summary>{c}</summary>
-                <ul class="editor-file-list" data-collection={c}></ul>
-              </details>
-            ))}
+            <div class="editor-sidebar-header">
+              <strong>탐색기</strong>
+            </div>
+            <div id="editor-tree-root" class="editor-tree"></div>
           </aside>
 
           <main class="editor-main">
@@ -106,7 +105,7 @@ const isDev = import.meta.env.DEV;
                       <button type="button" data-md="fm-tags">🏷️ 태그 추가</button>
                     </div>
                   </div>
-                  <button type="button" data-md="wikilink" title="위키링크" aria-label="위키링크">[[…]]</button>
+                  <button type="button" data-md="wikilink" title="위키링크 (자동완성: [[ 입력)" aria-label="위키링크">[[…]]</button>
                 </div>
               </div>
               <div class="editor-split" id="editor-split">
@@ -114,7 +113,7 @@ const isDev = import.meta.env.DEV;
                   id="editor-textarea"
                   class="editor-textarea"
                   spellcheck="false"
-                  placeholder="여기에 마크다운을 작성하세요. ⌘S 로 저장됩니다. 이미지는 끌어다 놓거나 붙여넣으세요."
+                  placeholder="여기에 마크다운을 작성하세요. ⌘S 로 저장됩니다. [[ 입력으로 위키링크 자동완성, 이미지는 드래그/붙여넣기."
                 ></textarea>
                 <div id="editor-preview" class="editor-preview" hidden>
                   <article class="prose-content" id="editor-preview-content"></article>
@@ -176,6 +175,7 @@ const isDev = import.meta.env.DEV;
               </dialog>
               <input type="file" id="editor-image-input" accept="image/*,application/pdf" hidden />
             </div>
+            <aside id="editor-git-panel" class="editor-git-panel" hidden></aside>
           </main>
         </div>
       </div>
@@ -183,196 +183,292 @@ const isDev = import.meta.env.DEV;
   </section>
 </BaseLayout>
 
+{isDev && (
+  <script>
+    import { initEditor } from './editor/main';
+    initEditor();
+  </script>
+)}
+
 <style is:global>
+  .editor-shell {
+    max-width: none;
+  }
   .editor-app {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-      height: calc(100vh - 8rem);
-      min-height: 600px;
-    }
-    .editor-toolbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-      padding-bottom: 0.5rem;
-      border-bottom: 1px solid var(--color-border);
-    }
-    .editor-title {
-      font-size: 1.25rem;
-      font-weight: 600;
-      margin: 0;
-    }
-    .editor-tag {
-      display: inline-block;
-      margin-left: 0.4rem;
-      padding: 0.1rem 0.5rem;
-      font-size: 0.7rem;
-      font-weight: 600;
-      border-radius: 0.375rem;
-      background-color: #f59e0b;
-      color: #fff;
-      vertical-align: middle;
-    }
-    .editor-actions {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .editor-status {
-      font-size: 0.8rem;
-      color: var(--color-fg-muted);
-      font-family: var(--font-mono);
-    }
-    .editor-btn {
-      display: inline-flex;
-      align-items: center;
-      padding: 0.4rem 0.85rem;
-      border: 1px solid var(--color-border);
-      border-radius: 0.375rem;
-      background-color: var(--color-surface);
-      color: var(--color-fg);
-      font-size: 0.85rem;
-      cursor: pointer;
-      transition: border-color 120ms, color 120ms, background-color 120ms;
-      text-decoration: none;
-    }
-    .editor-btn:hover:not([disabled]) {
-      border-color: var(--color-accent);
-      color: var(--color-accent);
-    }
-    .editor-btn[disabled] {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-    .editor-btn-primary {
-      background-color: var(--color-accent);
-      color: #fff;
-      border-color: var(--color-accent);
-    }
-    .editor-btn-primary:hover:not([disabled]) {
-      background-color: var(--color-accent-hover);
-      border-color: var(--color-accent-hover);
-      color: #fff;
-    }
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    height: calc(100vh - 7rem);
+    min-height: 600px;
+  }
+  .editor-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .editor-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin: 0;
+  }
+  .editor-tag {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 0.375rem;
+    background-color: #f59e0b;
+    color: #fff;
+    vertical-align: middle;
+  }
+  .editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .editor-status {
+    font-size: 0.8rem;
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+  }
+  .editor-autosave-indicator {
+    font-size: 0.72rem;
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+    opacity: 0.8;
+  }
+  .editor-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.375rem;
+    background-color: var(--color-surface);
+    color: var(--color-fg);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: border-color 120ms, color 120ms, background-color 120ms;
+    text-decoration: none;
+  }
+  .editor-btn:hover:not([disabled]) {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+  .editor-btn[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .editor-btn-primary {
+    background-color: var(--color-accent);
+    color: #fff;
+    border-color: var(--color-accent);
+  }
+  .editor-btn-primary:hover:not([disabled]) {
+    background-color: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+    color: #fff;
+  }
+  .editor-btn-danger {
+    background-color: #ef4444;
+    color: #fff;
+    border-color: #ef4444;
+  }
+  .editor-btn-danger:hover:not([disabled]) {
+    background-color: #dc2626;
+    border-color: #dc2626;
+    color: #fff;
+  }
+  .editor-btn-small {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .editor-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 0.75rem;
+    flex: 1;
+    min-height: 0;
+  }
+  @media (max-width: 768px) {
     .editor-layout {
-      display: grid;
-      grid-template-columns: 260px 1fr;
-      gap: 0.75rem;
-      flex: 1;
-      min-height: 0;
-    }
-    @media (max-width: 768px) {
-      .editor-layout {
-        grid-template-columns: 1fr;
-        grid-template-rows: auto 1fr;
-      }
-    }
-    .editor-sidebar {
-      border: 1px solid var(--color-border);
-      border-radius: 0.5rem;
-      padding: 0.5rem;
-      overflow-y: auto;
-      background-color: var(--color-surface-elevated);
-    }
-    .editor-collection summary {
-      cursor: pointer;
-      font-family: var(--font-mono);
-      font-size: 0.78rem;
-      text-transform: uppercase;
-      padding: 0.3rem 0.4rem;
-      color: var(--color-fg-muted);
-      letter-spacing: 0.04em;
-    }
-    .editor-file-list {
-      list-style: none;
-      margin: 0 0 0.5rem;
-      padding: 0;
-    }
-    .editor-file-list li button {
-      display: block;
-      width: 100%;
-      text-align: left;
-      padding: 0.35rem 0.5rem;
-      border: 0;
-      border-radius: 0.25rem;
-      background: transparent;
-      color: var(--color-fg);
-      font-size: 0.82rem;
-      cursor: pointer;
-      word-break: break-all;
-    }
-    .editor-file-list li button:hover {
-      background-color: var(--color-code-bg);
-    }
-    .editor-file-list li button.is-active {
-      background-color: var(--color-code-bg);
-      color: var(--color-accent);
-    }
-    .editor-main {
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-    }
-    .editor-pane {
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-      min-height: 0;
-      border: 1px solid var(--color-border);
-      border-radius: 0.5rem;
-      overflow: hidden;
-      background-color: var(--color-code-bg);
-    }
-    .editor-pane-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.5rem;
-      padding: 0.45rem 0.75rem;
-      border-bottom: 1px solid var(--color-border);
-      background-color: var(--color-code-header-bg);
-      font-size: 0.8rem;
-      color: var(--color-code-header-fg);
-      font-family: var(--font-mono);
-    }
-    .editor-preview-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      font-size: 0.78rem;
-      cursor: pointer;
-    }
-    .editor-split {
-      flex: 1;
-      display: grid;
       grid-template-columns: 1fr;
-      min-height: 0;
+      grid-template-rows: auto 1fr;
     }
+  }
+  .editor-sidebar {
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    background-color: var(--color-surface-elevated);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .editor-sidebar-header {
+    padding: 0.6rem 0.7rem 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 0.8rem;
+    color: var(--color-fg-muted);
+  }
+  .editor-tree {
+    overflow-y: auto;
+    padding: 0.4rem 0.3rem;
+    flex: 1;
+  }
+  .editor-tree-collection-header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+    padding: 0.4rem 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    color: var(--color-fg-muted);
+    letter-spacing: 0.04em;
+    border-radius: 0.25rem;
+  }
+  .editor-tree-collection-header:hover {
+    background-color: var(--color-code-bg);
+  }
+  .editor-tree-collection-actions,
+  .editor-tree-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    margin-left: auto;
+    opacity: 0;
+    transition: opacity 120ms;
+  }
+  .editor-tree-collection-header:hover .editor-tree-collection-actions,
+  .editor-tree-row:hover .editor-tree-row-actions {
+    opacity: 1;
+  }
+  .editor-tree-action {
+    border: 0;
+    background: transparent;
+    color: var(--color-fg-muted);
+    cursor: pointer;
+    padding: 0.1rem 0.3rem;
+    font-size: 0.75rem;
+    border-radius: 0.25rem;
+  }
+  .editor-tree-action:hover {
+    background-color: var(--color-surface);
+    color: var(--color-accent);
+  }
+  .editor-tree-collection-body {
+    padding-bottom: 0.25rem;
+  }
+  .editor-tree-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.45rem;
+    cursor: pointer;
+    border-radius: 0.25rem;
+    font-size: 0.82rem;
+    color: var(--color-fg);
+    user-select: none;
+  }
+  .editor-tree-row:hover {
+    background-color: var(--color-code-bg);
+  }
+  .editor-tree-row.is-active {
+    background-color: var(--color-code-bg);
+    color: var(--color-accent);
+    font-weight: 500;
+  }
+  .editor-tree-chevron {
+    display: inline-block;
+    width: 0.8em;
+    color: var(--color-fg-muted);
+    font-size: 0.72rem;
+  }
+  .editor-tree-icon {
+    font-size: 0.85rem;
+  }
+  .editor-tree-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .editor-tree-empty {
+    font-size: 0.75rem;
+    color: var(--color-fg-muted);
+    padding: 0.25rem 0.5rem;
+  }
+
+  .editor-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0.75rem;
+  }
+  .editor-pane {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background-color: var(--color-code-bg);
+  }
+  .editor-pane-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+    background-color: var(--color-code-header-bg);
+    font-size: 0.8rem;
+    color: var(--color-code-header-fg);
+    font-family: var(--font-mono);
+  }
+  .editor-preview-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .editor-split {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .editor-split.has-preview {
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 768px) {
     .editor-split.has-preview {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr 1fr;
     }
-    @media (max-width: 768px) {
-      .editor-split.has-preview {
-        grid-template-columns: 1fr;
-        grid-template-rows: 1fr 1fr;
-      }
-    }
-    .editor-textarea {
-      width: 100%;
-      height: 100%;
-      border: 0;
-      outline: none;
-      resize: none;
-      padding: 1rem;
-      font-family: var(--font-mono);
-      font-size: 0.9rem;
-      line-height: 1.6;
-      background-color: var(--color-code-bg);
-      color: var(--color-fg);
-    }
+  }
+  .editor-textarea {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    outline: none;
+    resize: none;
+    padding: 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    line-height: 1.6;
+    background-color: var(--color-code-bg);
+    color: var(--color-fg);
+  }
   .editor-preview {
     overflow-y: auto;
     padding: 1rem 1.25rem;
@@ -598,687 +694,285 @@ const isDev = import.meta.env.DEV;
   .editor-image-row[hidden] {
     display: none;
   }
+
+  .editor-modal {
+    width: min(560px, 92vw);
+    padding: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 0.6rem;
+    background-color: var(--color-surface);
+    color: var(--color-fg);
+    overflow: hidden;
+  }
+  .editor-modal::backdrop {
+    background-color: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(3px);
+  }
+  .editor-modal-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    padding: 1.1rem 1.2rem;
+  }
+  .editor-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .editor-modal-title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .editor-modal-close {
+    border: 0;
+    background: transparent;
+    color: var(--color-fg-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+  }
+  .editor-modal-close:hover {
+    background-color: var(--color-code-bg);
+    color: var(--color-fg);
+  }
+  .editor-modal-description {
+    margin: 0;
+    color: var(--color-fg-muted);
+    font-size: 0.88rem;
+    white-space: pre-line;
+  }
+  .editor-modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.85rem;
+  }
+  .editor-modal-field > span {
+    color: var(--color-fg-muted);
+    font-weight: 500;
+  }
+  .editor-modal-field input,
+  .editor-modal-field textarea,
+  .editor-modal-field select {
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.35rem;
+    background-color: var(--color-surface-elevated);
+    color: var(--color-fg);
+    font-family: inherit;
+    font-size: 0.9rem;
+  }
+  .editor-modal-field textarea {
+    font-family: var(--font-mono);
+    resize: vertical;
+  }
+  .editor-modal-hint {
+    color: var(--color-fg-muted);
+    font-size: 0.72rem;
+  }
+  .editor-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+  .editor-modal-body {
+    font-size: 0.85rem;
+  }
+  .editor-modal-diff {
+    background-color: var(--color-code-bg);
+    border-radius: 0.4rem;
+    padding: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    max-height: 60vh;
+    overflow: auto;
+    white-space: pre;
+    margin: 0;
+  }
+
+  .wikilink-popup {
+    position: absolute;
+    z-index: 100;
+    min-width: 240px;
+    max-width: 360px;
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    background-color: var(--color-surface);
+    box-shadow: 0 10px 28px -10px rgba(0, 0, 0, 0.45);
+  }
+  .wikilink-list {
+    list-style: none;
+    margin: 0;
+    padding: 0.25rem;
+  }
+  .wikilink-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .wikilink-item.is-active {
+    background-color: var(--color-accent);
+    color: #fff;
+  }
+  .wikilink-display {
+    font-weight: 500;
+  }
+  .wikilink-meta {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    opacity: 0.65;
+  }
+  .wikilink-item.is-active .wikilink-meta {
+    opacity: 0.85;
+  }
+
+  .editor-git-panel {
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    background-color: var(--color-surface-elevated);
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+  .git-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .git-panel-branch {
+    margin-left: 0.6rem;
+    color: var(--color-fg-muted);
+    font-size: 0.82rem;
+  }
+  .git-panel-actions {
+    display: flex;
+    gap: 0.3rem;
+  }
+  .git-panel-files {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .git-panel-file {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.35rem;
+    padding: 0.4rem 0.55rem;
+    background-color: var(--color-surface);
+  }
+  .git-panel-file label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    cursor: pointer;
+    font-size: 0.82rem;
+  }
+  .git-panel-status {
+    display: inline-block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 0.25rem;
+    color: #fff;
+    background-color: #6b7280;
+  }
+  .git-panel-status-modified { background-color: #f59e0b; }
+  .git-panel-status-added,
+  .git-panel-status-untracked { background-color: #10b981; }
+  .git-panel-status-deleted { background-color: #ef4444; }
+  .git-panel-status-renamed { background-color: #8b5cf6; }
+  .git-panel-status-conflicted { background-color: #dc2626; }
+  .git-panel-path {
+    font-family: var(--font-mono);
+    color: var(--color-fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .git-panel-empty {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--color-fg-muted);
+  }
+  .git-panel-blocked {
+    border-top: 1px dashed var(--color-border);
+    padding-top: 0.5rem;
+    font-size: 0.78rem;
+  }
+  .git-panel-blocked summary {
+    cursor: pointer;
+    color: var(--color-fg-muted);
+  }
+  .git-panel-blocked ul {
+    margin-top: 0.4rem;
+    padding-left: 1rem;
+    list-style: disc;
+  }
+  .git-panel-commit {
+    border-top: 1px solid var(--color-border);
+    padding-top: 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .git-panel-message-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.82rem;
+    color: var(--color-fg-muted);
+  }
+  .git-panel-message-label textarea {
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.35rem;
+    background-color: var(--color-surface);
+    color: var(--color-fg);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    resize: vertical;
+  }
+  .git-panel-commit-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .git-panel-output {
+    margin: 0;
+    padding: 0.6rem 0.7rem;
+    background-color: var(--color-code-bg);
+    border-radius: 0.35rem;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+    color: var(--color-fg);
+  }
+  .git-panel-error,
+  .git-panel-loading {
+    margin: 0;
+    color: var(--color-fg-muted);
+    font-size: 0.85rem;
+  }
 </style>
-
-<script is:inline define:vars={{ isDev }}>
-  (function () {
-    if (!isDev) return;
-      const statusEl = document.getElementById('editor-status');
-      const textarea = document.getElementById('editor-textarea');
-      const saveBtn = document.getElementById('editor-save');
-      const newBtn = document.getElementById('editor-new');
-      const pathEl = document.getElementById('editor-current-path');
-      const previewToggle = document.getElementById('editor-preview-toggle');
-      const previewEl = document.getElementById('editor-preview');
-      const previewContent = document.getElementById('editor-preview-content');
-      const previewLink = document.getElementById('editor-preview-link');
-      const splitEl = document.getElementById('editor-split');
-      if (!textarea || !saveBtn) return;
-
-      let current = null;
-      let isDirty = false;
-
-      function setStatus(text, kind) {
-        statusEl.textContent = text;
-        statusEl.style.color = kind === 'error' ? '#ef4444' : kind === 'ok' ? '#10b981' : 'var(--color-fg-muted)';
-      }
-
-      function urlFor(collection, slug) {
-        if (collection === 'notes') return '/notes/#' + slug;
-        return '/' + collection + '/' + slug + '/';
-      }
-
-      function selectFile(collection, slug, ext) {
-        current = { collection, slug, ext };
-        pathEl.textContent = collection + '/' + slug + ext;
-        textarea.disabled = false;
-        saveBtn.disabled = false;
-        previewLink.style.display = '';
-        previewLink.dataset.href = urlFor(collection, slug);
-        document.querySelectorAll('.editor-file-list button').forEach((b) => {
-          b.classList.toggle('is-active', b.dataset.collection === collection && b.dataset.slug === slug);
-        });
-        textarea.focus();
-        renderPreview();
-      }
-
-      async function loadFiles() {
-        setStatus('파일 목록 로딩…');
-        try {
-          const res = await fetch('/_editor/api/files');
-          const data = await res.json();
-          for (const c of Object.keys(data)) {
-            const list = document.querySelector(`[data-collection="${c}"]`);
-            if (!list) continue;
-            list.innerHTML = '';
-            for (const f of data[c]) {
-              const li = document.createElement('li');
-              const btn = document.createElement('button');
-              btn.type = 'button';
-              btn.textContent = f.slug + f.ext;
-              btn.dataset.collection = c;
-              btn.dataset.slug = f.slug;
-              btn.dataset.ext = f.ext;
-              btn.addEventListener('click', () => loadFile(c, f.slug));
-              li.appendChild(btn);
-              list.appendChild(li);
-            }
-          }
-          setStatus('준비됨', 'ok');
-        } catch (e) {
-          setStatus('파일 목록 로드 실패', 'error');
-          console.error(e);
-        }
-      }
-
-      async function loadFile(collection, slug) {
-        setStatus('파일 로딩…');
-        try {
-          const res = await fetch(`/_editor/api/file?collection=${encodeURIComponent(collection)}&slug=${encodeURIComponent(slug)}`);
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            setStatus('로드 실패: ' + (err.error || res.status), 'error');
-            return;
-          }
-          const data = await res.json();
-          textarea.value = data.content;
-          isDirty = false;
-          selectFile(collection, slug, data.ext);
-          setStatus('로드 완료', 'ok');
-          refreshPreviewAfterLoad();
-        } catch (e) {
-          setStatus('로드 실패', 'error');
-          console.error(e);
-        }
-      }
-
-      async function save() {
-        if (!current) return;
-        setStatus('저장 중…');
-        try {
-          const res = await fetch('/_editor/api/file', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              collection: current.collection,
-              slug: current.slug,
-              ext: current.ext,
-              content: textarea.value,
-            }),
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            setStatus('저장 실패: ' + (data.error || res.status), 'error');
-            return;
-          }
-          isDirty = false;
-          setStatus(`저장됨 → ${data.path} (${data.bytes}B)`, 'ok');
-          loadFiles();
-        } catch (e) {
-          setStatus('저장 실패', 'error');
-          console.error(e);
-        }
-      }
-
-      function todayIsoDate() {
-        const d = new Date();
-        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-      }
-      function todayIsoTime() {
-        const d = new Date();
-        const tz = -d.getTimezoneOffset();
-        const sign = tz >= 0 ? '+' : '-';
-        const hh = String(Math.floor(Math.abs(tz) / 60)).padStart(2, '0');
-        const mm = String(Math.abs(tz) % 60).padStart(2, '0');
-        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + 'T' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':00' + sign + hh + ':' + mm;
-      }
-      function templateFor(collection, slug) {
-        if (collection === 'posts') {
-          return `---\ntitle: "${slug}"\ndescription: ""\ndate: ${todayIsoDate()}\ntags: []\ndraft: true\n---\n\n`;
-        }
-        if (collection === 'notes') {
-          return `---\ndate: ${todayIsoTime()}\ntags: []\n---\n\n`;
-        }
-        return `---\ntitle: "${slug}"\naliases: []\ntags: []\nupdated: ${todayIsoDate()}\n---\n\n## 개요\n\n`;
-      }
-
-      newBtn.addEventListener('click', () => {
-        const collection = prompt('컬렉션 (posts / notes / wiki):', 'posts');
-        if (!collection || !['posts', 'notes', 'wiki'].includes(collection)) return;
-        const slug = prompt('파일 슬러그 (예: my-new-post, 또는 sub/folder/name):');
-        if (!slug) return;
-        const ext = collection === 'notes' ? '.md' : (confirm('MDX 컴포넌트가 필요한가요? (확인=.mdx / 취소=.md)') ? '.mdx' : '.md');
-        textarea.value = templateFor(collection, slug);
-        selectFile(collection, slug, ext);
-        isDirty = true;
-        setStatus('새 파일 (저장 안 됨)', 'ok');
-      });
-
-      saveBtn.addEventListener('click', save);
-
-      textarea.addEventListener('input', () => {
-        isDirty = true;
-        schedulePreview();
-      });
-
-      function getSel() {
-        return {
-          start: textarea.selectionStart,
-          end: textarea.selectionEnd,
-          before: textarea.value.slice(0, textarea.selectionStart),
-          selected: textarea.value.slice(textarea.selectionStart, textarea.selectionEnd),
-          after: textarea.value.slice(textarea.selectionEnd),
-        };
-      }
-
-      function setValue(newValue, selStart, selEnd) {
-        textarea.value = newValue;
-        if (selStart !== undefined) {
-          textarea.selectionStart = selStart;
-          textarea.selectionEnd = selEnd !== undefined ? selEnd : selStart;
-        }
-        textarea.focus();
-        textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-
-      function wrapSel(prefix, suffix, placeholderText) {
-        const s = getSel();
-        const text = s.selected || (placeholderText || '');
-        const newValue = s.before + prefix + text + suffix + s.after;
-        const startAt = s.start + prefix.length;
-        const endAt = startAt + text.length;
-        setValue(newValue, startAt, endAt);
-      }
-
-      function prefixLines(prefix) {
-        const s = getSel();
-        const lineStart = textarea.value.lastIndexOf('\n', s.start - 1) + 1;
-        let lineEnd = textarea.value.indexOf('\n', s.end);
-        if (lineEnd < 0) lineEnd = textarea.value.length;
-        const block = textarea.value.slice(lineStart, lineEnd);
-        const transformed = block
-          .split('\n')
-          .map((l) => (l.startsWith(prefix) ? l : prefix + l))
-          .join('\n');
-        const newValue = textarea.value.slice(0, lineStart) + transformed + textarea.value.slice(lineEnd);
-        setValue(newValue, lineStart + transformed.length, lineStart + transformed.length);
-      }
-
-      function insertBlock(text) {
-        const s = getSel();
-        const needLead = s.before && !s.before.endsWith('\n\n') ? (s.before.endsWith('\n') ? '\n' : '\n\n') : '';
-        const needTrail = s.after && !s.after.startsWith('\n') ? '\n\n' : '\n';
-        const block = needLead + text + needTrail;
-        const newValue = s.before + block + s.after;
-        const cursorAt = s.before.length + needLead.length + text.length;
-        setValue(newValue, cursorAt, cursorAt);
-      }
-
-      const CWO_SINGLE = `<CodeWithOutput
-  language="bash"
-  label="$ bash"
-  outputLanguage="text"
-  outputLabel="stdout"
-  title="제목"
-  code={\`echo "Hello"\`}
-  output={\`Hello\`}
-/>`;
-
-      const CWO_MULTI = `<CodeWithOutput
-  outputLanguage="text"
-  outputLabel="stdout"
-  title="멀티 언어 데모"
-  output={\`결과\`}
-  variants={[
-    { label: 'python', language: 'python', code: \`print("hi")\` },
-    { label: 'typescript', language: 'ts', code: \`console.log("hi")\` },
-  ]}
-/>`;
-
-      const MERMAID_TEMPLATES = {
-        flowchart: '```mermaid\nflowchart LR\n  A[시작] --> B{판단}\n  B -->|예| C[처리]\n  B -->|아니오| D[종료]\n```',
-        sequence: '```mermaid\nsequenceDiagram\n  participant A as 클라이언트\n  participant B as 서버\n  A->>B: 요청\n  B-->>A: 응답\n```',
-        state: '```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> Idle: stop\n  Running --> [*]: done\n```',
-        class: '```mermaid\nclassDiagram\n  class Animal {\n    +String name\n    +eat()\n  }\n  class Dog\n  Animal <|-- Dog\n```',
-        er: '```mermaid\nerDiagram\n  POST ||--o{ TAG_LINK : has\n  TAG ||--o{ TAG_LINK : tagged\n  POST {\n    string slug PK\n    string title\n  }\n```',
-      };
-
-      function upsertFrontmatter(updates) {
-        const raw = textarea.value;
-        const fmMatch = raw.match(/^---\n([\s\S]*?)\n---(\n|$)/);
-        let existingLines = [];
-        let rest = raw;
-        if (fmMatch) {
-          existingLines = fmMatch[1].split('\n');
-          rest = raw.slice(fmMatch[0].length);
-        }
-        const updated = new Set();
-        const out = [];
-        for (const line of existingLines) {
-          const m = line.match(/^([\w-]+)\s*:/);
-          if (m && Object.prototype.hasOwnProperty.call(updates, m[1])) {
-            const v = updates[m[1]];
-            if (v === null || v === undefined) {
-              updated.add(m[1]);
-              continue;
-            }
-            out.push(serializeYamlPair(m[1], v));
-            updated.add(m[1]);
-          } else {
-            out.push(line);
-          }
-        }
-        for (const [k, v] of Object.entries(updates)) {
-          if (!updated.has(k) && v !== null && v !== undefined) {
-            out.push(serializeYamlPair(k, v));
-          }
-        }
-        const newFm = '---\n' + out.join('\n') + '\n---\n';
-        const trimmedRest = rest.replace(/^\n+/, '');
-        const newValue = newFm + (trimmedRest ? '\n' + trimmedRest : '\n');
-        setValue(newValue, newFm.length, newFm.length);
-        setStatus(`frontmatter 갱신: ${Object.keys(updates).join(', ')}`, 'ok');
-      }
-
-      function serializeYamlPair(key, value) {
-        if (typeof value === 'string') return `${key}: ${JSON.stringify(value)}`;
-        if (typeof value === 'number' || typeof value === 'boolean') return `${key}: ${value}`;
-        if (Array.isArray(value)) return `${key}: [${value.map((v) => JSON.stringify(v)).join(', ')}]`;
-        return `${key}: ${JSON.stringify(value)}`;
-      }
-
-      const MD_HANDLERS = {
-        bold: () => wrapSel('**', '**', '굵게'),
-        italic: () => wrapSel('*', '*', '기울임'),
-        strike: () => wrapSel('~~', '~~', '취소선'),
-        code: () => wrapSel('`', '`', 'code'),
-        link: () => {
-          const url = prompt('링크 URL:', 'https://');
-          if (!url) return;
-          const s = getSel();
-          const text = s.selected || prompt('링크 텍스트:', '') || url;
-          const newValue = s.before + '[' + text + '](' + url + ')' + s.after;
-          const cursor = s.before.length + text.length + url.length + 4;
-          setValue(newValue, cursor, cursor);
-        },
-        image: () => openImagePicker(),
-        h1: () => prefixLines('# '),
-        h2: () => prefixLines('## '),
-        h3: () => prefixLines('### '),
-        ul: () => prefixLines('- '),
-        ol: () => prefixLines('1. '),
-        task: () => prefixLines('- [ ] '),
-        quote: () => prefixLines('> '),
-        codeblock: () => {
-          const lang = prompt('언어 (예: ts, python, bash, json):', '') || '';
-          const s = getSel();
-          const fenceOpen = '```' + lang;
-          const fenceClose = '```';
-          const text = s.selected || '코드';
-          insertBlock(fenceOpen + '\n' + text + '\n' + fenceClose);
-        },
-        table: () =>
-          insertBlock('| 컬럼1 | 컬럼2 | 컬럼3 |\n|---|---|---|\n| 셀1 | 셀2 | 셀3 |\n| 셀4 | 셀5 | 셀6 |'),
-        hr: () => insertBlock('---'),
-        'callout-note': () => insertBlock('> [!NOTE]\n> 정보 내용'),
-        'callout-tip': () => insertBlock('> [!TIP]\n> 팁 내용'),
-        'callout-important': () => insertBlock('> [!IMPORTANT]\n> 중요한 내용'),
-        'callout-warning': () => insertBlock('> [!WARNING]\n> 경고 내용'),
-        'callout-caution': () => insertBlock('> [!CAUTION]\n> 주의 내용'),
-        'cwo-single': () => insertBlock(CWO_SINGLE),
-        'cwo-multi': () => insertBlock(CWO_MULTI),
-        'mermaid-flowchart': () => insertBlock(MERMAID_TEMPLATES.flowchart),
-        'mermaid-sequence': () => insertBlock(MERMAID_TEMPLATES.sequence),
-        'mermaid-state': () => insertBlock(MERMAID_TEMPLATES.state),
-        'mermaid-class': () => insertBlock(MERMAID_TEMPLATES.class),
-        'mermaid-er': () => insertBlock(MERMAID_TEMPLATES.er),
-        wikilink: () => wrapSel('[[', ']]', '페이지명'),
-        'fm-cover': () => openImageDialogFor('cover'),
-        'fm-thumbnail': () => openImageDialogFor('thumbnail'),
-        'fm-series': () => {
-          const name = prompt('시리즈 이름:', '');
-          if (!name) return;
-          const orderRaw = prompt('이 글의 시리즈 순서 (숫자, 비워두면 자동):', '');
-          const update = { series: name.trim() };
-          if (orderRaw && orderRaw.trim()) {
-            const n = Number(orderRaw.trim());
-            if (!isNaN(n)) update.seriesOrder = n;
-          }
-          upsertFrontmatter(update);
-        },
-        'fm-category': () => {
-          const cat = prompt('카테고리 (영문/한글 슬러그, 폴더명 권장):', '');
-          if (!cat) return;
-          upsertFrontmatter({ category: cat.trim() });
-        },
-        'fm-tags': () => {
-          const tagsStr = prompt('태그 (쉼표 구분, 예: astro, perf):', '');
-          if (!tagsStr) return;
-          const tags = tagsStr.split(',').map((s) => s.trim()).filter(Boolean);
-          if (tags.length > 0) upsertFrontmatter({ tags });
-        },
-      };
-
-      document.querySelectorAll('.editor-md-toolbar [data-md]').forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-          e.preventDefault();
-          const key = btn.dataset.md;
-          const handler = MD_HANDLERS[key];
-          if (handler) handler();
-          closeAllMenus();
-        });
-      });
-
-      document.querySelectorAll('[data-md-menu]').forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const key = btn.dataset.mdMenu;
-          const menu = document.querySelector(`[data-menu="${key}"]`);
-          const willOpen = menu && menu.hidden;
-          closeAllMenus();
-          if (willOpen) {
-            menu.hidden = false;
-            btn.setAttribute('aria-expanded', 'true');
-          }
-        });
-      });
-
-      function closeAllMenus() {
-        document.querySelectorAll('.editor-md-menu').forEach((m) => {
-          m.hidden = true;
-        });
-        document.querySelectorAll('[data-md-menu]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
-      }
-
-      document.addEventListener('click', (e) => {
-        if (!e.target.closest('.editor-md-dropdown')) closeAllMenus();
-      });
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeAllMenus();
-      });
-
-      textarea.addEventListener('keydown', (e) => {
-        if (!(e.metaKey || e.ctrlKey)) return;
-        const key = e.key.toLowerCase();
-        if (key === 'b') { e.preventDefault(); MD_HANDLERS.bold(); }
-        else if (key === 'i') { e.preventDefault(); MD_HANDLERS.italic(); }
-        else if (key === 'k') { e.preventDefault(); MD_HANDLERS.link(); }
-      });
-
-      const imageInput = document.getElementById('editor-image-input');
-      const imageDialog = document.getElementById('editor-image-dialog');
-      const imagePreviewImg = document.getElementById('editor-image-preview-img');
-      const imageAltInput = document.getElementById('editor-image-alt');
-      const imageForm = imageDialog.querySelector('.editor-image-form');
-      const imageTitle = document.getElementById('editor-image-title');
-      const imageUrlInput = document.getElementById('editor-image-url');
-      const imageSourceStatus = document.getElementById('editor-image-source-status');
-      const imageUploadGroup = imageDialog.querySelector('[data-image-source-upload]');
-      const imageUrlGroup = imageDialog.querySelector('[data-image-source-url]');
-      const imagePurposeFieldset = imageDialog.querySelector('[data-image-section="purpose"]');
-      const imageBodyOnlySections = imageDialog.querySelectorAll('[data-image-section="body-only"]');
-
-      let pendingImage = null;
-
-      function openImagePicker() {
-        openImageDialogFor('body');
-      }
-
-      function openImageDialogFor(purpose) {
-        pendingImage = null;
-        imagePreviewImg.removeAttribute('src');
-        imageAltInput.value = '';
-        imageUrlInput.value = '';
-        imageSourceStatus.textContent = '';
-        imageForm.querySelectorAll('input[name="img-purpose"]').forEach((r) => (r.checked = r.value === purpose));
-        imageForm.querySelectorAll('input[name="img-source"]').forEach((r) => (r.checked = r.value === 'upload'));
-        imageForm.querySelectorAll('input[name="img-width"]').forEach((r) => (r.checked = r.value === ''));
-        imageForm.querySelectorAll('input[name="img-align"]').forEach((r) => (r.checked = r.value === ''));
-        applyDialogMode();
-        if (typeof imageDialog.showModal === 'function') imageDialog.showModal();
-        else imageDialog.setAttribute('open', '');
-      }
-
-      function currentPurpose() {
-        return imageForm.querySelector('input[name="img-purpose"]:checked')?.value || 'body';
-      }
-      function currentSource() {
-        return imageForm.querySelector('input[name="img-source"]:checked')?.value || 'upload';
-      }
-
-      function applyDialogMode() {
-        const purpose = currentPurpose();
-        const source = currentSource();
-        imageTitle.textContent =
-          purpose === 'cover'
-            ? '커버 이미지 설정'
-            : purpose === 'thumbnail'
-              ? '썸네일 이미지 설정'
-              : '이미지 삽입 옵션';
-        imageBodyOnlySections.forEach((s) => {
-          s.hidden = purpose !== 'body';
-        });
-        imageUploadGroup.hidden = source !== 'upload';
-        imageUrlGroup.hidden = !source.startsWith('url');
-      }
-
-      imagePurposeFieldset.addEventListener('change', applyDialogMode);
-      imageForm.querySelector('[data-image-section="source"]').addEventListener('change', () => {
-        applyDialogMode();
-        pendingImage = null;
-        imagePreviewImg.removeAttribute('src');
-        imageSourceStatus.textContent = '';
-      });
-
-      imageDialog.querySelector('[data-image-pick]').addEventListener('click', () => {
-        imageInput.value = '';
-        imageInput.click();
-      });
-      imageDialog.querySelector('[data-image-url-fetch]').addEventListener('click', async () => {
-        const url = imageUrlInput.value.trim();
-        if (!url) return;
-        const source = currentSource();
-        if (source === 'url-direct') {
-          setImagePending({ path: url, size: 0, type: 'external', sourceUrl: url, originalName: url });
-          imageSourceStatus.textContent = '외부 URL 그대로 사용';
-          return;
-        }
-        imageSourceStatus.textContent = '다운로드 중…';
-        try {
-          const res = await fetch('/_editor/api/fetch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            imageSourceStatus.textContent = '실패: ' + (data.error || res.status);
-            return;
-          }
-          setImagePending({ ...data, originalName: url });
-          imageSourceStatus.textContent = `저장됨 (${formatBytes(data.size)})`;
-        } catch (err) {
-          imageSourceStatus.textContent = '실패: ' + (err?.message ?? err);
-        }
-      });
-
-      imageInput.addEventListener('change', async () => {
-        const file = imageInput.files?.[0];
-        if (file) await uploadAndOpenDialog(file);
-      });
-
-      function setImagePending(image) {
-        pendingImage = image;
-        imagePreviewImg.src = image.path;
-        if (!imageAltInput.value) {
-          const base = image.originalName?.replace(/\.[^.]+$/, '') ?? '';
-          imageAltInput.value = base;
-        }
-      }
-
-      async function uploadAndOpenDialog(file) {
-        const wasOpen = imageDialog.open;
-        if (!wasOpen) {
-          openImageDialogFor('body');
-        }
-        setStatus('업로드 중…');
-        imageSourceStatus.textContent = '업로드 중…';
-        document.body.classList.add('editor-uploading');
-        try {
-          const fd = new FormData();
-          fd.append('file', file);
-          const res = await fetch('/_editor/api/upload', { method: 'POST', body: fd });
-          const data = await res.json();
-          if (!res.ok) {
-            imageSourceStatus.textContent = '실패: ' + (data.error || res.status);
-            setStatus('업로드 실패: ' + (data.error || res.status), 'error');
-            return;
-          }
-          setImagePending({ ...data, originalName: file.name });
-          imageSourceStatus.textContent = `업로드됨 (${formatBytes(data.size)})`;
-          setStatus(`업로드됨 (${formatBytes(data.size)})`, 'ok');
-        } catch (err) {
-          setStatus('업로드 실패', 'error');
-          imageSourceStatus.textContent = '실패';
-          console.error(err);
-        } finally {
-          document.body.classList.remove('editor-uploading');
-        }
-      }
-
-      function formatBytes(n) {
-        if (!n) return '0 B';
-        if (n < 1024) return n + ' B';
-        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-        return (n / (1024 * 1024)).toFixed(2) + ' MB';
-      }
-
-      imageDialog.addEventListener('click', (e) => {
-        if (e.target.dataset.imageCancel !== undefined) {
-          imageDialog.close('cancel');
-        }
-      });
-
-      imageForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        if (!pendingImage) {
-          imageSourceStatus.textContent = '이미지를 먼저 업로드 또는 가져오기 해주세요';
-          return;
-        }
-        const purpose = currentPurpose();
-        const alt = imageAltInput.value.trim();
-        if (purpose === 'cover') {
-          const update = { cover: pendingImage.path };
-          if (alt) update.coverAlt = alt;
-          upsertFrontmatter(update);
-        } else if (purpose === 'thumbnail') {
-          upsertFrontmatter({ thumbnail: pendingImage.path });
-        } else {
-          const width = imageForm.querySelector('input[name="img-width"]:checked')?.value ?? '';
-          const align = imageForm.querySelector('input[name="img-align"]:checked')?.value ?? '';
-          const classes = [width, align].filter(Boolean).join(' ');
-          const md = classes
-            ? `<img src="${pendingImage.path}" alt="${alt.replace(/"/g, '&quot;')}" class="${classes}" />`
-            : `![${alt}](${pendingImage.path})`;
-          insertBlock(md);
-        }
-        pendingImage = null;
-        imageDialog.close();
-      });
-
-      textarea.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        textarea.classList.add('editor-drag-hover');
-      });
-      textarea.addEventListener('dragleave', () => {
-        textarea.classList.remove('editor-drag-hover');
-      });
-      textarea.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        textarea.classList.remove('editor-drag-hover');
-        const file = e.dataTransfer?.files?.[0];
-        if (file) await uploadAndOpenDialog(file);
-      });
-
-      textarea.addEventListener('paste', async (e) => {
-        const items = e.clipboardData?.items;
-        if (!items) return;
-        for (const item of items) {
-          if (item.kind === 'file' && item.type.startsWith('image/')) {
-            e.preventDefault();
-            const file = item.getAsFile();
-            if (file) await uploadAndOpenDialog(file);
-            return;
-          }
-        }
-      });
-
-      document.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-          e.preventDefault();
-          if (current) save();
-        }
-      });
-
-      window.addEventListener('beforeunload', (e) => {
-        if (isDirty) {
-          e.preventDefault();
-          e.returnValue = '';
-        }
-      });
-
-      previewLink.addEventListener('click', () => {
-        if (previewLink.dataset.href) window.open(previewLink.dataset.href, '_blank', 'noopener');
-      });
-
-      previewToggle.addEventListener('change', () => {
-        previewEl.hidden = !previewToggle.checked;
-        splitEl.classList.toggle('has-preview', previewToggle.checked);
-        if (previewToggle.checked) renderPreview();
-      });
-
-      function refreshPreviewAfterLoad() {
-        if (previewEl && !previewEl.hidden) renderPreview();
-      }
-
-      let previewToken = 0;
-      let previewTimer = null;
-
-      function schedulePreview() {
-        if (!previewEl || previewEl.hidden) return;
-        clearTimeout(previewTimer);
-        previewTimer = setTimeout(renderPreview, 250);
-      }
-
-      async function renderPreview() {
-        if (!previewEl || previewEl.hidden) return;
-        const token = ++previewToken;
-        const content = textarea.value;
-        const ext = current?.ext ?? '.md';
-        try {
-          const res = await fetch('/_editor/api/render', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content, ext }),
-          });
-          if (token !== previewToken) return;
-          const data = await res.json();
-          if (!res.ok) {
-            previewContent.innerHTML = `<pre class="cwo-error" style="color:#ef4444;white-space:pre-wrap">렌더링 실패: ${(data.error || res.status)}\n\n${data.stack || ''}</pre>`;
-            return;
-          }
-          previewContent.innerHTML = data.html;
-          document.dispatchEvent(new CustomEvent('preview-updated', { detail: { container: previewContent } }));
-        } catch (err) {
-          if (token !== previewToken) return;
-          previewContent.innerHTML = `<pre style="color:#ef4444">미리보기 요청 실패: ${err && err.message ? err.message : err}</pre>`;
-        }
-      }
-
-      textarea.disabled = true;
-      saveBtn.disabled = true;
-      loadFiles();
-  })();
-</script>
-

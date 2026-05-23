@@ -34,6 +34,14 @@ export default function devEditor() {
           pattern: '/_editor/api/fetch',
           entrypoint: path.join(here, 'api-fetch.ts'),
         });
+        injectRoute({
+          pattern: '/_editor/api/ops',
+          entrypoint: path.join(here, 'api-file-ops.ts'),
+        });
+        injectRoute({
+          pattern: '/_editor/api/git',
+          entrypoint: path.join(here, 'api-git.ts'),
+        });
       },
     },
   };

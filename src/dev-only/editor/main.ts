@@ -1,0 +1,333 @@
+import { api } from './api';
+import { Autosaver, clearDraft, readDraft } from './autosave';
+import { FileOpsController } from './file-ops';
+import { GitPanel } from './git-panel';
+import { ImageDialogController } from './image-dialog';
+import { confirmModal } from './modal';
+import { PreviewPane } from './preview';
+import { state } from './state';
+import { initStatus, setStatus } from './status';
+import { FileTree } from './tree';
+import { MarkdownToolbar } from './toolbar';
+import { todayIsoDate, todayIsoTime, urlFor } from './utils';
+import { WikilinkAutocomplete } from './wikilink';
+import type { CollectionName, CurrentFile, Ext } from './state';
+
+function template(collection: CollectionName, slug: string): string {
+  if (collection === 'posts') {
+    return `---\ntitle: "${slug.split('/').pop() ?? slug}"\ndescription: ""\ndate: ${todayIsoDate()}\ntags: []\ndraft: true\n---\n\n`;
+  }
+  if (collection === 'notes') {
+    return `---\ndate: ${todayIsoTime()}\ntags: []\n---\n\n`;
+  }
+  return `---\ntitle: "${slug.split('/').pop() ?? slug}"\naliases: []\ntags: []\nupdated: ${todayIsoDate()}\n---\n\n## 개요\n\n`;
+}
+
+interface EditorUi {
+  status: HTMLElement;
+  textarea: HTMLTextAreaElement;
+  saveBtn: HTMLButtonElement;
+  pathEl: HTMLElement;
+  previewToggle: HTMLInputElement;
+  previewEl: HTMLElement;
+  previewContent: HTMLElement;
+  previewLink: HTMLButtonElement;
+  splitEl: HTMLElement;
+  treeRoot: HTMLElement;
+  toolbarRoot: HTMLElement;
+  gitPanelRoot: HTMLElement;
+  gitToggleBtn: HTMLButtonElement;
+  autosaveIndicator: HTMLElement;
+}
+
+function queryUi(): EditorUi | null {
+  const status = document.getElementById('editor-status');
+  const textarea = document.getElementById('editor-textarea') as HTMLTextAreaElement | null;
+  const saveBtn = document.getElementById('editor-save') as HTMLButtonElement | null;
+  const pathEl = document.getElementById('editor-current-path');
+  const previewToggle = document.getElementById('editor-preview-toggle') as HTMLInputElement | null;
+  const previewEl = document.getElementById('editor-preview');
+  const previewContent = document.getElementById('editor-preview-content');
+  const previewLink = document.getElementById('editor-preview-link') as HTMLButtonElement | null;
+  const splitEl = document.getElementById('editor-split');
+  const treeRoot = document.getElementById('editor-tree-root');
+  const toolbarRoot = document.querySelector<HTMLElement>('.editor-md-toolbar');
+  const gitPanelRoot = document.getElementById('editor-git-panel');
+  const gitToggleBtn = document.getElementById('editor-git-toggle') as HTMLButtonElement | null;
+  const autosaveIndicator = document.getElementById('editor-autosave-indicator');
+
+  if (
+    !status ||
+    !textarea ||
+    !saveBtn ||
+    !pathEl ||
+    !previewToggle ||
+    !previewEl ||
+    !previewContent ||
+    !previewLink ||
+    !splitEl ||
+    !treeRoot ||
+    !toolbarRoot ||
+    !gitPanelRoot ||
+    !gitToggleBtn ||
+    !autosaveIndicator
+  ) {
+    return null;
+  }
+  return {
+    status,
+    textarea,
+    saveBtn,
+    pathEl,
+    previewToggle,
+    previewEl,
+    previewContent,
+    previewLink,
+    splitEl,
+    treeRoot,
+    toolbarRoot,
+    gitPanelRoot,
+    gitToggleBtn,
+    autosaveIndicator,
+  };
+}
+
+export function initEditor(): void {
+  const ui = queryUi();
+  if (!ui) {
+    console.error('[editor] missing required elements');
+    return;
+  }
+  const {
+    status: statusEl,
+    textarea,
+    saveBtn,
+    pathEl,
+    previewToggle,
+    previewEl,
+    previewContent,
+    previewLink,
+    splitEl,
+    treeRoot,
+    toolbarRoot,
+    gitPanelRoot,
+    gitToggleBtn,
+    autosaveIndicator,
+  } = ui;
+
+  initStatus(statusEl);
+
+  const toolbar = new MarkdownToolbar({
+    textarea,
+    openImagePicker: () => imageDialog.openFor('body'),
+    openImageDialogFor: (purpose) => imageDialog.openFor(purpose),
+  });
+  toolbar.bind(toolbarRoot);
+
+  const imageDialog = new ImageDialogController(toolbar);
+
+  const preview = new PreviewPane({
+    container: previewEl,
+    content: previewContent,
+    toggle: previewToggle,
+    split: splitEl,
+    getText: () => textarea.value,
+    getExt: () => state.current?.ext ?? '.md',
+  });
+
+  const autosaver = new Autosaver(
+    () => state.current,
+    () => textarea.value,
+    (timestamp) => {
+      state.lastSavedAt = timestamp;
+      autosaveIndicator.textContent = `자동저장 ${new Date(timestamp).toLocaleTimeString('ko-KR')}`;
+    },
+  );
+  autosaver.start();
+
+  const wikilink = new WikilinkAutocomplete(textarea);
+
+  function setCurrent(file: CurrentFile | null): void {
+    state.current = file;
+    if (file) {
+      pathEl.textContent = `${file.collection}/${file.slug}${file.ext}`;
+      textarea.disabled = false;
+      saveBtn.disabled = false;
+      previewLink.style.display = '';
+      previewLink.dataset.href = urlFor(file.collection, file.slug);
+      tree.setSelection(file);
+      tree.expandTo(file);
+      autosaver.reset();
+    } else {
+      pathEl.textContent = '파일을 선택하거나 "새 파일" 을 누르세요';
+      textarea.disabled = true;
+      saveBtn.disabled = true;
+      previewLink.style.display = 'none';
+      tree.setSelection(null);
+    }
+    textarea.focus();
+    void preview.render();
+  }
+
+  const tree = new FileTree(treeRoot, {
+    onSelectFile: (collection, slug) => void loadFile(collection, slug),
+    onContextFile: (collection, slug, anchor) => {
+      const ext = (anchor.closest('[data-tree-file]') as HTMLElement | null)?.dataset.ext as Ext;
+      void fileOps.fileMenu(collection, slug, ext ?? '.md', anchor);
+    },
+    onContextFolder: (collection, folder, anchor) => void fileOps.folderMenu(collection, folder, anchor),
+    onNewFile: (collection, folder) => void handleNewFile(collection, folder),
+    onNewFolder: (collection, folder) => void fileOps.newFolder(collection, folder),
+  });
+  void tree.refresh();
+
+  const fileOps = new FileOpsController({
+    onChanged: async () => {
+      await tree.refresh();
+      await wikilink.refresh();
+    },
+    onFileChanged: (oldFile, newFile) => {
+      if (oldFile && state.current && state.current.collection === oldFile.collection && state.current.slug === oldFile.slug) {
+        if (newFile) setCurrent({ collection: newFile.collection, slug: newFile.slug, ext: newFile.ext });
+        else {
+          textarea.value = '';
+          setCurrent(null);
+        }
+      }
+    },
+  });
+
+  const gitPanel = new GitPanel(gitPanelRoot);
+  gitToggleBtn.addEventListener('click', () => gitPanel.toggle());
+
+  async function handleNewFile(collection: CollectionName, folder: string): Promise<void> {
+    const result = await fileOps.newFile(collection, folder);
+    if (!result) return;
+    if (state.isDirty) {
+      const proceed = await confirmModal({
+        title: '변경 사항이 있습니다',
+        description: '현재 파일을 저장하지 않고 새 파일로 전환할까요?',
+        confirmLabel: '버리고 전환',
+        danger: true,
+      });
+      if (!proceed) return;
+    }
+    textarea.value = template(result.collection, result.slug);
+    setCurrent(result);
+    state.isDirty = true;
+    setStatus('새 파일 (저장 안 됨)', 'ok');
+  }
+
+  async function loadFile(collection: CollectionName, slug: string): Promise<void> {
+    if (state.isDirty) {
+      const proceed = await confirmModal({
+        title: '변경 사항이 있습니다',
+        description: '저장하지 않고 다른 파일로 전환할까요?',
+        confirmLabel: '버리고 전환',
+        danger: true,
+      });
+      if (!proceed) return;
+    }
+    setStatus('파일 로딩…');
+    try {
+      const data = await api.loadFile(collection, slug);
+      const file: CurrentFile = { collection, slug, ext: data.ext };
+      const draft = readDraft(file);
+      let serverContent = data.content;
+      let useDraft = false;
+      if (draft && draft.content !== serverContent) {
+        const restore = await confirmModal({
+          title: '임시 저장본 발견',
+          description: `${new Date(draft.savedAt).toLocaleString('ko-KR')} 에 자동 저장된 미저장 변경 사항이 있습니다. 복원할까요?`,
+          confirmLabel: '복원',
+          cancelLabel: '버리고 서버 버전 사용',
+        });
+        if (restore) {
+          serverContent = draft.content;
+          useDraft = true;
+        } else {
+          clearDraft(file);
+        }
+      }
+      textarea.value = serverContent;
+      state.isDirty = useDraft;
+      setCurrent(file);
+      setStatus(useDraft ? '임시 저장본 복원됨' : '로드 완료', 'ok');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus('로드 실패: ' + msg, 'error');
+    }
+  }
+
+  async function save(): Promise<void> {
+    const file = state.current;
+    if (!file) return;
+    setStatus('저장 중…');
+    try {
+      const data = await api.saveFile({
+        collection: file.collection,
+        slug: file.slug,
+        ext: file.ext,
+        content: textarea.value,
+      });
+      state.isDirty = false;
+      setStatus(`저장됨 → ${data.path} (${data.bytes}B)`, 'ok');
+      clearDraft(file);
+      autosaver.reset();
+      await tree.refresh();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus('저장 실패: ' + msg, 'error');
+    }
+  }
+
+  saveBtn.addEventListener('click', () => void save());
+  textarea.addEventListener('input', () => {
+    state.isDirty = true;
+    preview.schedule();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      if (state.current) void save();
+    }
+  });
+
+  textarea.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    textarea.classList.add('editor-drag-hover');
+  });
+  textarea.addEventListener('dragleave', () => textarea.classList.remove('editor-drag-hover'));
+  textarea.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    textarea.classList.remove('editor-drag-hover');
+    const file = e.dataTransfer?.files?.[0];
+    if (file) await imageDialog.handleDroppedFile(file);
+  });
+
+  textarea.addEventListener('paste', async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) await imageDialog.handleDroppedFile(file);
+        return;
+      }
+    }
+  });
+
+  previewLink.addEventListener('click', () => {
+    if (previewLink.dataset.href) window.open(previewLink.dataset.href, '_blank', 'noopener');
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (state.isDirty) e.preventDefault();
+  });
+
+  textarea.disabled = true;
+  saveBtn.disabled = true;
+  setStatus('준비됨', 'ok');
+}
