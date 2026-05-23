@@ -9,8 +9,14 @@ const posts = defineCollection({
     date: z.coerce.date(),
     updated: z.coerce.date().optional(),
     tags: z.array(z.string()).default([]),
+    category: z.string().optional(),
+    series: z.string().optional(),
+    seriesOrder: z.number().optional(),
     draft: z.boolean().default(false),
     cover: z.string().optional(),
+    coverAlt: z.string().optional(),
+    coverCredit: z.string().optional(),
+    thumbnail: z.string().optional(),
   }),
 });
 
@@ -28,7 +34,11 @@ const wiki = defineCollection({
     title: z.string(),
     aliases: z.array(z.string()).default([]),
     tags: z.array(z.string()).default([]),
+    category: z.string().optional(),
     updated: z.coerce.date().optional(),
+    cover: z.string().optional(),
+    coverAlt: z.string().optional(),
+    thumbnail: z.string().optional(),
   }),
 });
 

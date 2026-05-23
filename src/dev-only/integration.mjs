@@ -30,6 +30,10 @@ export default function devEditor() {
           pattern: '/_editor/api/upload',
           entrypoint: path.join(here, 'api-upload.ts'),
         });
+        injectRoute({
+          pattern: '/_editor/api/fetch',
+          entrypoint: path.join(here, 'api-fetch.ts'),
+        });
       },
     },
   };
