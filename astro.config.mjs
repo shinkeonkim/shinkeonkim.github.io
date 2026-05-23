@@ -7,6 +7,8 @@ import pagefind from 'astro-pagefind';
 import tailwindcss from '@tailwindcss/vite';
 import { remarkAlert } from 'remark-github-blockquote-alert';
 import remarkWikilink from './src/plugins/remark-wikilink.mjs';
+import remarkMermaid from './src/plugins/remark-mermaid.mjs';
+import devEditor from './src/dev-only/integration.mjs';
 
 export default defineConfig({
   site: 'https://shinkeonkim.com',
@@ -15,6 +17,7 @@ export default defineConfig({
     react(),
     sitemap(),
     pagefind(),
+    devEditor(),
   ],
   vite: {
     plugins: [tailwindcss()],
@@ -23,11 +26,11 @@ export default defineConfig({
     },
   },
   markdown: {
-    remarkPlugins: [remarkAlert, remarkWikilink],
+    remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink],
     shikiConfig: {
       themes: {
         light: 'github-light',
-        dark: 'github-dark',
+        dark: 'one-dark-pro',
       },
       wrap: true,
     },

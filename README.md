@@ -43,7 +43,7 @@ VSCode 스니펫: `.vscode/snippets/markdown.json` — `post`, `note`, `wiki` pr
 
 ## Favicon 재생성
 
-원본 아바타 (`src/assets/avatar.png`) 가 바뀌었을 때만 다시 만들면 됩니다. JS 빌드와 분리된 일회성 유틸리티입니다.
+원본 아바타 (`src/avatar.png`) 가 바뀌었을 때만 다시 만들면 됩니다. JS 빌드와 분리된 일회성 유틸리티입니다.
 
 ```bash
 ./scripts/generate-favicons.py

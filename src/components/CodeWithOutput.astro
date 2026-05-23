@@ -1,0 +1,144 @@
+---
+import '../styles/code-with-output.css';
+import { codeToHtml } from 'shiki';
+
+interface Variant {
+  language: string;
+  label?: string;
+  code: string;
+}
+
+interface Props {
+  code?: string;
+  language?: string;
+  label?: string;
+  variants?: Variant[];
+  output: string;
+  outputLanguage?: string;
+  outputLabel?: string;
+  title?: string;
+  codeWidth?: number | string;
+}
+
+const props = Astro.props as Props;
+const {
+  code,
+  language,
+  label,
+  variants,
+  output,
+  outputLanguage = 'text',
+  outputLabel = '결과',
+  title,
+  codeWidth,
+} = props;
+
+const finalVariants: Variant[] =
+  variants && variants.length > 0
+    ? variants
+    : code !== undefined && language !== undefined
+      ? [{ language, label, code }]
+      : [];
+
+if (finalVariants.length === 0) {
+  throw new Error('<CodeWithOutput> requires either `variants` or both `code` + `language`');
+}
+
+function parseCodeWidth(value: number | string | undefined): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number') return Math.max(0, Math.min(100, value));
+  const m = String(value).match(/^(\d+(?:\.\d+)?)%?$/);
+  if (!m) return null;
+  return Math.max(0, Math.min(100, parseFloat(m[1])));
+}
+const initialPct = parseCodeWidth(codeWidth) ?? 50;
+const startVertical = initialPct >= 99;
+
+async function render(text: string, lang: string): Promise<string> {
+  try {
+    return await codeToHtml(text, {
+      lang,
+      themes: { light: 'github-light', dark: 'one-dark-pro' },
+    });
+  } catch {
+    return await codeToHtml(text, {
+      lang: 'text',
+      themes: { light: 'github-light', dark: 'one-dark-pro' },
+    });
+  }
+}
+
+const variantHtml = await Promise.all(
+  finalVariants.map(async (v) => ({
+    label: v.label ?? v.language,
+    language: v.language,
+    html: await render(v.code.trimEnd(), v.language),
+  })),
+);
+const outputHtml = await render(output.trimEnd(), outputLanguage);
+
+const uid = Math.random().toString(36).slice(2, 8);
+---
+<figure
+  class="code-with-output not-prose my-6"
+  data-cwo
+  data-cwo-id={uid}
+  data-vertical={startVertical ? 'true' : 'false'}
+  style={`--cwo-code-pct:${initialPct}%`}
+>
+  {title && (
+    <figcaption class="mb-2 text-sm font-medium text-[color:var(--color-fg-muted)]">
+      {title}
+    </figcaption>
+  )}
+  <div class="cwo-panes" data-cwo-panes>
+    <div class="cwo-pane cwo-pane-code">
+      <div class="cwo-header">
+        <span class="cwo-dot cwo-dot-input"></span>
+        {variantHtml.length > 1 ? (
+          <div class="cwo-tabs" role="tablist" aria-label="코드 언어 선택">
+            {variantHtml.map((v, i) => (
+              <button
+                type="button"
+                role="tab"
+                data-cwo-tab={String(i)}
+                aria-selected={i === 0 ? 'true' : 'false'}
+                class:list={['cwo-tab', i === 0 && 'is-active']}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span class="cwo-label">{variantHtml[0].label}</span>
+        )}
+      </div>
+      <div class="cwo-body cwo-code-body">
+        {variantHtml.map((v, i) => (
+          <div
+            class:list={['cwo-variant', i === 0 && 'is-active']}
+            data-cwo-variant={String(i)}
+            role="tabpanel"
+            aria-hidden={i === 0 ? 'false' : 'true'}
+            set:html={v.html}
+          />
+        ))}
+      </div>
+    </div>
+    <button
+      type="button"
+      class="cwo-splitter"
+      aria-label="패널 너비 조절 (화살표 키, 더블클릭으로 50% 리셋)"
+      data-cwo-splitter
+    >
+      <span class="cwo-splitter-grip" aria-hidden="true"></span>
+    </button>
+    <div class="cwo-pane cwo-pane-output">
+      <div class="cwo-header">
+        <span class="cwo-dot cwo-dot-output"></span>
+        <span class="cwo-label">{outputLabel}</span>
+      </div>
+      <div class="cwo-body" set:html={outputHtml} />
+    </div>
+  </div>
+</figure>
