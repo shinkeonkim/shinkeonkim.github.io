@@ -1,13 +1,11 @@
 ---
-layout: post
-title: "[TIL] 슬랙 웹훅과 깃헙 액션을 이용해 알림 봇 만들기"
-categories: TIL
+title: '[TIL] 슬랙 웹훅과 깃헙 액션을 이용해 알림 봇 만들기'
+description: 국민대학교 멋쟁이사자처럼에서 슬랙을 사용하기로 했고, 내부 스터디인 줌터디도 슬랙에서 활동을 하게되었다. 이때, 특정 시간마다 회고글을 쓰라는 메세지가 주기적으로 오는 봇이 있으면 좋겠다고 생각이 들었다.
 date: 2021-11-18 20:02:09 +0900
-math: true
 tags:
-  - TIL
-  - 슬랙 webhook
-  - Github action
+- TIL
+- 슬랙 webhook
+- Github action
 ---
 
 ## 계기

@@ -1,8 +1,10 @@
 ---
-layout: post
-title: "[TIL] swiper.js 사용하기"
-categories: TIL
-tags: ['슬라이드쇼', 'swiper.js']
+title: '[TIL] swiper.js 사용하기'
+description: 이 페이지를 꾸미고 싶었다.
+date: '2020-11-12'
+tags:
+- 슬라이드쇼
+- swiper.js
 ---
 
 [shinkeonkim.github.io/css-animation-study/](https://shinkeonkim.github.io/css-animation-study/)

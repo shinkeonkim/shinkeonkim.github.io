@@ -1,12 +1,10 @@
 ---
-layout: post
-title: "[TIL] vue에서 cytoscape 사용하기 1"
-categories: TIL
+title: '[TIL] vue에서 cytoscape 사용하기 1'
+description: 개인 프로젝트로 connection 이라는 이름의 프로젝트를 진행중이다.
 date: 2021-10-03 01:19:23 +0900
-math: true
 tags:
-  - Vue.js
-  - cytoscape
+- Vue.js
+- cytoscape
 ---
 
 ## 계기

@@ -1,12 +1,10 @@
 ---
-layout: post
-title: "[기초 PS 지식] 두 원의 교차 여부 판단하기"
-categories: basic
+title: '[기초 PS 지식] 두 원의 교차 여부 판단하기'
+description: 두 원의 x, y 좌표가 주어지고, 각각 반지름이 주어졌다고 하자.
 date: 2021-10-01 23:10:49 +0900
-math: true
 tags:
-  - math
-  - ps
+- math
+- ps
 ---
 
 ## 문제 상황

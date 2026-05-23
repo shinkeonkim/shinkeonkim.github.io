@@ -1,14 +1,12 @@
 ---
-layout: post
-title: "[TIL] Window size에 따라 속도가 달라지는 CSS Animation 바로잡기"
-categories: TIL
+title: '[TIL] Window size에 따라 속도가 달라지는 CSS Animation 바로잡기'
+description: 새벽에 어쩌다 떠오른 아이디어로 짧고 굵게 토이 프로젝트를 진행해보고 있다.
 date: 2021-12-19 18:38:16 +0900
-math: true
 tags:
-  - TIL
-  - CSS
-  - CSS Animation
-  - Vue.js
+- TIL
+- CSS
+- CSS Animation
+- Vue.js
 ---
 
 ## 문제 상황

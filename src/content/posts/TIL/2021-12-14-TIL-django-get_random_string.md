@@ -1,14 +1,12 @@
 ---
-layout: post
-title: "[TIL] Django Alphanumeric Random String 생성하기"
-categories: BOJ
+title: '[TIL] Django Alphanumeric Random String 생성하기'
+description: 웹 서비스를 구성하다보면, 종종 랜덤 문자열을 뽑아내야 하는 경우가 있다.
 date: 2021-12-14 21:40:53 +0900
-math: true
 tags:
-  - TIL
-  - python
-  - Django
-  - random
+- TIL
+- python
+- Django
+- random
 ---
 
 ## Django에서 랜덤 문자열 쉽게 만들어내기

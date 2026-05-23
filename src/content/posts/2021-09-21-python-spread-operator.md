@@ -1,12 +1,11 @@
 ---
-layout: post
-title: "[TIL - Python] Spread operator"
-categories: Python
-math: true
+title: '[TIL - Python] Spread operator'
+description: 스프레드 연산자는 배열, 문자열, 객체 등의 Iterable 객체를 개별 요소로 분리해주는 연산자를 말합니다.
+date: '2021-09-21'
 tags:
-  - Python
-  - 숏코딩
-  - TIL
+- Python
+- 숏코딩
+- TIL
 ---
 
 # Spread operator
