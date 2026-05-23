@@ -1,1 +1,0 @@
-ruby tools/time.rb
