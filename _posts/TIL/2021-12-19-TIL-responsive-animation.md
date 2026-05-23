@@ -21,7 +21,7 @@ tags:
 
 바로 Can you catch "Circle" 이다. 뭐.. 줄이자면 CCC 일 것 같다. ㅋㅋㅋ
 
-<img src="/assets/img/posts/2021-12-19/canyoucatchcircle.jpg" alt="canyoucatchcircle" class="w-50">
+<img src="/img/posts/2021-12-19/canyoucatchcircle.jpg" alt="canyoucatchcircle" class="w-50">
 
 굉장히 단순한 웹 페이지 프로젝트이다.
 

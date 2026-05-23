@@ -23,19 +23,19 @@ tags:
 
 두 원이 겹쳐져 있을 때, A점과 B점사이의 거리는 두 원의 반지름의 합(r1 + r2)보다 짧다.
 
-![intersection-two-circle-1](/assets/img/posts/intersection-two-circle-1.jpeg)
+![intersection-two-circle-1](/img/posts/intersection-two-circle-1.jpeg)
 
 ### 두 원이 접할 때
 
 두 원이 겹쳐져 있을 때, A점과 B점사이의 거리는 두 원의 반지름의 합(r1 + r2)과 같다.
 
-![intersection-two-circle-2](/assets/img/posts/intersection-two-circle-2.jpeg)
+![intersection-two-circle-2](/img/posts/intersection-two-circle-2.jpeg)
 
 ### 두 원이 떨어져 있을 때
 
 두 원이 겹쳐져 있을 때, A점과 B점사이의 거리는 두 원의 반지름의 합(r1 + r2)보다 길다.
 
-![intersection-two-circle-3](/assets/img/posts/intersection-two-circle-3.jpeg)
+![intersection-two-circle-3](/img/posts/intersection-two-circle-3.jpeg)
 
 ## 코드로 나타내기
 

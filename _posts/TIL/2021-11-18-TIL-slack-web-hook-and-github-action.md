@@ -17,7 +17,7 @@ tags:
 
 그래서 바로 워크플로빌더를 켰지만... 무료 플랜에서는 사용할 수 없었다...
 
-![wtf](/assets/img/posts/2021-11-18/TIL-slack-web-hook-and-github-action/wtf.png)
+![wtf](/img/posts/2021-11-18/TIL-slack-web-hook-and-github-action/wtf.png)
 
 그래서 직접 만들자! 결심했다.
 
@@ -98,4 +98,4 @@ if __name__ == "__main__":
 > 이번에 cron을 쉽게 만들려고 알아보던 중에, [cronmaker](http://www.cronmaker.com/)라는 사이트를 처음 알게 되었다. cron 정규 표현식을 더 쉽게 만들어준다.
 
 메세지가 잘 온다!
-![result](/assets/img/posts/2021-11-18/TIL-slack-web-hook-and-github-action/result.png)
+![result](/img/posts/2021-11-18/TIL-slack-web-hook-and-github-action/result.png)

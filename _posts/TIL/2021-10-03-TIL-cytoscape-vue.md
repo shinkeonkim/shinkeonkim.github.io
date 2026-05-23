@@ -136,12 +136,12 @@ export default defineComponent({
 
 근데, 아래 이미지와 같이 canvas element는 있는데 보이지 않았고, `어? width, height 문제인가?` 라는 생각이 들었다.
 
-![canvas가 있어](/assets/img/posts/cytoscape-vue-canvas.png)
+![canvas가 있어](/img/posts/cytoscape-vue-canvas.png)
 
 그래서 아래 코드와 같이 임시로 스타일을 추가해주었더니, 아주 잘 보였다..
 (왠지 나의 뻘짓 코드도 동일한 문제였던 것 같고, stackoverflow의 코드처럼 복잡한 코드가 되지 않아도 되지 않았을까 라는 생각이 들었다.. 일단 다음에 고치기로 했다..)
 
-![결과](/assets/img/posts/cytoscape-vue-canvas-2.png)
+![결과](/img/posts/cytoscape-vue-canvas-2.png)
 
 ```scss
 <style lang="scss">

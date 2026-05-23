@@ -1,12 +1,12 @@
 ---
-layout: post
 title: "2022년 11월부터 시작된 1년 6개월 회고록"
-categories: 회고록
+description: "군대에서의 1년 6개월을 돌아보며, 그 기간 동안의 공부와 앞으로의 계획에 대해 정리한 회고록입니다."
 tags:
   - 회고록
   - 군대
 date: 2024-05-28 15:00:00 +0900
---- 
+updated: 2024-05-28 15:00:00 +0900
+---
 
 > 길면서 짧았던 군 생활을 마무리하며, 회고록을 작성한다.
 
@@ -46,9 +46,9 @@ date: 2024-05-28 15:00:00 +0900
 
 ### 백준 문제라도 풀자.
 
-![Untitled](/assets/img/posts/2024/05/28/Untitled.png)
+![Untitled](/img/posts/2024/05/28/Untitled.png)
 
-![Untitled](/assets/img/posts/2024/05/28/Untitled%201.png)
+![Untitled](/img/posts/2024/05/28/Untitled%201.png)
 
 입대 전(2451문제) → 24.05.01(4034문제)로 약 1500문제 이상을 풀었습니다.  그리고 군생활 도중에 다이아5에서 다이아4로도 승급했습니다.
 
@@ -58,19 +58,19 @@ date: 2024-05-28 15:00:00 +0900
 
 1. [code.plus](http://code.plus) 사이트(스타트링크)에서 제공하는 알고리즘 고급으로 가는 연결고리 강의를 들었습니다.
 
-![code.plus_course_47_certification.png](/assets/img/posts/2024/05/28/code.plus_course_47_certification.png)
+![code.plus_course_47_certification.png](/img/posts/2024/05/28/code.plus_course_47_certification.png)
 
-![code.plus_course_46_certification.png](/assets/img/posts/2024/05/28/b08e135b-b20b-4809-8f51-c043a0f6860f.png)
+![code.plus_course_46_certification.png](/img/posts/2024/05/28/b08e135b-b20b-4809-8f51-c043a0f6860f.png)
 
 1. 인프런 - [외워서 끝내는 네트워크 핵심 이론 - 기초](https://www.inflearn.com/course/네트워크-핵심이론-기초/dashboard), [외워서 끝내는 네트워크 핵심 이론 - 응용](https://www.inflearn.com/course/%EB%84%A4%ED%8A%B8%EC%9B%8C%ED%81%AC-%ED%95%B5%EC%8B%AC%EC%9D%B4%EB%A1%A0-%EC%9D%91%EC%9A%A9/dashboard) 강의를 수강했습니다. 네트워크 관리사 자격증을 따면서 더 좋은 지식을 얻을 수 있을까 싶어 강의를 들었습니다. 상당히 좋은 강의였고 추천합니다.
 
-![Untitled](/assets/img/posts/2024/05/28/Untitled%202.png)
+![Untitled](/img/posts/2024/05/28/Untitled%202.png)
 
-![Untitled](/assets/img/posts/2024/05/28/Untitled%203.png)
+![Untitled](/img/posts/2024/05/28/Untitled%203.png)
 
 1. 인프런 - [외워서 끝내는 SSL과 최소한의 암호기술](https://www.inflearn.com/course/%EC%99%B8%EC%9B%8C%EC%84%9C-%EB%81%9D%EB%82%B4%EB%8A%94-%EC%95%94%ED%98%B8%EA%B8%B0%EC%88%A0/dashboard) 강의를 수강했습니다. 위 네트워크 강의와 이어지는 부분이 많았고, 아직도 다시 찾아보면서 내용을 흡수하고 있습니다.
 
-![Untitled](/assets/img/posts/2024/05/28/Untitled%204.png)
+![Untitled](/img/posts/2024/05/28/Untitled%204.png)
 
 1. 생활 코딩 - [정규표현식](https://www.inflearn.com/course/%EC%83%9D%ED%99%9C%EC%BD%94%EB%94%A9-%EC%A0%95%EA%B7%9C%ED%91%9C%ED%98%84%EC%8B%9D/dashboard), [Web2 : Oauth 2.0](https://www.inflearn.com/course/web2-oauth2/dashboard) 강의를 수강했습니다. 이전부터 조금씩 내가 제대로 알고 있는 게 맞나 싶었던 부분을 긁어주었던 강의였습니다. 전역 후 다시 TIL 글로 정리해보려고 합니다.
 2. 인프런 - [[그림으로 이해하는] 동기 비동기의 개념에 대한 가장 직관적인 이해](https://www.inflearn.com/course/sync-async-%EA%B0%9C%EB%85%90-%EC%9D%B4%ED%95%B4/dashboard)라는 강의를 수강했습니다. 사실 거의 아는 내용이 나왔고, 조금 아쉬웠습니다. 차라리 이 강의를 몇 년 전에 비동기에 대한 이해가 없었을 때 봤다면 더 좋았겠다 싶습니다.
