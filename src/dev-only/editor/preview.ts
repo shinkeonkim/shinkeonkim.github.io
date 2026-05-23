@@ -1,4 +1,5 @@
 import { api } from './api';
+import { ScrollSync } from './scroll-sync';
 import type { Ext } from './state';
 
 export class PreviewPane {
@@ -9,6 +10,7 @@ export class PreviewPane {
   private getExt: () => Ext;
   private token = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private sync: ScrollSync | null;
 
   constructor(opts: {
     container: HTMLElement;
@@ -17,17 +19,26 @@ export class PreviewPane {
     split: HTMLElement;
     getText: () => string;
     getExt: () => Ext;
+    textarea?: HTMLTextAreaElement;
   }) {
     this.container = opts.container;
     this.content = opts.content;
     this.toggle = opts.toggle;
     this.getText = opts.getText;
     this.getExt = opts.getExt;
+    this.sync = opts.textarea ? new ScrollSync(opts.textarea, this.container) : null;
+    this.applyToggleState(opts.split);
     this.toggle.addEventListener('change', () => {
-      this.container.hidden = !this.toggle.checked;
-      opts.split.classList.toggle('has-preview', this.toggle.checked);
+      this.applyToggleState(opts.split);
       if (this.toggle.checked) void this.render();
     });
+  }
+
+  private applyToggleState(split: HTMLElement): void {
+    this.container.hidden = !this.toggle.checked;
+    split.classList.toggle('has-preview', this.toggle.checked);
+    if (this.toggle.checked) this.sync?.enable();
+    else this.sync?.disable();
   }
 
   schedule(): void {
@@ -44,6 +55,7 @@ export class PreviewPane {
       if (token !== this.token) return;
       this.content.innerHTML = data.html;
       document.dispatchEvent(new CustomEvent('preview-updated', { detail: { container: this.content } }));
+      requestAnimationFrame(() => this.sync?.syncFromA());
     } catch (err) {
       if (token !== this.token) return;
       const msg = err instanceof Error ? err.message : String(err);

@@ -3,9 +3,16 @@ import * as THREE from 'three';
 
 interface Props {
   titles: string[];
+  words?: string[];
   prompt?: string;
   height?: number;
 }
+
+const DEFAULT_WORDS = [
+  '글', '기록', '생각', '노트', '위키', '연결', '그래프', '태그',
+  '학습', '회고', '아이디어', '메모', '검색', '코드', 'TIL',
+  'Astro', 'TypeScript', 'React', 'Three.js', 'Markdown',
+];
 
 const KEY_COLS = 14;
 const KEY_ROWS = 5;
@@ -59,7 +66,7 @@ function readTheme(): ThemeColors {
       };
 }
 
-export default function Hero3D({ titles, prompt = '~/koa/log $', height = 460 }: Props) {
+export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/log $', height = 460 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -174,28 +181,90 @@ export default function Hero3D({ titles, prompt = '~/koa/log $', height = 460 }:
     const openRotation = -(15 * Math.PI) / 180;
     screenPivot.rotation.x = closedRotation;
 
-    const particleCount = prefersReduced ? 0 : 60;
-    const particleGeometry = new THREE.BufferGeometry();
-    const particlePositions = new Float32Array(particleCount * 3);
-    const particleVelocities = new Float32Array(particleCount * 3);
-    for (let i = 0; i < particleCount; i++) {
-      particlePositions[i * 3] = (Math.random() - 0.5) * 8;
-      particlePositions[i * 3 + 1] = Math.random() * 3.5 + 1.2;
-      particlePositions[i * 3 + 2] = (Math.random() - 0.5) * 4;
-      particleVelocities[i * 3] = (Math.random() - 0.5) * 0.08;
-      particleVelocities[i * 3 + 1] = -Math.random() * 0.05 - 0.02;
-      particleVelocities[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
+    const titleWords = titles.flatMap((t) =>
+      t.split(/[\s,(){}[\]:;。、,.()]+/u).filter((w) => w.length > 0 && w.length <= 14),
+    );
+    const wordPool = Array.from(new Set([...titleWords, ...words])).slice(0, 80);
+    const wordCount = prefersReduced ? 0 : Math.min(wordPool.length, 28);
+
+    interface FloatingWord {
+      sprite: THREE.Sprite;
+      material: THREE.SpriteMaterial;
+      canvas: HTMLCanvasElement;
+      texture: THREE.CanvasTexture;
+      speed: number;
+      sway: number;
+      phase: number;
+      baseX: number;
     }
-    particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
-    const particleMaterial = new THREE.PointsMaterial({
-      color: theme.particleColor,
-      size: 0.06,
-      transparent: true,
-      opacity: 0.55,
-      sizeAttenuation: true,
-    });
-    const particles = new THREE.Points(particleGeometry, particleMaterial);
-    if (particleCount > 0) scene.add(particles);
+    const floatingWords: FloatingWord[] = [];
+
+    function buildWordTexture(text: string, color: string): { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; aspect: number } {
+      const canvas = document.createElement('canvas');
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const fontPx = 36;
+      const padX = 14;
+      const measureCtx = canvas.getContext('2d')!;
+      measureCtx.font = `600 ${fontPx}px var(--font-sans), "Pretendard Variable", system-ui, sans-serif`;
+      const textW = measureCtx.measureText(text).width;
+      const w = Math.ceil(textW) + padX * 2;
+      const h = fontPx + 12;
+      canvas.width = Math.max(1, Math.ceil(w * dpr));
+      canvas.height = Math.max(1, Math.ceil(h * dpr));
+      const ctx2 = canvas.getContext('2d')!;
+      ctx2.scale(dpr, dpr);
+      ctx2.font = `600 ${fontPx}px var(--font-sans), "Pretendard Variable", system-ui, sans-serif`;
+      ctx2.textBaseline = 'middle';
+      ctx2.fillStyle = color;
+      ctx2.fillText(text, padX, h / 2);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return { canvas, texture, aspect: w / h };
+    }
+
+    function spawnWordTop(word: FloatingWord): void {
+      word.sprite.position.y = 3.6 + Math.random() * 1.6;
+      word.baseX = (Math.random() - 0.5) * 9;
+      word.sprite.position.x = word.baseX;
+      word.sprite.position.z = (Math.random() - 0.5) * 4;
+      word.material.opacity = 0;
+      word.speed = 0.18 + Math.random() * 0.22;
+      word.sway = 0.1 + Math.random() * 0.25;
+      word.phase = Math.random() * Math.PI * 2;
+    }
+
+    function buildFloatingWord(text: string): FloatingWord {
+      const colorHex = '#' + theme.particleColor.toString(16).padStart(6, '0');
+      const { canvas, texture, aspect } = buildWordTexture(text, colorHex);
+      const material = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0, depthWrite: false });
+      const sprite = new THREE.Sprite(material);
+      sprite.userData.text = text;
+      const worldHeight = 0.36;
+      sprite.scale.set(aspect * worldHeight, worldHeight, 1);
+      const word: FloatingWord = {
+        sprite,
+        material,
+        canvas,
+        texture,
+        speed: 0.18 + Math.random() * 0.22,
+        sway: 0.1 + Math.random() * 0.25,
+        phase: Math.random() * Math.PI * 2,
+        baseX: 0,
+      };
+      spawnWordTop(word);
+      return word;
+    }
+
+    for (let i = 0; i < wordCount; i++) {
+      const text = wordPool[i % wordPool.length];
+      const w = buildFloatingWord(text);
+      w.sprite.position.y = -2 + (i / wordCount) * 7;
+      w.material.opacity = w.sprite.position.y > 0.5 ? 0.7 : 0;
+      scene.add(w.sprite);
+      floatingWords.push(w);
+    }
 
     const lineHeight = 38;
     const startY = 152;
@@ -336,20 +405,16 @@ export default function Hero3D({ titles, prompt = '~/koa/log $', height = 460 }:
         keys[i].position.y += Math.sin(elapsed * 2 + keyOffsets[i]) * 0.0008;
       }
 
-      if (particleCount > 0) {
-        const positions = particleGeometry.getAttribute('position') as THREE.BufferAttribute;
-        const arr = positions.array as Float32Array;
-        for (let i = 0; i < particleCount; i++) {
-          arr[i * 3] += particleVelocities[i * 3];
-          arr[i * 3 + 1] += particleVelocities[i * 3 + 1];
-          arr[i * 3 + 2] += particleVelocities[i * 3 + 2];
-          if (arr[i * 3 + 1] < 0.5) {
-            arr[i * 3] = (Math.random() - 0.5) * 8;
-            arr[i * 3 + 1] = 4;
-            arr[i * 3 + 2] = (Math.random() - 0.5) * 4;
-          }
-        }
-        positions.needsUpdate = true;
+      for (const w of floatingWords) {
+        w.sprite.position.y -= w.speed * dt;
+        w.sprite.position.x = w.baseX + Math.sin(elapsed * 0.6 + w.phase) * w.sway;
+        const y = w.sprite.position.y;
+        let opacity = 0;
+        if (y > 3.2) opacity = ((4.8 - y) / 1.6) * 0.7;
+        else if (y < 0.6) opacity = Math.max(0, ((y - 0.1) / 0.5)) * 0.7;
+        else opacity = 0.7;
+        w.material.opacity = Math.max(0, Math.min(0.7, opacity));
+        if (y < 0.1) spawnWordTop(w);
       }
 
       renderScreen();
@@ -375,7 +440,25 @@ export default function Hero3D({ titles, prompt = '~/koa/log $', height = 460 }:
       baseMaterial.roughness = theme.baseRough;
       keyMaterial.color.setHex(theme.keyColor);
       rim.color.setHex(theme.rimColor);
-      particleMaterial.color.setHex(theme.particleColor);
+      const colorHex = '#' + theme.particleColor.toString(16).padStart(6, '0');
+      for (const w of floatingWords) {
+        const ctx2 = w.canvas.getContext('2d');
+        if (!ctx2) continue;
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        ctx2.setTransform(1, 0, 0, 1, 0, 0);
+        ctx2.clearRect(0, 0, w.canvas.width, w.canvas.height);
+        ctx2.scale(dpr, dpr);
+        const fontPx = 36;
+        ctx2.font = `600 ${fontPx}px var(--font-sans), "Pretendard Variable", system-ui, sans-serif`;
+        ctx2.textBaseline = 'middle';
+        ctx2.fillStyle = colorHex;
+        const labelW = w.canvas.width / dpr;
+        const labelH = w.canvas.height / dpr;
+        const textW = labelW - 28;
+        const text = (w.sprite.userData.text as string | undefined) ?? '';
+        if (text) ctx2.fillText(text, 14, labelH / 2, textW);
+        w.texture.needsUpdate = true;
+      }
     }
     const themeObs = new MutationObserver(() => applyTheme());
     themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
@@ -394,12 +477,15 @@ export default function Hero3D({ titles, prompt = '~/koa/log $', height = 460 }:
       (screenShell.material as THREE.Material).dispose();
       screenFace.geometry.dispose();
       (screenFace.material as THREE.Material).dispose();
-      particleGeometry.dispose();
-      particleMaterial.dispose();
+      for (const w of floatingWords) {
+        scene.remove(w.sprite);
+        w.material.dispose();
+        w.texture.dispose();
+      }
       screenTexture.dispose();
       if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
     };
-  }, [titles, prompt, height]);
+  }, [titles, words, prompt, height]);
 
   return <div ref={containerRef} className="hero3d-canvas" style={{ height, width: '100%' }} />;
 }

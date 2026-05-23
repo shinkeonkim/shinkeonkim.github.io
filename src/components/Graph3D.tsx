@@ -15,10 +15,11 @@ const GROUP_COLORS: Record<string, string> = {
   notes: '#34d399',
   wiki: '#fbbf24',
 };
-const TAG_COLOR_3D = '#94a3b8';
+const TAG_COLOR_3D_LIGHT = '#475569';
+const TAG_COLOR_3D_DARK = '#cbd5e1';
 
-function nodeBaseColor(node: GraphNode): string {
-  if (node.kind === 'tag') return TAG_COLOR_3D;
+function nodeBaseColor(node: GraphNode, isDark: boolean): string {
+  if (node.kind === 'tag') return isDark ? TAG_COLOR_3D_DARK : TAG_COLOR_3D_LIGHT;
   return GROUP_COLORS[node.group ?? ''] ?? '#6b7280';
 }
 
@@ -112,7 +113,7 @@ export default function Graph3D({ nodes, links, height = 560, query = '' }: Prop
         nodeThreeObject={(n: GraphNode) => {
           const node = n;
           const dimmed = matchedIds ? !matchedIds.has(node.id) : false;
-          const color = dimmed ? (isDark ? '#3f3f46' : '#d4d4d8') : nodeBaseColor(node);
+          const color = dimmed ? (isDark ? '#3f3f46' : '#d4d4d8') : nodeBaseColor(node, isDark);
           if (node.kind === 'tag') {
             const size = Math.min(10, 4 + Math.sqrt(node.degree ?? 1) * 1.2);
             const mesh = new THREE.Mesh(

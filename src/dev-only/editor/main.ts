@@ -98,6 +98,8 @@ export function initEditor(): void {
     console.error('[editor] missing required elements');
     return;
   }
+  document.body.classList.add('editor-active');
+  document.documentElement.classList.add('editor-active');
   const {
     status: statusEl,
     textarea,
@@ -131,6 +133,7 @@ export function initEditor(): void {
     content: previewContent,
     toggle: previewToggle,
     split: splitEl,
+    textarea,
     getText: () => textarea.value,
     getExt: () => state.current?.ext ?? '.md',
   });
@@ -326,6 +329,8 @@ export function initEditor(): void {
   window.addEventListener('beforeunload', (e) => {
     if (state.isDirty) e.preventDefault();
   });
+
+  document.documentElement.classList.add('editor-active');
 
   textarea.disabled = true;
   saveBtn.disabled = true;
