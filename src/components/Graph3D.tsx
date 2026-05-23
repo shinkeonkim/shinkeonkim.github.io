@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph3D, { type ForceGraphMethods } from 'react-force-graph-3d';
+import * as THREE from 'three';
 import type { GraphNode, GraphLink } from './Graph';
 
 interface Props {
@@ -14,6 +15,12 @@ const GROUP_COLORS: Record<string, string> = {
   notes: '#34d399',
   wiki: '#fbbf24',
 };
+const TAG_COLOR_3D = '#94a3b8';
+
+function nodeBaseColor(node: GraphNode): string {
+  if (node.kind === 'tag') return TAG_COLOR_3D;
+  return GROUP_COLORS[node.group ?? ''] ?? '#6b7280';
+}
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
@@ -101,20 +108,36 @@ export default function Graph3D({ nodes, links, height = 560, query = '' }: Prop
         height={height}
         backgroundColor={backgroundColor}
         nodeLabel={(n) => (n as GraphNode).title}
-        nodeColor={(n) => {
-          const node = n as GraphNode;
-          if (matchedIds && !matchedIds.has(node.id)) return isDark ? '#3f3f46' : '#d4d4d8';
-          return GROUP_COLORS[node.group ?? ''] ?? '#6b7280';
-        }}
-        nodeOpacity={matchedIds ? 0.95 : 0.85}
         nodeRelSize={4}
-        linkColor={() => (isDark ? '#3f3f46' : '#d4d4d8')}
+        nodeThreeObject={(n: GraphNode) => {
+          const node = n;
+          const dimmed = matchedIds ? !matchedIds.has(node.id) : false;
+          const color = dimmed ? (isDark ? '#3f3f46' : '#d4d4d8') : nodeBaseColor(node);
+          if (node.kind === 'tag') {
+            const size = Math.min(10, 4 + Math.sqrt(node.degree ?? 1) * 1.2);
+            const mesh = new THREE.Mesh(
+              new THREE.BoxGeometry(size, size * 0.5, size),
+              new THREE.MeshLambertMaterial({ color, transparent: true, opacity: dimmed ? 0.5 : 0.85 }),
+            );
+            return mesh;
+          }
+          const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(4, 20, 16),
+            new THREE.MeshLambertMaterial({ color, transparent: true, opacity: dimmed ? 0.5 : 0.95 }),
+          );
+          return sphere;
+        }}
+        linkColor={(l) => {
+          if ((l as GraphLink).kind === 'tag') return isDark ? '#52525b' : '#cbd5e1';
+          return isDark ? '#3f3f46' : '#d4d4d8';
+        }}
         linkOpacity={matchedIds ? 0.15 : 0.4}
         linkWidth={(l) => {
-          if (!matchedIds) return 1;
+          const isTag = (l as GraphLink).kind === 'tag';
+          if (!matchedIds) return isTag ? 0.5 : 1;
           const s = typeof l.source === 'object' ? (l.source as GraphNode).id : (l.source as string);
           const t = typeof l.target === 'object' ? (l.target as GraphNode).id : (l.target as string);
-          return matchedIds.has(s) && matchedIds.has(t) ? 2 : 0.5;
+          return matchedIds.has(s) && matchedIds.has(t) ? 2 : 0.3;
         }}
         onNodeClick={(node) => {
           const n = node as GraphNode;

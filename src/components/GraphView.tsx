@@ -11,13 +11,24 @@ interface Props {
 export default function GraphView({ nodes, links }: Props) {
   const [mode, setMode] = useState<'2d' | '3d'>('2d');
   const [query, setQuery] = useState('');
+  const [showTags, setShowTags] = useState(true);
+
+  const { visibleNodes, visibleLinks } = useMemo(() => {
+    if (showTags) return { visibleNodes: nodes, visibleLinks: links };
+    const filteredNodes = nodes.filter((n) => n.kind !== 'tag');
+    const ids = new Set(filteredNodes.map((n) => n.id));
+    const filteredLinks = links.filter((l) => ids.has(l.source) && ids.has(l.target));
+    return { visibleNodes: filteredNodes, visibleLinks: filteredLinks };
+  }, [nodes, links, showTags]);
 
   const filteredCounts = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return null;
-    const matches = nodes.filter((n) => n.title.toLowerCase().includes(q));
-    return { matches: matches.length, total: nodes.length };
-  }, [nodes, query]);
+    const matches = visibleNodes.filter((n) => n.title.toLowerCase().includes(q));
+    return { matches: matches.length, total: visibleNodes.length };
+  }, [visibleNodes, query]);
+
+  const tagCount = useMemo(() => nodes.filter((n) => n.kind === 'tag').length, [nodes]);
 
   return (
     <div className="space-y-3">
@@ -29,6 +40,17 @@ export default function GraphView({ nodes, links }: Props) {
           placeholder="노드 이름으로 검색…"
           className="flex-1 min-w-[200px] rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[color:var(--color-accent)]"
         />
+        {tagCount > 0 && (
+          <label className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] px-2.5 py-1.5 text-sm cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showTags}
+              onChange={(e) => setShowTags(e.target.checked)}
+              className="accent-[color:var(--color-accent)]"
+            />
+            <span>🏷️ 태그 ({tagCount})</span>
+          </label>
+        )}
         <div className="inline-flex overflow-hidden rounded-md border border-[color:var(--color-border)]" role="tablist">
           <button
             type="button"
@@ -61,7 +83,7 @@ export default function GraphView({ nodes, links }: Props) {
       )}
       <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-elevated)] p-2">
         {mode === '2d' ? (
-          <Graph2D nodes={nodes} links={links} query={query} />
+          <Graph2D nodes={visibleNodes} links={visibleLinks} query={query} />
         ) : (
           <Suspense
             fallback={
@@ -70,7 +92,7 @@ export default function GraphView({ nodes, links }: Props) {
               </div>
             }
           >
-            <Graph3D nodes={nodes} links={links} query={query} />
+            <Graph3D nodes={visibleNodes} links={visibleLinks} query={query} />
           </Suspense>
         )}
       </div>

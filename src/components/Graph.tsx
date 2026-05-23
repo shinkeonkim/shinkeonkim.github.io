@@ -1,16 +1,23 @@
 import { useEffect, useMemo, useRef } from 'react';
 import * as d3 from 'd3';
 
+export type GraphNodeKind = 'doc' | 'tag';
+
 export interface GraphNode {
   id: string;
   title: string;
   url: string;
   group?: string;
+  kind?: GraphNodeKind;
+  degree?: number;
 }
+
+export type GraphLinkKind = 'wikilink' | 'tag';
 
 export interface GraphLink {
   source: string;
   target: string;
+  kind?: GraphLinkKind;
 }
 
 interface Props {
@@ -21,14 +28,25 @@ interface Props {
 }
 
 type SimNode = GraphNode & d3.SimulationNodeDatum;
-type SimLink = d3.SimulationLinkDatum<SimNode>;
+type SimLink = d3.SimulationLinkDatum<SimNode> & { kind?: GraphLinkKind };
 
 const GROUP_COLORS: Record<string, string> = {
   posts: '#4f46e5',
   notes: '#10b981',
   wiki: '#f59e0b',
 };
+const TAG_COLOR = '#94a3b8';
 const DIM_COLOR = '#a1a1aa';
+
+function nodeColor(node: GraphNode): string {
+  if (node.kind === 'tag') return TAG_COLOR;
+  return GROUP_COLORS[node.group ?? ''] ?? '#6b7280';
+}
+
+function tagSize(degree: number): { width: number; height: number } {
+  const w = Math.min(80, 22 + Math.sqrt(degree) * 6);
+  return { width: w, height: 16 };
+}
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
@@ -90,7 +108,7 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
     const idSet = new Set(simNodes.map((n) => n.id));
     const simLinks: SimLink[] = links
       .filter((l) => idSet.has(l.source) && idSet.has(l.target))
-      .map((l) => ({ source: l.source, target: l.target }));
+      .map((l) => ({ source: l.source, target: l.target, kind: l.kind }));
 
     const root = svg.append('g');
 
@@ -110,7 +128,8 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
       .selectAll<SVGLineElement, SimLink>('line')
       .data(simLinks)
       .join('line')
-      .attr('stroke-width', 1);
+      .attr('stroke-width', (d) => (d.kind === 'tag' ? 0.8 : 1))
+      .attr('stroke-dasharray', (d) => (d.kind === 'tag' ? '2 3' : null));
 
     const nodeGroup = root
       .append('g')
@@ -118,20 +137,24 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
       .selectAll<SVGGElement, SimNode>('g')
       .data(simNodes)
       .join('g')
+      .attr('data-kind', (d) => d.kind ?? 'doc')
       .style('cursor', 'pointer')
       .on('click', (_, d) => {
         if (d.url) window.location.href = d.url;
       });
 
-    nodeGroup
+    const docNodes = nodeGroup.filter((d) => d.kind !== 'tag');
+    const tagNodes = nodeGroup.filter((d) => d.kind === 'tag');
+
+    docNodes
       .append('circle')
       .attr('r', 7)
-      .attr('fill', (d) => GROUP_COLORS[d.group ?? ''] ?? '#6b7280')
+      .attr('fill', (d) => nodeColor(d))
       .attr('stroke', 'currentColor')
       .attr('stroke-opacity', 0.3)
       .attr('stroke-width', 1);
 
-    nodeGroup
+    docNodes
       .append('text')
       .text((d) => d.title)
       .attr('x', 10)
@@ -140,6 +163,35 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
       .attr('fill', 'currentColor')
       .attr('pointer-events', 'none')
       .style('user-select', 'none');
+
+    tagNodes.each(function (d) {
+      const sel = d3.select(this);
+      const { width, height } = tagSize(d.degree ?? 1);
+      sel
+        .append('rect')
+        .attr('x', -width / 2)
+        .attr('y', -height / 2)
+        .attr('width', width)
+        .attr('height', height)
+        .attr('rx', 8)
+        .attr('ry', 8)
+        .attr('fill', TAG_COLOR)
+        .attr('fill-opacity', 0.85)
+        .attr('stroke', 'currentColor')
+        .attr('stroke-opacity', 0.25)
+        .attr('stroke-width', 1);
+      sel
+        .append('text')
+        .text(d.title)
+        .attr('x', 0)
+        .attr('y', 4)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 10)
+        .attr('font-weight', 600)
+        .attr('fill', '#ffffff')
+        .attr('pointer-events', 'none')
+        .style('user-select', 'none');
+    });
 
     nodeGroup.append('title').text((d) => d.title);
 
@@ -154,9 +206,21 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
           .distance(80)
           .strength(0.4),
       )
-      .force('charge', d3.forceManyBody<SimNode>().strength(-160).distanceMax(400))
+      .force(
+        'charge',
+        d3
+          .forceManyBody<SimNode>()
+          .strength((d) => (d.kind === 'tag' ? -260 : -160))
+          .distanceMax(400),
+      )
       .force('center', d3.forceCenter(width / 2, height / 2).strength(0.05))
-      .force('collide', d3.forceCollide<SimNode>().radius(28));
+      .force(
+        'collide',
+        d3.forceCollide<SimNode>().radius((d) => {
+          if (d.kind === 'tag') return tagSize(d.degree ?? 1).width / 2 + 10;
+          return 28;
+        }),
+      );
 
     for (let i = 0; i < 30; i++) simulation.tick();
 
@@ -197,14 +261,18 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
     svg
-      .selectAll<SVGCircleElement, SimNode>('.graph-nodes circle')
+      .selectAll<SVGCircleElement, SimNode>('.graph-nodes g circle')
       .attr('fill', (d) => {
         if (matchedIds && !matchedIds.has(d.id)) return DIM_COLOR;
-        return GROUP_COLORS[d.group ?? ''] ?? '#6b7280';
+        return nodeColor(d);
       })
       .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 1));
     svg
-      .selectAll<SVGTextElement, SimNode>('.graph-nodes text')
+      .selectAll<SVGRectElement, SimNode>('.graph-nodes g rect')
+      .attr('fill', (d) => (matchedIds && !matchedIds.has(d.id) ? DIM_COLOR : nodeColor(d)))
+      .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 0.85));
+    svg
+      .selectAll<SVGTextElement, SimNode>('.graph-nodes g text')
       .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 1));
     svg
       .selectAll<SVGLineElement, SimLink>('.graph-links line')
