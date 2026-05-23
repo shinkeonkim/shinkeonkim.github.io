@@ -1,0 +1,180 @@
+---
+import { loadProjectStats, parseGitHubUrl, type ProjectStatRepo } from '../lib/projects';
+
+interface Props {
+  projectId: string;
+  repos: { url: string; label?: string; track: boolean }[];
+}
+
+const { projectId, repos } = Astro.props as Props;
+const cache = await loadProjectStats();
+const entry = cache[projectId];
+
+interface RepoView {
+  url: string;
+  label: string;
+  stat?: ProjectStatRepo;
+}
+
+const repoViews: RepoView[] = repos.map((r) => {
+  const parsed = parseGitHubUrl(r.url);
+  const stat = entry?.repos.find((s) => s.owner === parsed?.owner && s.repo === parsed?.repo);
+  return {
+    url: r.url,
+    label: r.label ?? (parsed ? `${parsed.owner}/${parsed.repo}` : r.url),
+    stat,
+  };
+});
+
+const myCommitsTotal = repoViews.reduce((sum, v) => sum + (v.stat?.myCommits ?? 0), 0);
+const totalCommitsTotal = repoViews.reduce((sum, v) => sum + (v.stat?.totalCommits ?? 0), 0);
+const sharePct = totalCommitsTotal > 0 ? Math.round((myCommitsTotal / totalCommitsTotal) * 100) : 0;
+const fetchedAt = entry?.fetchedAt ? new Date(entry.fetchedAt) : null;
+---
+<section class="project-stats not-prose" data-pagefind-ignore="all">
+  <header class="project-stats-header">
+    <h2 class="project-stats-title">📊 GitHub 활동</h2>
+    {fetchedAt && (
+      <span class="project-stats-fetched">캐시 갱신: {fetchedAt.toLocaleDateString('ko-KR')}</span>
+    )}
+  </header>
+
+  {totalCommitsTotal > 0 ? (
+    <div class="project-stats-summary">
+      <div class="project-stats-share-bar">
+        <div class="project-stats-share-fill" style={`width:${sharePct}%`}></div>
+      </div>
+      <p class="project-stats-share-label">
+        본인 커밋 <strong>{myCommitsTotal}</strong> / 전체 <strong>{totalCommitsTotal}</strong>
+        <span class="project-stats-share-pct">· 기여 비율 {sharePct}%</span>
+      </p>
+    </div>
+  ) : (
+    <p class="project-stats-empty">
+      통계 캐시가 비어 있습니다. <code>uv run scripts/fetch-project-stats.py</code> 로 빌드 전에 갱신하세요.
+    </p>
+  )}
+
+  <ul class="project-stats-repos">
+    {repoViews.map((v) => (
+      <li class="project-stats-repo">
+        <a href={v.url} target="_blank" rel="noopener" class="project-stats-repo-link">
+          <span class="project-stats-repo-icon">⌥</span>
+          <span class="project-stats-repo-label">{v.label}</span>
+        </a>
+        {v.stat ? (
+          <div class="project-stats-repo-meta">
+            <span>커밋 {v.stat.myCommits} / {v.stat.totalCommits}</span>
+            {v.stat.additions !== undefined && v.stat.deletions !== undefined && (
+              <span>+{v.stat.additions} / -{v.stat.deletions}</span>
+            )}
+            {v.stat.language && <span>{v.stat.language}</span>}
+            {v.stat.stars !== undefined && <span>★ {v.stat.stars}</span>}
+          </div>
+        ) : (
+          <span class="project-stats-repo-missing">통계 없음</span>
+        )}
+      </li>
+    ))}
+  </ul>
+</section>
+
+<style is:global>
+  .project-stats {
+    margin-top: 2rem;
+    padding: 1rem 1.2rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.6rem;
+    background-color: var(--color-surface-elevated);
+  }
+  .project-stats-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+  .project-stats-title {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  .project-stats-fetched {
+    font-size: 0.72rem;
+    color: var(--color-fg-muted);
+  }
+  .project-stats-empty {
+    margin: 0 0 0.75rem;
+    padding: 0.5rem 0.65rem;
+    font-size: 0.8rem;
+    color: var(--color-fg-muted);
+    border-radius: 0.35rem;
+    background-color: var(--color-code-bg);
+  }
+  .project-stats-share-bar {
+    height: 10px;
+    border-radius: 999px;
+    background-color: var(--color-code-bg);
+    overflow: hidden;
+  }
+  .project-stats-share-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--color-accent), var(--color-accent-hover));
+  }
+  .project-stats-share-label {
+    margin: 0.4rem 0 0;
+    font-size: 0.85rem;
+    color: var(--color-fg);
+  }
+  .project-stats-share-pct {
+    margin-left: 0.4rem;
+    color: var(--color-fg-muted);
+  }
+  .project-stats-repos {
+    list-style: none;
+    margin: 0.75rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .project-stats-repo {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    background-color: var(--color-surface);
+  }
+  .project-stats-repo-link {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    color: var(--color-fg);
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+  }
+  .project-stats-repo-link:hover {
+    color: var(--color-accent);
+  }
+  .project-stats-repo-icon {
+    color: var(--color-fg-muted);
+  }
+  .project-stats-repo-meta {
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--color-fg-muted);
+  }
+  .project-stats-repo-missing {
+    margin-left: auto;
+    font-size: 0.72rem;
+    color: var(--color-fg-muted);
+    font-style: italic;
+  }
+</style>
