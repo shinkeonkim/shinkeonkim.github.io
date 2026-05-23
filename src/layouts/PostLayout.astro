@@ -1,7 +1,7 @@
 ---
 import BaseLayout from './BaseLayout.astro';
 import Backlinks from '../components/Backlinks.astro';
-import { SITE_LOCALE } from '../consts';
+import { SITE_AUTHOR, SITE_LOCALE, SITE_TITLE, SITE_URL } from '../consts';
 import { getPostTaxonomy, slugify } from '../lib/taxonomy';
 
 interface Props {
@@ -67,8 +67,111 @@ if (collection === 'posts') {
 
 const categoryUrl = category ? `/posts/category/${encodeURIComponent(category)}/` : null;
 const seriesUrl = seriesInfo ? `/posts/series/${slugify(seriesInfo.name)}/` : null;
+
+const SERIES_WINDOW_BEFORE = 3;
+const SERIES_WINDOW_AFTER = 4;
+const SERIES_INLINE_THRESHOLD = 12;
+
+interface WindowedSeries {
+  visible: { id: string; title: string; order: number }[];
+  hiddenBefore: number;
+  hiddenAfter: number;
+}
+
+function windowedSeriesEntries(info: NonNullable<typeof seriesInfo>): WindowedSeries {
+  const all = info.entries;
+  if (all.length <= SERIES_INLINE_THRESHOLD) {
+    return { visible: all, hiddenBefore: 0, hiddenAfter: 0 };
+  }
+  const currentIdx = info.order - 1;
+  const start = Math.max(0, currentIdx - SERIES_WINDOW_BEFORE);
+  const end = Math.min(all.length, currentIdx + SERIES_WINDOW_AFTER + 1);
+  return {
+    visible: all.slice(start, end),
+    hiddenBefore: start,
+    hiddenAfter: all.length - end,
+  };
+}
+
+const seriesWindow = seriesInfo ? windowedSeriesEntries(seriesInfo) : null;
+
+const articleUrl = new URL(
+  collection === 'posts' ? `/posts/${slug}/` : `/wiki/${slug}/`,
+  SITE_URL,
+).toString();
+const articleImage = cover ? new URL(cover, SITE_URL).toString() : undefined;
+
+const postingSchema: Record<string, unknown> = {
+  '@context': 'https://schema.org',
+  '@type': collection === 'posts' ? 'BlogPosting' : 'TechArticle',
+  '@id': `${articleUrl}#article`,
+  headline: title,
+  description,
+  datePublished: isoDate,
+  ...(updated && { dateModified: updated.toISOString() }),
+  inLanguage: SITE_LOCALE,
+  mainEntityOfPage: { '@type': 'WebPage', '@id': articleUrl },
+  url: articleUrl,
+  author: {
+    '@type': 'Person',
+    name: SITE_AUTHOR,
+    url: SITE_URL,
+  },
+  publisher: {
+    '@type': 'Person',
+    name: SITE_AUTHOR,
+    url: SITE_URL,
+  },
+  ...(articleImage && {
+    image: {
+      '@type': 'ImageObject',
+      url: articleImage,
+      ...(coverAlt && { caption: coverAlt }),
+    },
+  }),
+  ...(tags.length > 0 && { keywords: tags.join(', ') }),
+  ...(category && { articleSection: category }),
+  ...(seriesInfo && {
+    isPartOf: {
+      '@type': 'CreativeWorkSeries',
+      name: seriesInfo.name,
+      position: seriesInfo.order,
+    },
+  }),
+};
+
+const breadcrumbItems = [
+  { name: collection === 'posts' ? '글' : '위키', url: new URL(collection === 'posts' ? '/posts/' : '/wiki/', SITE_URL).toString() },
+  ...(category && collection === 'posts'
+    ? [{ name: category, url: new URL(`/posts/category/${encodeURIComponent(category)}/`, SITE_URL).toString() }]
+    : []),
+  { name: title, url: articleUrl },
+];
+
+const breadcrumbSchema: Record<string, unknown> = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: breadcrumbItems.map((item, i) => ({
+    '@type': 'ListItem',
+    position: i + 1,
+    name: item.name,
+    item: item.url,
+  })),
+};
+
+void SITE_TITLE;
 ---
-<BaseLayout title={title} description={description} ogImage={cover}>
+<BaseLayout
+  title={title}
+  description={description}
+  ogImage={cover}
+  ogType="article"
+  publishedTime={isoDate}
+  modifiedTime={updated?.toISOString()}
+  articleTags={tags}
+  articleAuthor={SITE_AUTHOR}
+  jsonLd={[postingSchema, breadcrumbSchema]}
+>
   <article
     class="container-prose"
     data-pagefind-body
@@ -130,7 +233,7 @@ const seriesUrl = seriesInfo ? `/posts/series/${slugify(seriesInfo.name)}/` : nu
       <slot />
     </div>
 
-    {seriesInfo && (
+    {seriesInfo && seriesWindow && (
       <aside class="series-nav not-prose mt-10 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-elevated)] p-4" data-pagefind-ignore="all">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
           <h3 class="text-sm font-semibold">
@@ -139,7 +242,12 @@ const seriesUrl = seriesInfo ? `/posts/series/${slugify(seriesInfo.name)}/` : nu
           <span class="text-xs text-[color:var(--color-fg-muted)]">{seriesInfo.order} / {seriesInfo.total}</span>
         </div>
         <ol class="space-y-1 text-sm">
-          {seriesInfo.entries.map((e) => (
+          {seriesWindow.hiddenBefore > 0 && seriesUrl && (
+            <li class="text-xs text-[color:var(--color-fg-muted)]">
+              <a href={seriesUrl} class="hover:text-[color:var(--color-accent)]">↑ 이전 {seriesWindow.hiddenBefore}편 …</a>
+            </li>
+          )}
+          {seriesWindow.visible.map((e) => (
             <li class={e.id === slug ? 'font-semibold text-[color:var(--color-accent)]' : ''}>
               <span class="mr-1 inline-block w-6 text-right font-mono text-xs text-[color:var(--color-fg-muted)]">{e.order}.</span>
               {e.id === slug ? (
@@ -149,15 +257,23 @@ const seriesUrl = seriesInfo ? `/posts/series/${slugify(seriesInfo.name)}/` : nu
               )}
             </li>
           ))}
+          {seriesWindow.hiddenAfter > 0 && seriesUrl && (
+            <li class="text-xs text-[color:var(--color-fg-muted)]">
+              <a href={seriesUrl} class="hover:text-[color:var(--color-accent)]">↓ 이후 {seriesWindow.hiddenAfter}편 …</a>
+            </li>
+          )}
         </ol>
-        {(seriesInfo.prev || seriesInfo.next) && (
-          <nav class="mt-3 flex justify-between gap-2 border-t border-[color:var(--color-border)] pt-3 text-sm">
+        {(seriesInfo.prev || seriesInfo.next || seriesUrl) && (
+          <nav class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[color:var(--color-border)] pt-3 text-sm">
             {seriesInfo.prev ? (
               <a href={`/posts/${seriesInfo.prev.id}/`} class="flex-1 truncate" rel="prev">← {seriesInfo.prev.title}</a>
-            ) : <span />}
+            ) : <span class="flex-1" />}
+            {seriesUrl && (
+              <a href={seriesUrl} class="rounded-full border border-[color:var(--color-border)] px-2.5 py-0.5 text-xs no-underline hover:border-[color:var(--color-accent)] hover:text-[color:var(--color-accent)]">전체 {seriesInfo.total}편 →</a>
+            )}
             {seriesInfo.next ? (
               <a href={`/posts/${seriesInfo.next.id}/`} class="flex-1 truncate text-right" rel="next">{seriesInfo.next.title} →</a>
-            ) : <span />}
+            ) : <span class="flex-1" />}
           </nav>
         )}
       </aside>

@@ -35,18 +35,12 @@ const GROUP_COLORS: Record<string, string> = {
   notes: '#10b981',
   wiki: '#f59e0b',
 };
-const TAG_FILL_LIGHT = '#475569';
-const TAG_FILL_DARK = '#cbd5e1';
-const TAG_TEXT_LIGHT = '#ffffff';
-const TAG_TEXT_DARK = '#0f172a';
+const TAG_FILL_LIGHT = '#94a3b8';
+const TAG_FILL_DARK = '#475569';
 const DIM_COLOR = '#a1a1aa';
 
 function tagFill(isDark: boolean): string {
   return isDark ? TAG_FILL_DARK : TAG_FILL_LIGHT;
-}
-
-function tagTextColor(isDark: boolean): string {
-  return isDark ? TAG_TEXT_DARK : TAG_TEXT_LIGHT;
 }
 
 function nodeColor(node: GraphNode, isDark: boolean): string {
@@ -54,20 +48,8 @@ function nodeColor(node: GraphNode, isDark: boolean): string {
   return GROUP_COLORS[node.group ?? ''] ?? '#6b7280';
 }
 
-function estimateTextWidth(text: string, charPx: number): number {
-  let w = 0;
-  for (const ch of text) {
-    w += /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3]/.test(ch) ? charPx * 1.05 : charPx * 0.62;
-  }
-  return w;
-}
-
-function tagSize(text: string): { width: number; height: number } {
-  const fontPx = 13;
-  const padX = 14;
-  const width = Math.min(180, Math.max(48, estimateTextWidth(text, fontPx) + padX * 2));
-  return { width, height: 24 };
-}
+const TAG_NODE_SIZE = 10;
+const TAG_LABEL_GAP = 6;
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
@@ -199,33 +181,30 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
 
     tagNodes.each(function (d) {
       const sel = d3.select(this);
-      const { width, height } = tagSize(d.title);
       sel
         .append('rect')
-        .attr('x', -width / 2)
-        .attr('y', -height / 2)
-        .attr('width', width)
-        .attr('height', height)
-        .attr('rx', 12)
-        .attr('ry', 12)
+        .attr('x', -TAG_NODE_SIZE / 2)
+        .attr('y', -TAG_NODE_SIZE / 2)
+        .attr('width', TAG_NODE_SIZE)
+        .attr('height', TAG_NODE_SIZE)
+        .attr('rx', 2)
+        .attr('ry', 2)
         .attr('fill', tagFill(isDark))
-        .attr('fill-opacity', 0.95)
-        .attr('stroke', tagFill(isDark))
-        .attr('stroke-opacity', 0.4)
-        .attr('stroke-width', 1.5);
+        .attr('fill-opacity', 0.9)
+        .attr('stroke', 'currentColor')
+        .attr('stroke-opacity', 0.25)
+        .attr('stroke-width', 1);
       sel
         .append('text')
         .text(d.title)
-        .attr('x', 0)
-        .attr('y', 5)
-        .attr('text-anchor', 'middle')
-        .attr('font-size', 13)
-        .attr('font-weight', 700)
-        .attr('font-family', 'var(--font-sans), system-ui, sans-serif')
-        .attr('fill', tagTextColor(isDark))
+        .attr('x', TAG_NODE_SIZE / 2 + TAG_LABEL_GAP)
+        .attr('y', 4)
+        .attr('font-size', 11)
+        .attr('font-weight', 500)
+        .attr('fill', 'currentColor')
+        .attr('fill-opacity', 0.75)
         .attr('pointer-events', 'none')
-        .style('user-select', 'none')
-        .style('letter-spacing', '0.01em');
+        .style('user-select', 'none');
     });
 
     nodeGroup.append('title').text((d) => d.title);
@@ -252,7 +231,7 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
       .force(
         'collide',
         d3.forceCollide<SimNode>().radius((d) => {
-          if (d.kind === 'tag') return tagSize(d.title).width / 2 + 12;
+          if (d.kind === 'tag') return TAG_NODE_SIZE;
           return 28;
         }),
       );
@@ -305,11 +284,7 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
     svg
       .selectAll<SVGRectElement, SimNode>('.graph-nodes g rect')
       .attr('fill', (d) => (matchedIds && !matchedIds.has(d.id) ? DIM_COLOR : nodeColor(d, isDark)))
-      .attr('stroke', tagFill(isDark))
-      .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 0.95));
-    svg
-      .selectAll<SVGTextElement, SimNode>('.graph-nodes g[data-kind="tag"] text')
-      .attr('fill', tagTextColor(isDark));
+      .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 0.9));
     svg
       .selectAll<SVGTextElement, SimNode>('.graph-nodes g text')
       .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 1));
