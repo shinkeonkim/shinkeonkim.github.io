@@ -28,6 +28,7 @@ export interface ModalResult {
 }
 
 let host: HTMLDialogElement | null = null;
+let suppressNextClose = false;
 
 export function ensureHost(): HTMLDialogElement {
   if (host) return host;
@@ -65,7 +66,7 @@ export function openModal(options: ModalOptions): Promise<ModalResult> {
     : '';
   const confirmClass = options.danger ? 'editor-btn-danger' : 'editor-btn-primary';
   const html = `
-    <form method="dialog" class="editor-modal-form" data-editor-modal-form>
+    <form class="editor-modal-form" data-editor-modal-form>
       <header class="editor-modal-header">
         <h2 class="editor-modal-title">${escapeHtml(options.title)}</h2>
         <button type="button" class="editor-modal-close" data-editor-modal-cancel aria-label="닫기">✕</button>
@@ -87,10 +88,19 @@ export function openModal(options: ModalOptions): Promise<ModalResult> {
       if (settled) return;
       settled = true;
       dialog.removeEventListener('close', onClose);
-      if (dialog.open) dialog.close();
+      if (dialog.open) {
+        suppressNextClose = true;
+        dialog.close();
+      }
       resolve(result);
     }
-    const onClose = () => finish({ confirmed: false, values: {} });
+    const onClose = () => {
+      if (suppressNextClose) {
+        suppressNextClose = false;
+        return;
+      }
+      finish({ confirmed: false, values: {} });
+    };
     dialog.addEventListener('close', onClose, { once: true });
 
     dialog.querySelectorAll<HTMLElement>('[data-editor-modal-cancel]').forEach((btn) => {

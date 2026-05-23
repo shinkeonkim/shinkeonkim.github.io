@@ -168,6 +168,7 @@ export function initEditor(): void {
       previewLink.style.display = 'none';
       tree.setSelection(null);
     }
+    updateExtToggle();
     textarea.focus();
     void preview.render();
   }
@@ -181,6 +182,9 @@ export function initEditor(): void {
     onContextFolder: (collection, folder, anchor) => void fileOps.folderMenu(collection, folder, anchor),
     onNewFile: (collection, folder) => void handleNewFile(collection, folder),
     onNewFolder: (collection, folder) => void fileOps.newFolder(collection, folder),
+    onRenameFileInline: (collection, slug, ext, name) => fileOps.renameFileInline(collection, slug, ext, name),
+    onRenameFolderInline: (collection, folder, name) => fileOps.renameFolderInline(collection, folder, name),
+    onDropItem: (item, target) => fileOps.dropItem(item, target),
   });
   void tree.refresh();
 
@@ -198,6 +202,44 @@ export function initEditor(): void {
         }
       }
     },
+    onFolderChanged: (oldFolder, newFolder) => {
+      const cur = state.current;
+      if (!cur || cur.collection !== oldFolder.collection) return;
+      const prefix = oldFolder.folder ? `${oldFolder.folder}/` : '';
+      if (!prefix || !cur.slug.startsWith(prefix)) return;
+      const remainder = cur.slug.slice(prefix.length);
+      const newSlug = newFolder.folder ? `${newFolder.folder}/${remainder}` : remainder;
+      setCurrent({ collection: cur.collection, slug: newSlug, ext: cur.ext });
+    },
+  });
+
+  const extToggleBtn = document.getElementById('editor-ext-toggle') as HTMLButtonElement | null;
+  function updateExtToggle(): void {
+    if (!extToggleBtn) return;
+    if (!state.current) {
+      extToggleBtn.style.display = 'none';
+      return;
+    }
+    extToggleBtn.style.display = '';
+    const next: Ext = state.current.ext === '.md' ? '.mdx' : '.md';
+    extToggleBtn.textContent = `${state.current.ext} → ${next}`;
+    extToggleBtn.title = `현재 ${state.current.ext} · 클릭으로 ${next} 로 변환`;
+  }
+  extToggleBtn?.addEventListener('click', async () => {
+    const cur = state.current;
+    if (!cur) return;
+    if (state.isDirty) {
+      const proceed = await confirmModal({
+        title: '변경 사항이 있습니다',
+        description: '저장하지 않은 변경 사항이 있습니다. 확장자 변환 전에 저장하시겠습니까?',
+        confirmLabel: '저장 후 변환',
+        cancelLabel: '취소',
+      });
+      if (!proceed) return;
+      await save();
+    }
+    const nextExt = await fileOps.toggleExt(cur.collection, cur.slug, cur.ext);
+    if (nextExt) updateExtToggle();
   });
 
   const gitPanel = new GitPanel(gitPanelRoot);

@@ -1,6 +1,26 @@
 import { api, type TreeEntry } from './api';
 import { escapeHtml } from './utils';
-import type { CollectionName, CurrentFile } from './state';
+import type { CollectionName, CurrentFile, Ext } from './state';
+
+export interface DraggedFile {
+  type: 'file';
+  collection: CollectionName;
+  slug: string;
+  ext: Ext;
+}
+
+export interface DraggedFolder {
+  type: 'folder';
+  collection: CollectionName;
+  folder: string;
+}
+
+export type DraggedItem = DraggedFile | DraggedFolder;
+
+export interface DropTarget {
+  collection: CollectionName;
+  folder: string;
+}
 
 export interface TreeHandlers {
   onSelectFile: (collection: CollectionName, slug: string) => void;
@@ -8,9 +28,13 @@ export interface TreeHandlers {
   onContextFile: (collection: CollectionName, slug: string, anchor: HTMLElement) => void;
   onNewFile: (collection: CollectionName, folder: string) => void;
   onNewFolder: (collection: CollectionName, folder: string) => void;
+  onRenameFileInline: (collection: CollectionName, slug: string, ext: Ext, newBaseName: string) => Promise<void>;
+  onRenameFolderInline: (collection: CollectionName, folder: string, newName: string) => Promise<void>;
+  onDropItem: (item: DraggedItem, target: DropTarget) => Promise<void>;
 }
 
 const STORAGE_KEY = 'editor-tree-expanded';
+const DRAG_MIME = 'application/x-editor-item';
 
 export class FileTree {
   private root: HTMLElement;
@@ -18,6 +42,7 @@ export class FileTree {
   private expanded: Set<string>;
   private currentSelection: CurrentFile | null = null;
   private treeData: Record<CollectionName, TreeEntry[]> | null = null;
+  private inlineEditing: HTMLInputElement | null = null;
 
   constructor(root: HTMLElement, handlers: TreeHandlers) {
     this.root = root;
@@ -78,7 +103,12 @@ export class FileTree {
     const childrenHtml = entries.map((e) => this.renderEntry(collection, e, 0)).join('');
     return `
       <section class="editor-tree-collection" data-collection-section="${collection}">
-        <header class="editor-tree-collection-header" data-tree-toggle data-folder="" data-collection="${collection}" aria-expanded="${isOpen}">
+        <header class="editor-tree-collection-header"
+                data-tree-toggle
+                data-folder=""
+                data-collection="${collection}"
+                data-drop-target
+                aria-expanded="${isOpen}">
           <span class="editor-tree-chevron" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
           <span class="editor-tree-name">${collection}</span>
           <span class="editor-tree-collection-actions">
@@ -101,11 +131,18 @@ export class FileTree {
       const children = (entry.children ?? []).map((c) => this.renderEntry(collection, c, depth + 1)).join('');
       return `
         <div class="editor-tree-folder" data-folder-slug="${escapeHtml(entry.slug)}">
-          <div class="editor-tree-row editor-tree-folder-row" style="padding-left:${indent}px"
-               data-tree-toggle data-collection="${collection}" data-folder="${escapeHtml(entry.slug)}" aria-expanded="${isOpen}">
+          <div class="editor-tree-row editor-tree-folder-row"
+               style="padding-left:${indent}px"
+               draggable="true"
+               data-tree-toggle
+               data-tree-folder
+               data-drop-target
+               data-collection="${collection}"
+               data-folder="${escapeHtml(entry.slug)}"
+               aria-expanded="${isOpen}">
             <span class="editor-tree-chevron" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
             <span class="editor-tree-icon">📁</span>
-            <span class="editor-tree-name">${escapeHtml(entry.name)}</span>
+            <span class="editor-tree-name" data-tree-name>${escapeHtml(entry.name)}</span>
             <span class="editor-tree-row-actions">
               <button type="button" class="editor-tree-action" data-tree-new-file data-collection="${collection}" data-folder="${escapeHtml(entry.slug)}" title="새 파일">📄+</button>
               <button type="button" class="editor-tree-action" data-tree-new-folder data-collection="${collection}" data-folder="${escapeHtml(entry.slug)}" title="새 하위 폴더">📁+</button>
@@ -119,10 +156,15 @@ export class FileTree {
     const slug = entry.slug;
     const ext = entry.ext ?? '.md';
     return `
-      <div class="editor-tree-row editor-tree-file-row" style="padding-left:${indent + 16}px"
-           data-tree-file data-collection="${collection}" data-slug="${escapeHtml(slug)}" data-ext="${ext}">
+      <div class="editor-tree-row editor-tree-file-row"
+           style="padding-left:${indent + 16}px"
+           draggable="true"
+           data-tree-file
+           data-collection="${collection}"
+           data-slug="${escapeHtml(slug)}"
+           data-ext="${ext}">
         <span class="editor-tree-icon">📄</span>
-        <span class="editor-tree-name">${escapeHtml(entry.name)}</span>
+        <span class="editor-tree-name" data-tree-name>${escapeHtml(entry.name)}</span>
         <span class="editor-tree-row-actions">
           <button type="button" class="editor-tree-action" data-tree-file-menu data-collection="${collection}" data-slug="${escapeHtml(slug)}" title="더보기">⋯</button>
         </span>
@@ -130,10 +172,15 @@ export class FileTree {
     `;
   }
 
+  private isInsideAction(target: EventTarget | null): boolean {
+    return !!(target instanceof Element && target.closest('[data-tree-new-file], [data-tree-new-folder], [data-tree-folder-menu], [data-tree-file-menu], .editor-tree-name-input'));
+  }
+
   private attachListeners(): void {
     this.root.querySelectorAll<HTMLElement>('[data-tree-toggle]').forEach((el) => {
       el.addEventListener('click', (e) => {
-        if ((e.target as HTMLElement).closest('[data-tree-new-file], [data-tree-new-folder], [data-tree-folder-menu]')) return;
+        if (this.isInsideAction(e.target)) return;
+        if (this.inlineEditing) return;
         const collection = el.dataset.collection as CollectionName;
         const folder = el.dataset.folder ?? '';
         const key = this.folderKey(collection, folder);
@@ -146,7 +193,8 @@ export class FileTree {
 
     this.root.querySelectorAll<HTMLElement>('[data-tree-file]').forEach((el) => {
       el.addEventListener('click', (e) => {
-        if ((e.target as HTMLElement).closest('[data-tree-file-menu]')) return;
+        if (this.isInsideAction(e.target)) return;
+        if (this.inlineEditing) return;
         const collection = el.dataset.collection as CollectionName;
         const slug = el.dataset.slug ?? '';
         this.handlers.onSelectFile(collection, slug);
@@ -188,6 +236,131 @@ export class FileTree {
         this.handlers.onContextFolder(collection, folder, el);
       });
     });
+
+    this.root.querySelectorAll<HTMLElement>('[data-tree-name]').forEach((nameEl) => {
+      nameEl.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.startInlineEdit(nameEl);
+      });
+    });
+
+    this.root.querySelectorAll<HTMLElement>('[data-tree-file], [data-tree-folder]').forEach((el) => {
+      el.addEventListener('dragstart', (e) => {
+        const data = this.serializeDragSource(el);
+        if (!data || !e.dataTransfer) return;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData(DRAG_MIME, JSON.stringify(data));
+        el.classList.add('is-dragging');
+      });
+      el.addEventListener('dragend', () => el.classList.remove('is-dragging'));
+    });
+
+    this.root.querySelectorAll<HTMLElement>('[data-drop-target]').forEach((el) => {
+      el.addEventListener('dragover', (e) => {
+        if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        el.classList.add('is-drop-hover');
+      });
+      el.addEventListener('dragleave', () => el.classList.remove('is-drop-hover'));
+      el.addEventListener('drop', (e) => {
+        el.classList.remove('is-drop-hover');
+        const raw = e.dataTransfer?.getData(DRAG_MIME);
+        if (!raw) return;
+        e.preventDefault();
+        let item: DraggedItem;
+        try {
+          item = JSON.parse(raw) as DraggedItem;
+        } catch {
+          return;
+        }
+        const target: DropTarget = {
+          collection: el.dataset.collection as CollectionName,
+          folder: el.dataset.folder ?? '',
+        };
+        void this.handlers.onDropItem(item, target);
+      });
+    });
+  }
+
+  private serializeDragSource(el: HTMLElement): DraggedItem | null {
+    const collection = el.dataset.collection as CollectionName | undefined;
+    if (!collection) return null;
+    if (el.dataset.treeFile !== undefined) {
+      const slug = el.dataset.slug ?? '';
+      const ext = (el.dataset.ext ?? '.md') as Ext;
+      return { type: 'file', collection, slug, ext };
+    }
+    if (el.dataset.treeFolder !== undefined) {
+      const folder = el.dataset.folder ?? '';
+      return { type: 'folder', collection, folder };
+    }
+    return null;
+  }
+
+  private startInlineEdit(nameEl: HTMLElement): void {
+    if (this.inlineEditing) return;
+    const row = nameEl.closest<HTMLElement>('[data-tree-file], [data-tree-folder]');
+    if (!row) return;
+    const isFile = row.dataset.treeFile !== undefined;
+    const original = nameEl.textContent ?? '';
+    const collection = row.dataset.collection as CollectionName;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = original;
+    input.className = 'editor-tree-name-input';
+    input.spellcheck = false;
+    const parent = nameEl.parentElement;
+    if (!parent) return;
+    parent.replaceChild(input, nameEl);
+    this.inlineEditing = input;
+    input.focus();
+    if (isFile) {
+      const ext = (row.dataset.ext ?? '.md') as Ext;
+      const dot = original.length - ext.length;
+      input.setSelectionRange(0, dot > 0 ? dot : original.length);
+    } else {
+      input.select();
+    }
+
+    let settled = false;
+    const cleanup = (): void => {
+      this.inlineEditing = null;
+      input.replaceWith(nameEl);
+    };
+    const commit = async (): Promise<void> => {
+      if (settled) return;
+      settled = true;
+      const value = input.value.trim();
+      cleanup();
+      if (!value || value === original) return;
+      if (isFile) {
+        const slug = row.dataset.slug ?? '';
+        const ext = (row.dataset.ext ?? '.md') as Ext;
+        await this.handlers.onRenameFileInline(collection, slug, ext, value);
+      } else {
+        const folder = row.dataset.folder ?? '';
+        await this.handlers.onRenameFolderInline(collection, folder, value);
+      }
+    };
+    const cancel = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+    };
+    input.addEventListener('blur', () => void commit());
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        void commit();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        cancel();
+      }
+    });
+    input.addEventListener('click', (ev) => ev.stopPropagation());
+    input.addEventListener('dblclick', (ev) => ev.stopPropagation());
   }
 
   private updateActiveStates(): void {

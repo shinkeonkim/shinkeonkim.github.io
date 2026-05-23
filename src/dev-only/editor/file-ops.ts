@@ -1,20 +1,40 @@
 import { api } from './api';
 import { confirmModal, openModal } from './modal';
 import { setStatus } from './status';
-import type { CollectionName } from './state';
+import type { DraggedItem, DropTarget } from './tree';
+import type { CollectionName, Ext } from './state';
 
 const COLLECTION_OPTIONS = (['posts', 'notes', 'wiki'] as CollectionName[]).map((c) => ({ value: c, label: c }));
 
+function splitNameAndExt(name: string, fallbackExt: Ext): { base: string; ext: Ext } {
+  if (name.endsWith('.mdx')) return { base: name.slice(0, -4), ext: '.mdx' };
+  if (name.endsWith('.md')) return { base: name.slice(0, -3), ext: '.md' };
+  return { base: name, ext: fallbackExt };
+}
+
+type FileChangeHandler = (
+  oldFile: { collection: CollectionName; slug: string } | null,
+  newFile: { collection: CollectionName; slug: string; ext: Ext } | null,
+) => void;
+
+type FolderChangeHandler = (
+  oldFolder: { collection: CollectionName; folder: string },
+  newFolder: { collection: CollectionName; folder: string },
+) => void;
+
 export class FileOpsController {
   private onChanged: () => Promise<void>;
-  private onFileChanged: (oldFile: { collection: CollectionName; slug: string } | null, newFile: { collection: CollectionName; slug: string; ext: '.md' | '.mdx' } | null) => void;
+  private onFileChanged: FileChangeHandler;
+  private onFolderChanged: FolderChangeHandler;
 
   constructor(opts: {
     onChanged: () => Promise<void>;
-    onFileChanged: (oldFile: { collection: CollectionName; slug: string } | null, newFile: { collection: CollectionName; slug: string; ext: '.md' | '.mdx' } | null) => void;
+    onFileChanged: FileChangeHandler;
+    onFolderChanged: FolderChangeHandler;
   }) {
     this.onChanged = opts.onChanged;
     this.onFileChanged = opts.onFileChanged;
+    this.onFolderChanged = opts.onFolderChanged;
   }
 
   async newFile(collection: CollectionName, folder: string): Promise<{ collection: CollectionName; slug: string; ext: '.md' | '.mdx' } | null> {
@@ -230,10 +250,129 @@ export class FileOpsController {
     if (!r.confirmed) return;
     const toFolder = r.values.toFolder.trim();
     if (!toFolder || toFolder === folder) return;
+    await this.executeFolderRename(collection, folder, toFolder);
+  }
+
+  async renameFileInline(collection: CollectionName, slug: string, ext: Ext, newBaseName: string): Promise<void> {
+    const trimmed = newBaseName.trim();
+    if (!trimmed) return;
+    const parts = slug.split('/');
+    const oldBase = parts[parts.length - 1];
+    const { base, ext: parsedExt } = splitNameAndExt(trimmed, ext);
+    if (base === oldBase && parsedExt === ext) return;
+    parts[parts.length - 1] = base;
+    const newSlug = parts.join('/');
+    try {
+      await api.fileOps({
+        action: 'rename-file',
+        collection,
+        slug,
+        ext,
+        toSlug: newSlug,
+        toExt: parsedExt,
+      });
+      setStatus(`이름 변경: ${slug}${ext} → ${newSlug}${parsedExt}`, 'ok');
+      await this.onChanged();
+      this.onFileChanged({ collection, slug }, { collection, slug: newSlug, ext: parsedExt });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus('이름 변경 실패: ' + msg, 'error');
+    }
+  }
+
+  async renameFolderInline(collection: CollectionName, folder: string, newName: string): Promise<void> {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    const parts = folder.split('/');
+    if (parts[parts.length - 1] === trimmed) return;
+    parts[parts.length - 1] = trimmed;
+    const newFolder = parts.join('/');
+    await this.executeFolderRename(collection, folder, newFolder);
+  }
+
+  async toggleExt(collection: CollectionName, slug: string, ext: Ext): Promise<Ext | null> {
+    const targetExt: Ext = ext === '.md' ? '.mdx' : '.md';
+    try {
+      await api.fileOps({
+        action: 'rename-file',
+        collection,
+        slug,
+        ext,
+        toSlug: slug,
+        toExt: targetExt,
+      });
+      setStatus(`확장자 변경: ${slug}${ext} → ${slug}${targetExt}`, 'ok');
+      await this.onChanged();
+      this.onFileChanged({ collection, slug }, { collection, slug, ext: targetExt });
+      return targetExt;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus('확장자 변경 실패: ' + msg, 'error');
+      return null;
+    }
+  }
+
+  async dropItem(item: DraggedItem, target: DropTarget): Promise<void> {
+    if (item.type === 'file') {
+      const filename = item.slug.includes('/') ? item.slug.split('/').pop()! : item.slug;
+      const toSlug = target.folder ? `${target.folder}/${filename}` : filename;
+      if (item.collection === target.collection && item.slug === toSlug) return;
+      try {
+        if (item.collection === target.collection) {
+          await api.fileOps({
+            action: 'rename-file',
+            collection: item.collection,
+            slug: item.slug,
+            ext: item.ext,
+            toSlug,
+            toExt: item.ext,
+          });
+        } else {
+          await api.fileOps({
+            action: 'move-file',
+            collection: item.collection,
+            slug: item.slug,
+            ext: item.ext,
+            toCollection: target.collection,
+            toSlug,
+          });
+        }
+        setStatus(`이동: ${item.collection}/${item.slug} → ${target.collection}/${toSlug}`, 'ok');
+        await this.onChanged();
+        this.onFileChanged(
+          { collection: item.collection, slug: item.slug },
+          { collection: target.collection, slug: toSlug, ext: item.ext },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('이동 실패: ' + msg, 'error');
+      }
+      return;
+    }
+    if (item.collection !== target.collection) {
+      setStatus('폴더는 같은 컬렉션 안에서만 이동할 수 있습니다', 'error');
+      return;
+    }
+    const folderName = item.folder.includes('/') ? item.folder.split('/').pop()! : item.folder;
+    const toFolder = target.folder ? `${target.folder}/${folderName}` : folderName;
+    if (item.folder === toFolder) return;
+    if (toFolder === item.folder || toFolder.startsWith(item.folder + '/')) {
+      setStatus('자기 자신 또는 하위 폴더로는 이동할 수 없습니다', 'error');
+      return;
+    }
+    await this.executeFolderRename(item.collection, item.folder, toFolder);
+  }
+
+  private async executeFolderRename(
+    collection: CollectionName,
+    folder: string,
+    toFolder: string,
+  ): Promise<void> {
     try {
       await api.fileOps({ action: 'rename-folder', collection, folder, toFolder });
       setStatus(`폴더 변경: ${collection}/${folder} → ${collection}/${toFolder}`, 'ok');
       await this.onChanged();
+      this.onFolderChanged({ collection, folder }, { collection, folder: toFolder });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus('폴더 변경 실패: ' + msg, 'error');
