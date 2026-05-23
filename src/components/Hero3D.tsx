@@ -14,9 +14,32 @@ const DEFAULT_WORDS = [
   'Astro', 'TypeScript', 'React', 'Three.js', 'Markdown',
 ];
 
-const KEY_COLS = 14;
-const KEY_ROWS = 5;
-const KEY_GEO = new THREE.BoxGeometry(0.18, 0.05, 0.18);
+const KEY_U = 0.21;
+const KEY_GAP = 0.025;
+const KEY_DEPTH = 0.2;
+const ROW_DEPTH_GAP = 0.025;
+const KEY_THICKNESS = 0.05;
+const KEY_BASE_Y = 0.13;
+const FUNCTION_ROW_Z_SCALE = 0.5;
+
+interface KeyDef {
+  width: number;
+  shortRow?: boolean;
+}
+
+function row(widths: number[], shortRow = false): KeyDef[] {
+  return widths.map((w) => ({ width: w, shortRow }));
+}
+
+const KEYBOARD_ROWS: KeyDef[][] = [
+  row([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], true),
+  row([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5]),
+  row([1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
+  row([1.75, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.75]),
+  row([2.25, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2.25]),
+  row([1, 1, 1, 1.25, 5, 1.25, 1, 1, 1, 1]),
+];
+const ROW_U = 14.5;
 
 interface ThemeColors {
   scenebg: number | null;
@@ -112,38 +135,55 @@ export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/
     const base = new THREE.Mesh(baseGeometry, baseMaterial);
     laptop.add(base);
 
-    const trackpad = new THREE.Mesh(
-      new THREE.BoxGeometry(1.4, 0.005, 0.95),
-      new THREE.MeshStandardMaterial({
-        color: theme.keyColor,
-        metalness: 0.35,
-        roughness: 0.55,
-      }),
-    );
-    trackpad.position.set(0, 0.095, 1.05);
-    laptop.add(trackpad);
-
     const keyMaterial = new THREE.MeshStandardMaterial({
       color: theme.keyColor,
       metalness: 0.2,
       roughness: 0.7,
     });
     const keys: THREE.Mesh[] = [];
+    const keyGeometries: THREE.BufferGeometry[] = [];
     const keyOffsets: number[] = [];
-    const kbWidth = 3.4;
-    const kbDepth = 1.8;
-    const stepX = kbWidth / (KEY_COLS - 1);
-    const stepZ = kbDepth / (KEY_ROWS - 1);
-    for (let r = 0; r < KEY_ROWS; r++) {
-      for (let c = 0; c < KEY_COLS; c++) {
-        const key = new THREE.Mesh(KEY_GEO, keyMaterial);
-        const baseY = 0.13;
-        key.position.set(-kbWidth / 2 + c * stepX, baseY, -kbDepth / 2 + r * stepZ - 0.05);
+
+    const rowDepths = KEYBOARD_ROWS.map((r) =>
+      r[0]?.shortRow ? KEY_DEPTH * FUNCTION_ROW_Z_SCALE : KEY_DEPTH,
+    );
+    const rowOffsetX = -((ROW_U * KEY_U + (ROW_U - 1) * KEY_GAP) / 2);
+    const keyboardBackZ = -0.85;
+    let backEdge = keyboardBackZ;
+
+    KEYBOARD_ROWS.forEach((rowDef, rowIndex) => {
+      const depth = rowDepths[rowIndex];
+      const rowCenterZ = backEdge + depth / 2;
+      const rowUnits = rowDef.reduce((sum, k) => sum + k.width, 0);
+      const padU = (ROW_U - rowUnits) / 2;
+      let cursorX = rowOffsetX + padU * (KEY_U + KEY_GAP);
+      rowDef.forEach((keyDef) => {
+        const keyW = keyDef.width * KEY_U;
+        const geo = new THREE.BoxGeometry(keyW * 0.92, KEY_THICKNESS, depth * 0.88);
+        keyGeometries.push(geo);
+        const key = new THREE.Mesh(geo, keyMaterial);
+        key.position.set(cursorX + keyW / 2, KEY_BASE_Y, rowCenterZ);
         laptop.add(key);
         keys.push(key);
         keyOffsets.push(Math.random() * Math.PI * 2);
-      }
-    }
+        cursorX += keyW + KEY_GAP;
+      });
+      backEdge += depth + ROW_DEPTH_GAP;
+    });
+
+    const trackpadDepth = 0.85;
+    const trackpadGap = 0.16;
+    const trackpadCenterZ = backEdge + trackpadGap + trackpadDepth / 2;
+    const trackpad = new THREE.Mesh(
+      new THREE.BoxGeometry(1.6, 0.005, trackpadDepth),
+      new THREE.MeshStandardMaterial({
+        color: theme.keyColor,
+        metalness: 0.4,
+        roughness: 0.5,
+      }),
+    );
+    trackpad.position.set(0, 0.095, trackpadCenterZ);
+    laptop.add(trackpad);
 
     const screenPivot = new THREE.Group();
     screenPivot.position.set(0, 0.09, -1.4);
@@ -470,7 +510,7 @@ export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/
       container.removeEventListener('mousemove', onPointerMove);
       renderer.dispose();
       baseGeometry.dispose();
-      KEY_GEO.dispose();
+      for (const g of keyGeometries) g.dispose();
       baseMaterial.dispose();
       keyMaterial.dispose();
       screenShell.geometry.dispose();
