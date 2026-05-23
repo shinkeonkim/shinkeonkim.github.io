@@ -27,6 +27,7 @@ HEADING_RE = re.compile(r"^#{1,6}\s")
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)|<img\s[^>]*>", re.IGNORECASE)
 CSS_BATTLE_NUM_RE = re.compile(r"css-battle-(\d+)", re.IGNORECASE)
 MENTORING_NUM_RE = re.compile(r"mentoring-(\d+)", re.IGNORECASE)
+BOJ_NUM_RE = re.compile(r"boj-(\d+)", re.IGNORECASE)
 MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>[\s\S]*?</style>", re.IGNORECASE)
 SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>[\s\S]*?</script>", re.IGNORECASE)
@@ -43,6 +44,10 @@ def derive_series(item: "MigrationItem") -> tuple[str, int] | None:
         match = MENTORING_NUM_RE.search(name)
         if match:
             return "소프트웨어 특기자 멘토링", int(match.group(1))
+    if item.dest_dir == "problem-solving/boj":
+        match = BOJ_NUM_RE.search(name)
+        if match:
+            return "BOJ 풀이", int(match.group(1))
     return None
 
 
@@ -58,21 +63,32 @@ def plan() -> list[MigrationItem]:
 
     for folder in ("css-battle", "TIL", "mentoring"):
         src = LEGACY_ROOT / folder
+        if not src.exists():
+            continue
         for path in sorted(src.glob("*.md")):
             items.append(MigrationItem(path, folder))
+
+    boj_src = LEGACY_ROOT / "boj"
+    if boj_src.exists():
+        for path in sorted(boj_src.glob("*.md")):
+            items.append(MigrationItem(path, "problem-solving/boj"))
 
     for filename in (
         "2020-01-01-goodbye-2019.md",
         "2021-12-09-goodbye-2021.md",
         "2022-10-30-goodbye-2022.md",
     ):
-        items.append(MigrationItem(LEGACY_ROOT / filename, "my-life"))
+        src = LEGACY_ROOT / filename
+        if src.exists():
+            items.append(MigrationItem(src, "my-life"))
 
     for filename in (
         "2021-09-21-python-spread-operator.md",
         "2021-10-01-detect-intersection-two-circle.md",
     ):
-        items.append(MigrationItem(LEGACY_ROOT / filename, ""))
+        src = LEGACY_ROOT / filename
+        if src.exists():
+            items.append(MigrationItem(src, ""))
 
     return items
 
