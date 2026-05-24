@@ -197,10 +197,24 @@ export class ImageDialogController {
           this.form.querySelector<HTMLInputElement>('input[name="img-width"]:checked')?.value ?? '';
         const align =
           this.form.querySelector<HTMLInputElement>('input[name="img-align"]:checked')?.value ?? '';
-        const classes = [width, align].filter(Boolean).join(' ');
-        const md = classes
-          ? `<img src="${this.pending.path}" alt="${alt.replace(/"/g, '&quot;')}" class="${classes}" />`
-          : `![${alt}](${this.pending.path})`;
+        let widthClass = '';
+        let inlineStyle = '';
+        if (width === 'custom') {
+          const customRaw =
+            (document.getElementById('editor-image-width-custom') as HTMLInputElement | null)?.value.trim() ?? '';
+          if (/^\d+\s*(%|px|rem|em|vw)?$/i.test(customRaw)) {
+            const styled = /^\d+$/.test(customRaw) ? `${customRaw}px` : customRaw;
+            inlineStyle = ` style="width: ${styled.replace(/"/g, '')}"`;
+          }
+        } else if (width) {
+          widthClass = width;
+        }
+        const classes = [widthClass, align].filter(Boolean).join(' ');
+        const altSafe = alt.replace(/"/g, '&quot;');
+        const md =
+          classes || inlineStyle
+            ? `<img src="${this.pending.path}" alt="${altSafe}"${classes ? ` class="${classes}"` : ''}${inlineStyle} />`
+            : `![${alt}](${this.pending.path})`;
         this.toolbar.insertBlock(md);
       }
       this.pending = null;

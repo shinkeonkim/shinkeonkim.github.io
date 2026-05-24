@@ -183,3 +183,42 @@ export async function createBranch(name: string, checkout: boolean): Promise<{ b
   const after = await git().status();
   return { branch: after.current ?? name };
 }
+
+export interface StashEntry {
+  index: number;
+  message: string;
+}
+
+export async function stashList(): Promise<StashEntry[]> {
+  const result = await git().stashList();
+  return result.all.map((entry, index) => ({
+    index,
+    message: entry.message ?? '(no message)',
+  }));
+}
+
+export async function stashPush(message: string): Promise<{ output: string }> {
+  const trimmed = message.trim();
+  if (!/^[\w\sA-Za-z가-힣.,:\-_/()]*$/.test(trimmed)) {
+    throw new Error('invalid stash message');
+  }
+  const args = trimmed ? ['stash', 'push', '-m', trimmed] : ['stash', 'push'];
+  const output = await git().raw(args);
+  return { output: output.trim() || 'stashed' };
+}
+
+export async function stashPop(index = 0): Promise<{ output: string }> {
+  if (!Number.isInteger(index) || index < 0 || index > 99) {
+    throw new Error('invalid stash index');
+  }
+  const output = await git().raw(['stash', 'pop', `stash@{${index}}`]);
+  return { output: output.trim() || 'popped' };
+}
+
+export async function stashDrop(index: number): Promise<{ output: string }> {
+  if (!Number.isInteger(index) || index < 0 || index > 99) {
+    throw new Error('invalid stash index');
+  }
+  const output = await git().raw(['stash', 'drop', `stash@{${index}}`]);
+  return { output: output.trim() || 'dropped' };
+}

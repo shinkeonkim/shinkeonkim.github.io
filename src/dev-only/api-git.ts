@@ -10,6 +10,10 @@ import {
   listBranches,
   pull,
   push,
+  stashDrop,
+  stashList,
+  stashPop,
+  stashPush,
 } from './git-utils';
 import { notFoundResponse } from './api-utils';
 
@@ -54,6 +58,10 @@ export const GET: APIRoute = async ({ url }) => {
       const branches = await listBranches();
       return jsonOk({ branches });
     }
+    if (action === 'stash-list') {
+      const stashes = await stashList();
+      return jsonOk({ stashes });
+    }
     return jsonError(`unknown action: ${action}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -67,6 +75,7 @@ interface GitBody {
   message?: string;
   branch?: string;
   checkout?: boolean;
+  stashIndex?: number;
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -114,6 +123,19 @@ export const POST: APIRoute = async ({ request }) => {
     if (body.action === 'createBranch') {
       if (!body.branch) return jsonError('branch required');
       const result = await createBranch(body.branch, body.checkout !== false);
+      return jsonOk(result);
+    }
+    if (body.action === 'stash-push') {
+      const result = await stashPush(body.message ?? '');
+      return jsonOk(result);
+    }
+    if (body.action === 'stash-pop') {
+      const result = await stashPop(body.stashIndex ?? 0);
+      return jsonOk(result);
+    }
+    if (body.action === 'stash-drop') {
+      if (typeof body.stashIndex !== 'number') return jsonError('stashIndex required');
+      const result = await stashDrop(body.stashIndex);
       return jsonOk(result);
     }
     return jsonError(`unknown action: ${body.action}`);

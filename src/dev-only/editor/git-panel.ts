@@ -11,6 +11,7 @@ export class GitPanel {
   private amend = false;
   private busy = false;
   private branches: { current: string; all: string[] } | null = null;
+  private stashes: { index: number; message: string }[] = [];
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -19,12 +20,14 @@ export class GitPanel {
 
   async refresh(): Promise<void> {
     try {
-      const [statusRes, branchesRes] = await Promise.all([
+      const [statusRes, branchesRes, stashesRes] = await Promise.all([
         api.gitStatus(),
         api.gitBranches().catch(() => null),
+        api.gitStashList().catch(() => null),
       ]);
       this.status = statusRes.status;
       if (branchesRes) this.branches = branchesRes.branches;
+      this.stashes = stashesRes?.stashes ?? [];
       const allowedPaths = new Set(this.status.files.filter((f) => f.allowed).map((f) => f.path));
       for (const p of Array.from(this.selected)) if (!allowedPaths.has(p)) this.selected.delete(p);
       this.render();
@@ -126,6 +129,7 @@ export class GitPanel {
         </div>
       </header>
       ${branchSwitcher}
+      ${this.renderStashSection()}
       ${filesHtml}
       ${blockedHtml}
       <div class="git-panel-commit">
@@ -209,6 +213,70 @@ export class GitPanel {
       } finally {
         this.busy = false;
       }
+    });
+
+    this.root.querySelector('[data-git-stash-push]')?.addEventListener('click', async () => {
+      const message = window.prompt('stash 메시지 (선택)', '') ?? '';
+      this.busy = true;
+      this.render();
+      try {
+        const res = await api.gitStashPush(message);
+        setStatus('stash 완료', 'ok');
+        this.showOutput(`📦 ${res.output}`);
+        await this.refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('stash 실패: ' + msg, 'error');
+        this.showOutput(`❌ ${msg}`);
+      } finally {
+        this.busy = false;
+      }
+    });
+
+    this.root.querySelectorAll<HTMLElement>('[data-git-stash-pop]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const idx = Number(btn.dataset.stashIndex ?? '0');
+        this.busy = true;
+        this.render();
+        try {
+          const res = await api.gitStashPop(idx);
+          setStatus(`stash@{${idx}} pop 완료`, 'ok');
+          this.showOutput(`📦 ${res.output}`);
+          await this.refresh();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus('stash pop 실패: ' + msg, 'error');
+          this.showOutput(`❌ ${msg}`);
+        } finally {
+          this.busy = false;
+        }
+      });
+    });
+
+    this.root.querySelectorAll<HTMLElement>('[data-git-stash-drop]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const idx = Number(btn.dataset.stashIndex ?? '0');
+        const confirmed = await confirmModal({
+          title: `stash@{${idx}} drop`,
+          description: '이 stash 를 삭제합니다. 되돌릴 수 없습니다.',
+          confirmLabel: '삭제',
+          danger: true,
+        });
+        if (!confirmed) return;
+        this.busy = true;
+        this.render();
+        try {
+          await api.gitStashDrop(idx);
+          setStatus(`stash@{${idx}} 삭제됨`, 'ok');
+          await this.refresh();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus('stash drop 실패: ' + msg, 'error');
+          this.showOutput(`❌ ${msg}`);
+        } finally {
+          this.busy = false;
+        }
+      });
     });
 
     this.root.querySelector('[data-git-new-branch]')?.addEventListener('click', async () => {
@@ -384,5 +452,30 @@ export class GitPanel {
     if (!pre) return;
     pre.hidden = false;
     pre.textContent = text;
+  }
+
+  private renderStashSection(): string {
+    const hasChanges = (this.status?.files.length ?? 0) > 0;
+    const stashList = this.stashes.length === 0
+      ? ''
+      : `<ul class="git-panel-stash-list">
+          ${this.stashes
+            .map(
+              (s) => `<li class="git-panel-stash-item">
+                <span class="git-panel-stash-msg" title="stash@{${s.index}}">${escapeHtml(s.message)}</span>
+                <span class="git-panel-stash-actions">
+                  <button type="button" class="editor-btn editor-btn-small" data-git-stash-pop data-stash-index="${s.index}">pop</button>
+                  <button type="button" class="editor-btn editor-btn-small editor-btn-danger" data-git-stash-drop data-stash-index="${s.index}">drop</button>
+                </span>
+              </li>`,
+            )
+            .join('')}
+        </ul>`;
+    if (!hasChanges && this.stashes.length === 0) return '';
+    return `<details class="git-panel-stash">
+        <summary>📦 Stash (${this.stashes.length})</summary>
+        ${hasChanges ? '<button type="button" class="editor-btn editor-btn-small" data-git-stash-push>현재 변경사항 stash</button>' : ''}
+        ${stashList}
+      </details>`;
   }
 }

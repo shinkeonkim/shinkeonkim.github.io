@@ -196,6 +196,33 @@ export const api = {
       body: JSON.stringify({ action: 'createBranch', branch, checkout }),
     });
   },
+  gitStashList(): Promise<{
+    ok: boolean;
+    stashes: { index: number; message: string }[];
+  }> {
+    return jsonRequest('/_editor/api/git?action=stash-list');
+  },
+  gitStashPush(message: string): Promise<{ ok: boolean; output: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stash-push', message }),
+    });
+  },
+  gitStashPop(stashIndex = 0): Promise<{ ok: boolean; output: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stash-pop', stashIndex }),
+    });
+  },
+  gitStashDrop(stashIndex: number): Promise<{ ok: boolean; output: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stash-drop', stashIndex }),
+    });
+  },
   listSources(): Promise<{ sources: SourceSummary[] }> {
     return jsonRequest<{ sources: SourceSummary[] }>('/_editor/api/sources');
   },
