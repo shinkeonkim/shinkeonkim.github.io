@@ -1,7 +1,8 @@
 import type { CurrentFile } from './state';
+import { EDITOR_AUTOSAVE_INTERVAL_MS } from '../../consts';
 
 const PREFIX = 'editor-draft:';
-const AUTOSAVE_INTERVAL = 2000;
+const AUTOSAVE_INTERVAL = EDITOR_AUTOSAVE_INTERVAL_MS;
 
 function keyFor(file: CurrentFile): string {
   return `${PREFIX}${file.collection}/${file.slug}${file.ext}`;
@@ -24,12 +25,13 @@ export function readDraft(file: CurrentFile): DraftRecord | null {
   }
 }
 
-export function writeDraft(file: CurrentFile, content: string): void {
+export function writeDraft(file: CurrentFile, content: string): boolean {
   try {
     const record: DraftRecord = { content, savedAt: Date.now() };
     localStorage.setItem(keyFor(file), JSON.stringify(record));
+    return true;
   } catch {
-    return;
+    return false;
   }
 }
 
@@ -65,18 +67,22 @@ export function listDrafts(): { key: string; record: DraftRecord }[] {
 export class Autosaver {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSnapshot = '';
+  private failureNotified = false;
   private fileGetter: () => CurrentFile | null;
   private contentGetter: () => string;
   private onSaved: (timestamp: number) => void;
+  private onFailed: ((message: string) => void) | null;
 
   constructor(
     fileGetter: () => CurrentFile | null,
     contentGetter: () => string,
     onSaved: (t: number) => void,
+    onFailed?: (message: string) => void,
   ) {
     this.fileGetter = fileGetter;
     this.contentGetter = contentGetter;
     this.onSaved = onSaved;
+    this.onFailed = onFailed ?? null;
   }
 
   start(): void {
@@ -99,9 +105,7 @@ export class Autosaver {
     const file = this.fileGetter();
     if (!file) return;
     const content = this.contentGetter();
-    writeDraft(file, content);
-    this.lastSnapshot = content;
-    this.onSaved(Date.now());
+    this.persist(file, content);
   }
 
   private tick(): void {
@@ -109,8 +113,18 @@ export class Autosaver {
     if (!file) return;
     const content = this.contentGetter();
     if (content === this.lastSnapshot) return;
-    writeDraft(file, content);
-    this.lastSnapshot = content;
-    this.onSaved(Date.now());
+    this.persist(file, content);
+  }
+
+  private persist(file: CurrentFile, content: string): void {
+    const ok = writeDraft(file, content);
+    if (ok) {
+      this.lastSnapshot = content;
+      this.failureNotified = false;
+      this.onSaved(Date.now());
+    } else if (!this.failureNotified) {
+      this.failureNotified = true;
+      this.onFailed?.('초안 자동 저장 실패 (브라우저 저장공간 가득 참)');
+    }
   }
 }

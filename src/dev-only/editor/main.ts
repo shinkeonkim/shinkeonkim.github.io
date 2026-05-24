@@ -175,6 +175,10 @@ export function initEditor(): void {
       state.lastSavedAt = timestamp;
       autosaveIndicator.textContent = `자동저장 ${new Date(timestamp).toLocaleTimeString('ko-KR')}`;
     },
+    (message) => {
+      autosaveIndicator.textContent = `⚠ ${message}`;
+      setStatus(message, 'error');
+    },
   );
   autosaver.start();
 

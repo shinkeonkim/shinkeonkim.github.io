@@ -2,6 +2,7 @@ import { api, type TreeEntry } from './api';
 import { getCaretCoordinates } from './caret';
 import { escapeHtml } from './utils';
 import type { CollectionName } from './state';
+import { WIKILINK_AUTOCOMPLETE_MAX } from '../../consts';
 
 interface PageEntry {
   collection: CollectionName;
@@ -10,7 +11,7 @@ interface PageEntry {
   searchKey: string;
 }
 
-const MAX_RESULTS = 12;
+const MAX_RESULTS = WIKILINK_AUTOCOMPLETE_MAX;
 
 export class WikilinkAutocomplete {
   private textarea: HTMLTextAreaElement;
