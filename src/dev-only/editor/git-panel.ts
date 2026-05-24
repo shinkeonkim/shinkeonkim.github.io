@@ -103,7 +103,10 @@ export class GitPanel {
                   <span class="git-panel-status git-panel-status-${f.status}">${this.fileLabel(f)}</span>
                   <span class="git-panel-path">${escapeHtml(f.path)}</span>
                 </label>
-                <button type="button" class="editor-btn editor-btn-small" data-git-diff data-file="${escapeHtml(f.path)}">diff</button>
+                <span class="git-panel-file-actions">
+                  <button type="button" class="editor-btn editor-btn-small" data-git-diff data-file="${escapeHtml(f.path)}">diff</button>
+                  ${f.status !== 'untracked' && f.status !== 'added' ? `<button type="button" class="editor-btn editor-btn-small" data-git-hunks data-file="${escapeHtml(f.path)}" title="선택한 hunk 만 커밋">hunks</button>` : ''}
+                </span>
               </li>`,
             )
             .join('')}
@@ -310,6 +313,78 @@ export class GitPanel {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           setStatus('diff 실패: ' + msg, 'error');
+        }
+      });
+    });
+
+    this.root.querySelectorAll<HTMLElement>('[data-git-hunks]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const file = btn.dataset.file ?? '';
+        try {
+          const res = await api.gitHunks(file);
+          if (res.hunks.length === 0) {
+            setStatus('hunk 가 없습니다 (untracked 또는 binary 파일)', 'error');
+            return;
+          }
+          const body = `
+            <p class="git-hunks-summary">${res.hunks.length}개 hunk · 체크된 hunk만 별도 커밋합니다.</p>
+            <ol class="git-hunks-list">
+              ${res.hunks
+                .map(
+                  (h) => `<li class="git-hunks-item">
+                    <label class="git-hunks-label">
+                      <input type="checkbox" data-hunk-index="${h.index}" checked />
+                      <code>${escapeHtml(h.header)}</code>
+                    </label>
+                    <pre class="git-hunks-body">${escapeHtml(h.body)}</pre>
+                  </li>`,
+                )
+                .join('')}
+            </ol>
+            <label class="git-hunks-message">
+              <span>커밋 메시지</span>
+              <input type="text" data-hunk-message placeholder="요약" />
+            </label>
+          `;
+          const result = await openModal({
+            title: `부분 커밋: ${file}`,
+            body,
+            confirmLabel: '선택한 hunk 커밋',
+            cancelLabel: '닫기',
+          });
+          if (!result.confirmed) return;
+          const modalHost = document.getElementById('editor-modal-host');
+          const checked = modalHost
+            ? Array.from(
+                modalHost.querySelectorAll<HTMLInputElement>('[data-hunk-index]:checked'),
+              ).map((cb) => Number(cb.dataset.hunkIndex))
+            : [];
+          const message = (modalHost?.querySelector<HTMLInputElement>('[data-hunk-message]')?.value ?? '').trim();
+          if (!message) {
+            setStatus('커밋 메시지 필요', 'error');
+            return;
+          }
+          if (checked.length === 0) {
+            setStatus('선택된 hunk 없음', 'error');
+            return;
+          }
+          this.busy = true;
+          this.render();
+          try {
+            const commitRes = await api.gitCommitHunks(file, checked, message);
+            setStatus(`부분 커밋 완료: ${commitRes.committed}`, 'ok');
+            this.showOutput(`✅ partial commit ${commitRes.committed}\n${commitRes.file}`);
+            await this.refresh();
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setStatus('hunk 커밋 실패: ' + msg, 'error');
+            this.showOutput(`❌ ${msg}`);
+          } finally {
+            this.busy = false;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus('hunks 가져오기 실패: ' + msg, 'error');
         }
       });
     });

@@ -138,6 +138,25 @@ export const api = {
     const q = new URLSearchParams({ action: 'diff', file });
     return jsonRequest(`/_editor/api/git?${q.toString()}`);
   },
+  gitHunks(file: string): Promise<{
+    ok: boolean;
+    fileHeader: string;
+    hunks: { index: number; header: string; body: string; oldStart: number; oldLines: number; newStart: number; newLines: number }[];
+  }> {
+    const q = new URLSearchParams({ action: 'hunks', file });
+    return jsonRequest(`/_editor/api/git?${q.toString()}`);
+  },
+  gitCommitHunks(
+    file: string,
+    hunkIndexes: number[],
+    message: string,
+  ): Promise<{ ok: boolean; committed: string; file: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'commit-hunks', file, hunkIndexes, message }),
+    });
+  },
   gitCommit(
     files: string[],
     message: string,

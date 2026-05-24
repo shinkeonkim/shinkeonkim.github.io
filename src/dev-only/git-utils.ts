@@ -75,6 +75,96 @@ export async function getDiff(filePath: string): Promise<string> {
   return git().diff(['--', norm]);
 }
 
+export interface Hunk {
+  index: number;
+  header: string;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  body: string;
+}
+
+export interface FileHunks {
+  fileHeader: string;
+  hunks: Hunk[];
+}
+
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+export async function getFileHunks(filePath: string): Promise<FileHunks> {
+  const norm = normalizeRel(filePath);
+  if (!isAllowed(norm)) throw new Error('file not in allowed scope');
+  const raw = await git().diff(['--no-color', '--no-prefix', '--', norm]);
+  if (!raw) return { fileHeader: '', hunks: [] };
+  const lines = raw.split('\n');
+  let fileHeader = '';
+  let headerEnd = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('@@')) {
+      headerEnd = i;
+      break;
+    }
+    fileHeader += lines[i] + '\n';
+  }
+  const hunks: Hunk[] = [];
+  let current: Hunk | null = null;
+  for (let i = headerEnd; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('@@')) {
+      if (current) hunks.push(current);
+      const m = HUNK_HEADER_RE.exec(line);
+      if (!m) continue;
+      current = {
+        index: hunks.length,
+        header: line,
+        oldStart: Number(m[1]),
+        oldLines: Number(m[2] ?? '1'),
+        newStart: Number(m[3]),
+        newLines: Number(m[4] ?? '1'),
+        body: line + '\n',
+      };
+    } else if (current) {
+      current.body += line + '\n';
+    }
+  }
+  if (current) hunks.push(current);
+  return { fileHeader, hunks };
+}
+
+export async function commitHunks(
+  filePath: string,
+  hunkIndexes: number[],
+  message: string,
+): Promise<{ committed: string; file: string }> {
+  if (!message.trim()) throw new Error('commit message required');
+  if (hunkIndexes.length === 0) throw new Error('no hunks selected');
+  const norm = normalizeRel(filePath);
+  if (!isAllowed(norm)) throw new Error('file not in allowed scope');
+  const { fileHeader, hunks } = await getFileHunks(norm);
+  const selectedHunks = hunkIndexes
+    .filter((i) => i >= 0 && i < hunks.length)
+    .map((i) => hunks[i]);
+  if (selectedHunks.length === 0) throw new Error('no valid hunks');
+  const patch = fileHeader + selectedHunks.map((h) => h.body).join('');
+  const { spawn } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('git', ['apply', '--cached', '--whitespace=nowarn', '-'], { cwd: REPO_ROOT });
+    let stderr = '';
+    child.stderr.on('data', (b) => {
+      stderr += b.toString();
+    });
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`git apply failed: ${stderr.trim() || `exit ${code}`}`));
+    });
+    child.stdin.write(patch);
+    child.stdin.end();
+  });
+  const result = await git().commit(message);
+  return { committed: result.commit, file: norm };
+}
+
 export async function commit(
   files: string[],
   message: string,

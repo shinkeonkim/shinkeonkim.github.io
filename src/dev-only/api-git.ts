@@ -3,9 +3,11 @@ import {
   amendCommit,
   checkoutBranch,
   commit,
+  commitHunks,
   createBranch,
   fetchOrigin,
   getDiff,
+  getFileHunks,
   getStatus,
   listBranches,
   pull,
@@ -54,6 +56,12 @@ export const GET: APIRoute = async ({ url }) => {
       const diff = await getDiff(file);
       return jsonOk({ diff });
     }
+    if (action === 'hunks') {
+      const file = url.searchParams.get('file');
+      if (!file) return jsonError('file required');
+      const result = await getFileHunks(file);
+      return jsonOk({ ...result });
+    }
     if (action === 'branches') {
       const branches = await listBranches();
       return jsonOk({ branches });
@@ -76,6 +84,8 @@ interface GitBody {
   branch?: string;
   checkout?: boolean;
   stashIndex?: number;
+  file?: string;
+  hunkIndexes?: number[];
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -136,6 +146,16 @@ export const POST: APIRoute = async ({ request }) => {
     if (body.action === 'stash-drop') {
       if (typeof body.stashIndex !== 'number') return jsonError('stashIndex required');
       const result = await stashDrop(body.stashIndex);
+      return jsonOk(result);
+    }
+    if (body.action === 'commit-hunks') {
+      const file = body.file ?? '';
+      const idxs = Array.isArray(body.hunkIndexes) ? body.hunkIndexes : [];
+      const msg = String(body.message ?? '').trim();
+      if (!file) return jsonError('file required');
+      if (!msg) return jsonError('message required');
+      if (idxs.length === 0) return jsonError('no hunks');
+      const result = await commitHunks(file, idxs, msg);
       return jsonOk(result);
     }
     return jsonError(`unknown action: ${body.action}`);
