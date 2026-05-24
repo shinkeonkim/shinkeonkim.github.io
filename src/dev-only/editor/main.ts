@@ -2,6 +2,7 @@ import { api } from './api';
 import { Autosaver, clearDraft, readDraft } from './autosave';
 import { FileOpsController } from './file-ops';
 import { FindReplaceBar } from './find-replace';
+import { FrontmatterPanel } from './frontmatter-panel';
 import { GitPanel } from './git-panel';
 import { EditorHistory } from './history';
 import { ImageDialogController } from './image-dialog';
@@ -187,6 +188,12 @@ export function initEditor(): void {
   const wikilink = new WikilinkAutocomplete(textarea);
   const history = new EditorHistory(textarea);
   const findReplace = new FindReplaceBar(textarea);
+
+  const frontmatterPanelEl = document.getElementById('editor-frontmatter-panel');
+  const frontmatterPanel = frontmatterPanelEl
+    ? new FrontmatterPanel(frontmatterPanelEl, textarea, toolbar)
+    : null;
+  void frontmatterPanel;
 
   const treeSearchInput = document.getElementById('editor-tree-search') as HTMLInputElement | null;
   if (treeSearchInput) {
