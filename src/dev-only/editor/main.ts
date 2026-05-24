@@ -1,7 +1,9 @@
 import { api } from './api';
 import { Autosaver, clearDraft, readDraft } from './autosave';
 import { FileOpsController } from './file-ops';
+import { FindReplaceBar } from './find-replace';
 import { GitPanel } from './git-panel';
+import { EditorHistory } from './history';
 import { ImageDialogController } from './image-dialog';
 import { confirmModal } from './modal';
 import { PreviewPane } from './preview';
@@ -183,6 +185,38 @@ export function initEditor(): void {
   autosaver.start();
 
   const wikilink = new WikilinkAutocomplete(textarea);
+  const history = new EditorHistory(textarea);
+  const findReplace = new FindReplaceBar(textarea);
+
+  const treeSearchInput = document.getElementById('editor-tree-search') as HTMLInputElement | null;
+  if (treeSearchInput) {
+    const applyFilter = (): void => {
+      const q = treeSearchInput.value.trim().toLowerCase();
+      const treeRoot = document.getElementById('editor-tree-root');
+      if (!treeRoot) return;
+      const rows = treeRoot.querySelectorAll<HTMLElement>('.editor-tree-row');
+      rows.forEach((row) => {
+        if (!q) {
+          row.classList.remove('is-filter-hidden');
+          return;
+        }
+        const name = row.querySelector<HTMLElement>('[data-tree-name]')?.textContent?.toLowerCase() ?? '';
+        if (name.includes(q)) row.classList.remove('is-filter-hidden');
+        else row.classList.add('is-filter-hidden');
+      });
+    };
+    treeSearchInput.addEventListener('input', applyFilter);
+    treeSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        treeSearchInput.value = '';
+        applyFilter();
+      }
+    });
+    new MutationObserver(applyFilter).observe(
+      document.getElementById('editor-tree-root') ?? document.body,
+      { childList: true, subtree: true },
+    );
+  }
 
   function setCurrent(file: CurrentFile | null): void {
     state.current = file;
@@ -340,6 +374,7 @@ export function initEditor(): void {
       textarea.value = serverContent;
       state.isDirty = useDraft;
       setCurrent(file);
+      history.reset();
       setStatus(useDraft ? '임시 저장본 복원됨' : '로드 완료', 'ok');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -376,9 +411,27 @@ export function initEditor(): void {
   });
 
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
       if (state.current) void save();
+      return;
+    }
+    const inTextarea = e.target === textarea;
+    if (mod && e.key.toLowerCase() === 'f' && inTextarea) {
+      e.preventDefault();
+      findReplace.show();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'z' && inTextarea) {
+      e.preventDefault();
+      if (e.shiftKey) history.redo();
+      else history.undo();
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'y' && inTextarea) {
+      e.preventDefault();
+      history.redo();
     }
   });
 
