@@ -1,4 +1,5 @@
-import { getCollection, type CollectionEntry } from 'astro:content';
+import { type CollectionEntry } from 'astro:content';
+import { getPublishedPosts } from './content-queries';
 
 export type CategorizedCollection = 'posts' | 'wiki';
 
@@ -50,7 +51,7 @@ export function getPostTaxonomy(): Promise<PostTaxonomy> {
 }
 
 async function buildPostTaxonomy(): Promise<PostTaxonomy> {
-  const posts = (await getCollection('posts', ({ data }) => !data.draft)).slice();
+  const posts = (await getPublishedPosts()).slice();
 
   const categories = new Map<string, CollectionEntry<'posts'>[]>();
   const postCategory = new Map<string, string | null>();

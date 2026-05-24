@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import { notFoundResponse } from './api-utils';
 import ogs from 'open-graph-scraper';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -53,7 +54,7 @@ async function saveCache(cache: Record<string, CachedPreview>): Promise<void> {
 }
 
 export const GET: APIRoute = async ({ url }) => {
-  if (!import.meta.env.DEV) return new Response('Not available', { status: 404 });
+  if (!import.meta.env.DEV) return notFoundResponse();
   const target = url.searchParams.get('url');
   if (!target) {
     return new Response(JSON.stringify({ error: 'url required' }), {

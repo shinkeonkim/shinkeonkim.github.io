@@ -1,11 +1,12 @@
 import type { APIRoute } from 'astro';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { FILE_UPLOAD_MAX_BYTES } from '../consts';
+import { errorResponse, jsonResponse, notFoundResponse } from './api-utils';
 
 export const prerender = false;
 
 const UPLOAD_DIR = path.resolve(process.cwd(), 'public/uploads');
-const MAX_SIZE = 20 * 1024 * 1024;
 
 const EXT_BY_TYPE: Record<string, string> = {
   'image/png': '.png',
@@ -31,43 +32,29 @@ interface FetchBody {
   url?: string;
 }
 
+const tooLargeMessage = `너무 큽니다 (>${FILE_UPLOAD_MAX_BYTES / 1024 / 1024}MB)`;
+
 export const POST: APIRoute = async ({ request }) => {
-  if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
-  }
+  if (!import.meta.env.DEV) return notFoundResponse();
 
   let body: FetchBody;
   try {
     body = (await request.json()) as FetchBody;
   } catch {
-    return new Response(JSON.stringify({ error: 'invalid json' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return errorResponse('invalid json', 400);
   }
 
   const rawUrl = (body.url ?? '').trim();
-  if (!rawUrl) {
-    return new Response(JSON.stringify({ error: 'url required' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+  if (!rawUrl) return errorResponse('url required', 400);
 
   let target: URL;
   try {
     target = new URL(rawUrl);
   } catch {
-    return new Response(JSON.stringify({ error: '잘못된 URL' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return errorResponse('잘못된 URL', 400);
   }
   if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-    return new Response(JSON.stringify({ error: 'http/https URL 만 허용' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return errorResponse('http/https URL 만 허용', 400);
   }
 
   try {
@@ -76,32 +63,16 @@ export const POST: APIRoute = async ({ request }) => {
       redirect: 'follow',
     });
     if (!res.ok) {
-      return new Response(JSON.stringify({ error: `원격 응답 ${res.status} ${res.statusText}` }), {
-        status: 502,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return errorResponse(`원격 응답 ${res.status} ${res.statusText}`, 502);
     }
     const contentType = res.headers.get('content-type')?.split(';')[0].trim() ?? 'application/octet-stream';
     if (!contentType.startsWith('image/')) {
-      return new Response(JSON.stringify({ error: `이미지가 아닙니다 (${contentType})` }), {
-        status: 415,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return errorResponse(`이미지가 아닙니다 (${contentType})`, 415);
     }
     const len = Number(res.headers.get('content-length') ?? 0);
-    if (len > MAX_SIZE) {
-      return new Response(JSON.stringify({ error: `너무 큽니다 (>${MAX_SIZE / 1024 / 1024}MB)` }), {
-        status: 413,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    if (len > FILE_UPLOAD_MAX_BYTES) return errorResponse(tooLargeMessage, 413);
     const buffer = Buffer.from(await res.arrayBuffer());
-    if (buffer.length > MAX_SIZE) {
-      return new Response(JSON.stringify({ error: `너무 큽니다 (>${MAX_SIZE / 1024 / 1024}MB)` }), {
-        status: 413,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    if (buffer.length > FILE_UPLOAD_MAX_BYTES) return errorResponse(tooLargeMessage, 413);
 
     const urlExt = path.extname(target.pathname).toLowerCase();
     const ext = (urlExt && /^\.[a-z0-9]+$/i.test(urlExt) ? urlExt : '') || EXT_BY_TYPE[contentType] || '.bin';
@@ -113,20 +84,16 @@ export const POST: APIRoute = async ({ request }) => {
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
     await fs.writeFile(path.join(UPLOAD_DIR, filename), buffer);
 
-    return new Response(
-      JSON.stringify({
-        path: `/uploads/${filename}`,
-        sourceUrl: target.toString(),
-        size: buffer.length,
-        type: contentType,
-      }),
-      { headers: { 'Content-Type': 'application/json' } },
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ error: '다운로드 실패: ' + msg }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
+    return jsonResponse({
+      path: `/uploads/${filename}`,
+      sourceUrl: target.toString(),
+      size: buffer.length,
+      type: contentType,
     });
+  } catch (err) {
+    return errorResponse(
+      err instanceof Error ? '다운로드 실패: ' + err.message : '다운로드 실패',
+      502,
+    );
   }
 };

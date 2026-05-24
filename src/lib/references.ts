@@ -1,4 +1,5 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
+import { getPublishedPosts } from './content-queries';
 
 export type ReferenceCollection = 'posts' | 'wiki';
 
@@ -62,7 +63,7 @@ function urlForDoc(collection: ReferenceCollection, slug: string): string {
 async function buildIndex(): Promise<ReferenceIndex> {
   const [sourcesAll, posts, wiki] = await Promise.all([
     getCollection('sources'),
-    getCollection('posts', ({ data }) => !data.draft),
+    getPublishedPosts(),
     getCollection('wiki'),
   ]);
   const sources = new Map<string, CollectionEntry<'sources'>>();

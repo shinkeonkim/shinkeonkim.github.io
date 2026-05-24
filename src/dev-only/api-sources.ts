@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import { notFoundResponse } from './api-utils';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CONTENT_ROOT } from './path-utils';
@@ -112,7 +113,7 @@ function listSources(): ParsedSource[] {
 
 export const GET: APIRoute = () => {
   if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
+    return notFoundResponse();
   }
   return new Response(JSON.stringify({ sources: listSources() }), {
     headers: { 'Content-Type': 'application/json' },

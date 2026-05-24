@@ -1,11 +1,12 @@
 import type { APIRoute } from 'astro';
 import { commit, getDiff, getStatus, push } from './git-utils';
+import { notFoundResponse } from './api-utils';
 
 export const prerender = false;
 
 function devGuard(): Response | null {
   if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
+    return notFoundResponse();
   }
   return null;
 }

@@ -1,11 +1,12 @@
 import type { APIRoute } from 'astro';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { FILE_UPLOAD_MAX_BYTES } from '../consts';
+import { errorResponse, jsonResponse, notFoundResponse } from './api-utils';
 
 export const prerender = false;
 
 const UPLOAD_DIR = path.resolve(process.cwd(), 'public/uploads');
-const MAX_SIZE = 20 * 1024 * 1024;
 
 const EXT_BY_TYPE: Record<string, string> = {
   'image/png': '.png',
@@ -29,39 +30,20 @@ function sanitizeName(raw: string): string {
 }
 
 export const POST: APIRoute = async ({ request }) => {
-  if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
-  }
+  if (!import.meta.env.DEV) return notFoundResponse();
 
   let formData: FormData;
   try {
     formData = await request.formData();
   } catch {
-    return new Response(JSON.stringify({ error: 'multipart 요청이 아닙니다' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return errorResponse('multipart 요청이 아닙니다', 400);
   }
 
   const file = formData.get('file');
-  if (!(file instanceof File)) {
-    return new Response(JSON.stringify({ error: 'file 필드가 필요합니다' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  if (file.size === 0) {
-    return new Response(JSON.stringify({ error: '빈 파일' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-  if (file.size > MAX_SIZE) {
-    return new Response(JSON.stringify({ error: `파일이 너무 큽니다 (>${MAX_SIZE / 1024 / 1024}MB)` }), {
-      status: 413,
-      headers: { 'Content-Type': 'application/json' },
-    });
+  if (!(file instanceof File)) return errorResponse('file 필드가 필요합니다', 400);
+  if (file.size === 0) return errorResponse('빈 파일', 400);
+  if (file.size > FILE_UPLOAD_MAX_BYTES) {
+    return errorResponse(`파일이 너무 큽니다 (>${FILE_UPLOAD_MAX_BYTES / 1024 / 1024}MB)`, 413);
   }
 
   const originalExt = path.extname(file.name).toLowerCase();
@@ -78,16 +60,12 @@ export const POST: APIRoute = async ({ request }) => {
   const filename = `${timestamp}-${rand}${safe ? '-' + safe : ''}${ext}`;
 
   await fs.mkdir(UPLOAD_DIR, { recursive: true });
-  const fullPath = path.join(UPLOAD_DIR, filename);
-  await fs.writeFile(fullPath, Buffer.from(await file.arrayBuffer()));
+  await fs.writeFile(path.join(UPLOAD_DIR, filename), Buffer.from(await file.arrayBuffer()));
 
-  return new Response(
-    JSON.stringify({
-      path: `/uploads/${filename}`,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-    }),
-    { headers: { 'Content-Type': 'application/json' } },
-  );
+  return jsonResponse({
+    path: `/uploads/${filename}`,
+    name: file.name,
+    size: file.size,
+    type: file.type,
+  });
 };

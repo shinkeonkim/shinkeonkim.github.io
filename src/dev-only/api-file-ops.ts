@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import { notFoundResponse } from './api-utils';
 import {
   COLLECTIONS,
   createFolder,
@@ -14,7 +15,7 @@ export const prerender = false;
 
 function devGuard(): Response | null {
   if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
+    return notFoundResponse();
   }
   return null;
 }

@@ -1,11 +1,12 @@
 import type { APIRoute } from 'astro';
 import { COLLECTIONS, listFiles, listTree, type TreeEntry, type FileEntry } from './path-utils';
+import { notFoundResponse } from './api-utils';
 
 export const prerender = false;
 
 export const GET: APIRoute = ({ url }) => {
   if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
+    return notFoundResponse();
   }
   const shape = url.searchParams.get('shape') ?? 'tree';
   if (shape === 'flat') {

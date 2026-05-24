@@ -1,4 +1,5 @@
-import { getCollection, type CollectionEntry } from 'astro:content';
+import { type CollectionEntry } from 'astro:content';
+import { getPublishedProjects } from './content-queries';
 
 export interface CommitActivityWeek {
   week: number;
@@ -76,7 +77,7 @@ export function parseGitHubUrl(url: string): { owner: string; repo: string } | n
 }
 
 export async function listProjects(): Promise<CollectionEntry<'projects'>[]> {
-  const all = await getCollection('projects', ({ data }) => !data.draft);
+  const all = await getPublishedProjects();
   return all.sort((a, b) => {
     if (a.data.featured !== b.data.featured) return a.data.featured ? -1 : 1;
     const aEnd = a.data.end?.valueOf() ?? a.data.start.valueOf();

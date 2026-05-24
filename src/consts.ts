@@ -23,6 +23,10 @@ export const NOTES_PER_PAGE = 30;
 export const WIKI_PER_PAGE = 40;
 export const MAX_GRAPH_NODES = 400;
 
+export const FILE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+export const EDITOR_AUTOSAVE_INTERVAL_MS = 2000;
+export const WIKILINK_AUTOCOMPLETE_MAX = 12;
+
 export const NAV_ITEMS = [
   { href: '/', label: '홈' },
   { href: '/posts/', label: '글' },

@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import { notFoundResponse } from './api-utils';
 import { createMarkdownProcessor, parseFrontmatter } from '@astrojs/markdown-remark';
 import { codeToHtml } from 'shiki';
 import { remarkAlert } from 'remark-github-blockquote-alert';
@@ -400,7 +401,7 @@ interface RenderBody {
 
 export const POST: APIRoute = async ({ request }) => {
   if (!import.meta.env.DEV) {
-    return new Response('Not available', { status: 404 });
+    return notFoundResponse();
   }
 
   let body: RenderBody;

@@ -1,4 +1,5 @@
 import { getCollection } from 'astro:content';
+import { getPublishedPosts } from './content-queries';
 
 export type Collection = 'posts' | 'notes' | 'wiki';
 export type NodeKind = 'doc' | 'tag';
@@ -60,7 +61,7 @@ interface TaggedEntry {
 
 async function build(): Promise<ContentGraph> {
   const [posts, notes, wiki] = await Promise.all([
-    getCollection('posts', ({ data }) => !data.draft),
+    getPublishedPosts(),
     getCollection('notes'),
     getCollection('wiki'),
   ]);
