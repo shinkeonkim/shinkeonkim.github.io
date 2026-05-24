@@ -48,6 +48,57 @@ export function canonicalId(collection: Collection, slug: string): string {
   return `${collection}:${slug}`;
 }
 
+export interface Subgraph {
+  nodes: ContentNode[];
+  links: ContentLink[];
+}
+
+export async function getSubgraph(
+  centerId: string,
+  options: { depth?: number; includeTags?: boolean } = {},
+): Promise<Subgraph> {
+  const { depth = 1, includeTags = true } = options;
+  const graph = await getContentGraph();
+  const center = graph.nodes.find((n) => n.id === centerId);
+  if (!center) return { nodes: [], links: [] };
+
+  const adjacency = new Map<string, Set<string>>();
+  for (const l of graph.links) {
+    const s = String(l.source);
+    const t = String(l.target);
+    if (!adjacency.has(s)) adjacency.set(s, new Set());
+    if (!adjacency.has(t)) adjacency.set(t, new Set());
+    adjacency.get(s)!.add(t);
+    adjacency.get(t)!.add(s);
+  }
+
+  const reachable = new Set<string>([center.id]);
+  let frontier: string[] = [center.id];
+  for (let i = 0; i < depth; i++) {
+    const next: string[] = [];
+    for (const node of frontier) {
+      for (const n of adjacency.get(node) ?? []) {
+        if (reachable.has(n)) continue;
+        reachable.add(n);
+        next.push(n);
+      }
+    }
+    frontier = next;
+  }
+
+  const nodes = graph.nodes.filter((n) => {
+    if (!reachable.has(n.id)) return false;
+    if (!includeTags && n.kind === 'tag') return false;
+    return true;
+  });
+  const links = graph.links.filter((l) => {
+    const s = String(l.source);
+    const t = String(l.target);
+    return reachable.has(s) && reachable.has(t);
+  });
+  return { nodes, links };
+}
+
 function urlFor(collection: Collection, slug: string): string {
   if (collection === 'posts') return `/posts/${slug}/`;
   if (collection === 'wiki') return `/wiki/${slug}/`;

@@ -8,18 +8,50 @@ interface Props {
   links: GraphLink[];
 }
 
+type CollectionFilter = 'posts' | 'notes' | 'wiki';
+const ALL_COLLECTIONS: CollectionFilter[] = ['posts', 'notes', 'wiki'];
+const COLLECTION_LABELS: Record<CollectionFilter, string> = {
+  posts: '글',
+  notes: '노트',
+  wiki: '위키',
+};
+
+function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export default function GraphView({ nodes, links }: Props) {
   const [mode, setMode] = useState<'2d' | '3d'>('2d');
   const [query, setQuery] = useState('');
   const [showTags, setShowTags] = useState(true);
+  const [enabledCollections, setEnabledCollections] = useState<Set<CollectionFilter>>(
+    new Set(ALL_COLLECTIONS),
+  );
+
+  const collectionCounts = useMemo(() => {
+    const out: Record<CollectionFilter, number> = { posts: 0, notes: 0, wiki: 0 };
+    for (const n of nodes) {
+      if (n.kind === 'tag') continue;
+      const g = n.group as CollectionFilter | undefined;
+      if (g && g in out) out[g]++;
+    }
+    return out;
+  }, [nodes]);
 
   const { visibleNodes, visibleLinks } = useMemo(() => {
-    if (showTags) return { visibleNodes: nodes, visibleLinks: links };
-    const filteredNodes = nodes.filter((n) => n.kind !== 'tag');
+    const tagOk = (n: GraphNode) => showTags || n.kind !== 'tag';
+    const colOk = (n: GraphNode) =>
+      n.kind === 'tag' || (n.group && enabledCollections.has(n.group as CollectionFilter));
+    const filteredNodes = nodes.filter((n) => tagOk(n) && colOk(n));
     const ids = new Set(filteredNodes.map((n) => n.id));
     const filteredLinks = links.filter((l) => ids.has(l.source) && ids.has(l.target));
     return { visibleNodes: filteredNodes, visibleLinks: filteredLinks };
-  }, [nodes, links, showTags]);
+  }, [nodes, links, showTags, enabledCollections]);
 
   const filteredCounts = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -30,8 +62,34 @@ export default function GraphView({ nodes, links }: Props) {
 
   const tagCount = useMemo(() => nodes.filter((n) => n.kind === 'tag').length, [nodes]);
 
+  const toggleCollection = (c: CollectionFilter): void => {
+    setEnabledCollections((prev) => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c);
+      else next.add(c);
+      return next;
+    });
+  };
+
+  const exportJSON = (): void => {
+    const data = JSON.stringify({ nodes: visibleNodes, links: visibleLinks }, null, 2);
+    downloadBlob('content-graph.json', new Blob([data], { type: 'application/json' }));
+  };
+
+  const exportSVG = (): void => {
+    const stage = document.querySelector('.graph-stage svg, .react-force-graph-2d svg, svg[width][height]') as
+      | SVGSVGElement
+      | null;
+    if (!stage) return;
+    const xml = new XMLSerializer().serializeToString(stage);
+    downloadBlob(
+      'content-graph.svg',
+      new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n', xml], { type: 'image/svg+xml' }),
+    );
+  };
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 graph-stage">
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="search"
@@ -82,6 +140,45 @@ export default function GraphView({ nodes, links }: Props) {
             3D
           </button>
         </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-[color:var(--color-fg-muted)]">컬렉션:</span>
+        {ALL_COLLECTIONS.map((c) => {
+          const enabled = enabledCollections.has(c);
+          return (
+            <button
+              key={c}
+              type="button"
+              aria-pressed={enabled}
+              onClick={() => toggleCollection(c)}
+              className={
+                enabled
+                  ? 'rounded-full border border-[color:var(--color-accent)] bg-[color:var(--color-surface-elevated)] px-2.5 py-0.5 text-[color:var(--color-accent)]'
+                  : 'rounded-full border border-[color:var(--color-border)] px-2.5 py-0.5 text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-accent)]'
+              }
+            >
+              {COLLECTION_LABELS[c]} ({collectionCounts[c]})
+            </button>
+          );
+        })}
+        <span className="ml-auto inline-flex gap-1">
+          <button
+            type="button"
+            onClick={exportSVG}
+            className="rounded-md border border-[color:var(--color-border)] px-2 py-1 hover:border-[color:var(--color-accent)]"
+            title="SVG 다운로드"
+          >
+            ⤓ SVG
+          </button>
+          <button
+            type="button"
+            onClick={exportJSON}
+            className="rounded-md border border-[color:var(--color-border)] px-2 py-1 hover:border-[color:var(--color-accent)]"
+            title="JSON 다운로드 (nodes + links)"
+          >
+            ⤓ JSON
+          </button>
+        </span>
       </div>
       {filteredCounts && (
         <p className="text-xs text-[color:var(--color-fg-muted)]">
