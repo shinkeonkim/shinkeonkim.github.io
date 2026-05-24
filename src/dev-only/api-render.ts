@@ -2,8 +2,11 @@ import type { APIRoute } from 'astro';
 import { createMarkdownProcessor, parseFrontmatter } from '@astrojs/markdown-remark';
 import { codeToHtml } from 'shiki';
 import { remarkAlert } from 'remark-github-blockquote-alert';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import remarkWikilink from '../plugins/remark-wikilink.mjs';
 import remarkMermaid from '../plugins/remark-mermaid.mjs';
+import remarkMathLenient from '../plugins/remark-math-lenient.mjs';
 
 export const prerender = false;
 
@@ -13,7 +16,8 @@ function getProcessor() {
     processorPromise = createMarkdownProcessor({
       gfm: true,
       smartypants: true,
-      remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink],
+      remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath],
+      rehypePlugins: [[rehypeKatex, { output: 'html', strict: 'ignore' }]],
       shikiConfig: {
         themes: { light: 'github-light', dark: 'one-dark-pro' },
         wrap: true,

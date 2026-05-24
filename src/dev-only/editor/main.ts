@@ -23,7 +23,7 @@ function template(collection: CollectionName, slug: string): string {
     return `---\ndate: ${todayIsoTime()}\ntags: []\n---\n\n`;
   }
   if (collection === 'sources') {
-    return `---\ntitle: "${filename}"\ntype: website\nauthor: ""\nurl: ""\ntags: []\n---\n\n출처에 대한 간단한 설명을 작성하세요.\n`;
+    return `---\ntitle: "${filename}"\ntype: website\ntags: []\n---\n\n출처에 대한 간단한 설명을 작성하세요.\n`;
   }
   if (collection === 'projects') {
     return `---\ntitle: "${filename}"\nsummary: ""\nstart: ${todayIsoDate()}\nteamSize: 1\nrole: ""\nstatus: ongoing\nrepos: []\nstack: []\nlinks: []\ntags: []\n---\n\n## 무엇을 만들었나\n\n## 고민\n\n## 담당\n\n`;

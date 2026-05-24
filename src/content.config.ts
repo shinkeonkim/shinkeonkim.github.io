@@ -61,17 +61,20 @@ const wiki = defineCollection({
   }),
 });
 
+const emptyToUndefined = z.preprocess((v) => (v === '' ? undefined : v), z.string().optional());
+const emptyToUndefinedUrl = z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional());
+
 const sources = defineCollection({
   loader: glob({ pattern: '**/*.md', base: './src/content/sources' }),
   schema: z.object({
     title: z.string(),
     type: z.enum(['book', 'article', 'paper', 'website', 'video', 'talk', 'other']).default('other'),
-    author: z.string().optional(),
-    publisher: z.string().optional(),
+    author: emptyToUndefined,
+    publisher: emptyToUndefined,
     year: z.number().optional(),
-    isbn: z.string().optional(),
-    doi: z.string().optional(),
-    url: z.string().url().optional(),
+    isbn: emptyToUndefined,
+    doi: emptyToUndefined,
+    url: emptyToUndefinedUrl,
     aliases: z.array(z.string()).default([]),
     tags: z.array(z.string()).default([]),
   }),
