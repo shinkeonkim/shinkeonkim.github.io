@@ -3,6 +3,7 @@ import { defineConfig } from 'astro/config';
 import mdx from '@astrojs/mdx';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
+import { EnumChangefreq } from 'sitemap';
 import pagefind from 'astro-pagefind';
 import tailwindcss from '@tailwindcss/vite';
 import { remarkAlert } from 'remark-github-blockquote-alert';
@@ -16,10 +17,46 @@ import devEditor from './src/dev-only/integration.mjs';
 
 export default defineConfig({
   site: 'https://shinkeonkim.com',
+  compressHTML: true,
+  build: {
+    inlineStylesheets: 'auto',
+  },
   integrations: [
     mdx(),
     react(),
-    sitemap(),
+    sitemap({
+      filter: (page) => !page.includes('/_editor') && !page.includes('/__'),
+      serialize(item) {
+        const url = new URL(item.url);
+        const path = url.pathname;
+        if (path === '/') {
+          item.changefreq = EnumChangefreq.DAILY;
+          item.priority = 1.0;
+        } else if (path.startsWith('/posts/') && !path.startsWith('/posts/category/') && !path.startsWith('/posts/series/') && path !== '/posts/') {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.8;
+        } else if (path === '/posts/' || path.startsWith('/posts/')) {
+          item.changefreq = EnumChangefreq.DAILY;
+          item.priority = 0.7;
+        } else if (path.startsWith('/projects/')) {
+          item.changefreq = EnumChangefreq.MONTHLY;
+          item.priority = 0.8;
+        } else if (path.startsWith('/wiki/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.7;
+        } else if (path.startsWith('/notes/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.6;
+        } else if (path.startsWith('/tags/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.5;
+        } else {
+          item.changefreq = EnumChangefreq.MONTHLY;
+          item.priority = 0.5;
+        }
+        return item;
+      },
+    }),
     pagefind(),
     devEditor(),
   ],
