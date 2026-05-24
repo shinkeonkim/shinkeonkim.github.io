@@ -9,6 +9,8 @@ import tailwindcss from '@tailwindcss/vite';
 import { remarkAlert } from 'remark-github-blockquote-alert';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import rehypeSlug from 'rehype-slug';
+import rehypeAutolinkHeadings from 'rehype-autolink-headings';
 import remarkWikilink from './src/plugins/remark-wikilink.mjs';
 import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 import remarkMathLenient from './src/plugins/remark-math-lenient.mjs';
@@ -96,7 +98,22 @@ export default defineConfig({
       remarkMath,
       remarkUrlPreview,
     ],
-    rehypePlugins: [[rehypeKatex, { output: 'html', strict: 'ignore' }]],
+    rehypePlugins: [
+      rehypeSlug,
+      [
+        rehypeAutolinkHeadings,
+        {
+          behavior: 'append',
+          properties: {
+            className: ['heading-anchor'],
+            ariaLabel: 'permalink',
+            tabindex: -1,
+          },
+          content: { type: 'text', value: '#' },
+        },
+      ],
+      [rehypeKatex, { output: 'html', strict: 'ignore' }],
+    ],
     shikiConfig: {
       themes: {
         light: 'github-light',
