@@ -90,14 +90,22 @@ export const api = {
     const q = new URLSearchParams({ collection, slug });
     return jsonRequest<FileLoadResponse>(`/_editor/api/file?${q.toString()}`);
   },
-  saveFile(payload: { collection: CollectionName; slug: string; ext: Ext; content: string }): Promise<SaveResponse> {
+  saveFile(payload: {
+    collection: CollectionName;
+    slug: string;
+    ext: Ext;
+    content: string;
+  }): Promise<SaveResponse> {
     return jsonRequest<SaveResponse>('/_editor/api/file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
   },
-  render(payload: { content: string; ext: Ext }): Promise<{ html: string; frontmatter: unknown; componentNames: string[] }> {
+  render(payload: {
+    content: string;
+    ext: Ext;
+  }): Promise<{ html: string; frontmatter: unknown; componentNames: string[] }> {
     return jsonRequest('/_editor/api/render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -130,7 +138,10 @@ export const api = {
     const q = new URLSearchParams({ action: 'diff', file });
     return jsonRequest(`/_editor/api/git?${q.toString()}`);
   },
-  gitCommit(files: string[], message: string): Promise<{ ok: boolean; committed: string; files: string[] }> {
+  gitCommit(
+    files: string[],
+    message: string,
+  ): Promise<{ ok: boolean; committed: string; files: string[] }> {
     return jsonRequest('/_editor/api/git', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -147,7 +158,10 @@ export const api = {
   listSources(): Promise<{ sources: SourceSummary[] }> {
     return jsonRequest<{ sources: SourceSummary[] }>('/_editor/api/sources');
   },
-  urlPreview(url: string, force = false): Promise<{ preview: UrlPreviewResponse; cached: boolean }> {
+  urlPreview(
+    url: string,
+    force = false,
+  ): Promise<{ preview: UrlPreviewResponse; cached: boolean }> {
     const q = new URLSearchParams({ url });
     if (force) q.set('force', '1');
     return jsonRequest(`/_editor/api/url-preview?${q.toString()}`);

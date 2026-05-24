@@ -39,7 +39,9 @@ export class ImageDialogController {
     this.sourceStatus = document.getElementById('editor-image-source-status') as HTMLElement;
     this.uploadGroup = this.dialog.querySelector('[data-image-source-upload]') as HTMLElement;
     this.urlGroup = this.dialog.querySelector('[data-image-source-url]') as HTMLElement;
-    this.bodyOnlySections = this.dialog.querySelectorAll<HTMLElement>('[data-image-section="body-only"]');
+    this.bodyOnlySections = this.dialog.querySelectorAll<HTMLElement>(
+      '[data-image-section="body-only"]',
+    );
     this.titleEl = document.getElementById('editor-image-title') as HTMLElement;
     this.fileInput = document.getElementById('editor-image-input') as HTMLInputElement;
 
@@ -52,10 +54,18 @@ export class ImageDialogController {
     this.altInput.value = '';
     this.urlInput.value = '';
     this.sourceStatus.textContent = '';
-    this.form.querySelectorAll<HTMLInputElement>('input[name="img-purpose"]').forEach((r) => (r.checked = r.value === purpose));
-    this.form.querySelectorAll<HTMLInputElement>('input[name="img-source"]').forEach((r) => (r.checked = r.value === 'upload'));
-    this.form.querySelectorAll<HTMLInputElement>('input[name="img-width"]').forEach((r) => (r.checked = r.value === ''));
-    this.form.querySelectorAll<HTMLInputElement>('input[name="img-align"]').forEach((r) => (r.checked = r.value === ''));
+    this.form
+      .querySelectorAll<HTMLInputElement>('input[name="img-purpose"]')
+      .forEach((r) => (r.checked = r.value === purpose));
+    this.form
+      .querySelectorAll<HTMLInputElement>('input[name="img-source"]')
+      .forEach((r) => (r.checked = r.value === 'upload'));
+    this.form
+      .querySelectorAll<HTMLInputElement>('input[name="img-width"]')
+      .forEach((r) => (r.checked = r.value === ''));
+    this.form
+      .querySelectorAll<HTMLInputElement>('input[name="img-align"]')
+      .forEach((r) => (r.checked = r.value === ''));
     this.applyMode();
     if (typeof this.dialog.showModal === 'function') this.dialog.showModal();
     else this.dialog.setAttribute('open', '');
@@ -67,11 +77,13 @@ export class ImageDialogController {
   }
 
   private currentPurpose(): Purpose {
-    return (this.form.querySelector<HTMLInputElement>('input[name="img-purpose"]:checked')?.value ?? 'body') as Purpose;
+    return (this.form.querySelector<HTMLInputElement>('input[name="img-purpose"]:checked')?.value ??
+      'body') as Purpose;
   }
 
   private currentSource(): Source {
-    return (this.form.querySelector<HTMLInputElement>('input[name="img-source"]:checked')?.value ?? 'upload') as Source;
+    return (this.form.querySelector<HTMLInputElement>('input[name="img-source"]:checked')?.value ??
+      'upload') as Source;
   }
 
   private applyMode(): void {
@@ -116,7 +128,9 @@ export class ImageDialogController {
   }
 
   private bind(): void {
-    this.form.querySelector('[data-image-section="purpose"]')?.addEventListener('change', () => this.applyMode());
+    this.form
+      .querySelector('[data-image-section="purpose"]')
+      ?.addEventListener('change', () => this.applyMode());
     this.form.querySelector('[data-image-section="source"]')?.addEventListener('change', () => {
       this.applyMode();
       this.pending = null;
@@ -133,7 +147,13 @@ export class ImageDialogController {
       const url = this.urlInput.value.trim();
       if (!url) return;
       if (this.currentSource() === 'url-direct') {
-        this.setPending({ path: url, size: 0, type: 'external', sourceUrl: url, originalName: url });
+        this.setPending({
+          path: url,
+          size: 0,
+          type: 'external',
+          sourceUrl: url,
+          originalName: url,
+        });
         this.sourceStatus.textContent = '외부 URL 그대로 사용';
         return;
       }
@@ -173,8 +193,10 @@ export class ImageDialogController {
       } else if (purpose === 'thumbnail') {
         this.toolbar.upsertFrontmatter({ thumbnail: this.pending.path });
       } else {
-        const width = this.form.querySelector<HTMLInputElement>('input[name="img-width"]:checked')?.value ?? '';
-        const align = this.form.querySelector<HTMLInputElement>('input[name="img-align"]:checked')?.value ?? '';
+        const width =
+          this.form.querySelector<HTMLInputElement>('input[name="img-width"]:checked')?.value ?? '';
+        const align =
+          this.form.querySelector<HTMLInputElement>('input[name="img-align"]:checked')?.value ?? '';
         const classes = [width, align].filter(Boolean).join(' ');
         const md = classes
           ? `<img src="${this.pending.path}" alt="${alt.replace(/"/g, '&quot;')}" class="${classes}" />`

@@ -54,7 +54,7 @@ const TAG_LABEL_GAP = 6;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 function seededRandom(seed: number): () => number {
-  let s = (seed | 0) || 1;
+  let s = seed | 0 || 1;
   return () => {
     s = Math.imul(s ^ (s >>> 15), 1 | s);
     s ^= s + Math.imul(s ^ (s >>> 7), 61 | s);
@@ -62,11 +62,7 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-function seedInitialLayout(
-  nodes: SimNode[],
-  width: number,
-  height: number,
-): void {
+function seedInitialLayout(nodes: SimNode[], width: number, height: number): void {
   const n = nodes.length;
   if (n === 0) return;
   const cx = width / 2;
@@ -288,14 +284,12 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
     svg
       .selectAll<SVGTextElement, SimNode>('.graph-nodes g text')
       .attr('fill-opacity', (d) => (matchedIds && !matchedIds.has(d.id) ? 0.3 : 1));
-    svg
-      .selectAll<SVGLineElement, SimLink>('.graph-links line')
-      .attr('stroke-opacity', (l) => {
-        const s = typeof l.source === 'object' ? (l.source as SimNode).id : (l.source as string);
-        const t = typeof l.target === 'object' ? (l.target as SimNode).id : (l.target as string);
-        if (!matchedIds) return 0.25;
-        return matchedIds.has(s) && matchedIds.has(t) ? 0.5 : 0.08;
-      });
+    svg.selectAll<SVGLineElement, SimLink>('.graph-links line').attr('stroke-opacity', (l) => {
+      const s = typeof l.source === 'object' ? (l.source as SimNode).id : (l.source as string);
+      const t = typeof l.target === 'object' ? (l.target as SimNode).id : (l.target as string);
+      if (!matchedIds) return 0.25;
+      return matchedIds.has(s) && matchedIds.has(t) ? 0.5 : 0.08;
+    });
   }, [matchedIds, isDark]);
 
   return (

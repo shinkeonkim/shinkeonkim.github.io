@@ -29,8 +29,17 @@ export interface TreeHandlers {
   onContextFile: (collection: CollectionName, slug: string, anchor: HTMLElement) => void;
   onNewFile: (collection: CollectionName, folder: string) => void;
   onNewFolder: (collection: CollectionName, folder: string) => void;
-  onRenameFileInline: (collection: CollectionName, slug: string, ext: Ext, newBaseName: string) => Promise<void>;
-  onRenameFolderInline: (collection: CollectionName, folder: string, newName: string) => Promise<void>;
+  onRenameFileInline: (
+    collection: CollectionName,
+    slug: string,
+    ext: Ext,
+    newBaseName: string,
+  ) => Promise<void>;
+  onRenameFolderInline: (
+    collection: CollectionName,
+    folder: string,
+    newName: string,
+  ) => Promise<void>;
   onDropItem: (item: DraggedItem, target: DropTarget) => Promise<void>;
 }
 
@@ -128,7 +137,9 @@ export class FileTree {
     if (entry.type === 'folder') {
       const key = this.folderKey(collection, entry.slug);
       const isOpen = this.expanded.has(key);
-      const children = (entry.children ?? []).map((c) => this.renderEntry(collection, c, depth + 1)).join('');
+      const children = (entry.children ?? [])
+        .map((c) => this.renderEntry(collection, c, depth + 1))
+        .join('');
       return `
         <div class="editor-tree-folder" data-folder-slug="${escapeHtml(entry.slug)}">
           <div class="editor-tree-row editor-tree-folder-row"
@@ -173,7 +184,12 @@ export class FileTree {
   }
 
   private isInsideAction(target: EventTarget | null): boolean {
-    return !!(target instanceof Element && target.closest('[data-tree-new-file], [data-tree-new-folder], [data-tree-folder-menu], [data-tree-file-menu], .editor-tree-name-input'));
+    return !!(
+      target instanceof Element &&
+      target.closest(
+        '[data-tree-new-file], [data-tree-new-folder], [data-tree-folder-menu], [data-tree-file-menu], .editor-tree-name-input',
+      )
+    );
   }
 
   private attachListeners(): void {
@@ -245,16 +261,18 @@ export class FileTree {
       });
     });
 
-    this.root.querySelectorAll<HTMLElement>('[data-tree-file], [data-tree-folder]').forEach((el) => {
-      el.addEventListener('dragstart', (e) => {
-        const data = this.serializeDragSource(el);
-        if (!data || !e.dataTransfer) return;
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData(DRAG_MIME, JSON.stringify(data));
-        el.classList.add('is-dragging');
+    this.root
+      .querySelectorAll<HTMLElement>('[data-tree-file], [data-tree-folder]')
+      .forEach((el) => {
+        el.addEventListener('dragstart', (e) => {
+          const data = this.serializeDragSource(el);
+          if (!data || !e.dataTransfer) return;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData(DRAG_MIME, JSON.stringify(data));
+          el.classList.add('is-dragging');
+        });
+        el.addEventListener('dragend', () => el.classList.remove('is-dragging'));
       });
-      el.addEventListener('dragend', () => el.classList.remove('is-dragging'));
-    });
 
     this.root.querySelectorAll<HTMLElement>('[data-drop-target]').forEach((el) => {
       el.addEventListener('dragover', (e) => {
@@ -366,7 +384,8 @@ export class FileTree {
   private updateActiveStates(): void {
     const cur = this.currentSelection;
     this.root.querySelectorAll<HTMLElement>('[data-tree-file]').forEach((el) => {
-      const match = !!cur && el.dataset.collection === cur.collection && el.dataset.slug === cur.slug;
+      const match =
+        !!cur && el.dataset.collection === cur.collection && el.dataset.slug === cur.slug;
       el.classList.toggle('is-active', match);
     });
   }

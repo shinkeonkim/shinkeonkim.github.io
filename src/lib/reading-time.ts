@@ -14,9 +14,7 @@ const CJK_CHARS_PER_MINUTE = 500;
 const ASCII_WORDS_PER_MINUTE = 220;
 
 export function estimateReadingTime(body: string): ReadingStats {
-  const stripped = body
-    .replace(CODE_FENCE_RE, ' ')
-    .replace(HTML_RE, ' ');
+  const stripped = body.replace(CODE_FENCE_RE, ' ').replace(HTML_RE, ' ');
   let cjkChars = 0;
   for (const ch of stripped) {
     if (CJK_RE.test(ch)) cjkChars++;

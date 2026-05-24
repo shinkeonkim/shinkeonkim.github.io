@@ -66,17 +66,25 @@ export const GET: APIRoute = async ({ url }) => {
   try {
     parsed = new URL(target);
   } catch {
-    return new Response(JSON.stringify({ error: 'invalid url' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: 'invalid url' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return new Response(JSON.stringify({ error: 'http/https only' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: 'http/https only' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   const force = url.searchParams.get('force') === '1';
   const cache = await loadCache();
   const key = cacheKey(target);
   if (!force && cache[key] && !cache[key].error) {
-    return new Response(JSON.stringify({ preview: cache[key], cached: true }), { headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ preview: cache[key], cached: true }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   try {
@@ -88,15 +96,23 @@ export const GET: APIRoute = async ({ url }) => {
         headers: { 'User-Agent': 'shinkeonkim-blog-dev-editor/1.0' },
       },
     });
-    if (error) throw new Error(typeof (result as { error?: unknown })?.error === 'string' ? (result as { error?: string }).error! : 'ogs failed');
+    if (error)
+      throw new Error(
+        typeof (result as { error?: unknown })?.error === 'string'
+          ? (result as { error?: string }).error!
+          : 'ogs failed',
+      );
     const ogResult = result as Record<string, unknown>;
     const ogImage = Array.isArray(ogResult.ogImage)
       ? (ogResult.ogImage[0] as { url?: string } | undefined)?.url
       : (ogResult.ogImage as { url?: string } | undefined)?.url;
     const preview: CachedPreview = {
       url: target,
-      title: (ogResult.ogTitle as string | undefined) ?? (ogResult.twitterTitle as string | undefined),
-      description: (ogResult.ogDescription as string | undefined) ?? (ogResult.twitterDescription as string | undefined),
+      title:
+        (ogResult.ogTitle as string | undefined) ?? (ogResult.twitterTitle as string | undefined),
+      description:
+        (ogResult.ogDescription as string | undefined) ??
+        (ogResult.twitterDescription as string | undefined),
       image: ogImage,
       favicon: pickFavicon(target, ogResult),
       siteName: ogResult.ogSiteName as string | undefined,
@@ -104,9 +120,14 @@ export const GET: APIRoute = async ({ url }) => {
     };
     cache[key] = preview;
     await saveCache(cache);
-    return new Response(JSON.stringify({ preview, cached: false }), { headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ preview, cached: false }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ error: msg }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 };

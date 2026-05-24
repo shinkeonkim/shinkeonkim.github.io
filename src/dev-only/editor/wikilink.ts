@@ -98,10 +98,10 @@ export class WikilinkAutocomplete {
     }
     this.triggerStart = trigger.start;
     const q = trigger.query.toLowerCase();
-    this.filtered = (q
-      ? this.pages.filter((p) => p.searchKey.includes(q))
-      : this.pages
-    ).slice(0, MAX_RESULTS);
+    this.filtered = (q ? this.pages.filter((p) => p.searchKey.includes(q)) : this.pages).slice(
+      0,
+      MAX_RESULTS,
+    );
     if (this.filtered.length === 0) {
       this.hide();
       return;
@@ -190,7 +190,8 @@ export class WikilinkAutocomplete {
     const pos = this.textarea.selectionStart;
     const coords = getCaretCoordinates(this.textarea, pos);
     const rect = this.textarea.getBoundingClientRect();
-    const top = rect.top + coords.top + coords.height + 4 - this.textarea.scrollTop + window.scrollY;
+    const top =
+      rect.top + coords.top + coords.height + 4 - this.textarea.scrollTop + window.scrollY;
     const left = rect.left + coords.left + window.scrollX;
     this.popup.style.top = `${top}px`;
     this.popup.style.left = `${left}px`;

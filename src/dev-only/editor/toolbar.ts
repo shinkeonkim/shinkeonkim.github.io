@@ -40,10 +40,14 @@ const CWO_MULTI = `<CodeWithOutput
 />`;
 
 const MERMAID_TEMPLATES: Record<string, string> = {
-  flowchart: '```mermaid\nflowchart LR\n  A[시작] --> B{판단}\n  B -->|예| C[처리]\n  B -->|아니오| D[종료]\n```',
-  sequence: '```mermaid\nsequenceDiagram\n  participant A as 클라이언트\n  participant B as 서버\n  A->>B: 요청\n  B-->>A: 응답\n```',
-  state: '```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> Idle: stop\n  Running --> [*]: done\n```',
-  class: '```mermaid\nclassDiagram\n  class Animal {\n    +String name\n    +eat()\n  }\n  class Dog\n  Animal <|-- Dog\n```',
+  flowchart:
+    '```mermaid\nflowchart LR\n  A[시작] --> B{판단}\n  B -->|예| C[처리]\n  B -->|아니오| D[종료]\n```',
+  sequence:
+    '```mermaid\nsequenceDiagram\n  participant A as 클라이언트\n  participant B as 서버\n  A->>B: 요청\n  B-->>A: 응답\n```',
+  state:
+    '```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> Idle: stop\n  Running --> [*]: done\n```',
+  class:
+    '```mermaid\nclassDiagram\n  class Animal {\n    +String name\n    +eat()\n  }\n  class Dog\n  Animal <|-- Dog\n```',
   er: '```mermaid\nerDiagram\n  POST ||--o{ TAG_LINK : has\n  TAG ||--o{ TAG_LINK : tagged\n  POST {\n    string slug PK\n    string title\n  }\n```',
 };
 
@@ -106,7 +110,9 @@ export class MarkdownToolbar {
 
   private closeMenus(root: HTMLElement): void {
     root.querySelectorAll<HTMLElement>('.editor-md-menu').forEach((m) => (m.hidden = true));
-    root.querySelectorAll<HTMLElement>('[data-md-menu]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+    root
+      .querySelectorAll<HTMLElement>('[data-md-menu]')
+      .forEach((b) => b.setAttribute('aria-expanded', 'false'));
   }
 
   private getSel(): Selection {
@@ -155,7 +161,8 @@ export class MarkdownToolbar {
 
   insertBlock(text: string): void {
     const s = this.getSel();
-    const needLead = s.before && !s.before.endsWith('\n\n') ? (s.before.endsWith('\n') ? '\n' : '\n\n') : '';
+    const needLead =
+      s.before && !s.before.endsWith('\n\n') ? (s.before.endsWith('\n') ? '\n' : '\n\n') : '';
     const needTrail = s.after && !s.after.startsWith('\n') ? '\n\n' : '\n';
     const block = needLead + text + needTrail;
     const next = s.before + block + s.after;
@@ -261,7 +268,9 @@ export class MarkdownToolbar {
       case 'codeblock': {
         const r = await openModal({
           title: '코드 블록 삽입',
-          fields: [{ name: 'lang', label: '언어 (예: ts, python, bash)', placeholder: '비우면 일반 코드' }],
+          fields: [
+            { name: 'lang', label: '언어 (예: ts, python, bash)', placeholder: '비우면 일반 코드' },
+          ],
           confirmLabel: '삽입',
         });
         if (!r.confirmed) return;
@@ -272,7 +281,9 @@ export class MarkdownToolbar {
         break;
       }
       case 'table':
-        this.insertBlock('| 컬럼1 | 컬럼2 | 컬럼3 |\n|---|---|---|\n| 셀1 | 셀2 | 셀3 |\n| 셀4 | 셀5 | 셀6 |');
+        this.insertBlock(
+          '| 컬럼1 | 컬럼2 | 컬럼3 |\n|---|---|---|\n| 셀1 | 셀2 | 셀3 |\n| 셀4 | 셀5 | 셀6 |',
+        );
         break;
       case 'hr':
         this.insertBlock('---');
@@ -321,7 +332,11 @@ export class MarkdownToolbar {
           title: '시리즈 설정',
           fields: [
             { name: 'name', label: '시리즈 이름', required: true },
-            { name: 'order', label: '이 글의 시리즈 순서 (숫자, 비우면 자동)', placeholder: '예: 1' },
+            {
+              name: 'order',
+              label: '이 글의 시리즈 순서 (숫자, 비우면 자동)',
+              placeholder: '예: 1',
+            },
           ],
         });
         if (!r.confirmed || !r.values.name.trim()) return;
@@ -336,7 +351,14 @@ export class MarkdownToolbar {
       case 'fm-category': {
         const r = await openModal({
           title: '카테고리 설정',
-          fields: [{ name: 'category', label: '카테고리 슬러그', placeholder: '폴더명 권장', required: true }],
+          fields: [
+            {
+              name: 'category',
+              label: '카테고리 슬러그',
+              placeholder: '폴더명 권장',
+              required: true,
+            },
+          ],
         });
         if (!r.confirmed || !r.values.category.trim()) return;
         this.upsertFrontmatter({ category: r.values.category.trim() });
@@ -345,10 +367,15 @@ export class MarkdownToolbar {
       case 'fm-tags': {
         const r = await openModal({
           title: '태그 추가',
-          fields: [{ name: 'tags', label: '태그 (쉼표 구분)', placeholder: 'astro, perf', required: true }],
+          fields: [
+            { name: 'tags', label: '태그 (쉼표 구분)', placeholder: 'astro, perf', required: true },
+          ],
         });
         if (!r.confirmed) return;
-        const tags = r.values.tags.split(',').map((s) => s.trim()).filter(Boolean);
+        const tags = r.values.tags
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
         if (tags.length > 0) this.upsertFrontmatter({ tags });
         break;
       }

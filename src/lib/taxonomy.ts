@@ -19,11 +19,7 @@ export interface SeriesInfo {
 const SLUG_RE = /[^\p{L}\p{N}_-]+/gu;
 
 export function slugify(value: string): string {
-  return value
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(SLUG_RE, '-')
-    .replace(/^-|-$/g, '');
+  return value.normalize('NFKD').toLowerCase().replace(SLUG_RE, '-').replace(/^-|-$/g, '');
 }
 
 export function categoryOf<C extends CategorizedCollection>(
@@ -76,7 +72,10 @@ async function buildPostTaxonomy(): Promise<PostTaxonomy> {
   }
 
   const series = new Map<string, SeriesInfo>();
-  const postSeries = new Map<string, { slug: string; name: string; order: number; total: number }>();
+  const postSeries = new Map<
+    string,
+    { slug: string; name: string; order: number; total: number }
+  >();
   for (const [name, items] of seriesGroups) {
     items.sort((a, b) => {
       const orderA = a.data.seriesOrder ?? a.data.date.valueOf();

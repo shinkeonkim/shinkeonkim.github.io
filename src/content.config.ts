@@ -68,7 +68,9 @@ const sources = defineCollection({
   loader: glob({ pattern: '**/*.md', base: './src/content/sources' }),
   schema: z.object({
     title: z.string(),
-    type: z.enum(['book', 'article', 'paper', 'website', 'video', 'talk', 'other']).default('other'),
+    type: z
+      .enum(['book', 'article', 'paper', 'website', 'video', 'talk', 'other'])
+      .default('other'),
     author: emptyToUndefined,
     publisher: emptyToUndefined,
     year: z.number().optional(),
@@ -92,16 +94,24 @@ const projects = defineCollection({
     role: z.string().optional(),
     thumbnail: z.string().optional(),
     cover: z.string().optional(),
-    repos: z.array(z.object({
-      url: z.url(),
-      label: z.string().optional(),
-      track: z.boolean().default(true),
-    })).default([]),
+    repos: z
+      .array(
+        z.object({
+          url: z.url(),
+          label: z.string().optional(),
+          track: z.boolean().default(true),
+        }),
+      )
+      .default([]),
     stack: z.array(z.string()).default([]),
-    links: z.array(z.object({
-      url: z.url(),
-      label: z.string(),
-    })).default([]),
+    links: z
+      .array(
+        z.object({
+          url: z.url(),
+          label: z.string(),
+        }),
+      )
+      .default([]),
     status: z.enum(['ongoing', 'completed', 'archived']).default('completed'),
     featured: z.boolean().default(false),
     draft: z.boolean().default(false),

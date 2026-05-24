@@ -56,10 +56,7 @@ function buildSlugMap() {
         const slug = rel.replace(/\.(md|mdx)$/, '');
         const filename = path.basename(slug);
 
-        const url =
-          collection === 'notes'
-            ? `/notes/#${slug}`
-            : `/${collection}/${slug}/`;
+        const url = collection === 'notes' ? `/notes/#${slug}` : `/${collection}/${slug}/`;
 
         let title;
         let aliases = [];
@@ -73,9 +70,7 @@ function buildSlugMap() {
         }
 
         const keys = new Set(
-          [slug, filename, title, ...aliases]
-            .filter(Boolean)
-            .map((k) => k.toLowerCase()),
+          [slug, filename, title, ...aliases].filter(Boolean).map((k) => k.toLowerCase()),
         );
         for (const key of keys) {
           if (!map.has(key)) {

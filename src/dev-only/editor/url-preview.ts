@@ -16,9 +16,7 @@ export class UrlPreviewController {
     const result = await openModal({
       title: 'URL 미리보기 삽입',
       description: '외부 URL 의 OG 메타를 즉시 가져와 카드로 삽입합니다.',
-      fields: [
-        { name: 'url', label: 'URL', placeholder: 'https://…', required: true },
-      ],
+      fields: [{ name: 'url', label: 'URL', placeholder: 'https://…', required: true }],
       confirmLabel: '미리보기 카드 삽입',
     });
     if (!result.confirmed) return;
@@ -46,7 +44,10 @@ export class UrlPreviewController {
     setStatus('커서 위치에 URL 또는 <UrlPreview/> 가 없습니다', 'error');
   }
 
-  private findEnclosingTag(value: string, cursor: number): { start: number; end: number; url: string } | null {
+  private findEnclosingTag(
+    value: string,
+    cursor: number,
+  ): { start: number; end: number; url: string } | null {
     TAG_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = TAG_RE.exec(value)) !== null) {
@@ -57,7 +58,10 @@ export class UrlPreviewController {
     return null;
   }
 
-  private findUrlAtCursor(value: string, cursor: number): { start: number; end: number; url: string } | null {
+  private findUrlAtCursor(
+    value: string,
+    cursor: number,
+  ): { start: number; end: number; url: string } | null {
     URL_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = URL_RE.exec(value)) !== null) {
@@ -76,7 +80,8 @@ export class UrlPreviewController {
     const sel = this.textarea.selectionStart;
     const before = this.textarea.value.slice(0, sel);
     const after = this.textarea.value.slice(this.textarea.selectionEnd);
-    const needLead = before.length > 0 && !before.endsWith('\n\n') ? (before.endsWith('\n') ? '\n' : '\n\n') : '';
+    const needLead =
+      before.length > 0 && !before.endsWith('\n\n') ? (before.endsWith('\n') ? '\n' : '\n\n') : '';
     const needTrail = after.length > 0 && !after.startsWith('\n') ? '\n\n' : '\n';
     const block = needLead + tag + needTrail;
     const next = before + block + after;

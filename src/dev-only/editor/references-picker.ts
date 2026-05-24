@@ -2,7 +2,11 @@ import { api, type SourceSummary } from './api';
 import { confirmModal, ensureHost, openModal } from './modal';
 import { setStatus } from './status';
 import { escapeHtml } from './utils';
-import { parseReferencesFromFrontmatter, upsertReferencesInFrontmatter, type ReferenceItem } from './yaml-utils';
+import {
+  parseReferencesFromFrontmatter,
+  upsertReferencesInFrontmatter,
+  type ReferenceItem,
+} from './yaml-utils';
 
 interface PickerOptions {
   getContent: () => string;
@@ -19,7 +23,9 @@ function slugifyId(input: string): string {
 }
 
 function describeSource(source: SourceSummary): string {
-  const parts = [source.author, source.publisher, source.year ? String(source.year) : null].filter(Boolean);
+  const parts = [source.author, source.publisher, source.year ? String(source.year) : null].filter(
+    Boolean,
+  );
   return parts.length > 0 ? `${source.title} · ${parts.join(' · ')}` : source.title;
 }
 
@@ -79,11 +85,12 @@ export class ReferencesPicker {
 
   private render(): void {
     const filtered = this.filteredSources();
-    const selectedHtml = this.selected.length === 0
-      ? `<p class="ref-picker-empty">선택된 출처가 없습니다.</p>`
-      : `<ul class="ref-picker-selected-list">${this.selected
-          .map((r, i) => this.renderSelectedItem(r, i))
-          .join('')}</ul>`;
+    const selectedHtml =
+      this.selected.length === 0
+        ? `<p class="ref-picker-empty">선택된 출처가 없습니다.</p>`
+        : `<ul class="ref-picker-selected-list">${this.selected
+            .map((r, i) => this.renderSelectedItem(r, i))
+            .join('')}</ul>`;
 
     const html = `
       <div class="ref-picker">
@@ -101,9 +108,10 @@ export class ReferencesPicker {
             <button type="button" class="editor-btn editor-btn-small" data-ref-add-inline>+ 인라인</button>
             <button type="button" class="editor-btn editor-btn-small" data-ref-create-source>+ 새 출처</button>
           </div>
-          ${filtered.length === 0
-            ? `<p class="ref-picker-empty">출처가 없습니다. 우측 '+ 새 출처' 로 만들어보세요.</p>`
-            : `<ul class="ref-picker-available">${filtered.map((s) => this.renderAvailableItem(s)).join('')}</ul>`
+          ${
+            filtered.length === 0
+              ? `<p class="ref-picker-empty">출처가 없습니다. 우측 '+ 새 출처' 로 만들어보세요.</p>`
+              : `<ul class="ref-picker-available">${filtered.map((s) => this.renderAvailableItem(s)).join('')}</ul>`
           }
         </section>
         <footer class="ref-picker-footer">
@@ -190,12 +198,16 @@ export class ReferencesPicker {
         }
       });
     });
-    this.dialog.querySelector<HTMLElement>('[data-ref-add-inline]')?.addEventListener('click', () => {
-      void this.handleAddInline();
-    });
-    this.dialog.querySelector<HTMLElement>('[data-ref-create-source]')?.addEventListener('click', () => {
-      void this.handleCreateSource();
-    });
+    this.dialog
+      .querySelector<HTMLElement>('[data-ref-add-inline]')
+      ?.addEventListener('click', () => {
+        void this.handleAddInline();
+      });
+    this.dialog
+      .querySelector<HTMLElement>('[data-ref-create-source]')
+      ?.addEventListener('click', () => {
+        void this.handleCreateSource();
+      });
   }
 
   private renderListsOnly(): void {
@@ -208,9 +220,10 @@ export class ReferencesPicker {
     const availableSection = sections[1];
     const existingList = availableSection.querySelector('.ref-picker-available, .ref-picker-empty');
     const newList = document.createElement('div');
-    newList.innerHTML = filtered.length === 0
-      ? `<p class="ref-picker-empty">출처가 없습니다.</p>`
-      : `<ul class="ref-picker-available">${filtered.map((s) => this.renderAvailableItem(s)).join('')}</ul>`;
+    newList.innerHTML =
+      filtered.length === 0
+        ? `<p class="ref-picker-empty">출처가 없습니다.</p>`
+        : `<ul class="ref-picker-available">${filtered.map((s) => this.renderAvailableItem(s)).join('')}</ul>`;
     existingList?.replaceWith(newList.firstElementChild!);
     this.bind();
   }
@@ -281,7 +294,7 @@ export class ReferencesPicker {
     if (!r.confirmed) return;
     const title = r.values.title.trim();
     if (!title) return;
-    const id = (r.values.id.trim() || slugifyId(title));
+    const id = r.values.id.trim() || slugifyId(title);
     if (this.sources.some((s) => s.id === id)) {
       const ok = await confirmModal({
         title: '같은 ID 의 출처가 이미 있습니다',
@@ -290,7 +303,8 @@ export class ReferencesPicker {
       });
       if (ok) {
         this.addShared(id);
-        if (typeof this.dialog.showModal === 'function' && !this.dialog.open) this.dialog.showModal();
+        if (typeof this.dialog.showModal === 'function' && !this.dialog.open)
+          this.dialog.showModal();
       }
       return;
     }
@@ -298,7 +312,8 @@ export class ReferencesPicker {
     lines.push(`title: ${JSON.stringify(title)}`);
     lines.push(`type: ${r.values.type}`);
     if (r.values.author.trim()) lines.push(`author: ${JSON.stringify(r.values.author.trim())}`);
-    if (r.values.publisher.trim()) lines.push(`publisher: ${JSON.stringify(r.values.publisher.trim())}`);
+    if (r.values.publisher.trim())
+      lines.push(`publisher: ${JSON.stringify(r.values.publisher.trim())}`);
     if (r.values.year.trim()) {
       const y = Number(r.values.year.trim());
       if (!Number.isNaN(y)) lines.push(`year: ${y}`);

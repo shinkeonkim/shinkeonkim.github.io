@@ -38,7 +38,10 @@ export class FileOpsController {
     this.onFolderChanged = opts.onFolderChanged;
   }
 
-  async newFile(collection: CollectionName, folder: string): Promise<{ collection: CollectionName; slug: string; ext: '.md' | '.mdx' } | null> {
+  async newFile(
+    collection: CollectionName,
+    folder: string,
+  ): Promise<{ collection: CollectionName; slug: string; ext: '.md' | '.mdx' } | null> {
     const r = await openModal({
       title: '새 파일',
       fields: [
@@ -81,7 +84,14 @@ export class FileOpsController {
     const r = await openModal({
       title: '새 폴더',
       description: parent ? `상위: ${collection}/${parent}` : `상위: ${collection}/`,
-      fields: [{ name: 'name', label: '폴더 이름', required: true, placeholder: 'subfolder 또는 nested/sub' }],
+      fields: [
+        {
+          name: 'name',
+          label: '폴더 이름',
+          required: true,
+          placeholder: 'subfolder 또는 nested/sub',
+        },
+      ],
     });
     if (!r.confirmed) return;
     const name = r.values.name.trim();
@@ -97,7 +107,12 @@ export class FileOpsController {
     }
   }
 
-  async fileMenu(collection: CollectionName, slug: string, currentExt: '.md' | '.mdx', anchor: HTMLElement): Promise<void> {
+  async fileMenu(
+    collection: CollectionName,
+    slug: string,
+    currentExt: '.md' | '.mdx',
+    anchor: HTMLElement,
+  ): Promise<void> {
     const r = await openModal({
       title: '파일 작업',
       description: `${collection}/${slug}${currentExt}`,
@@ -118,7 +133,8 @@ export class FileOpsController {
     anchor.blur();
     if (!r.confirmed) return;
     if (r.values.action === 'rename') await this.renameFile(collection, slug, currentExt);
-    else if (r.values.action === 'move-collection') await this.moveFile(collection, slug, currentExt);
+    else if (r.values.action === 'move-collection')
+      await this.moveFile(collection, slug, currentExt);
     else if (r.values.action === 'delete') await this.deleteFile(collection, slug, currentExt);
   }
 
@@ -145,7 +161,11 @@ export class FileOpsController {
     else if (r.values.action === 'delete') await this.deleteFolder(collection, folder);
   }
 
-  private async renameFile(collection: CollectionName, slug: string, ext: '.md' | '.mdx'): Promise<void> {
+  private async renameFile(
+    collection: CollectionName,
+    slug: string,
+    ext: '.md' | '.mdx',
+  ): Promise<void> {
     const r = await openModal({
       title: '파일 이름 변경 / 이동',
       fields: [
@@ -185,7 +205,11 @@ export class FileOpsController {
     }
   }
 
-  private async moveFile(collection: CollectionName, slug: string, ext: '.md' | '.mdx'): Promise<void> {
+  private async moveFile(
+    collection: CollectionName,
+    slug: string,
+    ext: '.md' | '.mdx',
+  ): Promise<void> {
     const r = await openModal({
       title: '컬렉션 이동',
       fields: [
@@ -223,7 +247,11 @@ export class FileOpsController {
     }
   }
 
-  private async deleteFile(collection: CollectionName, slug: string, ext: '.md' | '.mdx'): Promise<void> {
+  private async deleteFile(
+    collection: CollectionName,
+    slug: string,
+    ext: '.md' | '.mdx',
+  ): Promise<void> {
     const confirmed = await confirmModal({
       title: '파일 삭제',
       description: `${collection}/${slug}${ext} 파일을 정말 삭제할까요? 되돌릴 수 없습니다.`,
@@ -254,7 +282,12 @@ export class FileOpsController {
     await this.executeFolderRename(collection, folder, toFolder);
   }
 
-  async renameFileInline(collection: CollectionName, slug: string, ext: Ext, newBaseName: string): Promise<void> {
+  async renameFileInline(
+    collection: CollectionName,
+    slug: string,
+    ext: Ext,
+    newBaseName: string,
+  ): Promise<void> {
     const trimmed = newBaseName.trim();
     if (!trimmed) return;
     const parts = slug.split('/');
@@ -281,7 +314,11 @@ export class FileOpsController {
     }
   }
 
-  async renameFolderInline(collection: CollectionName, folder: string, newName: string): Promise<void> {
+  async renameFolderInline(
+    collection: CollectionName,
+    folder: string,
+    newName: string,
+  ): Promise<void> {
     const trimmed = newName.trim();
     if (!trimmed) return;
     const parts = folder.split('/');

@@ -2,11 +2,7 @@ import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 
 const REPO_ROOT = process.cwd();
-const ALLOWED_PREFIXES = [
-  'src/content/',
-  'src/lib/taxonomy.ts',
-  'public/uploads/',
-];
+const ALLOWED_PREFIXES = ['src/content/', 'src/lib/taxonomy.ts', 'public/uploads/'];
 
 let _git: SimpleGit | null = null;
 function git(): SimpleGit {
@@ -17,13 +13,7 @@ function git(): SimpleGit {
 export interface GitFileStatus {
   path: string;
   staged: boolean;
-  status:
-    | 'modified'
-    | 'added'
-    | 'deleted'
-    | 'renamed'
-    | 'untracked'
-    | 'conflicted';
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
   allowed: boolean;
 }
 
@@ -62,7 +52,9 @@ export async function getStatus(): Promise<GitStatus> {
   for (const f of s.not_added) add(f, 'untracked', false);
   for (const f of s.conflicted) add(f, 'conflicted', false);
 
-  const remotes = await git().getRemotes().catch(() => []);
+  const remotes = await git()
+    .getRemotes()
+    .catch(() => []);
   const hasRemote = remotes.length > 0;
 
   return {
@@ -104,7 +96,7 @@ export async function push(): Promise<{ pushed: boolean; output: string }> {
   const remotes = await git().getRemotes();
   if (remotes.length === 0) throw new Error('no git remote configured');
   const result = await git().push();
-  const output = (result.pushed ?? []).map((p) => `${p.local} → ${p.remote}`).join('\n') ||
-    'push complete';
+  const output =
+    (result.pushed ?? []).map((p) => `${p.local} → ${p.remote}`).join('\n') || 'push complete';
   return { pushed: true, output };
 }

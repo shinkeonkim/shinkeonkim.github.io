@@ -18,7 +18,14 @@ function getProcessor() {
     processorPromise = createMarkdownProcessor({
       gfm: true,
       smartypants: true,
-      remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath, remarkUrlPreview],
+      remarkPlugins: [
+        remarkMermaid,
+        remarkAlert,
+        remarkWikilink,
+        remarkMathLenient,
+        remarkMath,
+        remarkUrlPreview,
+      ],
       rehypePlugins: [[rehypeKatex, { output: 'html', strict: 'ignore' }]],
       shikiConfig: {
         themes: { light: 'github-light', dark: 'one-dark-pro' },
@@ -33,7 +40,11 @@ const IMPORT_LINE_RE = /^\s*import\s+[\s\S]*?from\s+['"][^'"]+['"];?\s*$/gm;
 const TAG_OPEN_RE = /<([A-Z][\w.]*)/;
 
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function summarizeAttrs(raw: string): string {
@@ -47,9 +58,10 @@ function summarizeAttrs(raw: string): string {
 function placeholderHtml(name: string, attrs: string, inner?: string): string {
   const attrSummary = summarizeAttrs(attrs);
   const header = `<div class="mdx-component-placeholder__header"><span class="mdx-component-placeholder__name">&lt;${escapeHtml(name)}&gt;</span>${attrSummary ? ` <span class="mdx-component-placeholder__attrs">${attrSummary}</span>` : ''}</div>`;
-  const body = inner !== undefined && inner.trim()
-    ? `<div class="mdx-component-placeholder__body">${escapeHtml(inner.trim())}</div>`
-    : '';
+  const body =
+    inner !== undefined && inner.trim()
+      ? `<div class="mdx-component-placeholder__body">${escapeHtml(inner.trim())}</div>`
+      : '';
   return `\n\n<div class="mdx-component-placeholder" data-component="${escapeHtml(name)}">${header}${body}</div>\n\n`;
 }
 
@@ -289,14 +301,15 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
   );
   const outputHtml = await shiki(output.trimEnd(), outputLanguage);
 
-  const headerLeft = variants.length > 1
-    ? `<div class="cwo-tabs" role="tablist">${variants
-        .map(
-          (v, i) =>
-            `<button type="button" class="cwo-tab${i === 0 ? ' is-active' : ''}" data-cwo-tab="${i}" aria-selected="${i === 0}">${escapeHtml(v.label)}</button>`,
-        )
-        .join('')}</div>`
-    : `<span class="cwo-label">${escapeHtml(variants[0].label)}</span>`;
+  const headerLeft =
+    variants.length > 1
+      ? `<div class="cwo-tabs" role="tablist">${variants
+          .map(
+            (v, i) =>
+              `<button type="button" class="cwo-tab${i === 0 ? ' is-active' : ''}" data-cwo-tab="${i}" aria-selected="${i === 0}">${escapeHtml(v.label)}</button>`,
+          )
+          .join('')}</div>`
+      : `<span class="cwo-label">${escapeHtml(variants[0].label)}</span>`;
 
   const variantPanes = variants
     .map(
@@ -306,9 +319,8 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
     .join('');
 
   const vertical = codeWidth !== null && codeWidth >= 99;
-  const style = codeWidth !== null
-    ? ` style="--cwo-code-pct:${Math.max(0, Math.min(100, codeWidth))}%"`
-    : '';
+  const style =
+    codeWidth !== null ? ` style="--cwo-code-pct:${Math.max(0, Math.min(100, codeWidth))}%"` : '';
 
   return `\n\n<figure class="code-with-output not-prose" data-cwo data-vertical="${vertical}"${style}>
   ${title ? `<figcaption class="mb-2 text-sm font-medium" style="color:var(--color-fg-muted)">${escapeHtml(title)}</figcaption>` : ''}
@@ -351,10 +363,7 @@ async function transformJsx(src: string, seen: Set<string>): Promise<string> {
       out.push(src.slice(tagStart));
       break;
     }
-    const attrsRaw = src.slice(
-      afterName,
-      tagEnd.selfClosing ? tagEnd.end - 2 : tagEnd.end - 1,
-    );
+    const attrsRaw = src.slice(afterName, tagEnd.selfClosing ? tagEnd.end - 2 : tagEnd.end - 1);
     seen.add(name);
 
     let innerRaw: string | undefined = undefined;
@@ -387,7 +396,9 @@ async function transformJsx(src: string, seen: Set<string>): Promise<string> {
   return out.join('');
 }
 
-async function preprocessMdx(content: string): Promise<{ transformed: string; componentNames: string[] }> {
+async function preprocessMdx(
+  content: string,
+): Promise<{ transformed: string; componentNames: string[] }> {
   const seen = new Set<string>();
   const noImports = content.replace(IMPORT_LINE_RE, '');
   const transformed = await transformJsx(noImports, seen);

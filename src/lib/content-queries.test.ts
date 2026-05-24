@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { WIKILINK_RE, extractWikilinkTargets, sortByDateDesc, sortByTitleAsc } from './content-queries';
+import {
+  WIKILINK_RE,
+  extractWikilinkTargets,
+  sortByDateDesc,
+  sortByTitleAsc,
+} from './content-queries';
 
 describe('WIKILINK_RE', () => {
   it('captures simple wikilink', () => {

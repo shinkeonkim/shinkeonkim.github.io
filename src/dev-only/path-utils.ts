@@ -104,7 +104,10 @@ export function resolveFolder(collection: Collection, folderRel: string): string
   return safeResolve(collection, folderRel);
 }
 
-export function loadFile(collection: Collection, slug: string): { content: string; ext: '.md' | '.mdx' } | null {
+export function loadFile(
+  collection: Collection,
+  slug: string,
+): { content: string; ext: '.md' | '.mdx' } | null {
   for (const ext of ['.md', '.mdx'] as const) {
     const full = resolveFile(collection, slug, ext);
     if (fs.existsSync(full)) {
@@ -126,7 +129,11 @@ export function saveFile(
   return { path: path.relative(process.cwd(), full), bytes: Buffer.byteLength(content, 'utf-8') };
 }
 
-export function deleteFile(collection: Collection, slug: string, ext: '.md' | '.mdx'): { path: string } {
+export function deleteFile(
+  collection: Collection,
+  slug: string,
+  ext: '.md' | '.mdx',
+): { path: string } {
   const full = resolveFile(collection, slug, ext);
   if (!fs.existsSync(full)) throw new Error('file not found');
   fs.unlinkSync(full);
@@ -203,7 +210,10 @@ export function renameFolder(
   };
 }
 
-export function deleteFolder(collection: Collection, folderRel: string): { path: string; removed: number } {
+export function deleteFolder(
+  collection: Collection,
+  folderRel: string,
+): { path: string; removed: number } {
   const full = resolveFolder(collection, folderRel);
   if (!fs.existsSync(full)) throw new Error('folder not found');
   if (!fs.statSync(full).isDirectory()) throw new Error('not a folder');

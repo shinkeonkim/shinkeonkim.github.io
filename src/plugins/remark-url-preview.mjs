@@ -30,7 +30,11 @@ function escapeHtml(s) {
 }
 
 function hostname(url) {
-  try { return new URL(url).hostname; } catch { return url; }
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
 
 function cacheKey(url) {
@@ -48,7 +52,9 @@ function renderCardHtml(url) {
   const data = cache[cacheKey(url)];
   const host = hostname(url);
   const title = escapeHtml(data?.title ?? url);
-  const description = data?.description ? `<span class="url-preview-description">${escapeHtml(data.description)}</span>` : '';
+  const description = data?.description
+    ? `<span class="url-preview-description">${escapeHtml(data.description)}</span>`
+    : '';
   const image = data?.image
     ? `<span class="url-preview-image" style="background-image:url(${JSON.stringify(data.image)})"></span>`
     : '';

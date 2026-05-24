@@ -1,7 +1,8 @@
 import { visit } from 'unist-util-visit';
 
 const DISPLAY_INLINE_RE = /\$\$\s+([^$\n]+?)\s+\$\$/g;
-const INLINE_LENIENT_RE = /(^|[\s([{,;:'"\u2018\u201c])\$\s+([^$\n]+?)\s+\$(?=$|[\s)\]},;:.!?'"\u2019\u201d])/g;
+const INLINE_LENIENT_RE =
+  /(^|[\s([{,;:'"\u2018\u201c])\$\s+([^$\n]+?)\s+\$(?=$|[\s)\]},;:.!?'"\u2019\u201d])/g;
 
 export default function remarkMathLenient() {
   return (tree) => {

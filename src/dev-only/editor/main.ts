@@ -209,11 +209,14 @@ export function initEditor(): void {
       const ext = (anchor.closest('[data-tree-file]') as HTMLElement | null)?.dataset.ext as Ext;
       void fileOps.fileMenu(collection, slug, ext ?? '.md', anchor);
     },
-    onContextFolder: (collection, folder, anchor) => void fileOps.folderMenu(collection, folder, anchor),
+    onContextFolder: (collection, folder, anchor) =>
+      void fileOps.folderMenu(collection, folder, anchor),
     onNewFile: (collection, folder) => void handleNewFile(collection, folder),
     onNewFolder: (collection, folder) => void fileOps.newFolder(collection, folder),
-    onRenameFileInline: (collection, slug, ext, name) => fileOps.renameFileInline(collection, slug, ext, name),
-    onRenameFolderInline: (collection, folder, name) => fileOps.renameFolderInline(collection, folder, name),
+    onRenameFileInline: (collection, slug, ext, name) =>
+      fileOps.renameFileInline(collection, slug, ext, name),
+    onRenameFolderInline: (collection, folder, name) =>
+      fileOps.renameFolderInline(collection, folder, name),
     onDropItem: (item, target) => fileOps.dropItem(item, target),
   });
   void tree.refresh();
@@ -224,8 +227,14 @@ export function initEditor(): void {
       await wikilink.refresh();
     },
     onFileChanged: (oldFile, newFile) => {
-      if (oldFile && state.current && state.current.collection === oldFile.collection && state.current.slug === oldFile.slug) {
-        if (newFile) setCurrent({ collection: newFile.collection, slug: newFile.slug, ext: newFile.ext });
+      if (
+        oldFile &&
+        state.current &&
+        state.current.collection === oldFile.collection &&
+        state.current.slug === oldFile.slug
+      ) {
+        if (newFile)
+          setCurrent({ collection: newFile.collection, slug: newFile.slug, ext: newFile.ext });
         else {
           textarea.value = '';
           setCurrent(null);

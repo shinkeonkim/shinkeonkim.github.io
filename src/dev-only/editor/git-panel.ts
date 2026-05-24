@@ -63,12 +63,14 @@ export class GitPanel {
     const allowedFiles = s.files.filter((f) => f.allowed);
     const blockedFiles = s.files.filter((f) => !f.allowed);
     const branchInfo = s.branch
-      ? `<strong>${escapeHtml(s.branch)}</strong>` + (s.ahead || s.behind ? ` <small>(↑${s.ahead} ↓${s.behind})</small>` : '')
+      ? `<strong>${escapeHtml(s.branch)}</strong>` +
+        (s.ahead || s.behind ? ` <small>(↑${s.ahead} ↓${s.behind})</small>` : '')
       : '<em>(no branch)</em>';
 
-    const filesHtml = allowedFiles.length === 0
-      ? '<p class="git-panel-empty">콘텐츠/리소스 파일에 변경 사항이 없습니다.</p>'
-      : `<ul class="git-panel-files">
+    const filesHtml =
+      allowedFiles.length === 0
+        ? '<p class="git-panel-empty">콘텐츠/리소스 파일에 변경 사항이 없습니다.</p>'
+        : `<ul class="git-panel-files">
           ${allowedFiles
             .map(
               (f) => `<li class="git-panel-file">
@@ -83,9 +85,10 @@ export class GitPanel {
             .join('')}
         </ul>`;
 
-    const blockedHtml = blockedFiles.length === 0
-      ? ''
-      : `<details class="git-panel-blocked">
+    const blockedHtml =
+      blockedFiles.length === 0
+        ? ''
+        : `<details class="git-panel-blocked">
           <summary>커밋 범위 밖 (${blockedFiles.length})</summary>
           <ul>${blockedFiles.map((f) => `<li><code>${escapeHtml(f.path)}</code> <small>${escapeHtml(this.fileLabel(f))}</small></li>`).join('')}</ul>
         </details>`;
@@ -137,7 +140,9 @@ export class GitPanel {
       this.message = messageEl.value;
     });
 
-    this.root.querySelector('[data-git-refresh]')?.addEventListener('click', () => void this.refresh());
+    this.root
+      .querySelector('[data-git-refresh]')
+      ?.addEventListener('click', () => void this.refresh());
     this.root.querySelector('[data-git-close]')?.addEventListener('click', () => this.close());
 
     this.root.querySelectorAll<HTMLElement>('[data-git-diff]').forEach((btn) => {

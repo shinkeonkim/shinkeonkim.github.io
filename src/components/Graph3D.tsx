@@ -26,7 +26,7 @@ function nodeBaseColor(node: GraphNode, isDark: boolean): string {
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 function seededRandom(seed: number): () => number {
-  let s = (seed | 0) || 1;
+  let s = seed | 0 || 1;
   return () => {
     s = Math.imul(s ^ (s >>> 15), 1 | s);
     s ^= s + Math.imul(s ^ (s >>> 7), 61 | s);
@@ -92,9 +92,7 @@ export default function Graph3D({ nodes, links, height = 560, query = '' }: Prop
   const matchedIds = useMemo(() => {
     if (!normalizedQuery) return null;
     return new Set(
-      nodes
-        .filter((n) => n.title.toLowerCase().includes(normalizedQuery))
-        .map((n) => n.id),
+      nodes.filter((n) => n.title.toLowerCase().includes(normalizedQuery)).map((n) => n.id),
     );
   }, [nodes, normalizedQuery]);
 
@@ -118,13 +116,21 @@ export default function Graph3D({ nodes, links, height = 560, query = '' }: Prop
             const size = Math.min(10, 4 + Math.sqrt(node.degree ?? 1) * 1.2);
             const mesh = new THREE.Mesh(
               new THREE.BoxGeometry(size, size * 0.5, size),
-              new THREE.MeshLambertMaterial({ color, transparent: true, opacity: dimmed ? 0.5 : 0.85 }),
+              new THREE.MeshLambertMaterial({
+                color,
+                transparent: true,
+                opacity: dimmed ? 0.5 : 0.85,
+              }),
             );
             return mesh;
           }
           const sphere = new THREE.Mesh(
             new THREE.SphereGeometry(4, 20, 16),
-            new THREE.MeshLambertMaterial({ color, transparent: true, opacity: dimmed ? 0.5 : 0.95 }),
+            new THREE.MeshLambertMaterial({
+              color,
+              transparent: true,
+              opacity: dimmed ? 0.5 : 0.95,
+            }),
           );
           return sphere;
         }}
@@ -136,8 +142,10 @@ export default function Graph3D({ nodes, links, height = 560, query = '' }: Prop
         linkWidth={(l) => {
           const isTag = (l as GraphLink).kind === 'tag';
           if (!matchedIds) return isTag ? 0.5 : 1;
-          const s = typeof l.source === 'object' ? (l.source as GraphNode).id : (l.source as string);
-          const t = typeof l.target === 'object' ? (l.target as GraphNode).id : (l.target as string);
+          const s =
+            typeof l.source === 'object' ? (l.source as GraphNode).id : (l.source as string);
+          const t =
+            typeof l.target === 'object' ? (l.target as GraphNode).id : (l.target as string);
           return matchedIds.has(s) && matchedIds.has(t) ? 2 : 0.3;
         }}
         onNodeClick={(node) => {

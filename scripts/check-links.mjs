@@ -38,11 +38,10 @@ const cliArgs = [
   'json',
 ];
 
-const child = spawnSync(
-  path.join(REPO_ROOT, 'node_modules', '.bin', 'linkinator'),
-  cliArgs,
-  { cwd: REPO_ROOT, encoding: 'utf-8' },
-);
+const child = spawnSync(path.join(REPO_ROOT, 'node_modules', '.bin', 'linkinator'), cliArgs, {
+  cwd: REPO_ROOT,
+  encoding: 'utf-8',
+});
 
 if (child.error) {
   console.error('linkinator launch failed:', child.error.message);

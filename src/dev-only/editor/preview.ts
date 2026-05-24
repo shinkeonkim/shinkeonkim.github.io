@@ -54,7 +54,9 @@ export class PreviewPane {
       const data = await api.render({ content: this.getText(), ext: this.getExt() });
       if (token !== this.token) return;
       this.content.innerHTML = data.html;
-      document.dispatchEvent(new CustomEvent('preview-updated', { detail: { container: this.content } }));
+      document.dispatchEvent(
+        new CustomEvent('preview-updated', { detail: { container: this.content } }),
+      );
       requestAnimationFrame(() => this.sync?.syncFromA());
     } catch (err) {
       if (token !== this.token) return;

@@ -9,9 +9,26 @@ interface Props {
 }
 
 const DEFAULT_WORDS = [
-  '글', '기록', '생각', '노트', '위키', '연결', '그래프', '태그',
-  '학습', '회고', '아이디어', '메모', '검색', '코드', 'TIL',
-  'Astro', 'TypeScript', 'React', 'Three.js', 'Markdown',
+  '글',
+  '기록',
+  '생각',
+  '노트',
+  '위키',
+  '연결',
+  '그래프',
+  '태그',
+  '학습',
+  '회고',
+  '아이디어',
+  '메모',
+  '검색',
+  '코드',
+  'TIL',
+  'Astro',
+  'TypeScript',
+  'React',
+  'Three.js',
+  'Markdown',
 ];
 
 const KEY_U = 0.21;
@@ -89,7 +106,12 @@ function readTheme(): ThemeColors {
       };
 }
 
-export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/log $', height = 460 }: Props) {
+export default function Hero3D({
+  titles,
+  words = DEFAULT_WORDS,
+  prompt = '~/koa/log $',
+  height = 460,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -239,7 +261,10 @@ export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/
     }
     const floatingWords: FloatingWord[] = [];
 
-    function buildWordTexture(text: string, color: string): { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; aspect: number } {
+    function buildWordTexture(
+      text: string,
+      color: string,
+    ): { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; aspect: number } {
       const canvas = document.createElement('canvas');
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const fontPx = 36;
@@ -278,7 +303,12 @@ export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/
     function buildFloatingWord(text: string): FloatingWord {
       const colorHex = '#' + theme.particleColor.toString(16).padStart(6, '0');
       const { canvas, texture, aspect } = buildWordTexture(text, colorHex);
-      const material = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0, depthWrite: false });
+      const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      });
       const sprite = new THREE.Sprite(material);
       sprite.userData.text = text;
       const worldHeight = 0.36;
@@ -451,7 +481,7 @@ export default function Hero3D({ titles, words = DEFAULT_WORDS, prompt = '~/koa/
         const y = w.sprite.position.y;
         let opacity = 0;
         if (y > 3.2) opacity = ((4.8 - y) / 1.6) * 0.7;
-        else if (y < 0.6) opacity = Math.max(0, ((y - 0.1) / 0.5)) * 0.7;
+        else if (y < 0.6) opacity = Math.max(0, (y - 0.1) / 0.5) * 0.7;
         else opacity = 0.7;
         w.material.opacity = Math.max(0, Math.min(0.7, opacity));
         if (y < 0.1) spawnWordTop(w);

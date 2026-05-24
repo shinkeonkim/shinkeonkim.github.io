@@ -32,7 +32,12 @@ export default defineConfig({
         if (path === '/') {
           item.changefreq = EnumChangefreq.DAILY;
           item.priority = 1.0;
-        } else if (path.startsWith('/posts/') && !path.startsWith('/posts/category/') && !path.startsWith('/posts/series/') && path !== '/posts/') {
+        } else if (
+          path.startsWith('/posts/') &&
+          !path.startsWith('/posts/category/') &&
+          !path.startsWith('/posts/series/') &&
+          path !== '/posts/'
+        ) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.8;
         } else if (path === '/posts/' || path.startsWith('/posts/')) {
@@ -67,7 +72,14 @@ export default defineConfig({
     },
   },
   markdown: {
-    remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath, remarkUrlPreview],
+    remarkPlugins: [
+      remarkMermaid,
+      remarkAlert,
+      remarkWikilink,
+      remarkMathLenient,
+      remarkMath,
+      remarkUrlPreview,
+    ],
     rehypePlugins: [[rehypeKatex, { output: 'html', strict: 'ignore' }]],
     shikiConfig: {
       themes: {

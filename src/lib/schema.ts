@@ -1,4 +1,12 @@
-import { SITE_AUTHOR, SITE_DESCRIPTION, SITE_KEYWORDS, SITE_LOCALE, SITE_SOCIAL, SITE_TITLE, SITE_URL } from '../consts';
+import {
+  SITE_AUTHOR,
+  SITE_DESCRIPTION,
+  SITE_KEYWORDS,
+  SITE_LOCALE,
+  SITE_SOCIAL,
+  SITE_TITLE,
+  SITE_URL,
+} from '../consts';
 
 type SchemaObject = Record<string, unknown>;
 

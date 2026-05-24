@@ -43,13 +43,18 @@ export function ensureHost(): HTMLDialogElement {
 function buildField(field: ModalField): string {
   const id = `editor-modal-field-${field.name}`;
   const value = field.value ?? '';
-  const hint = field.hint ? `<small class="editor-modal-hint">${escapeHtml(field.hint)}</small>` : '';
+  const hint = field.hint
+    ? `<small class="editor-modal-hint">${escapeHtml(field.hint)}</small>`
+    : '';
   if (field.type === 'textarea') {
     return `<label class="editor-modal-field"><span>${escapeHtml(field.label)}</span><textarea id="${id}" name="${field.name}" rows="${field.rows ?? 4}" ${field.required ? 'required' : ''} placeholder="${escapeHtml(field.placeholder ?? '')}">${escapeHtml(value)}</textarea>${hint}</label>`;
   }
   if (field.type === 'select') {
     const opts = (field.options ?? [])
-      .map((o) => `<option value="${escapeHtml(o.value)}"${o.value === value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`)
+      .map(
+        (o) =>
+          `<option value="${escapeHtml(o.value)}"${o.value === value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`,
+      )
       .join('');
     return `<label class="editor-modal-field"><span>${escapeHtml(field.label)}</span><select id="${id}" name="${field.name}" ${field.required ? 'required' : ''}>${opts}</select>${hint}</label>`;
   }
@@ -126,14 +131,20 @@ export function openModal(options: ModalOptions): Promise<ModalResult> {
 
     if (typeof dialog.showModal === 'function') dialog.showModal();
     else dialog.setAttribute('open', '');
-    const firstInput = dialog.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-      'input, textarea, select',
-    );
+    const firstInput = dialog.querySelector<
+      HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+    >('input, textarea, select');
     if (firstInput) firstInput.focus();
   });
 }
 
-export async function confirmModal(options: { title: string; description?: string; danger?: boolean; confirmLabel?: string; cancelLabel?: string }): Promise<boolean> {
+export async function confirmModal(options: {
+  title: string;
+  description?: string;
+  danger?: boolean;
+  confirmLabel?: string;
+  cancelLabel?: string;
+}): Promise<boolean> {
   const result = await openModal({
     title: options.title,
     description: options.description,

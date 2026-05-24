@@ -69,7 +69,11 @@ export class Autosaver {
   private contentGetter: () => string;
   private onSaved: (timestamp: number) => void;
 
-  constructor(fileGetter: () => CurrentFile | null, contentGetter: () => string, onSaved: (t: number) => void) {
+  constructor(
+    fileGetter: () => CurrentFile | null,
+    contentGetter: () => string,
+    onSaved: (t: number) => void,
+  ) {
     this.fileGetter = fileGetter;
     this.contentGetter = contentGetter;
     this.onSaved = onSaved;

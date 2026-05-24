@@ -6,17 +6,31 @@ export const SITE_AUTHOR = 'koa (김신건)';
 export const SITE_LOCALE = 'ko-KR';
 
 export const SITE_KEYWORDS = [
-  '개발', '개발 블로그', '프로그래밍', '소프트웨어 엔지니어',
-  '알고리즘', '자료구조', '백준', 'PS', '코딩테스트',
-  'Python', 'Django', 'TypeScript', 'JavaScript', 'Astro',
-  'React', '웹 개발', '데이터베이스', 'PostgreSQL', 'Redis',
-  '김신건', 'koa', 'shinkeonkim',
+  '개발',
+  '개발 블로그',
+  '프로그래밍',
+  '소프트웨어 엔지니어',
+  '알고리즘',
+  '자료구조',
+  '백준',
+  'PS',
+  '코딩테스트',
+  'Python',
+  'Django',
+  'TypeScript',
+  'JavaScript',
+  'Astro',
+  'React',
+  '웹 개발',
+  '데이터베이스',
+  'PostgreSQL',
+  'Redis',
+  '김신건',
+  'koa',
+  'shinkeonkim',
 ];
 
-export const SITE_SOCIAL = [
-  'https://github.com/shinkeonkim',
-  'https://www.acmicpc.net/user/koa',
-];
+export const SITE_SOCIAL = ['https://github.com/shinkeonkim', 'https://www.acmicpc.net/user/koa'];
 
 export const POSTS_PER_PAGE = 20;
 export const NOTES_PER_PAGE = 30;

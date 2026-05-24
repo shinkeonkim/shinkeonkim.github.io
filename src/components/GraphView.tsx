@@ -51,7 +51,10 @@ export default function GraphView({ nodes, links }: Props) {
             <span>🏷️ 태그 ({tagCount})</span>
           </label>
         )}
-        <div className="inline-flex overflow-hidden rounded-md border border-[color:var(--color-border)]" role="tablist">
+        <div
+          className="inline-flex overflow-hidden rounded-md border border-[color:var(--color-border)]"
+          role="tablist"
+        >
           <button
             type="button"
             role="tab"
@@ -62,7 +65,9 @@ export default function GraphView({ nodes, links }: Props) {
                 ? 'bg-[color:var(--color-surface-elevated)] px-3 py-2 text-sm text-[color:var(--color-accent)]'
                 : 'px-3 py-2 text-sm text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]'
             }
-          >2D</button>
+          >
+            2D
+          </button>
           <button
             type="button"
             role="tab"
@@ -73,7 +78,9 @@ export default function GraphView({ nodes, links }: Props) {
                 ? 'bg-[color:var(--color-surface-elevated)] px-3 py-2 text-sm text-[color:var(--color-accent)]'
                 : 'px-3 py-2 text-sm text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]'
             }
-          >3D</button>
+          >
+            3D
+          </button>
         </div>
       </div>
       {filteredCounts && (

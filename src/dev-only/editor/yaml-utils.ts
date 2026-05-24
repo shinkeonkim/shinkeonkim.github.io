@@ -74,7 +74,9 @@ export function upsertReferencesInFrontmatter(content: string, items: ReferenceI
   let newFm: string;
   if (items.length === 0) {
     if (!slice) return content;
-    newFm = (fm.slice(0, slice.start) + fm.slice(slice.end)).replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '');
+    newFm = (fm.slice(0, slice.start) + fm.slice(slice.end))
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/^\n+|\n+$/g, '');
   } else if (slice) {
     newFm = fm.slice(0, slice.start) + block + fm.slice(slice.end);
   } else {

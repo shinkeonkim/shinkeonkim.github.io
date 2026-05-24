@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { absoluteUrl, breadcrumbSchema, collectionPageSchema, personSchema, websiteSchema } from './schema';
+import {
+  absoluteUrl,
+  breadcrumbSchema,
+  collectionPageSchema,
+  personSchema,
+  websiteSchema,
+} from './schema';
 import { SITE_URL } from '../consts';
 
 describe('absoluteUrl', () => {
@@ -62,7 +68,12 @@ describe('collectionPageSchema', () => {
   });
 
   it('includes ItemList numberOfItems when provided', () => {
-    const s = collectionPageSchema({ name: '태그', description: 'd', url: `${SITE_URL}/tags/`, itemCount: 12 });
+    const s = collectionPageSchema({
+      name: '태그',
+      description: 'd',
+      url: `${SITE_URL}/tags/`,
+      itemCount: 12,
+    });
     expect(s.mainEntity).toEqual({ '@type': 'ItemList', numberOfItems: 12 });
   });
 });

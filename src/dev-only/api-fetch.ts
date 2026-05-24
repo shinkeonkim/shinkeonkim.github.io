@@ -65,7 +65,8 @@ export const POST: APIRoute = async ({ request }) => {
     if (!res.ok) {
       return errorResponse(`원격 응답 ${res.status} ${res.statusText}`, 502);
     }
-    const contentType = res.headers.get('content-type')?.split(';')[0].trim() ?? 'application/octet-stream';
+    const contentType =
+      res.headers.get('content-type')?.split(';')[0].trim() ?? 'application/octet-stream';
     if (!contentType.startsWith('image/')) {
       return errorResponse(`이미지가 아닙니다 (${contentType})`, 415);
     }
@@ -75,7 +76,8 @@ export const POST: APIRoute = async ({ request }) => {
     if (buffer.length > FILE_UPLOAD_MAX_BYTES) return errorResponse(tooLargeMessage, 413);
 
     const urlExt = path.extname(target.pathname).toLowerCase();
-    const ext = (urlExt && /^\.[a-z0-9]+$/i.test(urlExt) ? urlExt : '') || EXT_BY_TYPE[contentType] || '.bin';
+    const ext =
+      (urlExt && /^\.[a-z0-9]+$/i.test(urlExt) ? urlExt : '') || EXT_BY_TYPE[contentType] || '.bin';
     const base = sanitize(path.basename(target.pathname, urlExt) || target.hostname);
     const timestamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
     const rand = Math.random().toString(36).slice(2, 8);

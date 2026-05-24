@@ -132,4 +132,6 @@ for (const url of urls) {
 }
 await fs.mkdir(path.dirname(CACHE_PATH), { recursive: true });
 await fs.writeFile(CACHE_PATH, JSON.stringify(cache, null, 2) + '\n', 'utf-8');
-console.log(`done: ${fetched} fetched, ${skipped} cached, ${urls.length} total → ${path.relative(REPO_ROOT, CACHE_PATH)}`);
+console.log(
+  `done: ${fetched} fetched, ${skipped} cached, ${urls.length} total → ${path.relative(REPO_ROOT, CACHE_PATH)}`,
+);
