@@ -1,5 +1,26 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 
+export interface CommitActivityWeek {
+  week: number;
+  total: number;
+  days: number[];
+}
+
+export interface RepoContributor {
+  login: string | null;
+  avatarUrl: string | null;
+  htmlUrl: string | null;
+  contributions: number;
+}
+
+export interface RepoRelease {
+  tag: string | null;
+  name: string | null;
+  publishedAt: string | null;
+  url: string | null;
+  prerelease: boolean;
+}
+
 export interface ProjectStatRepo {
   url: string;
   owner: string;
@@ -13,6 +34,14 @@ export interface ProjectStatRepo {
   stars?: number | null;
   forks?: number | null;
   language?: string | null;
+  pushedAt?: string | null;
+  defaultBranch?: string | null;
+  topics?: string[];
+  license?: string | null;
+  languages?: Record<string, number>;
+  commitActivity?: CommitActivityWeek[];
+  topContributors?: RepoContributor[];
+  releases?: RepoRelease[];
   error?: string;
 }
 

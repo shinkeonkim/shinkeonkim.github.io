@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -95,6 +96,90 @@ def github_headers(token: str | None) -> dict:
     return headers
 
 
+def fetch_stats_endpoint(
+    client: httpx.Client,
+    url: str,
+    *,
+    retries: int = 6,
+    delay: float = 5.0,
+) -> object | None:
+    """GitHub /stats/* endpoints return 202 while computing. Retry briefly."""
+    for attempt in range(retries):
+        res = client.get(url)
+        if res.status_code == 200:
+            try:
+                return res.json()
+            except ValueError:
+                return None
+        if res.status_code == 202 and attempt < retries - 1:
+            time.sleep(delay)
+            continue
+        return None
+    return None
+
+
+def fetch_commit_activity(client: httpx.Client, owner: str, repo: str) -> list[dict]:
+    data = fetch_stats_endpoint(
+        client, f"{GITHUB_API}/repos/{owner}/{repo}/stats/commit_activity"
+    )
+    if not isinstance(data, list):
+        return []
+    return [
+        {"week": w.get("week", 0), "total": w.get("total", 0), "days": w.get("days", [0] * 7)}
+        for w in data
+    ]
+
+
+def fetch_languages(client: httpx.Client, owner: str, repo: str) -> dict[str, int]:
+    res = client.get(f"{GITHUB_API}/repos/{owner}/{repo}/languages")
+    if res.status_code != 200:
+        return {}
+    data = res.json()
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_top_contributors(client: httpx.Client, owner: str, repo: str, limit: int = 10) -> list[dict]:
+    res = client.get(
+        f"{GITHUB_API}/repos/{owner}/{repo}/contributors",
+        params={"per_page": limit, "anon": "false"},
+    )
+    if res.status_code != 200:
+        return []
+    data = res.json()
+    if not isinstance(data, list):
+        return []
+    return [
+        {
+            "login": c.get("login"),
+            "avatarUrl": c.get("avatar_url"),
+            "htmlUrl": c.get("html_url"),
+            "contributions": c.get("contributions", 0),
+        }
+        for c in data
+        if c.get("type") != "Anonymous"
+    ]
+
+
+def fetch_releases(client: httpx.Client, owner: str, repo: str, limit: int = 5) -> list[dict]:
+    res = client.get(f"{GITHUB_API}/repos/{owner}/{repo}/releases", params={"per_page": limit})
+    if res.status_code != 200:
+        return []
+    data = res.json()
+    if not isinstance(data, list):
+        return []
+    return [
+        {
+            "tag": r.get("tag_name"),
+            "name": r.get("name") or r.get("tag_name"),
+            "publishedAt": r.get("published_at"),
+            "url": r.get("html_url"),
+            "prerelease": bool(r.get("prerelease")),
+        }
+        for r in data
+        if not r.get("draft")
+    ]
+
+
 def fetch_repo_stats(
     client: httpx.Client,
     owner: str,
@@ -122,11 +207,9 @@ def fetch_repo_stats(
     first_commit_date: str | None = None
     last_commit_date: str | None = None
     contrib_url = f"{GITHUB_API}/repos/{owner}/{repo}/stats/contributors"
-    contrib_res = client.get(contrib_url)
-    if contrib_res.status_code == 200:
-        contrib_data = contrib_res.json()
-        if isinstance(contrib_data, list):
-            for c in contrib_data:
+    contrib_data = fetch_stats_endpoint(client, contrib_url)
+    if isinstance(contrib_data, list):
+        for c in contrib_data:
                 if c.get("author", {}).get("login", "").lower() != username.lower():
                     continue
                 weeks = c.get("weeks", [])
@@ -139,6 +222,16 @@ def fetch_repo_stats(
                             first_commit_date = w_date
                         if last_commit_date is None or w_date > last_commit_date:
                             last_commit_date = w_date
+
+    commit_activity = fetch_commit_activity(client, owner, repo)
+    languages = fetch_languages(client, owner, repo)
+    top_contributors = fetch_top_contributors(client, owner, repo)
+    releases = fetch_releases(client, owner, repo)
+
+    license_info = info.get("license") or {}
+    license_id = license_info.get("spdx_id") if isinstance(license_info, dict) else None
+    if license_id == "NOASSERTION":
+        license_id = None
 
     return {
         "url": f"https://github.com/{owner}/{repo}",
@@ -153,6 +246,14 @@ def fetch_repo_stats(
         "stars": info.get("stargazers_count"),
         "forks": info.get("forks_count"),
         "language": info.get("language"),
+        "pushedAt": info.get("pushed_at"),
+        "defaultBranch": info.get("default_branch"),
+        "topics": info.get("topics") or [],
+        "license": license_id,
+        "languages": languages,
+        "commitActivity": commit_activity,
+        "topContributors": top_contributors,
+        "releases": releases,
     }
 
 
@@ -165,6 +266,40 @@ def parse_link_last_page(header: str | None) -> int:
             if m:
                 return int(m.group(1))
     return 0
+
+
+def merge_with_existing(new_stat: dict, existing_stat: dict | None) -> dict:
+    if not existing_stat:
+        return new_stat
+    merged = dict(new_stat)
+    fallback_fields = (
+        "commitActivity",
+        "languages",
+        "topContributors",
+        "releases",
+        "topics",
+        "firstCommitDate",
+        "lastCommitDate",
+        "additions",
+        "deletions",
+        "stars",
+        "forks",
+        "license",
+        "language",
+        "pushedAt",
+        "defaultBranch",
+    )
+    for field in fallback_fields:
+        val = merged.get(field)
+        is_empty = (
+            val is None
+            or val == ""
+            or (isinstance(val, (list, dict)) and len(val) == 0)
+            or (field in {"additions", "deletions"} and val == 0)
+        )
+        if is_empty and existing_stat.get(field):
+            merged[field] = existing_stat[field]
+    return merged
 
 
 def main(
@@ -203,6 +338,8 @@ def main(
             if not repos:
                 typer.echo(f"skip (no tracked repos): {project_id}")
                 continue
+            existing_repos = (existing or {}).get("repos", [])
+            existing_by_key = {(s.get("owner"), s.get("repo")): s for s in existing_repos}
             repo_stats: list[dict] = []
             for r in repos:
                 parsed = parse_repo_url(r["url"])
@@ -210,8 +347,10 @@ def main(
                     typer.echo(f"  invalid url: {r['url']}", err=True)
                     continue
                 owner, repo = parsed
+                existing_stat = existing_by_key.get((owner, repo))
                 try:
                     stat = fetch_repo_stats(client, owner, repo, username)
+                    stat = merge_with_existing(stat, existing_stat)
                     repo_stats.append(stat)
                     typer.echo(
                         f"  {owner}/{repo}: my {stat['myCommits']} / total {stat['totalCommits']}"
@@ -221,18 +360,16 @@ def main(
                         f"  {owner}/{repo}: HTTP {e.response.status_code} {e.response.text[:120]}",
                         err=True,
                     )
-                    repo_stats.append(
-                        {
-                            "url": r["url"],
-                            "owner": owner,
-                            "repo": repo,
-                            "totalCommits": 0,
-                            "myCommits": 0,
-                            "additions": 0,
-                            "deletions": 0,
-                            "error": f"HTTP {e.response.status_code}",
-                        }
-                    )
+                    fallback = existing_stat or {
+                        "url": r["url"],
+                        "owner": owner,
+                        "repo": repo,
+                        "totalCommits": 0,
+                        "myCommits": 0,
+                        "additions": 0,
+                        "deletions": 0,
+                    }
+                    repo_stats.append({**fallback, "error": f"HTTP {e.response.status_code}"})
             cache[project_id] = {
                 "repos": repo_stats,
                 "fetchedAt": datetime.now(timezone.utc).isoformat(),
