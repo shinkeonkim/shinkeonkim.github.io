@@ -70,6 +70,22 @@ export default defineConfig({
     resolve: {
       dedupe: ['three'],
     },
+    build: {
+      chunkSizeWarningLimit: 1000,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              if (id.includes('three') || id.includes('react-force-graph-3d')) return 'vendor-three';
+              if (id.includes('/d3-')) return 'vendor-d3';
+              if (id.includes('katex')) return 'vendor-katex';
+              if (id.includes('react-dom')) return 'vendor-react';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
   },
   markdown: {
     remarkPlugins: [
