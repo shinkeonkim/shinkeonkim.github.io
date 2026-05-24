@@ -155,6 +155,33 @@ export const api = {
       body: JSON.stringify({ action: 'push' }),
     });
   },
+  gitFetch(): Promise<{ ok: boolean; output: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'fetch' }),
+    });
+  },
+  gitPull(): Promise<{ ok: boolean; output: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pull' }),
+    });
+  },
+  gitAmend(
+    files: string[],
+    message?: string,
+  ): Promise<{ ok: boolean; committed: string; files: string[] }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'amend', files, message }),
+    });
+  },
+  gitBranches(): Promise<{ ok: boolean; branches: { current: string; all: string[] } }> {
+    return jsonRequest('/_editor/api/git?action=branches');
+  },
   listSources(): Promise<{ sources: SourceSummary[] }> {
     return jsonRequest<{ sources: SourceSummary[] }>('/_editor/api/sources');
   },

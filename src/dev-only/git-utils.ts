@@ -100,3 +100,61 @@ export async function push(): Promise<{ pushed: boolean; output: string }> {
     (result.pushed ?? []).map((p) => `${p.local} → ${p.remote}`).join('\n') || 'push complete';
   return { pushed: true, output };
 }
+
+export async function fetchOrigin(): Promise<{ output: string }> {
+  const remotes = await git().getRemotes();
+  if (remotes.length === 0) throw new Error('no git remote configured');
+  const result = await git().fetch();
+  const lines: string[] = [];
+  if (Array.isArray(result.updated) && result.updated.length > 0) {
+    lines.push(`updated ${result.updated.length} ref(s)`);
+  }
+  if (Array.isArray(result.deleted) && result.deleted.length > 0) {
+    lines.push(`deleted ${result.deleted.length} ref(s)`);
+  }
+  if (lines.length === 0) lines.push('no updates');
+  return { output: lines.join('\n') };
+}
+
+export async function pull(): Promise<{ output: string }> {
+  const remotes = await git().getRemotes();
+  if (remotes.length === 0) throw new Error('no git remote configured');
+  const result = await git().pull(['--ff-only']);
+  const changed = Array.isArray(result.files) ? result.files.length : 0;
+  const summary = `pull complete (${changed} file change${changed === 1 ? '' : 's'})`;
+  return { output: summary };
+}
+
+export async function amendCommit(
+  files: string[],
+  message?: string,
+): Promise<{ committed: string; files: string[] }> {
+  const filtered: string[] = [];
+  for (const raw of files) {
+    const norm = normalizeRel(raw);
+    if (!isAllowed(norm)) throw new Error(`not allowed: ${norm}`);
+    filtered.push(norm);
+  }
+  if (filtered.length > 0) {
+    await git().add(filtered);
+  }
+  const args = ['commit', '--amend'];
+  if (message && message.trim()) {
+    args.push('-m', message.trim());
+  } else {
+    args.push('--no-edit');
+  }
+  await git().raw(args);
+  const sha = (await git().revparse(['HEAD'])).trim();
+  return { committed: sha, files: filtered };
+}
+
+export interface BranchSummary {
+  current: string;
+  all: string[];
+}
+
+export async function listBranches(): Promise<BranchSummary> {
+  const result = await git().branchLocal();
+  return { current: result.current, all: result.all };
+}

@@ -8,6 +8,7 @@ export class GitPanel {
   private status: GitStatusPayload | null = null;
   private selected = new Set<string>();
   private message = '';
+  private amend = false;
   private busy = false;
 
   constructor(root: HTMLElement) {
@@ -111,12 +112,22 @@ export class GitPanel {
           <span>커밋 메시지</span>
           <textarea data-git-message rows="3" placeholder="요약 한 줄&#10;&#10;본문(선택)">${escapeHtml(this.message)}</textarea>
         </label>
+        <label class="git-panel-amend-label">
+          <input type="checkbox" data-git-amend-toggle ${this.amend ? 'checked' : ''} />
+          마지막 커밋에 추가 (--amend, 메시지 비우면 그대로 유지)
+        </label>
         <div class="git-panel-commit-actions">
           <button type="button" class="editor-btn editor-btn-primary" data-git-commit ${this.busy ? 'disabled' : ''}>
-            선택한 파일 커밋 (${this.selected.size})
+            ${this.amend ? '마지막 커밋 수정 (' + this.selected.size + ')' : '선택한 파일 커밋 (' + this.selected.size + ')'}
+          </button>
+          <button type="button" class="editor-btn" data-git-fetch ${s.hasRemote && !this.busy ? '' : 'disabled'}>
+            ↓ fetch
+          </button>
+          <button type="button" class="editor-btn" data-git-pull ${s.hasRemote && !this.busy ? '' : 'disabled'}>
+            ↓ pull (ff-only)
           </button>
           <button type="button" class="editor-btn" data-git-push ${s.hasRemote && !this.busy ? '' : 'disabled'}>
-            origin 으로 push
+            ↑ push
           </button>
         </div>
       </div>
@@ -138,6 +149,12 @@ export class GitPanel {
     const messageEl = this.root.querySelector<HTMLTextAreaElement>('[data-git-message]');
     messageEl?.addEventListener('input', () => {
       this.message = messageEl.value;
+    });
+
+    const amendEl = this.root.querySelector<HTMLInputElement>('[data-git-amend-toggle]');
+    amendEl?.addEventListener('change', () => {
+      this.amend = amendEl.checked;
+      this.render();
     });
 
     this.root
@@ -165,6 +182,40 @@ export class GitPanel {
     this.root.querySelector('[data-git-commit]')?.addEventListener('click', async () => {
       if (this.selected.size === 0) {
         setStatus('커밋할 파일을 선택하세요', 'error');
+        return;
+      }
+      if (this.amend) {
+        const confirmed = await confirmModal({
+          title: '마지막 커밋 수정 (--amend)',
+          description:
+            `${this.selected.size}개 파일을 마지막 커밋에 추가합니다.\n` +
+            (this.message.trim()
+              ? `메시지를 새로 씁니다:\n${this.message.trim()}`
+              : '메시지는 그대로 유지합니다.') +
+            '\n\n이미 push 된 경우 force-push 가 필요할 수 있습니다.',
+          confirmLabel: 'Amend',
+        });
+        if (!confirmed) return;
+        this.busy = true;
+        this.render();
+        try {
+          const res = await api.gitAmend(
+            Array.from(this.selected),
+            this.message.trim() || undefined,
+          );
+          setStatus(`amend 완료: ${res.committed}`, 'ok');
+          this.selected.clear();
+          this.message = '';
+          this.amend = false;
+          this.showOutput(`✅ amend ${res.committed}\n${res.files.join('\n')}`);
+          await this.refresh();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus('amend 실패: ' + msg, 'error');
+          this.showOutput(`❌ ${msg}`);
+        } finally {
+          this.busy = false;
+        }
         return;
       }
       if (!this.message.trim()) {
@@ -212,6 +263,48 @@ export class GitPanel {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setStatus('push 실패: ' + msg, 'error');
+        this.showOutput(`❌ ${msg}`);
+      } finally {
+        this.busy = false;
+      }
+    });
+
+    this.root.querySelector('[data-git-fetch]')?.addEventListener('click', async () => {
+      this.busy = true;
+      this.render();
+      try {
+        const res = await api.gitFetch();
+        setStatus('fetch 완료', 'ok');
+        this.showOutput(`✅ fetch\n${res.output}`);
+        await this.refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('fetch 실패: ' + msg, 'error');
+        this.showOutput(`❌ ${msg}`);
+      } finally {
+        this.busy = false;
+      }
+    });
+
+    this.root.querySelector('[data-git-pull]')?.addEventListener('click', async () => {
+      const confirmed = await confirmModal({
+        title: 'origin 에서 pull (ff-only)',
+        description:
+          '현재 브랜치를 origin 의 같은 브랜치로 fast-forward 합니다.\n' +
+          '병합 충돌 시 자동 중단합니다. 진행할까요?',
+        confirmLabel: 'Pull',
+      });
+      if (!confirmed) return;
+      this.busy = true;
+      this.render();
+      try {
+        const res = await api.gitPull();
+        setStatus('pull 완료', 'ok');
+        this.showOutput(`✅ pull\n${res.output}`);
+        await this.refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('pull 실패: ' + msg, 'error');
         this.showOutput(`❌ ${msg}`);
       } finally {
         this.busy = false;

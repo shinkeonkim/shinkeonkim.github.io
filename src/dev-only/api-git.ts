@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { commit, getDiff, getStatus, push } from './git-utils';
+import { amendCommit, commit, fetchOrigin, getDiff, getStatus, listBranches, pull, push } from './git-utils';
 import { notFoundResponse } from './api-utils';
 
 export const prerender = false;
@@ -39,6 +39,10 @@ export const GET: APIRoute = async ({ url }) => {
       const diff = await getDiff(file);
       return jsonOk({ diff });
     }
+    if (action === 'branches') {
+      const branches = await listBranches();
+      return jsonOk({ branches });
+    }
     return jsonError(`unknown action: ${action}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -74,6 +78,19 @@ export const POST: APIRoute = async ({ request }) => {
     }
     if (body.action === 'push') {
       const result = await push();
+      return jsonOk(result);
+    }
+    if (body.action === 'fetch') {
+      const result = await fetchOrigin();
+      return jsonOk(result);
+    }
+    if (body.action === 'pull') {
+      const result = await pull();
+      return jsonOk(result);
+    }
+    if (body.action === 'amend') {
+      const files = Array.isArray(body.files) ? body.files : [];
+      const result = await amendCommit(files, body.message);
       return jsonOk(result);
     }
     return jsonError(`unknown action: ${body.action}`);
