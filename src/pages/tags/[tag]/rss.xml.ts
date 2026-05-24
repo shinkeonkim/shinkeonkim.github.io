@@ -17,13 +17,14 @@ export async function GET(context: APIContext) {
   const tag = context.params.tag!;
   const posts = sortByDateDesc(await getPublishedPosts())
     .filter((p) => p.data.tags.includes(tag))
-    .slice(0, 50);
+    .slice(0, 30);
+  const items = await Promise.all(posts.map((p) => postToFeedItem(p)));
 
   return rss({
     title: `${SITE_TITLE} - #${tag}`,
     description: `'${tag}' 태그가 붙은 글 모음`,
     site: context.site ?? 'https://shinkeonkim.com',
     customData: `<language>ko-KR</language>`,
-    items: posts.map(postToFeedItem),
+    items,
   });
 }

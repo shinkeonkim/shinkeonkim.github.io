@@ -1,4 +1,5 @@
 import type { CollectionEntry } from 'astro:content';
+import { createMarkdownProcessor } from '@astrojs/markdown-remark';
 import { SITE_AUTHOR, SITE_URL } from '../consts';
 
 export interface FeedItem {
@@ -8,10 +9,45 @@ export interface FeedItem {
   link: string;
   categories?: string[];
   author?: string;
+  content?: string;
 }
 
-export function postToFeedItem(post: CollectionEntry<'posts'>): FeedItem {
-  return {
+let processorPromise: ReturnType<typeof createMarkdownProcessor> | null = null;
+async function getProcessor() {
+  if (!processorPromise) processorPromise = createMarkdownProcessor({});
+  return processorPromise;
+}
+
+function stripMdx(body: string): string {
+  return body
+    .replace(/^import\s+[^\n]+;\s*$/gm, '')
+    .replace(/<([A-Z][A-Za-z0-9]*)([^>]*)\/>/g, '<!-- mdx-component: $1 -->')
+    .replace(/<([A-Z][A-Za-z0-9]*)([^>]*)>([\s\S]*?)<\/\1>/g, '<!-- mdx-component: $1 -->\n$3');
+}
+
+function absolutizeUrls(html: string): string {
+  return html
+    .replace(/(href|src)="\/(?!\/)/g, `$1="${SITE_URL}/`)
+    .replace(/(href|src)='\/(?!\/)/g, `$1='${SITE_URL}/`);
+}
+
+export async function renderBodyForFeed(rawBody: string): Promise<string> {
+  if (!rawBody) return '';
+  try {
+    const processor = await getProcessor();
+    const stripped = stripMdx(rawBody);
+    const result = await processor.render(stripped);
+    return absolutizeUrls(String(result.code ?? ''));
+  } catch {
+    return '';
+  }
+}
+
+export async function postToFeedItem(
+  post: CollectionEntry<'posts'>,
+  options: { fullContent?: boolean } = {},
+): Promise<FeedItem> {
+  const item: FeedItem = {
     title: post.data.title,
     description: post.data.description ?? '',
     pubDate: post.data.date,
@@ -19,6 +55,11 @@ export function postToFeedItem(post: CollectionEntry<'posts'>): FeedItem {
     categories: post.data.tags,
     author: SITE_AUTHOR,
   };
+  if (options.fullContent) {
+    const body = (post as { body?: string }).body ?? '';
+    item.content = await renderBodyForFeed(body);
+  }
+  return item;
 }
 
 export function noteToFeedItem(note: CollectionEntry<'notes'>): FeedItem {
