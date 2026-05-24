@@ -182,6 +182,20 @@ export const api = {
   gitBranches(): Promise<{ ok: boolean; branches: { current: string; all: string[] } }> {
     return jsonRequest('/_editor/api/git?action=branches');
   },
+  gitCheckout(branch: string): Promise<{ ok: boolean; branch: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'checkout', branch }),
+    });
+  },
+  gitCreateBranch(branch: string, checkout = true): Promise<{ ok: boolean; branch: string }> {
+    return jsonRequest('/_editor/api/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'createBranch', branch, checkout }),
+    });
+  },
   listSources(): Promise<{ sources: SourceSummary[] }> {
     return jsonRequest<{ sources: SourceSummary[] }>('/_editor/api/sources');
   },

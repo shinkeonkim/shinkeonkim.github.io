@@ -10,6 +10,7 @@ export class GitPanel {
   private message = '';
   private amend = false;
   private busy = false;
+  private branches: { current: string; all: string[] } | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -18,8 +19,12 @@ export class GitPanel {
 
   async refresh(): Promise<void> {
     try {
-      const res = await api.gitStatus();
-      this.status = res.status;
+      const [statusRes, branchesRes] = await Promise.all([
+        api.gitStatus(),
+        api.gitBranches().catch(() => null),
+      ]);
+      this.status = statusRes.status;
+      if (branchesRes) this.branches = branchesRes.branches;
       const allowedPaths = new Set(this.status.files.filter((f) => f.allowed).map((f) => f.path));
       for (const p of Array.from(this.selected)) if (!allowedPaths.has(p)) this.selected.delete(p);
       this.render();
@@ -68,6 +73,21 @@ export class GitPanel {
         (s.ahead || s.behind ? ` <small>(↑${s.ahead} ↓${s.behind})</small>` : '')
       : '<em>(no branch)</em>';
 
+    const branchSwitcher = this.branches
+      ? `<div class="git-panel-branch-row">
+          <label class="git-panel-branch-label">전환:
+            <select data-git-branch-select>
+              ${this.branches.all
+                .map(
+                  (b) => `<option value="${escapeHtml(b)}" ${b === this.branches?.current ? 'selected' : ''}>${escapeHtml(b)}</option>`,
+                )
+                .join('')}
+            </select>
+          </label>
+          <button type="button" class="editor-btn editor-btn-small" data-git-new-branch>+ 새 브랜치</button>
+        </div>`
+      : '';
+
     const filesHtml =
       allowedFiles.length === 0
         ? '<p class="git-panel-empty">콘텐츠/리소스 파일에 변경 사항이 없습니다.</p>'
@@ -105,6 +125,7 @@ export class GitPanel {
           <button type="button" class="editor-btn editor-btn-small" data-git-close>✕ 닫기</button>
         </div>
       </header>
+      ${branchSwitcher}
       ${filesHtml}
       ${blockedHtml}
       <div class="git-panel-commit">
@@ -161,6 +182,52 @@ export class GitPanel {
       .querySelector('[data-git-refresh]')
       ?.addEventListener('click', () => void this.refresh());
     this.root.querySelector('[data-git-close]')?.addEventListener('click', () => this.close());
+
+    const branchSelect = this.root.querySelector<HTMLSelectElement>('[data-git-branch-select]');
+    branchSelect?.addEventListener('change', async () => {
+      const target = branchSelect.value;
+      if (!this.branches || target === this.branches.current) return;
+      const confirmed = await confirmModal({
+        title: `브랜치 전환: ${target}`,
+        description: `${this.branches.current} → ${target} 로 체크아웃합니다.\n작업 트리가 깨끗해야 합니다 (커밋 또는 stash 필요).`,
+        confirmLabel: '전환',
+      });
+      if (!confirmed) {
+        branchSelect.value = this.branches.current;
+        return;
+      }
+      this.busy = true;
+      this.render();
+      try {
+        const res = await api.gitCheckout(target);
+        setStatus(`브랜치 전환됨: ${res.branch}`, 'ok');
+        await this.refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('체크아웃 실패: ' + msg, 'error');
+        this.showOutput(`❌ ${msg}`);
+      } finally {
+        this.busy = false;
+      }
+    });
+
+    this.root.querySelector('[data-git-new-branch]')?.addEventListener('click', async () => {
+      const name = window.prompt('새 브랜치 이름 (예: feature/x)', '');
+      if (!name) return;
+      this.busy = true;
+      this.render();
+      try {
+        const res = await api.gitCreateBranch(name, true);
+        setStatus(`새 브랜치 생성/체크아웃: ${res.branch}`, 'ok');
+        await this.refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('브랜치 생성 실패: ' + msg, 'error');
+        this.showOutput(`❌ ${msg}`);
+      } finally {
+        this.busy = false;
+      }
+    });
 
     this.root.querySelectorAll<HTMLElement>('[data-git-diff]').forEach((btn) => {
       btn.addEventListener('click', async () => {

@@ -1,5 +1,16 @@
 import type { APIRoute } from 'astro';
-import { amendCommit, commit, fetchOrigin, getDiff, getStatus, listBranches, pull, push } from './git-utils';
+import {
+  amendCommit,
+  checkoutBranch,
+  commit,
+  createBranch,
+  fetchOrigin,
+  getDiff,
+  getStatus,
+  listBranches,
+  pull,
+  push,
+} from './git-utils';
 import { notFoundResponse } from './api-utils';
 
 export const prerender = false;
@@ -54,6 +65,8 @@ interface GitBody {
   action?: string;
   files?: string[];
   message?: string;
+  branch?: string;
+  checkout?: boolean;
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -91,6 +104,16 @@ export const POST: APIRoute = async ({ request }) => {
     if (body.action === 'amend') {
       const files = Array.isArray(body.files) ? body.files : [];
       const result = await amendCommit(files, body.message);
+      return jsonOk(result);
+    }
+    if (body.action === 'checkout') {
+      if (!body.branch) return jsonError('branch required');
+      const result = await checkoutBranch(body.branch);
+      return jsonOk(result);
+    }
+    if (body.action === 'createBranch') {
+      if (!body.branch) return jsonError('branch required');
+      const result = await createBranch(body.branch, body.checkout !== false);
       return jsonOk(result);
     }
     return jsonError(`unknown action: ${body.action}`);
