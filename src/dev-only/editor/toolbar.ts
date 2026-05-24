@@ -5,6 +5,7 @@ export interface ToolbarDeps {
   textarea: HTMLTextAreaElement;
   openImagePicker: () => void;
   openImageDialogFor: (purpose: 'cover' | 'thumbnail') => void;
+  openReferencesPicker: () => void;
 }
 
 interface Selection {
@@ -349,6 +350,9 @@ export class MarkdownToolbar {
         if (tags.length > 0) this.upsertFrontmatter({ tags });
         break;
       }
+      case 'fm-references':
+        this.deps.openReferencesPicker();
+        break;
       default:
         break;
     }

@@ -1,5 +1,6 @@
 export type Ext = '.md' | '.mdx';
-export type CollectionName = 'posts' | 'notes' | 'wiki';
+export type CollectionName = 'posts' | 'notes' | 'wiki' | 'sources' | 'projects';
+export const COLLECTION_NAMES: CollectionName[] = ['posts', 'notes', 'wiki', 'sources', 'projects'];
 
 export interface CurrentFile {
   collection: CollectionName;

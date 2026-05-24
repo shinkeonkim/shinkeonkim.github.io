@@ -5,6 +5,7 @@ import { GitPanel } from './git-panel';
 import { ImageDialogController } from './image-dialog';
 import { confirmModal } from './modal';
 import { PreviewPane } from './preview';
+import { ReferencesPicker } from './references-picker';
 import { state } from './state';
 import { initStatus, setStatus } from './status';
 import { FileTree } from './tree';
@@ -14,13 +15,20 @@ import { WikilinkAutocomplete } from './wikilink';
 import type { CollectionName, CurrentFile, Ext } from './state';
 
 function template(collection: CollectionName, slug: string): string {
+  const filename = slug.split('/').pop() ?? slug;
   if (collection === 'posts') {
-    return `---\ntitle: "${slug.split('/').pop() ?? slug}"\ndescription: ""\ndate: ${todayIsoDate()}\ntags: []\ndraft: true\n---\n\n`;
+    return `---\ntitle: "${filename}"\ndescription: ""\ndate: ${todayIsoDate()}\ntags: []\ndraft: true\n---\n\n`;
   }
   if (collection === 'notes') {
     return `---\ndate: ${todayIsoTime()}\ntags: []\n---\n\n`;
   }
-  return `---\ntitle: "${slug.split('/').pop() ?? slug}"\naliases: []\ntags: []\nupdated: ${todayIsoDate()}\n---\n\n## 개요\n\n`;
+  if (collection === 'sources') {
+    return `---\ntitle: "${filename}"\ntype: website\nauthor: ""\nurl: ""\ntags: []\n---\n\n출처에 대한 간단한 설명을 작성하세요.\n`;
+  }
+  if (collection === 'projects') {
+    return `---\ntitle: "${filename}"\nsummary: ""\nstart: ${todayIsoDate()}\nteamSize: 1\nrole: ""\nstatus: ongoing\nrepos: []\nstack: []\nlinks: []\ntags: []\n---\n\n## 무엇을 만들었나\n\n## 고민\n\n## 담당\n\n`;
+  }
+  return `---\ntitle: "${filename}"\naliases: []\ntags: []\nupdated: ${todayIsoDate()}\n---\n\n## 개요\n\n`;
 }
 
 interface EditorUi {
@@ -119,10 +127,27 @@ export function initEditor(): void {
 
   initStatus(statusEl);
 
+  const referencesPicker = new ReferencesPicker({
+    getContent: () => textarea.value,
+    setContent: (next) => {
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      textarea.value = next;
+      try {
+        textarea.selectionStart = Math.min(start, next.length);
+        textarea.selectionEnd = Math.min(end, next.length);
+      } catch {
+        return;
+      }
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+  });
+
   const toolbar = new MarkdownToolbar({
     textarea,
     openImagePicker: () => imageDialog.openFor('body'),
     openImageDialogFor: (purpose) => imageDialog.openFor(purpose),
+    openReferencesPicker: () => void referencesPicker.open(),
   });
   toolbar.bind(toolbarRoot);
 

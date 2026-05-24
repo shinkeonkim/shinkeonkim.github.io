@@ -49,7 +49,7 @@ export class WikilinkAutocomplete {
           });
         }
       }
-      for (const c of ['posts', 'wiki', 'notes'] as CollectionName[]) {
+      for (const c of ['posts', 'wiki', 'notes', 'projects'] as CollectionName[]) {
         walk(c, data.tree[c] ?? []);
       }
       this.pages = pages;

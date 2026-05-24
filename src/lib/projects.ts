@@ -8,11 +8,11 @@ export interface ProjectStatRepo {
   myCommits: number;
   additions: number;
   deletions: number;
-  firstCommitDate?: string;
-  lastCommitDate?: string;
-  stars?: number;
-  forks?: number;
-  language?: string;
+  firstCommitDate?: string | null;
+  lastCommitDate?: string | null;
+  stars?: number | null;
+  forks?: number | null;
+  language?: string | null;
   error?: string;
 }
 

@@ -42,6 +42,7 @@ const notes = defineCollection({
   schema: z.object({
     date: z.coerce.date(),
     tags: z.array(z.string()).default([]),
+    references: z.array(referenceItem).default([]),
   }),
 });
 
@@ -102,6 +103,7 @@ const projects = defineCollection({
     featured: z.boolean().default(false),
     draft: z.boolean().default(false),
     tags: z.array(z.string()).default([]),
+    references: z.array(referenceItem).default([]),
   }),
 });
 

@@ -4,7 +4,8 @@ import { setStatus } from './status';
 import type { DraggedItem, DropTarget } from './tree';
 import type { CollectionName, Ext } from './state';
 
-const COLLECTION_OPTIONS = (['posts', 'notes', 'wiki'] as CollectionName[]).map((c) => ({ value: c, label: c }));
+import { COLLECTION_NAMES } from './state';
+const COLLECTION_OPTIONS = COLLECTION_NAMES.map((c) => ({ value: c, label: c }));
 
 function splitNameAndExt(name: string, fallbackExt: Ext): { base: string; ext: Ext } {
   if (name.endsWith('.mdx')) return { base: name.slice(0, -4), ext: '.mdx' };

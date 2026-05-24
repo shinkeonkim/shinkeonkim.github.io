@@ -42,6 +42,10 @@ export default function devEditor() {
           pattern: '/_editor/api/git',
           entrypoint: path.join(here, 'api-git.ts'),
         });
+        injectRoute({
+          pattern: '/_editor/api/sources',
+          entrypoint: path.join(here, 'api-sources.ts'),
+        });
       },
     },
   };

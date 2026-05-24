@@ -1,5 +1,6 @@
 import { api, type TreeEntry } from './api';
 import { escapeHtml } from './utils';
+import { COLLECTION_NAMES } from './state';
 import type { CollectionName, CurrentFile, Ext } from './state';
 
 export interface DraggedFile {
@@ -86,9 +87,8 @@ export class FileTree {
 
   private render(): void {
     if (!this.treeData) return;
-    const collections: CollectionName[] = ['posts', 'notes', 'wiki'];
     const parts: string[] = [];
-    for (const collection of collections) {
+    for (const collection of COLLECTION_NAMES) {
       const entries = this.treeData[collection] ?? [];
       parts.push(this.renderCollection(collection, entries));
     }

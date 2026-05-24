@@ -55,6 +55,18 @@ export interface GitStatusPayload {
   files: GitFile[];
 }
 
+export interface SourceSummary {
+  id: string;
+  title: string;
+  type: string;
+  author?: string;
+  publisher?: string;
+  year?: number;
+  url?: string;
+  aliases: string[];
+  tags: string[];
+}
+
 async function jsonRequest<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, init);
   let data: unknown;
@@ -131,5 +143,8 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'push' }),
     });
+  },
+  listSources(): Promise<{ sources: SourceSummary[] }> {
+    return jsonRequest<{ sources: SourceSummary[] }>('/_editor/api/sources');
   },
 };
