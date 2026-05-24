@@ -30,7 +30,7 @@ export const SITE_KEYWORDS = [
   'shinkeonkim',
 ];
 
-export const SITE_SOCIAL = ['https://github.com/shinkeonkim', 'https://www.acmicpc.net/user/koa'];
+export const SITE_SOCIAL = ['https://github.com/shinkeonkim'];
 
 export const POSTS_PER_PAGE = 20;
 export const NOTES_PER_PAGE = 30;
