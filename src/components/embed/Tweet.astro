@@ -1,0 +1,89 @@
+---
+interface Props {
+  id: string;
+  user?: string;
+  align?: 'left' | 'center';
+  theme?: 'light' | 'dark' | 'auto';
+}
+
+const { id, user = 'twitter', align = 'center', theme = 'auto' } = Astro.props as Props;
+const fallbackUrl = `https://twitter.com/${user}/status/${id}`;
+---
+<div
+  class="tweet-embed"
+  data-tweet-id={id}
+  data-tweet-align={align}
+  data-tweet-theme={theme}
+>
+  <blockquote class="twitter-tweet" data-conversation="none">
+    <a href={fallbackUrl}>tweet</a>
+  </blockquote>
+  <noscript>
+    <a href={fallbackUrl} rel="noopener" target="_blank">View tweet ↗</a>
+  </noscript>
+</div>
+
+<script>
+  function ensureWidgets(): Promise<void> {
+    if ((window as unknown as { twttr?: { widgets: unknown } }).twttr?.widgets) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-twttr]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve());
+        return;
+      }
+      const s = document.createElement('script');
+      s.src = 'https://platform.twitter.com/widgets.js';
+      s.async = true;
+      s.charset = 'utf-8';
+      s.dataset.twttr = 'true';
+      s.addEventListener('load', () => resolve());
+      document.head.appendChild(s);
+    });
+  }
+
+  async function renderTweets() {
+    const tweets = document.querySelectorAll<HTMLElement>('.tweet-embed');
+    if (tweets.length === 0) return;
+    await ensureWidgets();
+    const twttr = (window as unknown as {
+      twttr?: { widgets?: { createTweet?: (id: string, target: HTMLElement, opts?: Record<string, unknown>) => Promise<unknown> } };
+    }).twttr;
+    if (!twttr?.widgets?.createTweet) return;
+    const isDark = document.documentElement.classList.contains('dark');
+    for (const el of tweets) {
+      if (el.dataset.rendered === 'true') continue;
+      const id = el.dataset.tweetId;
+      if (!id) continue;
+      const themeAttr = el.dataset.tweetTheme;
+      const theme = themeAttr === 'dark' || themeAttr === 'light' ? themeAttr : isDark ? 'dark' : 'light';
+      const align = el.dataset.tweetAlign === 'left' ? 'left' : 'center';
+      el.innerHTML = '';
+      try {
+        await twttr.widgets.createTweet(id, el, { theme, align, conversation: 'none' });
+        el.dataset.rendered = 'true';
+      } catch (err) {
+        console.error('Tweet render failed:', err);
+      }
+    }
+  }
+  renderTweets();
+  document.addEventListener('astro:page-load', renderTweets);
+</script>
+
+<style is:global>
+  .tweet-embed {
+    margin: 1.25rem 0;
+    display: flex;
+    justify-content: center;
+    min-height: 4rem;
+  }
+  .tweet-embed[data-tweet-align='left'] {
+    justify-content: flex-start;
+  }
+  .tweet-embed .twitter-tweet {
+    margin: 0 !important;
+  }
+</style>
