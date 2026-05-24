@@ -48,6 +48,5 @@ export const NAV_ITEMS = [
   { href: '/notes/', label: '한줄노트' },
   { href: '/wiki/', label: '위키' },
   { href: '/graph/', label: '그래프' },
-  { href: '/search/', label: '검색' },
   { href: '/about/', label: '소개' },
 ] as const;
