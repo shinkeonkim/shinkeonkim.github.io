@@ -96,11 +96,14 @@ const projects = defineCollection({
     cover: z.string().optional(),
     repos: z
       .array(
-        z.object({
-          url: z.url(),
-          label: z.string().optional(),
-          track: z.boolean().default(true),
-        }),
+        z.preprocess(
+          (v) => (typeof v === 'string' ? { url: v } : v),
+          z.object({
+            url: z.url(),
+            label: z.string().optional(),
+            track: z.boolean().default(true),
+          }),
+        ),
       )
       .default([]),
     stack: z.array(z.string()).default([]),
