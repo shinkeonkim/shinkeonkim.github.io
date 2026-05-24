@@ -7,6 +7,7 @@ import rehypeKatex from 'rehype-katex';
 import remarkWikilink from '../plugins/remark-wikilink.mjs';
 import remarkMermaid from '../plugins/remark-mermaid.mjs';
 import remarkMathLenient from '../plugins/remark-math-lenient.mjs';
+import remarkUrlPreview from '../plugins/remark-url-preview.mjs';
 
 export const prerender = false;
 
@@ -16,7 +17,7 @@ function getProcessor() {
     processorPromise = createMarkdownProcessor({
       gfm: true,
       smartypants: true,
-      remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath],
+      remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath, remarkUrlPreview],
       rehypePlugins: [[rehypeKatex, { output: 'html', strict: 'ignore' }]],
       shikiConfig: {
         themes: { light: 'github-light', dark: 'one-dark-pro' },

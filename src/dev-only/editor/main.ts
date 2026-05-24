@@ -10,6 +10,7 @@ import { state } from './state';
 import { initStatus, setStatus } from './status';
 import { FileTree } from './tree';
 import { MarkdownToolbar } from './toolbar';
+import { UrlPreviewController } from './url-preview';
 import { todayIsoDate, todayIsoTime, urlFor } from './utils';
 import { WikilinkAutocomplete } from './wikilink';
 import type { CollectionName, CurrentFile, Ext } from './state';
@@ -143,11 +144,15 @@ export function initEditor(): void {
     },
   });
 
+  const urlPreview = new UrlPreviewController(textarea);
+
   const toolbar = new MarkdownToolbar({
     textarea,
     openImagePicker: () => imageDialog.openFor('body'),
     openImageDialogFor: (purpose) => imageDialog.openFor(purpose),
     openReferencesPicker: () => void referencesPicker.open(),
+    insertUrlPreview: () => urlPreview.insertNew(),
+    toggleUrlPreviewAtCursor: () => urlPreview.toggleAtCursor(),
   });
   toolbar.bind(toolbarRoot);
 

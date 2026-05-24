@@ -11,6 +11,7 @@ import rehypeKatex from 'rehype-katex';
 import remarkWikilink from './src/plugins/remark-wikilink.mjs';
 import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 import remarkMathLenient from './src/plugins/remark-math-lenient.mjs';
+import remarkUrlPreview from './src/plugins/remark-url-preview.mjs';
 import devEditor from './src/dev-only/integration.mjs';
 
 export default defineConfig({
@@ -29,7 +30,7 @@ export default defineConfig({
     },
   },
   markdown: {
-    remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath],
+    remarkPlugins: [remarkMermaid, remarkAlert, remarkWikilink, remarkMathLenient, remarkMath, remarkUrlPreview],
     rehypePlugins: [[rehypeKatex, { output: 'html', strict: 'ignore' }]],
     shikiConfig: {
       themes: {

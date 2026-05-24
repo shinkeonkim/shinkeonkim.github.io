@@ -147,4 +147,20 @@ export const api = {
   listSources(): Promise<{ sources: SourceSummary[] }> {
     return jsonRequest<{ sources: SourceSummary[] }>('/_editor/api/sources');
   },
+  urlPreview(url: string, force = false): Promise<{ preview: UrlPreviewResponse; cached: boolean }> {
+    const q = new URLSearchParams({ url });
+    if (force) q.set('force', '1');
+    return jsonRequest(`/_editor/api/url-preview?${q.toString()}`);
+  },
 };
+
+export interface UrlPreviewResponse {
+  url: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  favicon?: string;
+  siteName?: string;
+  fetchedAt: string;
+  error?: string;
+}

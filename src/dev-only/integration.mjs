@@ -46,6 +46,10 @@ export default function devEditor() {
           pattern: '/_editor/api/sources',
           entrypoint: path.join(here, 'api-sources.ts'),
         });
+        injectRoute({
+          pattern: '/_editor/api/url-preview',
+          entrypoint: path.join(here, 'api-url-preview.ts'),
+        });
       },
     },
   };

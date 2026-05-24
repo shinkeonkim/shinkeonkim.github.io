@@ -6,6 +6,8 @@ export interface ToolbarDeps {
   openImagePicker: () => void;
   openImageDialogFor: (purpose: 'cover' | 'thumbnail') => void;
   openReferencesPicker: () => void;
+  insertUrlPreview: () => Promise<void>;
+  toggleUrlPreviewAtCursor: () => Promise<void>;
 }
 
 interface Selection {
@@ -352,6 +354,12 @@ export class MarkdownToolbar {
       }
       case 'fm-references':
         this.deps.openReferencesPicker();
+        break;
+      case 'url-preview':
+        await this.deps.insertUrlPreview();
+        break;
+      case 'url-preview-toggle':
+        await this.deps.toggleUrlPreviewAtCursor();
         break;
       default:
         break;
