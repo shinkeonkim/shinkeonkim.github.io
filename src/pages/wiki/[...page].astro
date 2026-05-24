@@ -2,7 +2,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import Pagination from '../../components/Pagination.astro';
-import { WIKI_PER_PAGE } from '../../consts';
+import { SITE_LOCALE, WIKI_PER_PAGE } from '../../consts';
 import type { GetStaticPaths, Page } from 'astro';
 
 export const getStaticPaths = (async ({ paginate }) => {
@@ -14,20 +14,108 @@ export const getStaticPaths = (async ({ paginate }) => {
 
 type Props = { page: Page<CollectionEntry<'wiki'>> };
 const { page } = Astro.props as Props;
+
+const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
+const isLanding = page.currentPage === 1;
+
+interface StubInfo {
+  entry: CollectionEntry<'wiki'>;
+  chars: number;
+}
+
+let recentUpdates: CollectionEntry<'wiki'>[] = [];
+let stubs: StubInfo[] = [];
+
+if (isLanding) {
+  const all = await getCollection('wiki');
+  recentUpdates = all
+    .filter((e) => e.data.updated)
+    .sort((a, b) => (b.data.updated!.valueOf() - a.data.updated!.valueOf()))
+    .slice(0, 6);
+
+  const STUB_THRESHOLD = 300;
+  for (const entry of all) {
+    const body = (entry as { body?: string }).body ?? '';
+    const stripped = body.replace(/```[\s\S]*?```/g, '').replace(/<[^>]+>/g, '').trim();
+    if (stripped.length < STUB_THRESHOLD) {
+      stubs.push({ entry, chars: stripped.length });
+    }
+  }
+  stubs.sort((a, b) => a.chars - b.chars);
+}
 ---
 
 <BaseLayout
   title={page.currentPage > 1 ? `위키 (${page.currentPage}페이지)` : '위키'}
-  description="개념 정리 노트 모음"
+  description="개념 정리 노트 모음 — 자주 참조하는 주제를 한 페이지로 묶었습니다."
 >
-  <section class="mx-auto max-w-3xl px-5" data-pagefind-ignore="all">
+  <section class="mx-auto max-w-3xl px-5">
     <h1 class="mb-2 text-3xl font-bold tracking-tight">위키</h1>
-    <p class="mb-8 text-[color:var(--color-fg-muted)]">
-      총 {page.total}개의 페이지 · {page.currentPage} / {page.lastPage} 페이지
+    <p class="mb-6 text-[color:var(--color-fg-muted)]" data-pagefind-ignore>
+      총 {page.total}개의 페이지 · {page.currentPage} / {page.lastPage}
+      {!isLanding && ` · ${page.total}개 중 ${(page.currentPage - 1) * WIKI_PER_PAGE + 1}–${(page.currentPage - 1) * WIKI_PER_PAGE + page.data.length}`}
     </p>
 
-    {
-      page.data.length === 0 ? (
+    {isLanding && recentUpdates.length > 0 && (
+      <section class="mb-8" data-pagefind-ignore="all">
+        <h2 class="mb-3 text-lg font-semibold">최근 업데이트</h2>
+        <ul class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {recentUpdates.map((w) => (
+            <li>
+              <a
+                href={`/wiki/${w.id}/`}
+                class="block rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-elevated)] px-3 py-2 no-underline hover:border-[color:var(--color-accent)]"
+              >
+                <span class="block text-sm font-medium">{w.data.title}</span>
+                <time
+                  datetime={w.data.updated!.toISOString()}
+                  class="mt-0.5 block text-xs text-[color:var(--color-fg-muted)]"
+                >
+                  {fmt.format(w.data.updated!)}
+                </time>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    {isLanding && stubs.length > 0 && (
+      <section class="mb-8" data-pagefind-ignore="all">
+        <h2 class="mb-3 text-lg font-semibold">📝 내용 보강 필요 ({stubs.length})</h2>
+        <p class="mb-2 text-xs text-[color:var(--color-fg-muted)]">
+          본문이 300자 미만인 위키 페이지. 한 줄 정의만 있거나 미작성 상태입니다.
+        </p>
+        <ul class="flex flex-wrap gap-1.5">
+          {stubs.slice(0, 24).map(({ entry, chars }) => (
+            <li>
+              <a
+                href={`/wiki/${entry.id}/`}
+                class="inline-flex items-baseline gap-1 rounded-full border border-dashed border-[color:var(--color-border)] px-2.5 py-0.5 text-sm no-underline hover:border-[color:var(--color-accent)] hover:text-[color:var(--color-accent)]"
+                title={`본문 ${chars}자`}
+              >
+                {entry.data.title}
+                <span class="text-xs opacity-60">{chars}자</span>
+              </a>
+            </li>
+          ))}
+          {stubs.length > 24 && (
+            <li class="text-xs text-[color:var(--color-fg-muted)] self-center">
+              +{stubs.length - 24}개 더
+            </li>
+          )}
+        </ul>
+      </section>
+    )}
+
+    <section data-pagefind-body data-pagefind-filter="section:wiki">
+      {isLanding && <h2 class="mb-3 text-lg font-semibold">전체 페이지</h2>}
+      {page.data.length === 0 ? (
         <p class="text-sm text-[color:var(--color-fg-muted)]">
           아직 작성된 위키 페이지가 없습니다.
         </p>
@@ -40,17 +128,22 @@ const { page } = Astro.props as Props;
                 class="block rounded-md border border-[color:var(--color-border)] px-4 py-3 no-underline hover:border-[color:var(--color-accent)]"
               >
                 <span class="block text-base font-medium">{w.data.title}</span>
-                {w.data.tags.length > 0 && (
-                  <span class="mt-1 block text-xs text-[color:var(--color-fg-muted)]">
-                    {w.data.tags.map((t) => `#${t}`).join(' ')}
-                  </span>
-                )}
+                <span class="mt-1 flex flex-wrap items-baseline gap-2 text-xs text-[color:var(--color-fg-muted)]">
+                  {w.data.updated && (
+                    <time datetime={w.data.updated.toISOString()}>
+                      {fmt.format(w.data.updated)} 업데이트
+                    </time>
+                  )}
+                  {w.data.tags.length > 0 && (
+                    <span>· {w.data.tags.map((t) => `#${t}`).join(' ')}</span>
+                  )}
+                </span>
               </a>
             </li>
           ))}
         </ul>
-      )
-    }
+      )}
+    </section>
 
     <Pagination currentPage={page.currentPage} lastPage={page.lastPage} baseUrl="/wiki/" />
   </section>
