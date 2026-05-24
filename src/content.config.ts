@@ -3,7 +3,7 @@ import { glob } from 'astro/loaders';
 
 const referenceInline = z.object({
   title: z.string(),
-  url: z.string().url().optional(),
+  url: z.url().optional(),
   author: z.string().optional(),
   note: z.string().optional(),
 });
@@ -62,7 +62,7 @@ const wiki = defineCollection({
 });
 
 const emptyToUndefined = z.preprocess((v) => (v === '' ? undefined : v), z.string().optional());
-const emptyToUndefinedUrl = z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional());
+const emptyToUndefinedUrl = z.preprocess((v) => (v === '' ? undefined : v), z.url().optional());
 
 const sources = defineCollection({
   loader: glob({ pattern: '**/*.md', base: './src/content/sources' }),
@@ -93,13 +93,13 @@ const projects = defineCollection({
     thumbnail: z.string().optional(),
     cover: z.string().optional(),
     repos: z.array(z.object({
-      url: z.string().url(),
+      url: z.url(),
       label: z.string().optional(),
       track: z.boolean().default(true),
     })).default([]),
     stack: z.array(z.string()).default([]),
     links: z.array(z.object({
-      url: z.string().url(),
+      url: z.url(),
       label: z.string(),
     })).default([]),
     status: z.enum(['ongoing', 'completed', 'archived']).default('completed'),
