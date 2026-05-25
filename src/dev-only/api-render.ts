@@ -288,6 +288,10 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
   const output = String(attrs.output ?? '');
   const outputLanguage = String(attrs.outputLanguage ?? 'text');
   const outputLabel = String(attrs.outputLabel ?? '결과');
+  const inputRaw = typeof attrs.input === 'string' ? attrs.input : null;
+  const inputLanguage = String(attrs.inputLanguage ?? 'text');
+  const inputLabel = String(attrs.inputLabel ?? 'stdin');
+  const hasInput = inputRaw !== null && inputRaw.length > 0;
   const title = typeof attrs.title === 'string' ? attrs.title : null;
   const codeWidth = typeof attrs.codeWidth === 'number' ? attrs.codeWidth : null;
 
@@ -302,6 +306,7 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
     }),
   );
   const outputHtml = await shiki(output.trimEnd(), outputLanguage);
+  const inputHtml = hasInput ? await shiki(inputRaw!.trimEnd(), inputLanguage) : '';
 
   const headerLeft =
     variants.length > 1
@@ -332,9 +337,19 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
       <div class="cwo-body cwo-code-body">${variantPanes}</div>
     </div>
     <button type="button" class="cwo-splitter" aria-label="패널 너비 조절"><span class="cwo-splitter-grip"></span></button>
-    <div class="cwo-pane cwo-pane-output">
-      <div class="cwo-header"><span class="cwo-dot cwo-dot-output"></span><span class="cwo-label">${escapeHtml(outputLabel)}</span></div>
-      <div class="cwo-body">${outputHtml}</div>
+    <div class="cwo-pane cwo-pane-output" data-has-input="${hasInput ? 'true' : 'false'}">
+      ${
+        hasInput
+          ? `<div class="cwo-subpane cwo-subpane-stdin">
+        <div class="cwo-header"><span class="cwo-dot cwo-dot-stdin"></span><span class="cwo-label">${escapeHtml(inputLabel)}</span></div>
+        <div class="cwo-body">${inputHtml}</div>
+      </div>`
+          : ''
+      }
+      <div class="cwo-subpane cwo-subpane-stdout">
+        <div class="cwo-header"><span class="cwo-dot cwo-dot-output"></span><span class="cwo-label">${escapeHtml(outputLabel)}</span></div>
+        <div class="cwo-body">${outputHtml}</div>
+      </div>
     </div>
   </div>
 </figure>\n\n`;
