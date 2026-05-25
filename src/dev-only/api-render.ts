@@ -389,7 +389,7 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
   const style =
     codeWidth !== null ? ` style="--cwo-code-pct:${Math.max(0, Math.min(100, codeWidth))}%"` : '';
 
-  return `\n\n<figure class="code-with-output not-prose" data-cwo data-vertical="${vertical}"${style}>
+  return `\n\n<figure class="code-with-output not-prose" data-cwo data-vertical="${vertical}" data-multi-case="${isMultiCase ? 'true' : 'false'}"${style}>
   ${title ? `<figcaption class="mb-2 text-sm font-medium" style="color:var(--color-fg-muted)">${escapeHtml(title)}</figcaption>` : ''}
   <div class="cwo-panes" data-cwo-panes>
     <div class="cwo-pane cwo-pane-code">
@@ -397,7 +397,7 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
       <div class="cwo-body cwo-code-body">${variantPanes}</div>
     </div>
     <button type="button" class="cwo-splitter" aria-label="패널 너비 조절"><span class="cwo-splitter-grip"></span></button>
-    <div class="cwo-pane cwo-pane-output" data-multi-case="${isMultiCase ? 'true' : 'false'}">
+    <div class="cwo-pane cwo-pane-output">
       ${casesHtml}
     </div>
   </div>
