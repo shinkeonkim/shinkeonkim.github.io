@@ -1,6 +1,21 @@
-import { parseFrontmatter } from '@astrojs/markdown-remark';
+import { parse as parseYaml } from 'yaml';
 import { escapeHtml } from './utils';
 import type { MarkdownToolbar } from './toolbar';
+
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+
+function extractFrontmatter(raw: string): Record<string, unknown> {
+  const m = raw.match(FRONTMATTER_RE);
+  if (!m) return {};
+  try {
+    const parsed = parseYaml(m[1]);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
 
 const KEY_LABEL: Record<string, string> = {
   title: '제목',
@@ -76,12 +91,7 @@ export class FrontmatterPanel {
   private parseCurrent(): Record<string, unknown> {
     const raw = this.textarea.value;
     if (!raw.startsWith('---')) return {};
-    try {
-      const result = parseFrontmatter(raw) as { frontmatter?: Record<string, unknown> };
-      return result.frontmatter ?? {};
-    } catch {
-      return {};
-    }
+    return extractFrontmatter(raw);
   }
 
   private render(): void {
