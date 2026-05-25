@@ -16,9 +16,16 @@ import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 import remarkMathLenient from './src/plugins/remark-math-lenient.mjs';
 import remarkUrlPreview from './src/plugins/remark-url-preview.mjs';
 import devEditor from './src/dev-only/integration.mjs';
+import modulepreload from './src/lib/modulepreload-integration.mjs';
+import { buildImageMap } from './src/lib/sitemap-images.mjs';
+
+const SITE_URL = 'https://shinkeonkim.com';
+// Pre-build the URL → cover/thumbnail map once, at config-load time.
+// sitemap serialize() is synchronous, so we resolve the map up-front.
+const imageMap = await buildImageMap(SITE_URL);
 
 export default defineConfig({
-  site: 'https://shinkeonkim.com',
+  site: SITE_URL,
   compressHTML: true,
   build: {
     inlineStylesheets: 'auto',
@@ -61,11 +68,17 @@ export default defineConfig({
           item.changefreq = EnumChangefreq.MONTHLY;
           item.priority = 0.5;
         }
+
+        const img = imageMap.get(item.url);
+        if (img) {
+          /** @type {any} */ (item).img = [img];
+        }
         return item;
       },
     }),
     pagefind(),
     devEditor(),
+    modulepreload(),
   ],
   vite: {
     plugins: [tailwindcss()],
@@ -78,10 +91,11 @@ export default defineConfig({
         output: {
           manualChunks(id) {
             if (id.includes('node_modules')) {
+              if (id.includes('/react-dom/') || id.includes('/scheduler/')) return 'vendor-react';
+              if (/[\\/]react[\\/]/.test(id)) return 'vendor-react';
               if (id.includes('three') || id.includes('react-force-graph-3d')) return 'vendor-three';
               if (id.includes('/d3-')) return 'vendor-d3';
               if (id.includes('katex')) return 'vendor-katex';
-              if (id.includes('react-dom')) return 'vendor-react';
             }
             return undefined;
           },
