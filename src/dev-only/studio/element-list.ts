@@ -137,9 +137,9 @@ function makeDefaultElement(type: string, id: string, cx: number, cy: number): A
     case 'circle':
       return { type: 'circle', id, rotation: 0, cx, cy, r: 36, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, label: id, labelColor: '#0b0b0f', labelSize: 14 };
     case 'line':
-      return { type: 'line', id, rotation: 0, x1: cx - 80, y1: cy, x2: cx + 80, y2: cy, stroke: '#6366f1', strokeWidth: 2 };
+      return { type: 'line', id, rotation: 0, x1: cx - 80, y1: cy, x2: cx + 80, y2: cy, stroke: '#6366f1', strokeWidth: 2, headStart: 'none', headEnd: 'none' };
     case 'arrow':
-      return { type: 'arrow', id, rotation: 0, x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, stroke: '#6366f1', strokeWidth: 2, curvature: 0, labelColor: '#0b0b0f' };
+      return { type: 'arrow', id, rotation: 0, x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, stroke: '#6366f1', strokeWidth: 2, curvature: 0, labelColor: '#0b0b0f', headStart: 'none', headEnd: 'arrow' };
     case 'text':
       return { type: 'text', id, rotation: 0, x: cx, y: cy, content: id, fontSize: 18, fontWeight: 400, color: '#18181b', textAnchor: 'middle' };
     case 'image':

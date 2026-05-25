@@ -1,13 +1,20 @@
 import {
   getDef,
+  getSelection,
   isDirty,
   markClean,
   setDef,
+  setSelection,
   subscribe,
   updateMeta,
   undo,
   redo,
+  deleteElement,
+  deleteStep,
+  addElement,
+  uniqueElementId,
 } from './state';
+import type { AnimationElement } from '../../animations/schema';
 import { initCanvas, showPreview, hidePreview } from './canvas';
 import { initElementList } from './element-list';
 import { initProperties } from './properties';
@@ -43,6 +50,12 @@ interface StudioUi {
   newTitleInput: HTMLInputElement;
   newCreateBtn: HTMLButtonElement;
   newError: HTMLElement;
+  canvasWidthInput: HTMLInputElement;
+  canvasHeightInput: HTMLInputElement;
+  imageUploadBtn: HTMLButtonElement;
+  imageFileInput: HTMLInputElement;
+  helpBtn: HTMLButtonElement;
+  helpDialog: HTMLDialogElement;
 }
 
 function queryUi(): StudioUi | null {
@@ -75,12 +88,19 @@ function queryUi(): StudioUi | null {
   const newTitleInput = $<HTMLInputElement>('studio-new-title');
   const newCreateBtn = $<HTMLButtonElement>('studio-new-create');
   const newError = $<HTMLElement>('studio-new-error');
+  const canvasWidthInput = $<HTMLInputElement>('studio-canvas-width');
+  const canvasHeightInput = $<HTMLInputElement>('studio-canvas-height');
+  const imageUploadBtn = $<HTMLButtonElement>('studio-image-upload');
+  const imageFileInput = $<HTMLInputElement>('studio-image-file');
+  const helpBtn = $<HTMLButtonElement>('studio-help');
+  const helpDialog = $<HTMLDialogElement>('studio-help-dialog');
 
   if (
     !titleInput || !idDisplay || !status || !saveBtn || !deleteBtn || !newBtn || !openBtn ||
     !playBtn || !restartBtn || !speedInput || !speedValue || !canvas || !elementList || !toolsRoot ||
     !propsRoot || !timelineTracks || !elementTracks || !addStepBtn || !libraryDialog || !libraryList || !newDialog ||
-    !newIdInput || !newTitleInput || !newCreateBtn || !newError
+    !newIdInput || !newTitleInput || !newCreateBtn || !newError ||
+    !canvasWidthInput || !canvasHeightInput || !imageUploadBtn || !imageFileInput || !helpBtn || !helpDialog
   ) {
     return null;
   }
@@ -90,10 +110,59 @@ function queryUi(): StudioUi | null {
     playBtn, restartBtn, speedInput, speedValue, canvas, elementList, toolsRoot,
     propsRoot, timelineTracks, elementTracks, addStepBtn, libraryDialog, libraryList, newDialog,
     newIdInput, newTitleInput, newCreateBtn, newError,
+    canvasWidthInput, canvasHeightInput, imageUploadBtn, imageFileInput, helpBtn, helpDialog,
   };
 }
 
 let playState: 'idle' | 'playing' = 'idle';
+let clipboard: AnimationElement | null = null;
+
+function shiftCloneCoords(el: AnimationElement, dx: number, dy: number): AnimationElement {
+  const clone = JSON.parse(JSON.stringify(el)) as AnimationElement;
+  if (clone.type === 'rect' || clone.type === 'image' || clone.type === 'text') {
+    clone.x += dx;
+    clone.y += dy;
+  } else if (clone.type === 'circle') {
+    clone.cx += dx;
+    clone.cy += dy;
+  } else if (clone.type === 'line' || clone.type === 'arrow') {
+    if (typeof clone.x1 === 'number') clone.x1 += dx;
+    if (typeof clone.y1 === 'number') clone.y1 += dy;
+    if (typeof clone.x2 === 'number') clone.x2 += dx;
+    if (typeof clone.y2 === 'number') clone.y2 += dy;
+  } else if (clone.type === 'path') {
+    clone.x = (clone.x ?? 0) + dx;
+    clone.y = (clone.y ?? 0) + dy;
+  } else if (clone.type === 'polygon') {
+    const pts = clone.points.trim().split(/\s+/).map((pair: string) => {
+      const [x, y] = pair.split(',').map(Number);
+      if (Number.isFinite(x) && Number.isFinite(y)) return `${x + dx},${y + dy}`;
+      return pair;
+    });
+    clone.points = pts.join(' ');
+  }
+  return clone;
+}
+
+function copySelection(): boolean {
+  const sel = getSelection();
+  if (sel.kind !== 'element') return false;
+  const def = getDef();
+  if (!def) return false;
+  const el = def.elements.find((e) => e.id === sel.elementId);
+  if (!el) return false;
+  clipboard = JSON.parse(JSON.stringify(el));
+  return true;
+}
+
+function pasteFromClipboard(): boolean {
+  if (!clipboard) return false;
+  const newId = uniqueElementId(clipboard.type);
+  const shifted = shiftCloneCoords(clipboard, 20, 20);
+  shifted.id = newId;
+  addElement(shifted);
+  return true;
+}
 
 export function initStudio(): void {
   const ui = queryUi();
@@ -120,6 +189,29 @@ export function initStudio(): void {
     if (!m) return;
     updateCanvas({ width: Number(m[1]), height: Number(m[2]) });
   });
+
+  ui.canvasWidthInput.addEventListener('input', () => {
+    const w = Number(ui.canvasWidthInput.value);
+    if (w >= 100 && w <= 8000) updateCanvas({ width: w });
+  });
+  ui.canvasHeightInput.addEventListener('input', () => {
+    const h = Number(ui.canvasHeightInput.value);
+    if (h >= 100 && h <= 8000) updateCanvas({ height: h });
+  });
+
+  ui.imageUploadBtn.addEventListener('click', () => ui.imageFileInput.click());
+  ui.imageFileInput.addEventListener('change', () => {
+    const file = ui.imageFileInput.files?.[0];
+    if (file) void uploadAndInsertImage(file, ui);
+    ui.imageFileInput.value = '';
+  });
+
+  ui.helpBtn.addEventListener('click', () => {
+    if (typeof ui.helpDialog.showModal === 'function') ui.helpDialog.showModal();
+    else ui.helpDialog.setAttribute('open', '');
+  });
+
+  setupImageDropAndPaste(ui);
 
   subscribe(() => reflectState(ui));
   reflectState(ui);
@@ -153,11 +245,42 @@ export function initStudio(): void {
   });
 
   document.addEventListener('keydown', (e) => {
+    const inText =
+      e.target instanceof HTMLInputElement ||
+      e.target instanceof HTMLTextAreaElement ||
+      (e.target instanceof HTMLElement && e.target.isContentEditable);
     const mod = e.metaKey || e.ctrlKey;
+
+    if (e.key === 'Escape') {
+      const sel = getSelection();
+      if (sel.kind !== 'none') {
+        setSelection({ kind: 'none' });
+      }
+      return;
+    }
+
+    if (!inText && !mod && (e.key === '?' || (e.key === '/' && e.shiftKey))) {
+      e.preventDefault();
+      if (typeof ui.helpDialog.showModal === 'function') ui.helpDialog.showModal();
+      else ui.helpDialog.setAttribute('open', '');
+      return;
+    }
+
+    if (!inText && (e.key === 'Delete' || e.key === 'Backspace')) {
+      const sel = getSelection();
+      if (sel.kind === 'element') {
+        e.preventDefault();
+        deleteElement(sel.elementId);
+        setSelection({ kind: 'none' });
+      } else if (sel.kind === 'step') {
+        e.preventDefault();
+        deleteStep(sel.stepId);
+      }
+      return;
+    }
+
     if (!mod) return;
     const key = e.key.toLowerCase();
-    const inText =
-      e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
     if (key === 's') {
       e.preventDefault();
       void saveCurrent(ui);
@@ -172,6 +295,25 @@ export function initStudio(): void {
     if (key === 'y' && !inText) {
       e.preventDefault();
       redo();
+      return;
+    }
+    if ((key === 'c' || key === 'x') && !inText) {
+      if (copySelection()) {
+        e.preventDefault();
+        if (key === 'x') {
+          const sel = getSelection();
+          if (sel.kind === 'element') {
+            deleteElement(sel.elementId);
+            setSelection({ kind: 'none' });
+          }
+        }
+      }
+      return;
+    }
+    if (key === 'v' && !inText) {
+      if (pasteFromClipboard()) {
+        e.preventDefault();
+      }
     }
   });
 
@@ -190,6 +332,10 @@ function reflectState(ui: StudioUi): void {
     ui.idDisplay.textContent = '';
     ui.saveBtn.disabled = true;
     ui.deleteBtn.disabled = true;
+    ui.canvasWidthInput.value = '';
+    ui.canvasHeightInput.value = '';
+    ui.canvasWidthInput.disabled = true;
+    ui.canvasHeightInput.disabled = true;
     return;
   }
   if (document.activeElement !== ui.titleInput) {
@@ -199,9 +345,100 @@ function reflectState(ui: StudioUi): void {
   ui.idDisplay.textContent = def.id;
   ui.saveBtn.disabled = false;
   ui.deleteBtn.disabled = false;
+  ui.canvasWidthInput.disabled = false;
+  ui.canvasHeightInput.disabled = false;
+  if (document.activeElement !== ui.canvasWidthInput) ui.canvasWidthInput.value = String(def.canvas.width);
+  if (document.activeElement !== ui.canvasHeightInput) ui.canvasHeightInput.value = String(def.canvas.height);
   if (isDirty()) {
     setStatus(ui, '저장되지 않은 변경 사항', 'warn');
   }
+}
+
+async function uploadAndInsertImage(file: File, ui: StudioUi): Promise<void> {
+  const def = getDef();
+  if (!def) {
+    setStatus(ui, '먼저 애니메이션을 열거나 만드세요', 'warn');
+    return;
+  }
+  try {
+    setStatus(ui, '이미지 업로드 중…');
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch('/_editor/api/upload', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { path: string };
+    const cx = def.canvas.width / 2;
+    const cy = def.canvas.height / 2;
+    const tempImg = await loadImageSize(data.path);
+    const maxDim = Math.min(def.canvas.width, def.canvas.height) * 0.5;
+    let w = tempImg?.w ?? 200;
+    let h = tempImg?.h ?? 200;
+    if (w > maxDim || h > maxDim) {
+      const s = maxDim / Math.max(w, h);
+      w = Math.round(w * s);
+      h = Math.round(h * s);
+    }
+    const id = uniqueElementId('img');
+    addElement({
+      type: 'image', id, rotation: 0,
+      x: Math.round(cx - w / 2), y: Math.round(cy - h / 2),
+      width: w, height: h, src: data.path,
+      preserveAspectRatio: 'xMidYMid meet', opacity: 1,
+    });
+    setStatus(ui, `업로드 완료: ${data.path}`, 'ok');
+  } catch (err) {
+    setStatus(ui, '업로드 실패: ' + (err instanceof Error ? err.message : String(err)), 'error');
+  }
+}
+
+function loadImageSize(src: string): Promise<{ w: number; h: number } | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+function setupImageDropAndPaste(ui: StudioUi): void {
+  const canvasWrap = ui.app.querySelector<HTMLElement>('.studio-canvas-wrap');
+  if (canvasWrap) {
+    canvasWrap.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer) return;
+      const hasFiles = Array.from(e.dataTransfer.items ?? []).some((it) => it.kind === 'file');
+      if (hasFiles) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        canvasWrap.classList.add('is-drop-target');
+      }
+    });
+    canvasWrap.addEventListener('dragleave', () => canvasWrap.classList.remove('is-drop-target'));
+    canvasWrap.addEventListener('drop', (e) => {
+      canvasWrap.classList.remove('is-drop-target');
+      const file = e.dataTransfer?.files?.[0];
+      if (file && file.type.startsWith('image/')) {
+        e.preventDefault();
+        void uploadAndInsertImage(file, ui);
+      }
+    });
+  }
+  document.addEventListener('paste', (e) => {
+    if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) {
+      return;
+    }
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          void uploadAndInsertImage(file, ui);
+          return;
+        }
+      }
+    }
+  });
 }
 
 function setStatus(ui: StudioUi, text: string, kind: 'ok' | 'warn' | 'error' = 'ok'): void {
@@ -308,9 +545,15 @@ async function createNew(ui: StudioUi): Promise<void> {
 async function saveCurrent(ui: StudioUi): Promise<void> {
   const def = getDef();
   if (!def) return;
+  if (!def.title || def.title.trim().length === 0) {
+    updateMeta({ title: def.id });
+    setStatus(ui, `제목이 비어 있어 ID(${def.id})를 사용합니다`, 'warn');
+  }
+  const current = getDef();
+  if (!current) return;
   try {
     setStatus(ui, '저장 중…');
-    const saved = await api.saveAnimation(def);
+    const saved = await api.saveAnimation(current);
     setDef(saved);
     markClean();
     setStatus(ui, `저장됨 (${new Date().toLocaleTimeString('ko-KR')})`, 'ok');

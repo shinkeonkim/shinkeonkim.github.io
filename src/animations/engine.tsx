@@ -14,6 +14,84 @@ import type {
 } from './schema';
 import { computeSnapshot, isColorKey, isNumericKey } from './schema';
 
+const ENGINE_MARKER_DEFS = `
+  <marker id="anim-h-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-arrow-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-triangle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-triangle-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-triangle-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="anim-h-triangle-open-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="anim-h-circle" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6">
+    <circle cx="5" cy="5" r="4" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-circle-open" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7">
+    <circle cx="5" cy="5" r="4" fill="white" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="anim-h-diamond" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-diamond-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="currentColor" />
+  </marker>
+  <marker id="anim-h-diamond-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="white" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="anim-h-diamond-open-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="white" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="anim-h-bar" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="10" orient="auto">
+    <rect x="4" y="0" width="2" height="10" fill="currentColor" />
+  </marker>
+`;
+
+function engineMarkerUrl(head: string | undefined, end: 'start' | 'end'): string | undefined {
+  if (!head || head === 'none') return undefined;
+  if (head === 'circle' || head === 'circle-open') return `url(#anim-h-${head})`;
+  const idBase = `anim-h-${head}`;
+  return end === 'start' ? `url(#${idBase}-start)` : `url(#${idBase})`;
+}
+
+const EASE_FUNCS: Record<string, (t: number) => number> = {
+  linear: (t) => t,
+  easeIn: (t) => t * t,
+  easeOut: (t) => 1 - (1 - t) * (1 - t),
+  easeInOut: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
+  easeInQuad: (t) => t * t,
+  easeOutQuad: (t) => 1 - (1 - t) * (1 - t),
+  easeInOutQuad: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
+  easeInCubic: (t) => t * t * t,
+  easeOutCubic: (t) => 1 - Math.pow(1 - t, 3),
+  easeInOutCubic: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
+  spring: (t) => {
+    const c = 1.70158;
+    return t * t * (((c + 1) * t) - c) + (1 - t) * (Math.sin(t * Math.PI * 2) * 0.05);
+  },
+};
+
+function entryDelta(mode: string | undefined, w = 200, h = 200): { dx: number; dy: number; scale?: number } {
+  switch (mode) {
+    case 'slide-left': return { dx: -w, dy: 0 };
+    case 'slide-right': return { dx: w, dy: 0 };
+    case 'slide-up': return { dx: 0, dy: -h };
+    case 'slide-down': return { dx: 0, dy: h };
+    case 'zoom': return { dx: 0, dy: 0, scale: 0.2 };
+    case 'pop': return { dx: 0, dy: 0, scale: 0.4 };
+    default: return { dx: 0, dy: 0 };
+  }
+}
+
 interface ActiveEffect {
   key: string;
   effect: AnimationEffect;
@@ -79,6 +157,7 @@ function interpolateSnapshot(
   prev: SnapshotMap,
   target: SnapshotMap,
   t: number,
+  elementMap?: Map<string, AnimationElement>,
 ): SnapshotMap {
   if (t <= 0) return prev;
   if (t >= 1) return target;
@@ -92,14 +171,33 @@ function interpolateSnapshot(
     const becomingVisible = !prevState.visible && targetState.visible;
     const becomingInvisible = prevState.visible && !targetState.visible;
 
+    const baseEl = elementMap?.get(id);
+    const entryMode = baseEl ? (baseEl as { entryMode?: string }).entryMode : undefined;
+    const exitMode = baseEl ? (baseEl as { exitMode?: string }).exitMode : undefined;
+    const hasEntry = entryMode && entryMode !== 'instant';
+    const hasExit = exitMode && exitMode !== 'instant';
+
     let visible: boolean;
     let useTargetSnapshot: boolean;
+    let appearProgress = 1;
     if (becomingVisible) {
-      visible = t >= 0.999;
-      useTargetSnapshot = visible;
+      if (hasEntry) {
+        visible = true;
+        useTargetSnapshot = true;
+        appearProgress = t;
+      } else {
+        visible = t >= 0.999;
+        useTargetSnapshot = visible;
+      }
     } else if (becomingInvisible) {
-      visible = t <= 0.001;
-      useTargetSnapshot = false;
+      if (hasExit) {
+        visible = true;
+        useTargetSnapshot = false;
+        appearProgress = 1 - t;
+      } else {
+        visible = t <= 0.001;
+        useTargetSnapshot = false;
+      }
     } else {
       visible = prevState.visible;
       useTargetSnapshot = false;
@@ -109,7 +207,7 @@ function interpolateSnapshot(
       ...(useTargetSnapshot ? targetState : prevState),
       visible,
     };
-    if (!useTargetSnapshot && !becomingVisible) {
+    if (!useTargetSnapshot && !becomingVisible && !becomingInvisible) {
       for (const [k, v] of Object.entries(targetState)) {
         if (k === 'visible') continue;
         const pv = prevState[k];
@@ -120,9 +218,65 @@ function interpolateSnapshot(
         }
       }
     }
+
+    if (becomingVisible && hasEntry) {
+      applyEntryTransform(merged, baseEl!, entryMode!, appearProgress);
+    } else if (becomingInvisible && hasExit) {
+      applyEntryTransform(merged, baseEl!, exitMode!, appearProgress);
+    }
+
     out.set(id, merged);
   }
   return out;
+}
+
+function applyEntryTransform(
+  merged: Record<string, unknown>,
+  baseEl: AnimationElement,
+  mode: string,
+  progress: number,
+): void {
+  merged.__opacity = mode === 'fade' ? progress : (merged.__opacity ?? 1);
+  if (mode === 'fade') return;
+  const bounds = elementBounds(baseEl, merged);
+  const w = bounds?.w ?? 100;
+  const h = bounds?.h ?? 100;
+  const off = entryDelta(mode, w * 1.5, h * 1.5);
+  const inv = 1 - progress;
+  if (off.dx || off.dy) {
+    shiftElementCoords(merged, baseEl.type, off.dx * inv, off.dy * inv);
+  }
+  if (typeof off.scale === 'number') {
+    const s = off.scale + (1 - off.scale) * progress;
+    merged.__scale = s;
+  }
+}
+
+function elementCenterFromState(el: AnimationElement, state: Record<string, unknown>): { x: number; y: number } | null {
+  if (el.type === 'rect' || el.type === 'image') {
+    return { x: (state.x as number) + (state.width as number) / 2, y: (state.y as number) + (state.height as number) / 2 };
+  }
+  if (el.type === 'circle') return { x: state.cx as number, y: state.cy as number };
+  if (el.type === 'text') return { x: state.x as number, y: state.y as number };
+  if (el.type === 'path') return { x: (state.x as number) ?? 0, y: (state.y as number) ?? 0 };
+  return null;
+}
+
+function elementBounds(el: AnimationElement, state: Record<string, unknown>): { w: number; h: number } | null {
+  if (el.type === 'rect' || el.type === 'image') return { w: state.width as number, h: state.height as number };
+  if (el.type === 'circle') return { w: (state.r as number) * 2, h: (state.r as number) * 2 };
+  if (el.type === 'text') return { w: 100, h: state.fontSize as number };
+  return null;
+}
+
+function shiftElementCoords(merged: Record<string, unknown>, type: string, dx: number, dy: number): void {
+  if (type === 'rect' || type === 'image' || type === 'text' || type === 'path') {
+    if (typeof merged.x === 'number') merged.x = (merged.x as number) + dx;
+    if (typeof merged.y === 'number') merged.y = (merged.y as number) + dy;
+  } else if (type === 'circle') {
+    if (typeof merged.cx === 'number') merged.cx = (merged.cx as number) + dx;
+    if (typeof merged.cy === 'number') merged.cy = (merged.cy as number) + dy;
+  }
 }
 
 function totalDurationOf(def: AnimationDef): number {
@@ -194,6 +348,12 @@ export default function AnimationEngine({
     };
   }, [playing, def, speedMultiplier, staticAtStep]);
 
+  const elementMap = useMemo(() => {
+    const m = new Map<string, AnimationElement>();
+    for (const el of def.elements) m.set(el.id, el);
+    return m;
+  }, [def.elements]);
+
   const { currentSnap, currentStepIdx } = useMemo(() => {
     if (staticAtStep !== undefined) {
       const idx = Math.max(-1, Math.min(def.steps.length - 1, staticAtStep));
@@ -209,13 +369,13 @@ export default function AnimationEngine({
       if (time < end) {
         const localT = step.duration === 0 ? 1 : (time - acc) / step.duration;
         const eased = easeApply(step.ease, localT);
-        const snap = interpolateSnapshot(snapshots[i], snapshots[i + 1], eased);
+        const snap = interpolateSnapshot(snapshots[i], snapshots[i + 1], eased, elementMap);
         return { currentSnap: snap, currentStepIdx: i };
       }
       acc = end;
     }
     return { currentSnap: snapshots[snapshots.length - 1], currentStepIdx: def.steps.length - 1 };
-  }, [time, snapshots, def, staticAtStep]);
+  }, [time, snapshots, def, staticAtStep, elementMap]);
 
   useEffect(() => {
     onStepChange?.(currentStepIdx);
@@ -243,11 +403,6 @@ export default function AnimationEngine({
   }, [currentStepIdx, def.steps, speedMultiplier]);
 
   const elementOrder = useMemo(() => def.elements.map((e) => e.id), [def.elements]);
-  const elementMap = useMemo(() => {
-    const m = new Map<string, AnimationElement>();
-    for (const el of def.elements) m.set(el.id, el);
-    return m;
-  }, [def.elements]);
 
   return (
     <div className="anim-engine">
@@ -257,34 +412,32 @@ export default function AnimationEngine({
         aria-label={def.title}
         style={{ width: '100%', height: 'auto', background: def.canvas.background }}
       >
-        <defs>
-          <marker
-            id="anim-engine-arrow"
-            viewBox="0 0 10 10"
-            refX="8"
-            refY="5"
-            markerWidth="6"
-            markerHeight="6"
-            orient="auto"
-          >
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
-          </marker>
-        </defs>
+        <defs dangerouslySetInnerHTML={{ __html: ENGINE_MARKER_DEFS }} />
 
         {elementOrder.map((id) => {
           const baseEl = elementMap.get(id);
           const state = currentSnap.get(id);
           if (!baseEl || !state || !state.visible) return null;
           const activeEffect = activeEffects.find((ae) => ae.effect.elementId === id);
+          const entryOpacity = (state as { __opacity?: number }).__opacity;
+          const entryScale = (state as { __scale?: number }).__scale;
+          const wrapStyle: React.CSSProperties = {};
+          if (typeof entryOpacity === 'number') wrapStyle.opacity = entryOpacity;
+          let wrapTransform: string | undefined;
+          if (typeof entryScale === 'number') {
+            const center = elementCenterFromState(baseEl, state);
+            if (center) wrapTransform = `translate(${center.x} ${center.y}) scale(${entryScale}) translate(${-center.x} ${-center.y})`;
+          }
           return (
-            <RenderElement
-              key={id}
-              baseType={baseEl.type}
-              state={state}
-              snap={currentSnap}
-              elementMap={elementMap}
-              activeEffect={activeEffect}
-            />
+            <g key={id} style={wrapStyle} transform={wrapTransform}>
+              <RenderElement
+                baseType={baseEl.type}
+                state={state}
+                snap={currentSnap}
+                elementMap={elementMap}
+                activeEffect={activeEffect}
+              />
+            </g>
           );
         })}
 
@@ -388,13 +541,21 @@ function RenderElement({ baseType, state, snap, elementMap, activeEffect }: Rend
 
   if (baseType === 'line') {
     const l = state as unknown as LineElement;
+    const coords = resolveLineCoords(l, snap, elementMap);
+    if (!coords) return null;
+    const ms = engineMarkerUrl(l.headStart, 'start');
+    const me = engineMarkerUrl(l.headEnd, 'end');
     return (
-      <line
-        x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
-        stroke={highlight ?? l.stroke}
-        strokeWidth={l.strokeWidth}
-        strokeDasharray={l.strokeDasharray}
-      />
+      <g style={{ color: highlight ?? l.stroke }}>
+        <line
+          x1={coords.x1} y1={coords.y1} x2={coords.x2} y2={coords.y2}
+          stroke="currentColor"
+          strokeWidth={l.strokeWidth}
+          strokeDasharray={l.strokeDasharray}
+          markerStart={ms}
+          markerEnd={me}
+        />
+      </g>
     );
   }
 
@@ -406,6 +567,8 @@ function RenderElement({ baseType, state, snap, elementMap, activeEffect }: Rend
     const midX = (coords.x1 + coords.x2) / 2;
     const midY = (coords.y1 + coords.y2) / 2;
     const isCurved = (a.curvature || 0) !== 0;
+    const ms = engineMarkerUrl(a.headStart ?? 'none', 'start');
+    const me = engineMarkerUrl(a.headEnd ?? 'arrow', 'end');
     let pathD = '';
     if (isCurved) {
       const dx = coords.x2 - coords.x1;
@@ -420,9 +583,9 @@ function RenderElement({ baseType, state, snap, elementMap, activeEffect }: Rend
     return (
       <g style={{ color }}>
         {isCurved ? (
-          <path d={pathD} fill="none" stroke="currentColor" strokeWidth={a.strokeWidth} strokeDasharray={a.strokeDasharray} markerEnd="url(#anim-engine-arrow)" />
+          <path d={pathD} fill="none" stroke="currentColor" strokeWidth={a.strokeWidth} strokeDasharray={a.strokeDasharray} markerStart={ms} markerEnd={me} />
         ) : (
-          <line x1={coords.x1} y1={coords.y1} x2={coords.x2} y2={coords.y2} stroke="currentColor" strokeWidth={a.strokeWidth} strokeDasharray={a.strokeDasharray} markerEnd="url(#anim-engine-arrow)" />
+          <line x1={coords.x1} y1={coords.y1} x2={coords.x2} y2={coords.y2} stroke="currentColor" strokeWidth={a.strokeWidth} strokeDasharray={a.strokeDasharray} markerStart={ms} markerEnd={me} />
         )}
         {a.label && (
           <g>
@@ -551,38 +714,121 @@ function pickAutoAnchor(
   return bestPair;
 }
 
+export function resolveLineCoords(
+  line: LineElement,
+  snap: SnapshotMap,
+  elementMap: Map<string, AnimationElement>,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  const fromFixed = typeof line.x1 === 'number' && typeof line.y1 === 'number'
+    ? { x: line.x1, y: line.y1 } : null;
+  const toFixed = typeof line.x2 === 'number' && typeof line.y2 === 'number'
+    ? { x: line.x2, y: line.y2 } : null;
+  const fromEl = line.fromId ? elementMap.get(line.fromId) : null;
+  const toEl = line.toId ? elementMap.get(line.toId) : null;
+  const fromState = line.fromId ? snap.get(line.fromId) : null;
+  const toState = line.toId ? snap.get(line.toId) : null;
+  const fromConnected = !!(fromEl && fromState);
+  const toConnected = !!(toEl && toState);
+
+  if (!fromConnected && !fromFixed) return null;
+  if (!toConnected && !toFixed) return null;
+
+  let fromAnchor: Anchor = line.fromAnchor ?? 'auto';
+  let toAnchor: Anchor = line.toAnchor ?? 'auto';
+
+  let p1: { x: number; y: number } | null = null;
+  let p2: { x: number; y: number } | null = null;
+
+  if (fromConnected && toConnected) {
+    if (fromAnchor === 'auto' || toAnchor === 'auto') {
+      const picked = pickAutoAnchor(fromEl!, fromState!, toEl!, toState!);
+      if (fromAnchor === 'auto') fromAnchor = picked.from;
+      if (toAnchor === 'auto') toAnchor = picked.to;
+    }
+    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
+    p2 = anchorPoint(toEl!, toState!, toAnchor);
+  } else if (fromConnected && toFixed) {
+    if (fromAnchor === 'auto') fromAnchor = pickAnchorTowardPoint(fromEl!, fromState!, toFixed);
+    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
+    p2 = toFixed;
+  } else if (fromFixed && toConnected) {
+    if (toAnchor === 'auto') toAnchor = pickAnchorTowardPoint(toEl!, toState!, fromFixed);
+    p1 = fromFixed;
+    p2 = anchorPoint(toEl!, toState!, toAnchor);
+  } else if (fromFixed && toFixed) {
+    p1 = fromFixed;
+    p2 = toFixed;
+  }
+
+  if (!p1 || !p2) return null;
+  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+}
+
+function pickAnchorTowardPoint(
+  el: AnimationElement,
+  state: Record<string, unknown>,
+  point: { x: number; y: number },
+): Anchor {
+  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
+  let best: Anchor = 'right';
+  let bestDist = Infinity;
+  for (const a of candidates) {
+    const p = anchorPoint(el, state, a);
+    if (!p) continue;
+    const d = Math.hypot(p.x - point.x, p.y - point.y);
+    if (d < bestDist) { bestDist = d; best = a; }
+  }
+  return best;
+}
+
 export function resolveArrowCoords(
   arrow: ArrowElement,
   snap: SnapshotMap,
   elementMap: Map<string, AnimationElement>,
 ): { x1: number; y1: number; x2: number; y2: number } | null {
-  if (arrow.fromId && arrow.toId) {
-    const fromEl = elementMap.get(arrow.fromId);
-    const toEl = elementMap.get(arrow.toId);
-    const fromState = snap.get(arrow.fromId);
-    const toState = snap.get(arrow.toId);
-    if (!fromEl || !toEl || !fromState || !toState) return null;
-    let fromAnchor = arrow.fromAnchor ?? 'auto';
-    let toAnchor = arrow.toAnchor ?? 'auto';
+  const fromFixed = typeof arrow.x1 === 'number' && typeof arrow.y1 === 'number'
+    ? { x: arrow.x1, y: arrow.y1 } : null;
+  const toFixed = typeof arrow.x2 === 'number' && typeof arrow.y2 === 'number'
+    ? { x: arrow.x2, y: arrow.y2 } : null;
+  const fromEl = arrow.fromId ? elementMap.get(arrow.fromId) : null;
+  const toEl = arrow.toId ? elementMap.get(arrow.toId) : null;
+  const fromState = arrow.fromId ? snap.get(arrow.fromId) : null;
+  const toState = arrow.toId ? snap.get(arrow.toId) : null;
+  const fromConnected = !!(fromEl && fromState);
+  const toConnected = !!(toEl && toState);
+
+  if (!fromConnected && !fromFixed) return null;
+  if (!toConnected && !toFixed) return null;
+
+  let fromAnchor: Anchor = arrow.fromAnchor ?? 'auto';
+  let toAnchor: Anchor = arrow.toAnchor ?? 'auto';
+
+  let p1: { x: number; y: number } | null = null;
+  let p2: { x: number; y: number } | null = null;
+
+  if (fromConnected && toConnected) {
     if (fromAnchor === 'auto' || toAnchor === 'auto') {
-      const picked = pickAutoAnchor(fromEl, fromState, toEl, toState);
+      const picked = pickAutoAnchor(fromEl!, fromState!, toEl!, toState!);
       if (fromAnchor === 'auto') fromAnchor = picked.from;
       if (toAnchor === 'auto') toAnchor = picked.to;
     }
-    const fp = anchorPoint(fromEl, fromState, fromAnchor);
-    const tp = anchorPoint(toEl, toState, toAnchor);
-    if (!fp || !tp) return null;
-    return { x1: fp.x, y1: fp.y, x2: tp.x, y2: tp.y };
+    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
+    p2 = anchorPoint(toEl!, toState!, toAnchor);
+  } else if (fromConnected && toFixed) {
+    if (fromAnchor === 'auto') fromAnchor = pickAnchorTowardPoint(fromEl!, fromState!, toFixed);
+    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
+    p2 = toFixed;
+  } else if (fromFixed && toConnected) {
+    if (toAnchor === 'auto') toAnchor = pickAnchorTowardPoint(toEl!, toState!, fromFixed);
+    p1 = fromFixed;
+    p2 = anchorPoint(toEl!, toState!, toAnchor);
+  } else if (fromFixed && toFixed) {
+    p1 = fromFixed;
+    p2 = toFixed;
   }
-  if (
-    typeof arrow.x1 === 'number' &&
-    typeof arrow.y1 === 'number' &&
-    typeof arrow.x2 === 'number' &&
-    typeof arrow.y2 === 'number'
-  ) {
-    return { x1: arrow.x1, y1: arrow.y1, x2: arrow.x2, y2: arrow.y2 };
-  }
-  return null;
+
+  if (!p1 || !p2) return null;
+  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
 }
 
 function FlowParticle({

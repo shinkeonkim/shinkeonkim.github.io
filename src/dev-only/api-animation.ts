@@ -42,6 +42,9 @@ export const PUT: APIRoute = requireDev(async ({ params, request }) => {
     if (!parsed.success) {
       return jsonResponse({ error: 'validation failed', detail: parsed.error.message }, { status: 400 });
     }
+    if (!parsed.data.title || parsed.data.title.trim().length === 0) {
+      parsed.data.title = id;
+    }
     parsed.data.updatedAt = new Date().toISOString();
     await writeFile(pathFor(id), JSON.stringify(parsed.data, null, 2) + '\n', 'utf-8');
     return jsonResponse({ ok: true, def: parsed.data });

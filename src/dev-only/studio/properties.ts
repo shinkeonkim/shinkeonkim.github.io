@@ -9,6 +9,7 @@ import {
   getSelection,
   setSelection,
   setElementKeyframe,
+  setElementBase,
   setElementVisibility,
   clearKeyframeProp,
   updateStep,
@@ -23,7 +24,12 @@ import {
   subscribe,
 } from './state';
 
+const BASE_ONLY_KEYS = new Set(['entryMode', 'exitMode', 'transitionEase', 'fromId', 'toId', 'fromAnchor', 'toAnchor', 'headStart', 'headEnd']);
+
 let panelEl: HTMLElement | null = null;
+let isComposing = false;
+let pendingRender = false;
+let textInputFocused = false;
 
 interface FieldDef {
   label: string;
@@ -60,13 +66,19 @@ const FIELDS_BY_TYPE: Record<string, FieldDef[]> = {
     { label: 'labelColor', key: 'labelColor', type: 'color' },
   ],
   line: [
-    { label: 'x1', key: 'x1', type: 'number' },
-    { label: 'y1', key: 'y1', type: 'number' },
-    { label: 'x2', key: 'x2', type: 'number' },
-    { label: 'y2', key: 'y2', type: 'number' },
+    { label: 'fromId', key: 'fromId', type: 'select' },
+    { label: 'fromAnchor', key: 'fromAnchor', type: 'select', options: ['auto', 'top', 'right', 'bottom', 'left', 'center'] },
+    { label: 'toId', key: 'toId', type: 'select' },
+    { label: 'toAnchor', key: 'toAnchor', type: 'select', options: ['auto', 'top', 'right', 'bottom', 'left', 'center'] },
+    { label: 'x1 (fixed)', key: 'x1', type: 'number' },
+    { label: 'y1 (fixed)', key: 'y1', type: 'number' },
+    { label: 'x2 (fixed)', key: 'x2', type: 'number' },
+    { label: 'y2 (fixed)', key: 'y2', type: 'number' },
     { label: 'stroke', key: 'stroke', type: 'color' },
     { label: 'strokeWidth', key: 'strokeWidth', type: 'number', step: 0.5 },
     { label: 'strokeDasharray', key: 'strokeDasharray', type: 'text' },
+    { label: 'headStart', key: 'headStart', type: 'select', options: ['none', 'arrow', 'triangle', 'triangle-open', 'circle', 'circle-open', 'diamond', 'diamond-open', 'bar'] },
+    { label: 'headEnd', key: 'headEnd', type: 'select', options: ['none', 'arrow', 'triangle', 'triangle-open', 'circle', 'circle-open', 'diamond', 'diamond-open', 'bar'] },
   ],
   arrow: [
     { label: 'fromId', key: 'fromId', type: 'select' },
@@ -83,6 +95,8 @@ const FIELDS_BY_TYPE: Record<string, FieldDef[]> = {
     { label: 'strokeDasharray', key: 'strokeDasharray', type: 'text' },
     { label: 'label', key: 'label', type: 'text' },
     { label: 'labelColor', key: 'labelColor', type: 'color' },
+    { label: 'headStart', key: 'headStart', type: 'select', options: ['none', 'arrow', 'triangle', 'triangle-open', 'circle', 'circle-open', 'diamond', 'diamond-open', 'bar'] },
+    { label: 'headEnd', key: 'headEnd', type: 'select', options: ['none', 'arrow', 'triangle', 'triangle-open', 'circle', 'circle-open', 'diamond', 'diamond-open', 'bar'] },
   ],
   text: [
     { label: 'x', key: 'x', type: 'number' },
@@ -129,13 +143,152 @@ function escapeHtml(s: string): string {
 
 export function initProperties(root: HTMLElement): void {
   panelEl = root;
-  subscribe(render);
+  subscribe(renderWithFocusRetention);
   if (panelEl) {
     panelEl.addEventListener('input', onInput);
     panelEl.addEventListener('change', onInput);
     panelEl.addEventListener('click', onClick);
+    panelEl.addEventListener('compositionstart', () => {
+      isComposing = true;
+    });
+    panelEl.addEventListener('compositionend', () => {
+      isComposing = false;
+      maybeFlushPendingRender();
+    });
+    panelEl.addEventListener('focusin', (e) => {
+      const t = e.target as HTMLElement;
+      if (isTextInput(t)) textInputFocused = true;
+    });
+    panelEl.addEventListener('focusout', (e) => {
+      const t = e.target as HTMLElement;
+      if (isTextInput(t)) {
+        setTimeout(() => {
+          const active = document.activeElement as HTMLElement | null;
+          if (!active || !panelEl?.contains(active) || !isTextInput(active)) {
+            textInputFocused = false;
+            maybeFlushPendingRender();
+          }
+        }, 0);
+      }
+    });
   }
+  renderWithFocusRetention();
+}
+
+function isTextInput(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  if (el instanceof HTMLTextAreaElement) return true;
+  if (el instanceof HTMLInputElement) {
+    const t = el.type;
+    return t === 'text' || t === 'number' || t === 'search' || t === 'email' || t === 'tel' || t === 'url' || t === 'password';
+  }
+  return false;
+}
+
+function maybeFlushPendingRender(): void {
+  if (pendingRender && !isComposing && !textInputFocused) {
+    pendingRender = false;
+    renderWithFocusRetention();
+  }
+}
+
+interface FocusSnapshot {
+  scope: 'field' | 'effect' | 'add-effect';
+  fieldKey?: string;
+  effectIdx?: string;
+  effectField?: string;
+  addEffectControl?: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  scrollTop: number;
+}
+
+function captureFocus(): FocusSnapshot | null {
+  if (!panelEl) return null;
+  const active = document.activeElement as HTMLElement | null;
+  if (!active || !panelEl.contains(active)) return null;
+  if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement)) {
+    return null;
+  }
+  const scrollTop = panelEl.scrollTop;
+  let selectionStart: number | null = null;
+  let selectionEnd: number | null = null;
+  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+    try {
+      selectionStart = active.selectionStart;
+      selectionEnd = active.selectionEnd;
+    } catch {
+      selectionStart = null;
+      selectionEnd = null;
+    }
+  }
+  const fieldLabel = active.closest<HTMLElement>('[data-field-key]');
+  const effectRow = active.closest<HTMLElement>('[data-effect-idx]');
+  const effectField = active.closest<HTMLElement>('[data-effect-field]');
+  if (fieldLabel) {
+    return { scope: 'field', fieldKey: fieldLabel.dataset.fieldKey, selectionStart, selectionEnd, scrollTop };
+  }
+  if (effectRow && effectField) {
+    return {
+      scope: 'effect',
+      effectIdx: effectRow.dataset.effectIdx,
+      effectField: effectField.dataset.effectField,
+      selectionStart,
+      selectionEnd,
+      scrollTop,
+    };
+  }
+  if (active.id === 'studio-new-effect-type' || active.id === 'studio-new-effect-target') {
+    return { scope: 'add-effect', addEffectControl: active.id, selectionStart, selectionEnd, scrollTop };
+  }
+  return null;
+}
+
+function restoreFocus(snap: FocusSnapshot | null): void {
+  if (!snap || !panelEl) return;
+  panelEl.scrollTop = snap.scrollTop;
+  let target: HTMLElement | null = null;
+  if (snap.scope === 'field' && snap.fieldKey) {
+    target = panelEl.querySelector<HTMLElement>(
+      `[data-field-key="${cssEscapeAttr(snap.fieldKey)}"] [data-field-input]`,
+    );
+  } else if (snap.scope === 'effect' && snap.effectIdx && snap.effectField) {
+    target = panelEl.querySelector<HTMLElement>(
+      `[data-effect-idx="${cssEscapeAttr(snap.effectIdx)}"] [data-effect-field="${cssEscapeAttr(snap.effectField)}"] [data-effect-input]`,
+    );
+  } else if (snap.scope === 'add-effect' && snap.addEffectControl) {
+    target = document.getElementById(snap.addEffectControl);
+  }
+  if (!target) return;
+  target.focus();
+  if (
+    snap.selectionStart !== null &&
+    snap.selectionEnd !== null &&
+    (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
+  ) {
+    const setRange = target.setSelectionRange?.bind(target);
+    if (typeof setRange === 'function') {
+      try {
+        setRange(snap.selectionStart, snap.selectionEnd);
+      } catch {
+        return;
+      }
+    }
+  }
+}
+
+function cssEscapeAttr(s: string): string {
+  return s.replace(/["\\]/g, (m) => `\\${m}`);
+}
+
+function renderWithFocusRetention(): void {
+  if (isComposing || textInputFocused) {
+    pendingRender = true;
+    return;
+  }
+  const snap = captureFocus();
   render();
+  if (snap) restoreFocus(snap);
 }
 
 function render(): void {
@@ -189,9 +342,21 @@ function numberField(label: string, key: string, value: number | undefined, step
   return `<label class="studio-field" data-field-key="${escapeHtml(key)}"><span>${escapeHtml(label)}</span>
     <input type="number" step="${step}" value="${value ?? 0}" data-field-input /></label>`;
 }
+function normalizeHexColor(value: string | undefined): string {
+  if (!value) return '#000000';
+  if (/^#[0-9a-f]{6}$/i.test(value)) return value;
+  if (/^#[0-9a-f]{3}$/i.test(value)) {
+    return '#' + value.slice(1).split('').map((c) => c + c).join('');
+  }
+  return '#000000';
+}
+
 function colorField(label: string, key: string, value: string | undefined): string {
-  return `<label class="studio-field" data-field-key="${escapeHtml(key)}"><span>${escapeHtml(label)}</span>
-    <input type="color" value="${escapeHtml(value ?? '#000000')}" data-field-input /></label>`;
+  const hex = normalizeHexColor(value);
+  const isCustom = value && value !== hex;
+  const note = isCustom ? ` <span class="studio-color-note" title="원래 값: ${escapeHtml(value!)}">(${escapeHtml(value!)})</span>` : '';
+  return `<label class="studio-field" data-field-key="${escapeHtml(key)}"><span>${escapeHtml(label)}${note}</span>
+    <input type="color" value="${escapeHtml(hex)}" data-field-input /></label>`;
 }
 function selectField(label: string, key: string, value: string | undefined, options: { value: string }[]): string {
   const opts = options.map((o) => `<option value="${escapeHtml(o.value)}" ${o.value === value ? 'selected' : ''}>${escapeHtml(o.value || '— 없음 —')}</option>`).join('');
@@ -241,13 +406,26 @@ function renderElementForm(def: AnimationDef, el: AnimationElement, stepIdx: num
     })
     .join('');
 
+  const baseEl = el as unknown as Record<string, unknown>;
+  const animationFields = `
+    <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">애니메이션 동작</span></div>
+    ${selectField('entryMode (등장)', 'entryMode', String(baseEl.entryMode ?? 'instant'), ENTRY_MODE_OPTIONS.map((v) => ({ value: v })))}
+    ${selectField('exitMode (사라짐)', 'exitMode', String(baseEl.exitMode ?? 'instant'), EXIT_MODE_OPTIONS.map((v) => ({ value: v })))}
+    ${selectField('transitionEase (개별)', 'transitionEase', String(baseEl.transitionEase ?? ''), TRANSITION_EASE_OPTIONS.map((v) => ({ value: v })))}
+  `;
+
   panelEl.innerHTML = `
     <div class="studio-step-hint-row"><span class="studio-step-hint">📍 ${stepIdx < 0 ? 'base state' : escapeHtml(def.steps[stepIdx]?.label || def.steps[stepIdx]?.id || '')}</span></div>
     <div class="studio-props-header"><span class="studio-props-header-title">${escapeHtml(el.id)}</span><span class="studio-props-header-type">${escapeHtml(el.type)}</span></div>
     ${visibilityRow}
     ${fieldsHtml}
+    ${animationFields}
   `;
 }
+
+const ENTRY_MODE_OPTIONS = ['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom', 'pop'];
+const EXIT_MODE_OPTIONS = ENTRY_MODE_OPTIONS;
+const TRANSITION_EASE_OPTIONS = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'easeInQuad', 'easeOutQuad', 'easeInOutQuad', 'easeInCubic', 'easeOutCubic', 'easeInOutCubic', 'spring'];
 
 function renderStepForm(def: AnimationDef, step: AnimationStep): void {
   if (!panelEl) return;
@@ -370,7 +548,12 @@ function onInput(e: Event): void {
       setElementVisibility(sel.elementId, Boolean(value));
       return;
     }
-    if (value === '' && ['fromId', 'toId', 'subtitle', 'label', 'strokeDasharray', 'fromAnchor', 'toAnchor'].includes(key)) {
+    if (BASE_ONLY_KEYS.has(key)) {
+      const v = value === '' ? undefined : (value as string);
+      setElementBase(sel.elementId, { [key]: v });
+      return;
+    }
+    if (value === '' && ['subtitle', 'label', 'strokeDasharray'].includes(key)) {
       setElementKeyframe(sel.elementId, { [key]: null });
       return;
     }

@@ -32,6 +32,7 @@ const state: State = {
 const HISTORY_LIMIT = 60;
 const past: string[] = [];
 const future: string[] = [];
+let inTransient = false;
 
 function snapshotJson(): string | null {
   return state.def ? JSON.stringify(state.def) : null;
@@ -43,6 +44,16 @@ function pushHistory(): void {
   past.push(snap);
   if (past.length > HISTORY_LIMIT) past.shift();
   future.length = 0;
+}
+
+export function beginTransient(): void {
+  if (!state.def) return;
+  pushHistory();
+  inTransient = true;
+}
+
+export function endTransient(): void {
+  inTransient = false;
 }
 
 export function canUndo(): boolean {
@@ -140,7 +151,7 @@ export function setSelection(sel: Selection): void {
 
 function mutateDef(fn: (def: AnimationDef) => void): void {
   if (!state.def) return;
-  pushHistory();
+  if (!inTransient) pushHistory();
   const next = animationDefSchema.parse(JSON.parse(JSON.stringify(state.def)));
   fn(next);
   state.def = next;

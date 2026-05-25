@@ -29,6 +29,7 @@ interface DragState {
   startMouseY: number;
   startElemX: number;
   startElemY: number;
+  originalPolygonPoints?: string;
 }
 
 interface RotateState {
@@ -56,12 +57,70 @@ interface EndpointDragState {
   snapTarget: { elementId: string; anchor: Anchor; x: number; y: number } | null;
 }
 
-const SNAP_RADIUS = 18;
+const SNAP_RADIUS = 28;
+
+const HEAD_MARKER_DEFS = `
+  <marker id="studio-h-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-arrow-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-triangle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-triangle-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-triangle-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="studio-h-triangle-open-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="studio-h-circle" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6">
+    <circle cx="5" cy="5" r="4" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-circle-open" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7">
+    <circle cx="5" cy="5" r="4" fill="white" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="studio-h-diamond" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-diamond-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="currentColor" />
+  </marker>
+  <marker id="studio-h-diamond-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="white" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="studio-h-diamond-open-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path d="M 0 5 L 5 0 L 10 5 L 5 10 z" fill="white" stroke="currentColor" stroke-width="1.5" />
+  </marker>
+  <marker id="studio-h-bar" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="10" orient="auto">
+    <rect x="4" y="0" width="2" height="10" fill="currentColor" />
+  </marker>
+`;
+
+function markerUrlFor(head: string | undefined, end: 'start' | 'end'): string {
+  if (!head || head === 'none') return '';
+  const isOpenCircle = head === 'circle-open';
+  const isCircle = head === 'circle' || isOpenCircle;
+  if (isCircle) return `url(#studio-h-${head})`;
+  const idBase = `studio-h-${head}`;
+  return end === 'start' ? `url(#${idBase}-start)` : `url(#${idBase})`;
+}
+
+interface VertexDragState {
+  elementId: string;
+  vertexIndex: number;
+  originalPoints: string;
+}
 
 let dragState: DragState | null = null;
 let rotateState: RotateState | null = null;
 let connectState: ConnectState | null = null;
 let endpointDragState: EndpointDragState | null = null;
+let vertexDragState: VertexDragState | null = null;
 let canvasEl: SVGSVGElement | null = null;
 let previewRoot: HTMLDivElement | null = null;
 let hoveredElementId: string | null = null;
@@ -127,6 +186,24 @@ function onMouseDown(e: MouseEvent): void {
   const target = e.target as Element | null;
   const def = getDef();
   if (!def) return;
+
+  const vertexHandle = target?.closest<SVGElement>('[data-vertex-handle]');
+  if (vertexHandle) {
+    e.preventDefault();
+    const id = vertexHandle.dataset.elemId ?? '';
+    const vi = Number(vertexHandle.dataset.vertexIndex ?? '-1');
+    const snap = getCurrentSnapshot();
+    const elState = snap.get(id);
+    if (!elState || vi < 0) return;
+    vertexDragState = {
+      elementId: id,
+      vertexIndex: vi,
+      originalPoints: String(elState.points ?? ''),
+    };
+    setSelection({ kind: 'element', elementId: id });
+    render();
+    return;
+  }
 
   const endpointHandle = target?.closest<SVGElement>('[data-endpoint-handle]');
   if (endpointHandle) {
@@ -210,7 +287,10 @@ function onMouseDown(e: MouseEvent): void {
   const elState = snap.get(id);
   const baseEl = def.elements.find((x) => x.id === id);
   if (!elState || !baseEl) return;
-  if (baseEl.type === 'arrow' && baseEl.fromId && baseEl.toId) return;
+  if ((baseEl.type === 'arrow' || baseEl.type === 'line') && baseEl.fromId && baseEl.toId) {
+    setSelection({ kind: 'element', elementId: id });
+    return;
+  }
   const anchor = readPositionAnchor(baseEl, elState);
   if (!anchor) return;
   dragState = {
@@ -219,11 +299,22 @@ function onMouseDown(e: MouseEvent): void {
     startMouseY: e.clientY,
     startElemX: anchor.x,
     startElemY: anchor.y,
+    originalPolygonPoints: baseEl.type === 'polygon' ? String(elState.points ?? '') : undefined,
   };
   setSelection({ kind: 'element', elementId: id });
 }
 
 function onMouseMove(e: MouseEvent): void {
+  if (vertexDragState) {
+    const pt = svgPoint(e.clientX, e.clientY);
+    if (!pt) return;
+    const pts = vertexDragState.originalPoints.trim().split(/\s+/);
+    if (vertexDragState.vertexIndex < pts.length) {
+      pts[vertexDragState.vertexIndex] = `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`;
+      setElementKeyframe(vertexDragState.elementId, { points: pts.join(' ') });
+    }
+    return;
+  }
   if (endpointDragState) {
     const pt = svgPoint(e.clientX, e.clientY);
     if (!pt) return;
@@ -236,10 +327,7 @@ function onMouseMove(e: MouseEvent): void {
     if (!baseEl) return;
     const finalX = endpointDragState.snapTarget ? endpointDragState.snapTarget.x : pt.x;
     const finalY = endpointDragState.snapTarget ? endpointDragState.snapTarget.y : pt.y;
-    if (baseEl.type === 'line') {
-      const patch = endpointDragState.end === 'start' ? { x1: finalX, y1: finalY } : { x2: finalX, y2: finalY };
-      setElementBase(baseEl.id, patch);
-    } else if (baseEl.type === 'arrow') {
+    if (baseEl.type === 'line' || baseEl.type === 'arrow') {
       if (endpointDragState.snapTarget) {
         if (endpointDragState.end === 'start') {
           setElementBase(baseEl.id, {
@@ -302,6 +390,10 @@ function onMouseMove(e: MouseEvent): void {
 }
 
 function onMouseUp(e: MouseEvent): void {
+  if (vertexDragState) {
+    vertexDragState = null;
+    render();
+  }
   if (endpointDragState) {
     endpointDragState = null;
     render();
@@ -327,6 +419,8 @@ function onMouseUp(e: MouseEvent): void {
           strokeWidth: 2,
           curvature: 0,
           labelColor: '#0b0b0f',
+          headStart: 'none',
+          headEnd: 'arrow',
         });
       }
     }
@@ -362,7 +456,7 @@ function applyMove(
     setElementKeyframe(baseEl.id, { x, y });
   } else if (baseEl.type === 'circle') {
     setElementKeyframe(baseEl.id, { cx: x, cy: y });
-  } else if (baseEl.type === 'line') {
+  } else if ((baseEl.type === 'line' || baseEl.type === 'arrow') && typeof state.x1 === 'number' && typeof state.y1 === 'number' && typeof state.x2 === 'number' && typeof state.y2 === 'number') {
     const dx = x - (state.x1 as number);
     const dy = y - (state.y1 as number);
     setElementKeyframe(baseEl.id, {
@@ -371,15 +465,15 @@ function applyMove(
       x2: (state.x2 as number) + dx,
       y2: (state.y2 as number) + dy,
     });
-  } else if (baseEl.type === 'arrow' && typeof state.x1 === 'number' && typeof state.y1 === 'number') {
-    const dx = x - (state.x1 as number);
-    const dy = y - (state.y1 as number);
-    setElementKeyframe(baseEl.id, {
-      x1: x,
-      y1: y,
-      x2: (state.x2 as number) + dx,
-      y2: (state.y2 as number) + dy,
-    });
+  } else if (baseEl.type === 'path') {
+    setElementKeyframe(baseEl.id, { x, y });
+  } else if (baseEl.type === 'polygon' && dragState?.originalPolygonPoints) {
+    const startFirst = firstPolygonPoint(dragState.originalPolygonPoints);
+    if (!startFirst) return;
+    const dx = x - startFirst.x;
+    const dy = y - startFirst.y;
+    const newPoints = shiftPolygonPoints(dragState.originalPolygonPoints, dx, dy);
+    setElementKeyframe(baseEl.id, { points: newPoints });
   }
 }
 
@@ -391,11 +485,67 @@ function readPositionAnchor(
     return { x: state.x as number, y: state.y as number };
   }
   if (baseEl.type === 'circle') return { x: state.cx as number, y: state.cy as number };
-  if (baseEl.type === 'line') return { x: state.x1 as number, y: state.y1 as number };
-  if (baseEl.type === 'arrow' && typeof state.x1 === 'number') {
+  if ((baseEl.type === 'line' || baseEl.type === 'arrow') && typeof state.x1 === 'number') {
     return { x: state.x1 as number, y: state.y1 as number };
   }
+  if (baseEl.type === 'path') return { x: (state.x as number) ?? 0, y: (state.y as number) ?? 0 };
+  if (baseEl.type === 'polygon') {
+    const first = firstPolygonPoint(String(state.points ?? ''));
+    return first;
+  }
   return null;
+}
+
+function firstPolygonPoint(points: string): { x: number; y: number } | null {
+  const first = points.trim().split(/\s+/)[0];
+  if (!first) return null;
+  const [x, y] = first.split(',').map(Number);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+function shiftPolygonPoints(points: string, dx: number, dy: number): string {
+  return points
+    .trim()
+    .split(/\s+/)
+    .map((pair) => {
+      const [x, y] = pair.split(',').map(Number);
+      if (Number.isFinite(x) && Number.isFinite(y)) return `${(x + dx).toFixed(1)},${(y + dy).toFixed(1)}`;
+      return pair;
+    })
+    .join(' ');
+}
+
+function polygonBoundingBox(points: string): { x: number; y: number; w: number; h: number } | null {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let any = false;
+  for (const pair of points.trim().split(/\s+/)) {
+    const [x, y] = pair.split(',').map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    any = true;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  if (!any) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function pathBBoxOnCanvas(elementId: string): { x: number; y: number; w: number; h: number } | null {
+  if (!canvasEl) return null;
+  const g = canvasEl.querySelector<SVGGElement>(`[data-elem-id="${cssAttrEscape(elementId)}"]`);
+  if (!g) return null;
+  try {
+    const bbox = g.getBBox();
+    return { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
+  } catch {
+    return null;
+  }
+}
+
+function cssAttrEscape(s: string): string {
+  return s.replace(/["\\]/g, (m) => `\\${m}`);
 }
 
 function render(): void {
@@ -413,11 +563,7 @@ function render(): void {
   canvasEl.style.height = def.canvas.height + 'px';
   canvasEl.style.backgroundColor = def.canvas.background;
 
-  canvasEl.innerHTML = `<defs>
-    <marker id="studio-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
-    </marker>
-  </defs>`;
+  canvasEl.innerHTML = `<defs>${HEAD_MARKER_DEFS}</defs>`;
 
   const snap = getCurrentSnapshot();
   const elementsById = new Map<string, AnimationElement>();
@@ -441,6 +587,8 @@ function render(): void {
     if (handle) canvasEl.appendChild(handle);
     const endpoints = renderLineEndpointHandles(selection.elementId, snap, elementsById);
     if (endpoints) canvasEl.appendChild(endpoints);
+    const vertices = renderPolygonVertexHandles(selection.elementId, snap, elementsById);
+    if (vertices) canvasEl.appendChild(vertices);
   }
 
   if (endpointDragState) {
@@ -525,10 +673,12 @@ function renderLineEndpointHandles(
   const state = snap.get(elId);
   if (!baseEl || !state) return null;
   if (baseEl.type !== 'line' && baseEl.type !== 'arrow') return null;
-  const coords: { x1: number; y1: number; x2: number; y2: number } | null =
-    baseEl.type === 'line'
-      ? { x1: state.x1 as number, y1: state.y1 as number, x2: state.x2 as number, y2: state.y2 as number }
-      : resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
+  let coords: { x1: number; y1: number; x2: number; y2: number } | null = null;
+  if (baseEl.type === 'line') {
+    coords = resolveLineCoords(state as unknown as LineElement, snap, byId);
+  } else {
+    coords = resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
+  }
   if (!coords) return null;
   const midX = (coords.x1 + coords.x2) / 2;
   const midY = (coords.y1 + coords.y2) / 2;
@@ -544,6 +694,28 @@ function renderLineEndpointHandles(
       fill="var(--color-accent)" stroke="white" stroke-width="2"
       data-line-mid-handle data-elem-id="${escapeXml(elId)}" style="cursor: move" />
   `;
+  return g;
+}
+
+function renderPolygonVertexHandles(
+  elId: string,
+  snap: SnapshotMap,
+  byId: Map<string, AnimationElement>,
+): SVGElement | null {
+  const baseEl = byId.get(elId);
+  const state = snap.get(elId);
+  if (!baseEl || !state) return null;
+  if (baseEl.type !== 'polygon') return null;
+  const points = String(state.points ?? '').trim().split(/\s+/);
+  const g = document.createElementNS(SVG_NS, 'g');
+  let html = '';
+  for (let i = 0; i < points.length; i += 1) {
+    const [x, y] = points[i].split(',').map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    html += `<circle cx="${x}" cy="${y}" r="6" fill="white" stroke="var(--color-accent)" stroke-width="2"
+      data-vertex-handle data-elem-id="${escapeXml(elId)}" data-vertex-index="${i}" style="cursor: grab" />`;
+  }
+  g.innerHTML = html;
   return g;
 }
 
@@ -678,10 +850,16 @@ function renderElement(
   }
   if (baseEl.type === 'line') {
     const l = state as unknown as LineElement;
+    const coords = resolveLineCoords(l, snap, byId);
+    if (!coords) return null;
     const g = makeG(baseEl.id, 0, 0, 0);
+    g.style.color = l.stroke;
     const dash = l.strokeDasharray ? `stroke-dasharray="${l.strokeDasharray}"` : '';
-    g.innerHTML = `<line x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}"
-      stroke="${l.stroke}" stroke-width="${l.strokeWidth}" ${dash} />`;
+    const mStart = markerUrlFor(l.headStart, 'start');
+    const mEnd = markerUrlFor(l.headEnd, 'end');
+    const mAttr = `${mStart ? `marker-start="${mStart}"` : ''} ${mEnd ? `marker-end="${mEnd}"` : ''}`;
+    g.innerHTML = `<line x1="${coords.x1}" y1="${coords.y1}" x2="${coords.x2}" y2="${coords.y2}"
+      stroke="currentColor" stroke-width="${l.strokeWidth}" ${dash} ${mAttr} />`;
     return g;
   }
   if (baseEl.type === 'arrow') {
@@ -694,6 +872,9 @@ function renderElement(
     const midX = (coords.x1 + coords.x2) / 2;
     const midY = (coords.y1 + coords.y2) / 2;
     const isCurved = (a.curvature || 0) !== 0;
+    const mStart = markerUrlFor(a.headStart ?? 'none', 'start');
+    const mEnd = markerUrlFor(a.headEnd ?? 'arrow', 'end');
+    const mAttr = `${mStart ? `marker-start="${mStart}"` : ''} ${mEnd ? `marker-end="${mEnd}"` : ''}`;
     let pathHtml: string;
     if (isCurved) {
       const dx = coords.x2 - coords.x1;
@@ -703,9 +884,9 @@ function renderElement(
       const ny = dx / len;
       const cpx = midX + nx * (a.curvature ?? 0);
       const cpy = midY + ny * (a.curvature ?? 0);
-      pathHtml = `<path d="M ${coords.x1} ${coords.y1} Q ${cpx} ${cpy} ${coords.x2} ${coords.y2}" fill="none" stroke="currentColor" stroke-width="${a.strokeWidth}" ${dash} marker-end="url(#studio-arrow)" />`;
+      pathHtml = `<path d="M ${coords.x1} ${coords.y1} Q ${cpx} ${cpy} ${coords.x2} ${coords.y2}" fill="none" stroke="currentColor" stroke-width="${a.strokeWidth}" ${dash} ${mAttr} />`;
     } else {
-      pathHtml = `<line x1="${coords.x1}" y1="${coords.y1}" x2="${coords.x2}" y2="${coords.y2}" stroke="currentColor" stroke-width="${a.strokeWidth}" ${dash} marker-end="url(#studio-arrow)" />`;
+      pathHtml = `<line x1="${coords.x1}" y1="${coords.y1}" x2="${coords.x2}" y2="${coords.y2}" stroke="currentColor" stroke-width="${a.strokeWidth}" ${dash} ${mAttr} />`;
     }
     g.innerHTML = `
       ${pathHtml}
@@ -737,13 +918,13 @@ function renderElement(
     const g = makeG(baseEl.id, rotation, p.x, p.y);
     const dash = p.strokeDasharray ? `stroke-dasharray="${p.strokeDasharray}"` : '';
     const xform = (p.x || p.y) ? `transform="translate(${p.x} ${p.y})"` : '';
-    g.innerHTML = `<path d="${escapeXml(p.d)}" fill="${p.fill}" stroke="${p.stroke}" stroke-width="${p.strokeWidth}" ${dash} opacity="${p.opacity}" ${xform} />`;
+    g.innerHTML = `<path d="${escapeXml(p.d)}" fill="${p.fill}" stroke="${p.stroke}" stroke-width="${p.strokeWidth}" ${dash} opacity="${p.opacity}" ${xform} pointer-events="all" />`;
     return g;
   }
   if (baseEl.type === 'polygon') {
     const pg = state as unknown as import('../../animations/schema').PolygonElement;
     const g = makeG(baseEl.id, rotation, 0, 0);
-    g.innerHTML = `<polygon points="${escapeXml(pg.points)}" fill="${pg.fill}" stroke="${pg.stroke}" stroke-width="${pg.strokeWidth}" opacity="${pg.opacity}" />`;
+    g.innerHTML = `<polygon points="${escapeXml(pg.points)}" fill="${pg.fill}" stroke="${pg.stroke}" stroke-width="${pg.strokeWidth}" opacity="${pg.opacity}" pointer-events="all" />`;
     return g;
   }
   return null;
@@ -754,36 +935,177 @@ function resolveArrowCoords(
   snap: SnapshotMap,
   byId: Map<string, AnimationElement>,
 ): { x1: number; y1: number; x2: number; y2: number } | null {
-  if (a.fromId && a.toId) {
-    const fromEl = byId.get(a.fromId);
-    const toEl = byId.get(a.toId);
-    const fromState = snap.get(a.fromId);
-    const toState = snap.get(a.toId);
-    if (!fromEl || !toEl || !fromState || !toState) return null;
-    const fc = centerOf(fromEl, fromState);
-    const tc = centerOf(toEl, toState);
-    if (!fc || !tc) return null;
-    return { x1: fc.x, y1: fc.y, x2: tc.x, y2: tc.y };
+  const fromFixed = typeof a.x1 === 'number' && typeof a.y1 === 'number'
+    ? { x: a.x1, y: a.y1 } : null;
+  const toFixed = typeof a.x2 === 'number' && typeof a.y2 === 'number'
+    ? { x: a.x2, y: a.y2 } : null;
+  const fromEl = a.fromId ? byId.get(a.fromId) : null;
+  const toEl = a.toId ? byId.get(a.toId) : null;
+  const fromState = a.fromId ? snap.get(a.fromId) : null;
+  const toState = a.toId ? snap.get(a.toId) : null;
+  const fromConnected = !!(fromEl && fromState);
+  const toConnected = !!(toEl && toState);
+
+  if (!fromConnected && !fromFixed) return null;
+  if (!toConnected && !toFixed) return null;
+
+  let fromAnchor: Anchor = a.fromAnchor ?? 'auto';
+  let toAnchor: Anchor = a.toAnchor ?? 'auto';
+
+  let p1: { x: number; y: number } | null = null;
+  let p2: { x: number; y: number } | null = null;
+
+  if (fromConnected && toConnected) {
+    if (fromAnchor === 'auto' || toAnchor === 'auto') {
+      const picked = pickAutoAnchorPair(fromEl!, fromState!, toEl!, toState!);
+      if (fromAnchor === 'auto') fromAnchor = picked.from;
+      if (toAnchor === 'auto') toAnchor = picked.to;
+    }
+    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
+    p2 = anchorPointOf(toEl!, toState!, toAnchor);
+  } else if (fromConnected && toFixed) {
+    if (fromAnchor === 'auto') fromAnchor = pickAutoAnchorTowardPoint(fromEl!, fromState!, toFixed);
+    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
+    p2 = toFixed;
+  } else if (fromFixed && toConnected) {
+    if (toAnchor === 'auto') toAnchor = pickAutoAnchorTowardPoint(toEl!, toState!, fromFixed);
+    p1 = fromFixed;
+    p2 = anchorPointOf(toEl!, toState!, toAnchor);
+  } else if (fromFixed && toFixed) {
+    p1 = fromFixed;
+    p2 = toFixed;
   }
-  if (
-    typeof a.x1 === 'number' && typeof a.y1 === 'number' &&
-    typeof a.x2 === 'number' && typeof a.y2 === 'number'
-  ) {
-    return { x1: a.x1, y1: a.y1, x2: a.x2, y2: a.y2 };
+
+  if (!p1 || !p2) return null;
+  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+}
+
+function resolveLineCoords(
+  l: LineElement,
+  snap: SnapshotMap,
+  byId: Map<string, AnimationElement>,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  const fromFixed = typeof l.x1 === 'number' && typeof l.y1 === 'number'
+    ? { x: l.x1, y: l.y1 } : null;
+  const toFixed = typeof l.x2 === 'number' && typeof l.y2 === 'number'
+    ? { x: l.x2, y: l.y2 } : null;
+  const fromEl = l.fromId ? byId.get(l.fromId) : null;
+  const toEl = l.toId ? byId.get(l.toId) : null;
+  const fromState = l.fromId ? snap.get(l.fromId) : null;
+  const toState = l.toId ? snap.get(l.toId) : null;
+  const fromConnected = !!(fromEl && fromState);
+  const toConnected = !!(toEl && toState);
+  if (!fromConnected && !fromFixed) return null;
+  if (!toConnected && !toFixed) return null;
+
+  let fromAnchor: Anchor = l.fromAnchor ?? 'auto';
+  let toAnchor: Anchor = l.toAnchor ?? 'auto';
+
+  let p1: { x: number; y: number } | null = null;
+  let p2: { x: number; y: number } | null = null;
+
+  if (fromConnected && toConnected) {
+    if (fromAnchor === 'auto' || toAnchor === 'auto') {
+      const picked = pickAutoAnchorPair(fromEl!, fromState!, toEl!, toState!);
+      if (fromAnchor === 'auto') fromAnchor = picked.from;
+      if (toAnchor === 'auto') toAnchor = picked.to;
+    }
+    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
+    p2 = anchorPointOf(toEl!, toState!, toAnchor);
+  } else if (fromConnected && toFixed) {
+    if (fromAnchor === 'auto') fromAnchor = pickAutoAnchorTowardPoint(fromEl!, fromState!, toFixed);
+    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
+    p2 = toFixed;
+  } else if (fromFixed && toConnected) {
+    if (toAnchor === 'auto') toAnchor = pickAutoAnchorTowardPoint(toEl!, toState!, fromFixed);
+    p1 = fromFixed;
+    p2 = anchorPointOf(toEl!, toState!, toAnchor);
+  } else if (fromFixed && toFixed) {
+    p1 = fromFixed;
+    p2 = toFixed;
   }
+
+  if (!p1 || !p2) return null;
+  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+}
+
+function pickAutoAnchorTowardPoint(
+  el: AnimationElement,
+  state: Record<string, unknown>,
+  point: { x: number; y: number },
+): Anchor {
+  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
+  let best: Anchor = 'right';
+  let bestDist = Infinity;
+  for (const a of candidates) {
+    const p = anchorPointOf(el, state, a);
+    if (!p) continue;
+    const d = Math.hypot(p.x - point.x, p.y - point.y);
+    if (d < bestDist) { bestDist = d; best = a; }
+  }
+  return best;
+}
+
+function anchorPointOf(
+  el: AnimationElement,
+  state: Record<string, unknown>,
+  anchor: Anchor,
+): { x: number; y: number } | null {
+  if (el.type === 'rect' || el.type === 'image') {
+    const x = state.x as number;
+    const y = state.y as number;
+    const w = state.width as number;
+    const h = state.height as number;
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    switch (anchor) {
+      case 'top': return { x: cx, y };
+      case 'right': return { x: x + w, y: cy };
+      case 'bottom': return { x: cx, y: y + h };
+      case 'left': return { x, y: cy };
+      case 'center':
+      case 'auto':
+      default: return { x: cx, y: cy };
+    }
+  }
+  if (el.type === 'circle') {
+    const cx = state.cx as number;
+    const cy = state.cy as number;
+    const r = state.r as number;
+    switch (anchor) {
+      case 'top': return { x: cx, y: cy - r };
+      case 'right': return { x: cx + r, y: cy };
+      case 'bottom': return { x: cx, y: cy + r };
+      case 'left': return { x: cx - r, y: cy };
+      default: return { x: cx, y: cy };
+    }
+  }
+  if (el.type === 'text') return { x: state.x as number, y: state.y as number };
   return null;
 }
 
-function centerOf(
-  el: AnimationElement,
-  state: Record<string, unknown>,
-): { x: number; y: number } | null {
-  if (el.type === 'rect' || el.type === 'image') {
-    return { x: (state.x as number) + (state.width as number) / 2, y: (state.y as number) + (state.height as number) / 2 };
+function pickAutoAnchorPair(
+  fromEl: AnimationElement,
+  fromState: Record<string, unknown>,
+  toEl: AnimationElement,
+  toState: Record<string, unknown>,
+): { from: Anchor; to: Anchor } {
+  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
+  let bestPair: { from: Anchor; to: Anchor } = { from: 'right', to: 'left' };
+  let bestDist = Infinity;
+  for (const fa of candidates) {
+    for (const ta of candidates) {
+      const fp = anchorPointOf(fromEl, fromState, fa);
+      const tp = anchorPointOf(toEl, toState, ta);
+      if (!fp || !tp) continue;
+      const d = Math.hypot(tp.x - fp.x, tp.y - fp.y);
+      if (d < bestDist) {
+        bestDist = d;
+        bestPair = { from: fa, to: ta };
+      }
+    }
   }
-  if (el.type === 'circle') return { x: state.cx as number, y: state.cy as number };
-  if (el.type === 'text') return { x: state.x as number, y: state.y as number };
-  return null;
+  return bestPair;
 }
 
 function renderSelectionOutline(
@@ -805,7 +1127,7 @@ function renderSelectionOutline(
   } else if (baseEl.type === 'line' || baseEl.type === 'arrow') {
     const coords =
       baseEl.type === 'line'
-        ? { x1: state.x1 as number, y1: state.y1 as number, x2: state.x2 as number, y2: state.y2 as number }
+        ? resolveLineCoords(state as unknown as LineElement, snap, byId)
         : resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
     if (!coords) return null;
     box = {
@@ -814,6 +1136,12 @@ function renderSelectionOutline(
       w: Math.abs(coords.x2 - coords.x1) + 8,
       h: Math.abs(coords.y2 - coords.y1) + 8,
     };
+  } else if (baseEl.type === 'polygon') {
+    const bbox = polygonBoundingBox(String(state.points ?? ''));
+    if (bbox) box = { x: bbox.x - 4, y: bbox.y - 4, w: bbox.w + 8, h: bbox.h + 8 };
+  } else if (baseEl.type === 'path') {
+    const bbox = pathBBoxOnCanvas(elId);
+    if (bbox) box = { x: bbox.x - 4, y: bbox.y - 4, w: bbox.w + 8, h: bbox.h + 8 };
   }
   if (!box) return null;
   const rect = document.createElementNS(SVG_NS, 'rect');
@@ -831,7 +1159,8 @@ export function showPreview(def: import('../../animations/schema').AnimationDef)
   if (!parent) return;
   hidePreview();
   previewRoot = document.createElement('div');
-  previewRoot.style.cssText = 'position:absolute;inset:0;background:white;z-index:2;display:flex;align-items:center;justify-content:center;';
+  const bg = def.canvas.background && def.canvas.background !== 'transparent' ? def.canvas.background : 'transparent';
+  previewRoot.style.cssText = `position:absolute;left:0;top:0;width:${def.canvas.width}px;height:${def.canvas.height}px;background:${bg};z-index:2;overflow:hidden;`;
   parent.style.position = 'relative';
   parent.appendChild(previewRoot);
   void mountReactPreview(previewRoot, def);

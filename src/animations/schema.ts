@@ -10,10 +10,25 @@ const easeSchema = z
 
 export const anchorSchema = z.enum(['auto', 'top', 'right', 'bottom', 'left', 'center']).default('auto');
 
+export const entryModeSchema = z
+  .enum(['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom', 'pop'])
+  .default('instant');
+
+export const exitModeSchema = z
+  .enum(['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom', 'pop'])
+  .default('instant');
+
+export const transitionEaseSchema = z
+  .enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'easeInQuad', 'easeOutQuad', 'easeInOutQuad', 'easeInCubic', 'easeOutCubic', 'easeInOutCubic', 'spring'])
+  .optional();
+
 const baseElementProps = {
   id: idSchema,
   name: z.string().optional(),
   rotation: z.number().default(0),
+  entryMode: entryModeSchema.optional(),
+  exitMode: exitModeSchema.optional(),
+  transitionEase: transitionEaseSchema,
 };
 
 export const rectElementSchema = z.object({
@@ -47,16 +62,25 @@ export const circleElementSchema = z.object({
   labelSize: z.number().positive().default(14),
 });
 
+export const arrowHeadSchema = z
+  .enum(['none', 'arrow', 'triangle', 'triangle-open', 'circle', 'circle-open', 'diamond', 'diamond-open', 'bar']);
+
 export const lineElementSchema = z.object({
   type: z.literal('line'),
   ...baseElementProps,
-  x1: z.number(),
-  y1: z.number(),
-  x2: z.number(),
-  y2: z.number(),
+  fromId: idSchema.optional(),
+  toId: idSchema.optional(),
+  fromAnchor: anchorSchema.optional(),
+  toAnchor: anchorSchema.optional(),
+  x1: z.number().optional(),
+  y1: z.number().optional(),
+  x2: z.number().optional(),
+  y2: z.number().optional(),
   stroke: z.string().default('#6366f1'),
   strokeWidth: z.number().positive().default(2),
   strokeDasharray: z.string().optional(),
+  headStart: arrowHeadSchema.optional(),
+  headEnd: arrowHeadSchema.optional(),
 });
 
 export const arrowElementSchema = z.object({
@@ -76,6 +100,8 @@ export const arrowElementSchema = z.object({
   label: z.string().optional(),
   labelColor: z.string().default('#0b0b0f'),
   curvature: z.number().default(0),
+  headStart: arrowHeadSchema.optional(),
+  headEnd: arrowHeadSchema.optional(),
 });
 
 export const textElementSchema = z.object({
@@ -178,7 +204,7 @@ export const stepSchema = z.object({
 export const animationDefSchema = z.object({
   version: z.literal(2).default(2),
   id: idSchema,
-  title: z.string().min(1),
+  title: z.string().default(''),
   description: z.string().default(''),
   category: z
     .enum(['network', 'cache', 'algorithm', 'architecture', 'flow', 'protocol', 'general'])
@@ -205,6 +231,10 @@ export const animationDefSchema = z.object({
 });
 
 export type Anchor = z.infer<typeof anchorSchema>;
+export type ArrowHead = z.infer<typeof arrowHeadSchema>;
+export type EntryMode = z.infer<typeof entryModeSchema>;
+export type ExitMode = z.infer<typeof exitModeSchema>;
+export type TransitionEase = z.infer<typeof transitionEaseSchema>;
 export type RectElement = z.infer<typeof rectElementSchema>;
 export type CircleElement = z.infer<typeof circleElementSchema>;
 export type LineElement = z.infer<typeof lineElementSchema>;
