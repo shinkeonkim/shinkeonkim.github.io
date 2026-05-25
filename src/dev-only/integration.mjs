@@ -15,6 +15,18 @@ export default function devEditor() {
           entrypoint: path.join(here, 'editor.astro'),
         });
         injectRoute({
+          pattern: '/_studio',
+          entrypoint: path.join(here, 'studio.astro'),
+        });
+        injectRoute({
+          pattern: '/_studio/api/animations',
+          entrypoint: path.join(here, 'api-animations.ts'),
+        });
+        injectRoute({
+          pattern: '/_studio/api/animations/[id]',
+          entrypoint: path.join(here, 'api-animation.ts'),
+        });
+        injectRoute({
           pattern: '/_editor/api/files',
           entrypoint: path.join(here, 'api-files.ts'),
         });

@@ -1,0 +1,363 @@
+---
+---
+
+<style is:global>
+  .anim-placeholder {
+    min-height: 280px;
+    margin: 1.5rem 0;
+    border: 1px dashed var(--color-border);
+    border-radius: 0.75rem;
+    background-color: var(--color-surface-elevated);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-fg-muted);
+    font-size: 0.875rem;
+  }
+  .anim-placeholder::before {
+    content: '⏳ 애니메이션 로딩…';
+  }
+  .anim-error {
+    margin: 1rem 0;
+    padding: 0.75rem 1rem;
+    border: 1px solid #ef4444;
+    border-radius: 0.5rem;
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #b91c1c;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+  }
+  :root.dark .anim-error {
+    color: #fca5a5;
+  }
+  .anim-wrapper {
+    margin: 1.5rem 0;
+    border: 1px solid var(--color-border);
+    border-radius: 0.75rem;
+    background-color: var(--color-surface);
+    overflow: hidden;
+  }
+  .anim-wrapper-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--color-border);
+    background-color: var(--color-surface-elevated);
+  }
+  .anim-wrapper-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .anim-wrapper-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .anim-wrapper-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 2rem;
+    min-width: 2rem;
+    padding: 0 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.375rem;
+    background-color: var(--color-surface);
+    color: var(--color-fg-muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    text-decoration: none;
+  }
+  .anim-wrapper-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+  .anim-wrapper-speed {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.375rem;
+    background-color: var(--color-surface);
+    font-size: 0.75rem;
+    color: var(--color-fg-muted);
+  }
+  .anim-wrapper-speed input[type='range'] {
+    width: 80px;
+  }
+  .anim-wrapper-speed-value {
+    font-family: var(--font-mono);
+    min-width: 3.5em;
+    text-align: right;
+  }
+  .anim-wrapper-body {
+    position: relative;
+    padding: 1rem;
+    background-color: var(--color-surface);
+  }
+  .anim-wrapper-step {
+    margin-top: 0.5rem;
+    text-align: center;
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    color: var(--color-fg-muted);
+  }
+  .anim-wrapper-reduced {
+    padding: 1rem;
+    text-align: center;
+    color: var(--color-fg-muted);
+  }
+</style>
+
+<script is:inline>
+  // Workaround for Vite React plugin preamble check in dev mode.
+  // engine.tsx (with JSX) is dynamically used by the AnimationLoader script
+  // below outside Astro's React island pipeline, so the plugin's expected
+  // preamble globals are not set, causing import to throw. Stubs satisfy
+  // the plugin's check; production build is unaffected by these globals.
+  if (typeof window !== 'undefined' && !window.__vite_plugin_react_preamble_installed__) {
+    window.$RefreshReg$ = function () {};
+    window.$RefreshSig$ = function () {
+      return function (t) {
+        return t;
+      };
+    };
+    window.__vite_plugin_react_preamble_installed__ = true;
+  }
+</script>
+
+<script>
+  import { createRoot, type Root } from 'react-dom/client';
+  import { createElement, useState, useEffect, useCallback, useRef } from 'react';
+  import AnimationEngine from '../animations/engine';
+  import { animationDefSchema } from '../animations/schema';
+  import type { AnimationDef } from '../animations/schema';
+
+  const HYDRATED = new WeakSet<HTMLElement>();
+  const ROOTS = new WeakMap<HTMLElement, Root>();
+  const CACHE = new Map<string, Promise<AnimationDef | null>>();
+
+  async function fetchAnimation(id: string): Promise<AnimationDef | null> {
+    if (CACHE.has(id)) return CACHE.get(id)!;
+    const p = (async () => {
+      try {
+        const res = await fetch(`/animations/${id}.json`, { cache: 'force-cache' });
+        if (!res.ok) return null;
+        const json = await res.json();
+        const parsed = animationDefSchema.safeParse(json);
+        return parsed.success ? parsed.data : null;
+      } catch {
+        return null;
+      }
+    })();
+    CACHE.set(id, p);
+    return p;
+  }
+
+  function fail(el: HTMLElement, msg: string): void {
+    el.outerHTML = `<div class="anim-error">${msg}</div>`;
+  }
+
+  interface WrapperProps {
+    def: AnimationDef;
+    overrides: Record<string, unknown>;
+  }
+
+  function PlayerWrapper({ def, overrides: _overrides }: WrapperProps) {
+    const [speed, setSpeed] = useState(1);
+    const [playing, setPlaying] = useState(def.settings.autoplay);
+    const [step, setStep] = useState(0);
+    const [reducedMotion, setReducedMotion] = useState(false);
+    const [restartKey, setRestartKey] = useState(0);
+    const ref = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      if (typeof window === 'undefined') return;
+      const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+      setReducedMotion(mq.matches);
+      const onChange = () => setReducedMotion(mq.matches);
+      mq.addEventListener('change', onChange);
+      return () => mq.removeEventListener('change', onChange);
+    }, []);
+
+    useEffect(() => {
+      const el = ref.current;
+      if (!el || typeof IntersectionObserver === 'undefined') return;
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) setPlaying(e.isIntersecting && def.settings.autoplay);
+        },
+        { threshold: 0.1 },
+      );
+      io.observe(el);
+      return () => io.disconnect();
+    }, [def.settings.autoplay]);
+
+    const restart = useCallback(() => {
+      setRestartKey((k) => k + 1);
+      setStep(0);
+    }, []);
+
+    return createElement(
+      'div',
+      { ref, className: 'anim-wrapper not-prose' },
+      createElement(
+        'div',
+        { className: 'anim-wrapper-header' },
+        createElement(
+          'div',
+          { className: 'anim-wrapper-title' },
+          createElement('span', { 'aria-hidden': 'true' }, '⚡'),
+          createElement('span', null, def.title),
+        ),
+        createElement(
+          'div',
+          { className: 'anim-wrapper-actions' },
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'anim-wrapper-btn',
+              onClick: () => setPlaying((p) => !p),
+              title: playing ? '일시정지' : '재생',
+              'aria-label': playing ? '일시정지' : '재생',
+            },
+            playing ? '⏸' : '▶',
+          ),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'anim-wrapper-btn',
+              onClick: restart,
+              title: '다시 재생',
+              'aria-label': '다시 재생',
+            },
+            '↻',
+          ),
+          createElement(
+            'label',
+            { className: 'anim-wrapper-speed', title: '재생 속도' },
+            createElement('span', { 'aria-hidden': 'true' }, '⏩'),
+            createElement('input', {
+              type: 'range',
+              min: 0.25,
+              max: 3,
+              step: 0.25,
+              value: speed,
+              onChange: (e: React.ChangeEvent<HTMLInputElement>) => setSpeed(Number(e.target.value)),
+              'aria-label': '재생 속도',
+            }),
+            createElement(
+              'span',
+              { className: 'anim-wrapper-speed-value' },
+              speed.toFixed(2) + 'x',
+            ),
+          ),
+          createElement(
+            'a',
+            {
+              href: `/animations/${def.id}/`,
+              className: 'anim-wrapper-btn',
+              title: '풀스크린 보기',
+              'aria-label': '풀스크린 보기',
+            },
+            '⛶',
+          ),
+        ),
+      ),
+      createElement(
+        'div',
+        { className: 'anim-wrapper-body' },
+        reducedMotion
+          ? createElement(
+              'div',
+              { className: 'anim-wrapper-reduced' },
+              createElement(
+                'p',
+                null,
+                createElement('strong', null, def.title),
+                def.description ? ' — ' + def.description : '',
+              ),
+              createElement(
+                'p',
+                { style: { fontSize: '0.8rem', marginTop: '0.5rem' } },
+                '모션 줄이기 설정으로 자동 재생을 멈췄습니다.',
+              ),
+            )
+          : createElement(AnimationEngine, {
+              key: restartKey,
+              def,
+              speedMultiplier: speed,
+              playing,
+              onStepChange: setStep,
+            }),
+        def.steps.length > 0 && !reducedMotion
+          ? createElement(
+              'div',
+              { className: 'anim-wrapper-step' },
+              `Step ${step + 1} / ${def.steps.length}`,
+              def.steps[step]?.label ? ` — ${def.steps[step].label}` : '',
+            )
+          : null,
+      ),
+    );
+  }
+
+  async function hydrate(el: HTMLElement): Promise<void> {
+    if (HYDRATED.has(el)) return;
+    HYDRATED.add(el);
+    const id = el.dataset.animId ?? '';
+    const overridesRaw = el.dataset.animOverrides ?? '{}';
+
+    let overrides: Record<string, unknown>;
+    try {
+      overrides = JSON.parse(overridesRaw);
+    } catch (err) {
+      fail(el, `overrides 파싱 실패 (${id}): ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const def = await fetchAnimation(id);
+    if (!def) {
+      fail(el, `애니메이션 로드 실패: "${id}" (/animations/${id}.json 없음)`);
+      return;
+    }
+
+    const root = createRoot(el);
+    ROOTS.set(el, root);
+    el.classList.remove('anim-placeholder');
+    root.render(createElement(PlayerWrapper, { def, overrides }));
+  }
+
+  function hydrateAll(): void {
+    const els = document.querySelectorAll<HTMLElement>('.anim-placeholder');
+    if (els.length === 0) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      els.forEach((el) => void hydrate(el));
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            io.unobserve(entry.target);
+            void hydrate(entry.target as HTMLElement);
+          }
+        }
+      },
+      { rootMargin: '200px 0px' },
+    );
+    els.forEach((el) => io.observe(el));
+  }
+
+  hydrateAll();
+  document.addEventListener('astro:page-load', hydrateAll);
+</script>

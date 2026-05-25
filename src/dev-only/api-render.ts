@@ -9,6 +9,7 @@ import remarkWikilink from '../plugins/remark-wikilink.mjs';
 import remarkMermaid from '../plugins/remark-mermaid.mjs';
 import remarkMathLenient from '../plugins/remark-math-lenient.mjs';
 import remarkUrlPreview from '../plugins/remark-url-preview.mjs';
+import remarkAnimation from '../plugins/remark-animation.mjs';
 
 export const prerender = false;
 
@@ -19,6 +20,7 @@ function getProcessor() {
       gfm: true,
       smartypants: true,
       remarkPlugins: [
+        remarkAnimation,
         remarkMermaid,
         remarkAlert,
         remarkWikilink,

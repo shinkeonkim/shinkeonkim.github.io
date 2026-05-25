@@ -6,6 +6,7 @@ import { FrontmatterPanel } from './frontmatter-panel';
 import { GitPanel } from './git-panel';
 import { EditorHistory } from './history';
 import { ImageDialogController } from './image-dialog';
+import { AnimationPicker } from './animation-picker';
 import { confirmModal } from './modal';
 import { PreviewPane } from './preview';
 import { ReferencesPicker } from './references-picker';
@@ -160,6 +161,7 @@ export function initEditor(): void {
   toolbar.bind(toolbarRoot);
 
   const imageDialog = new ImageDialogController(toolbar);
+  new AnimationPicker(toolbar).init();
 
   const preview = new PreviewPane({
     container: previewEl,
