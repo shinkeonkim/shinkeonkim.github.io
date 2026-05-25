@@ -673,12 +673,9 @@ function renderLineEndpointHandles(
   const state = snap.get(elId);
   if (!baseEl || !state) return null;
   if (baseEl.type !== 'line' && baseEl.type !== 'arrow') return null;
-  let coords: { x1: number; y1: number; x2: number; y2: number } | null = null;
-  if (baseEl.type === 'line') {
-    coords = resolveLineCoords(state as unknown as LineElement, snap, byId);
-  } else {
-    coords = resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
-  }
+  const coords = baseEl.type === 'line'
+    ? resolveLineCoords(state as unknown as LineElement, snap, byId)
+    : resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
   if (!coords) return null;
   const midX = (coords.x1 + coords.x2) / 2;
   const midY = (coords.y1 + coords.y2) / 2;

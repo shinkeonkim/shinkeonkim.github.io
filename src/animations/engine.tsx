@@ -63,23 +63,6 @@ function engineMarkerUrl(head: string | undefined, end: 'start' | 'end'): string
   return end === 'start' ? `url(#${idBase}-start)` : `url(#${idBase})`;
 }
 
-const EASE_FUNCS: Record<string, (t: number) => number> = {
-  linear: (t) => t,
-  easeIn: (t) => t * t,
-  easeOut: (t) => 1 - (1 - t) * (1 - t),
-  easeInOut: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
-  easeInQuad: (t) => t * t,
-  easeOutQuad: (t) => 1 - (1 - t) * (1 - t),
-  easeInOutQuad: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
-  easeInCubic: (t) => t * t * t,
-  easeOutCubic: (t) => 1 - Math.pow(1 - t, 3),
-  easeInOutCubic: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
-  spring: (t) => {
-    const c = 1.70158;
-    return t * t * (((c + 1) * t) - c) + (1 - t) * (Math.sin(t * Math.PI * 2) * 0.05);
-  },
-};
-
 function entryDelta(mode: string | undefined, w = 200, h = 200): { dx: number; dy: number; scale?: number } {
   switch (mode) {
     case 'slide-left': return { dx: -w, dy: 0 };
