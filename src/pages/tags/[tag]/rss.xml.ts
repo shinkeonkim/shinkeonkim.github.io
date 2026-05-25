@@ -7,16 +7,28 @@ import { postToFeedItem } from '../../../lib/feed';
 
 export async function getStaticPaths() {
   const [posts, wiki] = await Promise.all([getPublishedPosts(), getCollection('wiki')]);
-  const tags = new Set<string>();
-  for (const p of posts) p.data.tags.forEach((t) => tags.add(t));
-  for (const w of wiki) w.data.tags.forEach((t) => tags.add(t));
-  return Array.from(tags).map((tag) => ({ params: { tag } }));
+  const slugToLabel = new Map<string, string>();
+  const addTag = (raw: string): void => {
+    const slug = raw.toLowerCase();
+    if (!slugToLabel.has(slug)) slugToLabel.set(slug, raw);
+  };
+  for (const p of posts) p.data.tags.forEach(addTag);
+  for (const w of wiki) w.data.tags.forEach(addTag);
+  return Array.from(slugToLabel.entries()).map(([slug, label]) => ({
+    params: { tag: slug },
+    props: { tagLabel: label },
+  }));
+}
+
+interface Props {
+  tagLabel: string;
 }
 
 export async function GET(context: APIContext) {
-  const tag = context.params.tag!;
+  const tagSlug = context.params.tag!;
+  const tag = (context.props as Props).tagLabel;
   const posts = sortByDateDesc(await getPublishedPosts())
-    .filter((p) => p.data.tags.includes(tag))
+    .filter((p) => p.data.tags.some((t) => t.toLowerCase() === tagSlug))
     .slice(0, 30);
   const items = await Promise.all(posts.map((p) => postToFeedItem(p)));
 
