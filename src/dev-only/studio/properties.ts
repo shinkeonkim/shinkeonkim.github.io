@@ -339,7 +339,7 @@ function onInput(e: Event): void {
     const idx = Number(row.dataset.effectIdx);
     const key = fieldLabel.dataset.effectField ?? '';
     const input = target as HTMLInputElement | HTMLSelectElement;
-    let value: unknown =
+    const value: unknown =
       'type' in input && input.type === 'number' ? Number(input.value) : input.value;
     updateEffect(sel.stepId, idx, { [key]: value } as Partial<import('../../animations/schema').AnimationEffect>);
     return;

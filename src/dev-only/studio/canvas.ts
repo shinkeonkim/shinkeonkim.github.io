@@ -525,12 +525,10 @@ function renderLineEndpointHandles(
   const state = snap.get(elId);
   if (!baseEl || !state) return null;
   if (baseEl.type !== 'line' && baseEl.type !== 'arrow') return null;
-  let coords: { x1: number; y1: number; x2: number; y2: number } | null = null;
-  if (baseEl.type === 'line') {
-    coords = { x1: state.x1 as number, y1: state.y1 as number, x2: state.x2 as number, y2: state.y2 as number };
-  } else {
-    coords = resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
-  }
+  const coords: { x1: number; y1: number; x2: number; y2: number } | null =
+    baseEl.type === 'line'
+      ? { x1: state.x1 as number, y1: state.y1 as number, x2: state.x2 as number, y2: state.y2 as number }
+      : resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
   if (!coords) return null;
   const midX = (coords.x1 + coords.x2) / 2;
   const midY = (coords.y1 + coords.y2) / 2;
@@ -696,7 +694,7 @@ function renderElement(
     const midX = (coords.x1 + coords.x2) / 2;
     const midY = (coords.y1 + coords.y2) / 2;
     const isCurved = (a.curvature || 0) !== 0;
-    let pathHtml = '';
+    let pathHtml: string;
     if (isCurved) {
       const dx = coords.x2 - coords.x1;
       const dy = coords.y2 - coords.y1;

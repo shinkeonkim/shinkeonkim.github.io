@@ -250,7 +250,7 @@ export async function listBranches(): Promise<BranchSummary> {
 }
 
 function validateBranchName(name: string): void {
-  if (!name || !/^[A-Za-z0-9._\/-]{1,80}$/.test(name)) {
+  if (!name || !/^[A-Za-z0-9._/-]{1,80}$/.test(name)) {
     throw new Error(`invalid branch name: ${name}`);
   }
 }

@@ -24,7 +24,6 @@ function parseFrontmatter(raw: string): Record<string, unknown> {
   if (end < 0) return {};
   const fm = raw.slice(3, end).trim();
   const data: Record<string, unknown> = {};
-  let key: string | null = null;
   let inList: string | null = null;
   for (const line of fm.split('\n')) {
     if (!line.trim()) continue;
@@ -37,7 +36,7 @@ function parseFrontmatter(raw: string): Record<string, unknown> {
     inList = null;
     const m = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
     if (!m) continue;
-    key = m[1];
+    const key = m[1];
     const raw = m[2].trim();
     if (raw === '' || raw === '[]') {
       if (raw === '[]') data[key] = [];
