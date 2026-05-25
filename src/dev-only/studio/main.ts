@@ -2,8 +2,11 @@ import {
   getDef,
   getSelection,
   isDirty,
+  isDraft,
   markClean,
   setDef,
+  setDraft,
+  promoteDraftToSaved,
   setSelection,
   subscribe,
   updateMeta,
@@ -14,6 +17,7 @@ import {
   addElement,
   uniqueElementId,
 } from './state';
+import { animationDefSchema } from '../../animations/schema';
 import type { AnimationElement } from '../../animations/schema';
 import { initCanvas, showPreview, hidePreview } from './canvas';
 import { initElementList } from './element-list';
@@ -212,6 +216,7 @@ export function initStudio(): void {
   });
 
   setupImageDropAndPaste(ui);
+  setupTimelineResizer(ui);
 
   subscribe(() => reflectState(ui));
   reflectState(ui);
@@ -241,6 +246,7 @@ export function initStudio(): void {
     if ((e.target as HTMLElement).closest('[data-studio-dialog-close]')) {
       ui.libraryDialog.close();
       ui.newDialog.close();
+      ui.newDialog.removeAttribute('data-mode');
     }
   });
 
@@ -321,7 +327,22 @@ export function initStudio(): void {
     if (isDirty()) e.preventDefault();
   });
 
-  setStatus(ui, '준비됨', 'ok');
+  if (!getDef()) {
+    startDraft();
+    setStatus(ui, '임시 작업 (Draft) — 저장 시 ID/제목 입력', 'ok');
+  } else {
+    setStatus(ui, '준비됨', 'ok');
+  }
+}
+
+function startDraft(): void {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:.TZ]/g, '')
+    .slice(0, 14);
+  const id = `draft-${stamp}`;
+  const def = animationDefSchema.parse({ id, title: '', description: '' });
+  setDraft(def);
 }
 
 function reflectState(ui: StudioUi): void {
@@ -342,9 +363,16 @@ function reflectState(ui: StudioUi): void {
     ui.titleInput.value = def.title;
   }
   ui.titleInput.disabled = false;
-  ui.idDisplay.textContent = def.id;
+  if (isDraft()) {
+    ui.idDisplay.textContent = '📝 Draft (저장 시 ID 입력)';
+    ui.idDisplay.classList.add('is-draft');
+    ui.deleteBtn.disabled = true;
+  } else {
+    ui.idDisplay.textContent = def.id;
+    ui.idDisplay.classList.remove('is-draft');
+    ui.deleteBtn.disabled = false;
+  }
   ui.saveBtn.disabled = false;
-  ui.deleteBtn.disabled = false;
   ui.canvasWidthInput.disabled = false;
   ui.canvasHeightInput.disabled = false;
   if (document.activeElement !== ui.canvasWidthInput) ui.canvasWidthInput.value = String(def.canvas.width);
@@ -397,6 +425,58 @@ function loadImageSize(src: string): Promise<{ w: number; h: number } | null> {
     img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
     img.onerror = () => resolve(null);
     img.src = src;
+  });
+}
+
+function setupTimelineResizer(ui: StudioUi): void {
+  const resizer = document.getElementById('studio-timeline-resizer');
+  if (!resizer) return;
+  const STORAGE_KEY = 'studio.timelineHeight';
+  const saved = Number(localStorage.getItem(STORAGE_KEY));
+  if (Number.isFinite(saved) && saved > 100) {
+    ui.app.style.setProperty('--studio-timeline-h', `${saved}px`);
+  }
+  let dragging = false;
+  let startY = 0;
+  let startH = 320;
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    startY = e.clientY;
+    const cs = getComputedStyle(ui.app).getPropertyValue('--studio-timeline-h').trim();
+    startH = parseFloat(cs) || 320;
+    resizer.classList.add('is-dragging');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const dy = startY - e.clientY;
+    const h = Math.max(120, Math.min(window.innerHeight * 0.8, startH + dy));
+    ui.app.style.setProperty('--studio-timeline-h', `${h}px`);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('is-dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    const cs = getComputedStyle(ui.app).getPropertyValue('--studio-timeline-h').trim();
+    const h = parseFloat(cs);
+    if (Number.isFinite(h) && h > 0) {
+      localStorage.setItem(STORAGE_KEY, String(h));
+    }
+  });
+  resizer.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    const cs = getComputedStyle(ui.app).getPropertyValue('--studio-timeline-h').trim();
+    const current = parseFloat(cs) || 320;
+    const step = e.shiftKey ? 40 : 10;
+    const delta = e.key === 'ArrowUp' ? step : -step;
+    const h = Math.max(120, Math.min(window.innerHeight * 0.8, current + delta));
+    ui.app.style.setProperty('--studio-timeline-h', `${h}px`);
+    localStorage.setItem(STORAGE_KEY, String(h));
   });
 }
 
@@ -520,6 +600,7 @@ function openNewDialog(ui: StudioUi): void {
   ui.newIdInput.value = '';
   ui.newTitleInput.value = '';
   ui.newError.textContent = '';
+  ui.newDialog.dataset.mode = 'create';
   if (typeof ui.newDialog.showModal === 'function') ui.newDialog.showModal();
   else ui.newDialog.setAttribute('open', '');
 }
@@ -529,6 +610,11 @@ async function createNew(ui: StudioUi): Promise<void> {
   const title = ui.newTitleInput.value.trim() || id;
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) {
     ui.newError.textContent = 'ID 는 영문 소문자 / 숫자 / - / _ 만 가능';
+    return;
+  }
+  const mode = ui.newDialog.dataset.mode ?? 'create';
+  if (mode === 'draft-save') {
+    await saveDraftWithId(ui, id, title);
     return;
   }
   try {
@@ -542,9 +628,31 @@ async function createNew(ui: StudioUi): Promise<void> {
   }
 }
 
+async function saveDraftWithId(ui: StudioUi, id: string, title: string): Promise<void> {
+  const current = getDef();
+  if (!current) return;
+  try {
+    const draftSnapshot = { ...current, id, title: title || id };
+    await api.createAnimation(id, title || id);
+    const saved = await api.saveAnimation(draftSnapshot);
+    setDef(saved);
+    promoteDraftToSaved();
+    markClean();
+    ui.newDialog.removeAttribute('data-mode');
+    ui.newDialog.close();
+    setStatus(ui, `Draft 저장 완료: ${id}`, 'ok');
+  } catch (err) {
+    ui.newError.textContent = '저장 실패: ' + (err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function saveCurrent(ui: StudioUi): Promise<void> {
   const def = getDef();
   if (!def) return;
+  if (isDraft()) {
+    promptDraftSave(ui);
+    return;
+  }
   if (!def.title || def.title.trim().length === 0) {
     updateMeta({ title: def.id });
     setStatus(ui, `제목이 비어 있어 ID(${def.id})를 사용합니다`, 'warn');
@@ -560,6 +668,15 @@ async function saveCurrent(ui: StudioUi): Promise<void> {
   } catch (err) {
     setStatus(ui, '저장 실패: ' + (err instanceof Error ? err.message : String(err)), 'error');
   }
+}
+
+function promptDraftSave(ui: StudioUi): void {
+  ui.newIdInput.value = '';
+  ui.newTitleInput.value = '';
+  ui.newError.textContent = '먼저 ID와 제목을 정해주세요 (현재 작업은 보존됩니다)';
+  ui.newDialog.dataset.mode = 'draft-save';
+  if (typeof ui.newDialog.showModal === 'function') ui.newDialog.showModal();
+  else ui.newDialog.setAttribute('open', '');
 }
 
 async function deleteCurrent(ui: StudioUi): Promise<void> {

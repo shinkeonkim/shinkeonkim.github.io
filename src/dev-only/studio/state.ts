@@ -17,6 +17,7 @@ interface State {
   dirty: boolean;
   selection: Selection;
   currentStepIdx: number;
+  isDraft: boolean;
 }
 
 type Listener = () => void;
@@ -27,7 +28,27 @@ const state: State = {
   dirty: false,
   selection: { kind: 'none' },
   currentStepIdx: -1,
+  isDraft: false,
 };
+
+export function isDraft(): boolean {
+  return state.isDraft;
+}
+
+export function setDraft(def: AnimationDef): void {
+  state.def = def;
+  state.dirty = false;
+  state.isDraft = true;
+  state.selection = { kind: 'none' };
+  state.currentStepIdx = def.steps.length > 0 ? def.steps.length - 1 : -1;
+  resetHistory();
+  emit();
+}
+
+export function promoteDraftToSaved(): void {
+  state.isDraft = false;
+  emit();
+}
 
 const HISTORY_LIMIT = 60;
 const past: string[] = [];
@@ -122,6 +143,7 @@ export function setCurrentStepIdx(idx: number): void {
 export function setDef(def: AnimationDef | null, markDirty = false): void {
   state.def = def;
   state.dirty = markDirty;
+  state.isDraft = false;
   if (def === null) {
     state.selection = { kind: 'none' };
     state.currentStepIdx = -1;
