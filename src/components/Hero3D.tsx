@@ -479,7 +479,7 @@ export default function Hero3D({
         w.sprite.position.y -= w.speed * dt;
         w.sprite.position.x = w.baseX + Math.sin(elapsed * 0.6 + w.phase) * w.sway;
         const y = w.sprite.position.y;
-        let opacity = 0;
+        let opacity: number;
         if (y > 3.2) opacity = ((4.8 - y) / 1.6) * 0.7;
         else if (y < 0.6) opacity = Math.max(0, (y - 0.1) / 0.5) * 0.7;
         else opacity = 0.7;
