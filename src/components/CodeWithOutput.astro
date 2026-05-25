@@ -8,17 +8,30 @@ interface Variant {
   code: string;
 }
 
+interface CaseSpec {
+  label?: string;
+  input?: string;
+  output: string;
+  inputLanguage?: string;
+  inputLabel?: string;
+  outputLanguage?: string;
+  outputLabel?: string;
+}
+
 interface Props {
   code?: string;
   language?: string;
   label?: string;
   variants?: Variant[];
-  output: string;
-  outputLanguage?: string;
-  outputLabel?: string;
+  // Single-pair mode (backwards-compat shorthand).
   input?: string;
+  output?: string;
   inputLanguage?: string;
   inputLabel?: string;
+  outputLanguage?: string;
+  outputLabel?: string;
+  // Multi-pair mode.
+  cases?: CaseSpec[];
   title?: string;
   codeWidth?: number | string;
 }
@@ -29,16 +42,16 @@ const {
   language,
   label,
   variants,
-  output,
-  outputLanguage = 'text',
-  outputLabel = '결과',
   input,
+  output,
   inputLanguage = 'text',
   inputLabel = 'stdin',
+  outputLanguage = 'text',
+  outputLabel = '결과',
+  cases,
   title,
   codeWidth,
 } = props;
-const hasInput = typeof input === 'string' && input.length > 0;
 
 const finalVariants: Variant[] =
   variants && variants.length > 0
@@ -50,6 +63,24 @@ const finalVariants: Variant[] =
 if (finalVariants.length === 0) {
   throw new Error('<CodeWithOutput> requires either `variants` or both `code` + `language`');
 }
+
+const resolvedCases: CaseSpec[] = (() => {
+  if (cases && cases.length > 0) return cases;
+  if (typeof output !== 'string') {
+    throw new Error('<CodeWithOutput> requires `output` or a non-empty `cases` array');
+  }
+  return [
+    {
+      input,
+      output,
+      inputLanguage,
+      inputLabel,
+      outputLanguage,
+      outputLabel,
+    },
+  ];
+})();
+const isMultiCase = resolvedCases.length > 1;
 
 function parseCodeWidth(value: number | string | undefined): number | null {
   if (value === undefined || value === null) return null;
@@ -82,8 +113,22 @@ const variantHtml = await Promise.all(
     html: await render(v.code.trimEnd(), v.language),
   })),
 );
-const outputHtml = await render(output.trimEnd(), outputLanguage);
-const inputHtml = hasInput ? await render(input!.trimEnd(), inputLanguage) : '';
+
+const renderedCases = await Promise.all(
+  resolvedCases.map(async (c, i) => {
+    const caseInput = c.input;
+    const hasInput = typeof caseInput === 'string' && caseInput.length > 0;
+    return {
+      label: c.label ?? (isMultiCase ? `예제 ${i + 1}` : null),
+      showLabel: isMultiCase || typeof c.label === 'string',
+      hasInput,
+      inputLabel: c.inputLabel ?? inputLabel,
+      outputLabel: c.outputLabel ?? outputLabel,
+      inputHtml: hasInput ? await render(caseInput!.trimEnd(), c.inputLanguage ?? inputLanguage) : '',
+      outputHtml: await render(c.output.trimEnd(), c.outputLanguage ?? outputLanguage),
+    };
+  }),
+);
 
 const uid = Math.random().toString(36).slice(2, 8);
 ---
@@ -148,25 +193,32 @@ const uid = Math.random().toString(36).slice(2, 8);
     >
       <span class="cwo-splitter-grip" aria-hidden="true"></span>
     </button>
-    <div class="cwo-pane cwo-pane-output" data-has-input={hasInput ? 'true' : 'false'}>
+    <div class="cwo-pane cwo-pane-output" data-multi-case={isMultiCase ? 'true' : 'false'}>
       {
-        hasInput && (
-          <div class="cwo-subpane cwo-subpane-stdin">
-            <div class="cwo-header">
-              <span class="cwo-dot cwo-dot-stdin" />
-              <span class="cwo-label">{inputLabel}</span>
+        renderedCases.map((c) => (
+          <div class="cwo-case" data-has-input={c.hasInput ? 'true' : 'false'}>
+            {c.showLabel && c.label && (
+              <div class="cwo-case-label">{c.label}</div>
+            )}
+            {c.hasInput && (
+              <div class="cwo-subpane cwo-subpane-stdin">
+                <div class="cwo-header">
+                  <span class="cwo-dot cwo-dot-stdin" />
+                  <span class="cwo-label">{c.inputLabel}</span>
+                </div>
+                <div class="cwo-body" set:html={c.inputHtml} />
+              </div>
+            )}
+            <div class="cwo-subpane cwo-subpane-stdout">
+              <div class="cwo-header">
+                <span class="cwo-dot cwo-dot-output" />
+                <span class="cwo-label">{c.outputLabel}</span>
+              </div>
+              <div class="cwo-body" set:html={c.outputHtml} />
             </div>
-            <div class="cwo-body" set:html={inputHtml} />
           </div>
-        )
+        ))
       }
-      <div class="cwo-subpane cwo-subpane-stdout">
-        <div class="cwo-header">
-          <span class="cwo-dot cwo-dot-output"></span>
-          <span class="cwo-label">{outputLabel}</span>
-        </div>
-        <div class="cwo-body" set:html={outputHtml} />
-      </div>
     </div>
   </div>
 </figure>
