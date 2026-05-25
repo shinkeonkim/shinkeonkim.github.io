@@ -57,6 +57,13 @@ async function loadEntries() {
   return all;
 }
 
+// Normalize for slug comparison: NFC to canonicalize Hangul jamo
+// (macOS HFS+/APFS returns NFD filenames; git/Linux returns NFC),
+// then lowercase for case-insensitive matching.
+function normKey(s) {
+  return String(s).normalize('NFC').toLowerCase();
+}
+
 function buildSlugMap(entries) {
   const map = new Map();
   for (const e of entries) {
@@ -65,7 +72,7 @@ function buildSlugMap(entries) {
     const aliases = Array.isArray(e.fm.aliases) ? e.fm.aliases : [];
     const keys = [e.slug, filename, e.fm.title, ...aliases].filter(Boolean);
     for (const k of keys) {
-      const key = String(k).toLowerCase();
+      const key = normKey(k);
       if (!map.has(key)) map.set(key, e);
     }
   }
@@ -95,7 +102,9 @@ async function main() {
   const violations = [];
   const slugMap = buildSlugMap(entries);
 
-  const sourceIds = new Set(entries.filter((e) => e.collection === 'sources').map((e) => e.slug));
+  const sourceIds = new Set(
+    entries.filter((e) => e.collection === 'sources').map((e) => e.slug.normalize('NFC')),
+  );
 
   const slugSeenByCollection = new Map();
   for (const e of entries) {
@@ -156,7 +165,7 @@ async function main() {
     if (Array.isArray(e.fm.references)) {
       for (const ref of e.fm.references) {
         if (ref && typeof ref === 'object' && typeof ref.id === 'string') {
-          if (!sourceIds.has(ref.id)) {
+          if (!sourceIds.has(ref.id.normalize('NFC'))) {
             violations.push(
               classify('error', entries, e.collection, e.slug, `references unknown source id: ${ref.id}`),
             );
@@ -169,7 +178,7 @@ async function main() {
       const re = new RegExp(WIKILINK_RE.source, WIKILINK_RE.flags);
       let match;
       while ((match = re.exec(e.body)) !== null) {
-        const target = match[1]?.trim().toLowerCase();
+        const target = match[1] ? normKey(match[1].trim()) : '';
         if (!target) continue;
         if (!slugMap.has(target)) {
           violations.push(
