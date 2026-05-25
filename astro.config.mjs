@@ -16,6 +16,7 @@ import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 import remarkMathLenient from './src/plugins/remark-math-lenient.mjs';
 import remarkUrlPreview from './src/plugins/remark-url-preview.mjs';
 import remarkAnimation from './src/plugins/remark-animation.mjs';
+import rehypeLazyImages from './src/plugins/rehype-lazy-images.mjs';
 import devEditor from './src/dev-only/integration.mjs';
 import modulepreload from './src/lib/modulepreload-integration.mjs';
 import { buildImageMap } from './src/lib/sitemap-images.mjs';
@@ -129,6 +130,7 @@ export default defineConfig({
         },
       ],
       [rehypeKatex, { output: 'html', strict: 'ignore' }],
+      rehypeLazyImages,
     ],
     shikiConfig: {
       themes: {

@@ -37,6 +37,40 @@
     cursor: zoom-in;
     transition: transform 120ms ease-out;
   }
+  .mermaid[data-mermaid-source]:not([data-mermaid-rendered]) {
+    min-height: 160px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    background-color: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    white-space: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: progress;
+  }
+  .mermaid[data-mermaid-source]:not([data-mermaid-rendered])::before {
+    content: '⟳ Mermaid 다이어그램 로드 대기 중…';
+    display: block;
+    margin-bottom: 0.5rem;
+    opacity: 0.8;
+  }
+  .mermaid[data-mermaid-source].is-loading:not([data-mermaid-rendered])::before {
+    content: '⟳ Mermaid 렌더링 중…';
+    animation: mermaid-spin 1.2s linear infinite;
+    display: inline-block;
+  }
+  @keyframes mermaid-spin {
+    0% { opacity: 0.5; }
+    50% { opacity: 1; }
+    100% { opacity: 0.5; }
+  }
   .mermaid[data-mermaid-source]:hover {
     transform: scale(1.005);
   }
@@ -140,40 +174,92 @@
     }
 
     let renderToken = 0;
-    async function renderMermaid() {
-      const elements = Array.from(document.querySelectorAll('.mermaid[data-mermaid-source]'));
-      if (elements.length === 0) return;
-      const token = ++renderToken;
+    let initialized = false;
 
+    function snapshotSources() {
+      document.querySelectorAll('.mermaid[data-mermaid-source]').forEach((el) => {
+        if (!el.hasAttribute('data-mermaid-original')) {
+          el.setAttribute('data-mermaid-original', el.textContent || '');
+        }
+      });
+    }
+
+    async function renderNodes(nodes) {
+      if (!nodes || nodes.length === 0) return;
+      const token = ++renderToken;
       const mermaid = await loadMermaid();
       if (token !== renderToken) return;
 
-      const isDark = document.documentElement.classList.contains('dark');
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: isDark ? 'dark' : 'default',
-        securityLevel: 'strict',
-        fontFamily:
-          'ui-sans-serif,system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif',
-      });
+      if (!initialized) {
+        const isDark = document.documentElement.classList.contains('dark');
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: isDark ? 'dark' : 'default',
+          securityLevel: 'strict',
+          fontFamily:
+            'ui-sans-serif,system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif',
+        });
+        initialized = true;
+      }
 
-      for (const el of elements) {
-        let source = el.getAttribute('data-mermaid-original');
-        if (source === null) {
-          source = el.textContent || '';
-          el.setAttribute('data-mermaid-original', source);
-        }
+      for (const el of nodes) {
+        const source = el.getAttribute('data-mermaid-original') || el.textContent || '';
+        el.setAttribute('data-mermaid-original', source);
         el.removeAttribute('data-processed');
         el.textContent = source;
+        el.classList.add('is-loading');
       }
 
       try {
-        await mermaid.run({ nodes: elements });
+        await mermaid.run({ nodes });
+        for (const el of nodes) {
+          el.setAttribute('data-mermaid-rendered', '1');
+          el.classList.remove('is-loading');
+        }
         attachZoomHandlers();
       } catch (err) {
         console.error('[mermaid] render failed:', err);
+        for (const el of nodes) el.classList.remove('is-loading');
       }
     }
+
+    let observer = null;
+    let viewportObserver = null;
+    function setupLazyMermaid() {
+      const all = Array.from(document.querySelectorAll('.mermaid[data-mermaid-source]'));
+      if (all.length === 0) return;
+      snapshotSources();
+
+      if (viewportObserver) viewportObserver.disconnect();
+      viewportObserver = new IntersectionObserver((entries) => {
+        const candidates = [];
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            const el = entry.target;
+            viewportObserver.unobserve(el);
+            if (!el.hasAttribute('data-mermaid-rendered')) candidates.push(el);
+          }
+        }
+        if (candidates.length > 0) void renderNodes(candidates);
+      }, { rootMargin: '300px 0px' });
+      for (const el of all) {
+        if (!el.hasAttribute('data-mermaid-rendered')) viewportObserver.observe(el);
+      }
+    }
+
+    async function renderMermaid() {
+      const all = Array.from(document.querySelectorAll('.mermaid[data-mermaid-source]'));
+      if (all.length === 0) return;
+      // theme change - re-render the ALREADY rendered ones
+      const rendered = all.filter((el) => el.hasAttribute('data-mermaid-rendered'));
+      if (rendered.length > 0) {
+        initialized = false;
+        for (const el of rendered) el.removeAttribute('data-mermaid-rendered');
+        await renderNodes(rendered);
+      }
+    }
+
+    void setupLazyMermaid;
 
     const dialog = () => document.getElementById('mermaid-zoom');
     const viewport = () => dialog()?.querySelector('.mermaid-zoom-viewport');
@@ -355,9 +441,9 @@
       dragging = false;
     });
 
-    renderMermaid();
+    setupLazyMermaid();
 
-    const observer = new MutationObserver((mutations) => {
+    observer = new MutationObserver((mutations) => {
       for (const m of mutations) {
         if (m.attributeName === 'class') {
           renderMermaid();
@@ -367,7 +453,12 @@
     });
     observer.observe(document.documentElement, { attributes: true });
 
-    document.addEventListener('astro:after-swap', renderMermaid);
-    document.addEventListener('preview-updated', renderMermaid);
+    document.addEventListener('astro:after-swap', () => {
+      initialized = false;
+      setupLazyMermaid();
+    });
+    document.addEventListener('preview-updated', () => {
+      setupLazyMermaid();
+    });
   })();
 </script>
