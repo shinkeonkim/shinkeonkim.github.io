@@ -60,6 +60,11 @@ function urlForDoc(collection: ReferenceCollection, slug: string): string {
   return collection === 'posts' ? `/posts/${slug}/` : `/wiki/${slug}/`;
 }
 
+// Korean source IDs can disagree between macOS (NFD filenames from APFS) and
+// Linux/git (NFC). To make lookups platform-independent, both Map keys AND
+// lookup keys must be normalized to NFC. Helpers below centralize this.
+const nfc = (s: string): string => s.normalize('NFC');
+
 async function buildIndex(): Promise<ReferenceIndex> {
   const [sourcesAll, posts, wiki] = await Promise.all([
     getCollection('sources'),
@@ -67,16 +72,17 @@ async function buildIndex(): Promise<ReferenceIndex> {
     getCollection('wiki'),
   ]);
   const sources = new Map<string, CollectionEntry<'sources'>>();
-  for (const s of sourcesAll) sources.set(s.id, s);
+  for (const s of sourcesAll) sources.set(nfc(s.id), s);
 
   const citingBySourceId = new Map<string, CitingDoc[]>();
   const collect = (collection: ReferenceCollection, entries: CitingEntry[]): void => {
     for (const { ref, doc } of entries) {
       if (!ref.id) continue;
-      let list = citingBySourceId.get(ref.id);
+      const key = nfc(ref.id);
+      let list = citingBySourceId.get(key);
       if (!list) {
         list = [];
-        citingBySourceId.set(ref.id, list);
+        citingBySourceId.set(key, list);
       }
       list.push({ ...doc, page: ref.page, anchor: ref.anchor, note: ref.note });
     }
@@ -130,7 +136,7 @@ export function resolveReferences(
     if (!raw || typeof raw !== 'object') continue;
     const obj = raw as Record<string, unknown>;
     if (typeof obj.id === 'string') {
-      const source = index.sources.get(obj.id);
+      const source = index.sources.get(nfc(obj.id));
       if (source) {
         out.push({
           kind: 'shared',
