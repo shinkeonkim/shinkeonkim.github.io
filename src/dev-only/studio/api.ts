@@ -9,7 +9,7 @@ export interface AnimationSummary {
   updatedAt?: string;
 }
 
-async function jsonOr<T>(res: Response, fallback?: T): Promise<T> {
+async function jsonOr<T>(res: Response, _fallback?: T): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`HTTP ${res.status}: ${text}`);
