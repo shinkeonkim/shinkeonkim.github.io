@@ -180,7 +180,7 @@ function isTextInput(el: HTMLElement | null): boolean {
   if (el instanceof HTMLTextAreaElement) return true;
   if (el instanceof HTMLInputElement) {
     const t = el.type;
-    return t === 'text' || t === 'number' || t === 'search' || t === 'email' || t === 'tel' || t === 'url' || t === 'password';
+    return t === 'text' || t === 'number' || t === 'search' || t === 'email' || t === 'tel' || t === 'url' || t === 'password' || t === 'color' || t === 'range';
   }
   return false;
 }
@@ -342,21 +342,63 @@ function numberField(label: string, key: string, value: number | undefined, step
   return `<label class="studio-field" data-field-key="${escapeHtml(key)}"><span>${escapeHtml(label)}</span>
     <input type="number" step="${step}" value="${value ?? 0}" data-field-input /></label>`;
 }
-function normalizeHexColor(value: string | undefined): string {
-  if (!value) return '#000000';
-  if (/^#[0-9a-f]{6}$/i.test(value)) return value;
-  if (/^#[0-9a-f]{3}$/i.test(value)) {
-    return '#' + value.slice(1).split('').map((c) => c + c).join('');
+interface ParsedColor {
+  hex: string;
+  alpha: number;
+  original: string | undefined;
+}
+
+function parseColor(value: string | undefined): ParsedColor {
+  const original = value;
+  if (!value) return { hex: '#000000', alpha: 1, original };
+  const v = value.trim();
+  if (v === 'transparent') return { hex: '#000000', alpha: 0, original };
+  const hex8 = v.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (hex8) {
+    return { hex: `#${hex8[1]}${hex8[2]}${hex8[3]}`, alpha: parseInt(hex8[4], 16) / 255, original };
   }
-  return '#000000';
+  const hex6 = v.match(/^#([0-9a-f]{6})$/i);
+  if (hex6) return { hex: `#${hex6[1]}`, alpha: 1, original };
+  const hex3 = v.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i);
+  if (hex3) {
+    return { hex: `#${hex3[1]}${hex3[1]}${hex3[2]}${hex3[2]}${hex3[3]}${hex3[3]}`, alpha: 1, original };
+  }
+  const rgba = v.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)$/i);
+  if (rgba) {
+    const toHex = (n: string) => Math.max(0, Math.min(255, Number(n))).toString(16).padStart(2, '0');
+    const a = rgba[4] !== undefined ? Math.max(0, Math.min(1, Number(rgba[4]))) : 1;
+    return { hex: `#${toHex(rgba[1])}${toHex(rgba[2])}${toHex(rgba[3])}`, alpha: a, original };
+  }
+  return { hex: '#000000', alpha: 1, original };
+}
+
+function combineColor(hex: string, alpha: number): string {
+  const a = Math.max(0, Math.min(1, alpha));
+  if (a >= 0.999) return hex;
+  const aa = Math.round(a * 255).toString(16).padStart(2, '0');
+  return `${hex}${aa}`;
+}
+
+function normalizeHexColor(value: string | undefined): string {
+  return parseColor(value).hex;
 }
 
 function colorField(label: string, key: string, value: string | undefined): string {
-  const hex = normalizeHexColor(value);
-  const isCustom = value && value !== hex;
-  const note = isCustom ? ` <span class="studio-color-note" title="원래 값: ${escapeHtml(value!)}">(${escapeHtml(value!)})</span>` : '';
-  return `<label class="studio-field" data-field-key="${escapeHtml(key)}"><span>${escapeHtml(label)}${note}</span>
-    <input type="color" value="${escapeHtml(hex)}" data-field-input /></label>`;
+  const parsed = parseColor(value);
+  const alphaPct = Math.round(parsed.alpha * 100);
+  const isCustom = parsed.original && parsed.original !== parsed.hex && parsed.original !== 'transparent';
+  const note = isCustom ? ` <span class="studio-color-note" title="원래 값: ${escapeHtml(parsed.original!)}">(${escapeHtml(parsed.original!)})</span>` : '';
+  const previewBg = parsed.alpha < 0.999
+    ? `linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%) 0 0/8px 8px, linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%) 4px 4px/8px 8px, ${parsed.hex}${Math.round(parsed.alpha * 255).toString(16).padStart(2, '0')}`
+    : parsed.hex;
+  return `<label class="studio-field studio-color-field" data-field-key="${escapeHtml(key)}" data-color-alpha="${alphaPct}"><span>${escapeHtml(label)}${note}</span>
+    <div class="studio-color-row">
+      <span class="studio-color-preview" style="background: ${previewBg}; background-clip: padding-box;"></span>
+      <input type="color" value="${escapeHtml(parsed.hex)}" data-field-input data-color-base aria-label="${escapeHtml(label)} 색상" />
+      <input type="range" min="0" max="100" step="1" value="${alphaPct}" data-color-alpha-input aria-label="${escapeHtml(label)} 불투명도" title="불투명도 (0% = 투명, 100% = 불투명)" />
+      <span class="studio-color-alpha-label">${alphaPct}%</span>
+    </div>
+  </label>`;
 }
 function selectField(label: string, key: string, value: string | undefined, options: { value: string }[]): string {
   const opts = options.map((o) => `<option value="${escapeHtml(o.value)}" ${o.value === value ? 'selected' : ''}>${escapeHtml(o.value || '— 없음 —')}</option>`).join('');
@@ -471,7 +513,16 @@ function effectRow(eff: AnimationEffect, idx: number, elementIds: string[]): str
     .join('');
   let extra = '';
   if (eff.type === 'highlight' || eff.type === 'flow') {
-    extra += `<label class="studio-field" data-effect-field="color"><span>color</span><input type="color" value="${escapeHtml((eff as { color: string }).color)}" data-effect-input /></label>`;
+    const ec = parseColor((eff as { color: string }).color);
+    const ecAlphaPct = Math.round(ec.alpha * 100);
+    extra += `<label class="studio-field studio-color-field" data-effect-field="color" data-color-alpha="${ecAlphaPct}"><span>color</span>
+      <div class="studio-color-row">
+        <span class="studio-color-preview" style="background: ${ec.hex};"></span>
+        <input type="color" value="${escapeHtml(ec.hex)}" data-effect-input data-color-base />
+        <input type="range" min="0" max="100" step="1" value="${ecAlphaPct}" data-color-alpha-input />
+        <span class="studio-color-alpha-label">${ecAlphaPct}%</span>
+      </div>
+    </label>`;
   }
   if (eff.type === 'flow') {
     extra += `<label class="studio-field" data-effect-field="particles"><span>particles</span><input type="number" min="1" max="10" value="${(eff as { particles: number }).particles}" data-effect-input /></label>`;
@@ -500,15 +551,71 @@ function effectRow(eff: AnimationEffect, idx: number, elementIds: string[]): str
   </div>`;
 }
 
+function handleColorAlpha(e: Event, alphaInput: HTMLInputElement, sel: ReturnType<typeof getSelection>): void {
+  const fieldEl = alphaInput.closest<HTMLElement>('[data-color-alpha]');
+  if (!fieldEl) return;
+  const alphaPct = Number(alphaInput.value);
+  fieldEl.dataset.colorAlpha = String(alphaPct);
+  const label = fieldEl.querySelector('.studio-color-alpha-label');
+  if (label) label.textContent = `${alphaPct}%`;
+  const colorBase = fieldEl.querySelector<HTMLInputElement>('[data-color-base]');
+  const preview = fieldEl.querySelector<HTMLElement>('.studio-color-preview');
+  const baseHex = colorBase?.value ?? '#000000';
+  const alpha = alphaPct / 100;
+  if (preview) {
+    if (alpha < 0.999) {
+      const aaHex = Math.round(alpha * 255).toString(16).padStart(2, '0');
+      preview.style.background = `linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%) 0 0/8px 8px, linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%) 4px 4px/8px 8px, ${baseHex}${aaHex}`;
+    } else {
+      preview.style.background = baseHex;
+    }
+  }
+  if (e.type !== 'change') return;
+  const combined = combineColor(baseHex, alpha);
+  const key = fieldEl.dataset.fieldKey ?? '';
+  const effectField = fieldEl.closest<HTMLElement>('[data-effect-idx]');
+  if (effectField && sel.kind === 'step') {
+    const idx = Number(effectField.dataset.effectIdx);
+    const effKey = fieldEl.dataset.effectField ?? key;
+    updateEffect(sel.stepId, idx, { [effKey]: combined } as Partial<import('../../animations/schema').AnimationEffect>);
+    return;
+  }
+  commitValue(key, combined, sel);
+}
+
+function commitValue(key: string, value: string, sel: ReturnType<typeof getSelection>): void {
+  if (sel.kind === 'none') {
+    if (key === 'canvas.background') updateCanvas({ background: value });
+    return;
+  }
+  if (sel.kind === 'element') {
+    if (BASE_ONLY_KEYS.has(key)) {
+      setElementBase(sel.elementId, { [key]: value });
+    } else {
+      setElementKeyframe(sel.elementId, { [key]: value });
+    }
+  }
+}
+
 function onInput(e: Event): void {
   const target = e.target as HTMLElement;
   const isEffect = target.matches('[data-effect-input]');
   const isField = target.matches('[data-field-input]');
-  if (!isField && !isEffect) return;
+  const isColorAlpha = target.matches('[data-color-alpha-input]');
+  if (!isField && !isEffect && !isColorAlpha) return;
 
   const def = getDef();
   if (!def) return;
   const sel = getSelection();
+
+  if (isColorAlpha) {
+    handleColorAlpha(e, target as HTMLInputElement, sel);
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.type === 'color' && e.type === 'input') {
+    return;
+  }
 
   if (isEffect) {
     const row = target.closest<HTMLElement>('[data-effect-idx]');
@@ -517,8 +624,15 @@ function onInput(e: Event): void {
     const idx = Number(row.dataset.effectIdx);
     const key = fieldLabel.dataset.effectField ?? '';
     const input = target as HTMLInputElement | HTMLSelectElement;
-    const value: unknown =
-      'type' in input && input.type === 'number' ? Number(input.value) : input.value;
+    let value: unknown;
+    if (input instanceof HTMLInputElement && input.type === 'color') {
+      const alphaPct = Number(fieldLabel.dataset.colorAlpha ?? '100');
+      value = combineColor(input.value, alphaPct / 100);
+    } else if ('type' in input && input.type === 'number') {
+      value = Number(input.value);
+    } else {
+      value = input.value;
+    }
     updateEffect(sel.stepId, idx, { [key]: value } as Partial<import('../../animations/schema').AnimationEffect>);
     return;
   }
@@ -530,7 +644,11 @@ function onInput(e: Event): void {
   let value: unknown;
   if ('type' in input && input.type === 'checkbox') value = (input as HTMLInputElement).checked;
   else if ('type' in input && input.type === 'number') value = Number(input.value);
-  else value = input.value;
+  else if (input instanceof HTMLInputElement && input.type === 'color') {
+    const fieldEl = target.closest<HTMLElement>('[data-color-alpha]');
+    const alphaPct = Number(fieldEl?.dataset.colorAlpha ?? '100');
+    value = combineColor(input.value, alphaPct / 100);
+  } else value = input.value;
 
   if (sel.kind === 'none') {
     if (key === 'meta.title') updateMeta({ title: String(value) });
