@@ -31,12 +31,9 @@ export interface ProjectStatRepo {
   additions: number;
   deletions: number;
   firstCommitDate?: string | null;
-  lastCommitDate?: string | null;
   stars?: number | null;
   forks?: number | null;
-  language?: string | null;
   pushedAt?: string | null;
-  defaultBranch?: string | null;
   topics?: string[];
   license?: string | null;
   languages?: Record<string, number>;
