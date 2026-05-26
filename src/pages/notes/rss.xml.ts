@@ -7,8 +7,8 @@ import { noteToFeedItem } from '../../lib/feed';
 export async function GET(context: APIContext) {
   const notes = sortByDateDesc(await getPublishedNotes()).slice(0, 100);
   return rss({
-    title: `${SITE_TITLE} - 한줄 노트`,
-    description: '짧은 메모 / 한줄 노트 모음',
+    title: `${SITE_TITLE} - 노트`,
+    description: '짧은 메모와 노트 모음',
     site: context.site ?? 'https://shinkeonkim.com',
     customData: `<language>ko-KR</language>`,
     items: notes.map(noteToFeedItem),
