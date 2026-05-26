@@ -365,10 +365,18 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
     )
     .join('');
 
-  const casesHtml = renderedCases
+  const caseTabsHtml = isMultiCase
+    ? `<div class="cwo-header cwo-case-tabs-header"><span class="cwo-dot cwo-dot-output"></span><div class="cwo-tabs cwo-case-tabs" role="tablist">${renderedCases
+        .map(
+          (c, i) =>
+            `<button type="button" class="cwo-tab${i === 0 ? ' is-active' : ''}" data-cwo-case-tab="${i}" aria-selected="${i === 0}">${escapeHtml(c.label ?? `예제 ${i + 1}`)}</button>`,
+        )
+        .join('')}</div></div>`
+    : '';
+
+  const casePanelsHtml = renderedCases
     .map(
-      (c) => `<div class="cwo-case" data-has-input="${c.hasInput ? 'true' : 'false'}">
-        ${c.showLabel && c.label ? `<div class="cwo-case-label">${escapeHtml(c.label)}</div>` : ''}
+      (c, i) => `<div class="cwo-case${i === 0 ? ' is-active' : ''}" data-cwo-case-panel="${i}" data-has-input="${c.hasInput ? 'true' : 'false'}" aria-hidden="${i === 0 ? 'false' : 'true'}">
         ${
           c.hasInput
             ? `<div class="cwo-subpane cwo-subpane-stdin">
@@ -398,7 +406,8 @@ async function renderCodeWithOutput(attrs: Record<string, unknown>): Promise<str
     </div>
     <button type="button" class="cwo-splitter" aria-label="패널 너비 조절"><span class="cwo-splitter-grip"></span></button>
     <div class="cwo-pane cwo-pane-output">
-      ${casesHtml}
+      ${caseTabsHtml}
+      <div class="cwo-case-panels">${casePanelsHtml}</div>
     </div>
   </div>
 </figure>\n\n`;
