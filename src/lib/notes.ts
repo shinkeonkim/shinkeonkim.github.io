@@ -16,3 +16,13 @@ export function noteTitle(body: string | undefined): string {
   title = title.replace(/[.!?]+$/, '').trim();
   return title;
 }
+
+const NOTE_COLORS = ['yellow', 'green', 'blue', 'pink'] as const;
+
+export function noteColorClass(slug: string): string {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) {
+    h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  }
+  return `note-card-${NOTE_COLORS[h % NOTE_COLORS.length]}`;
+}
