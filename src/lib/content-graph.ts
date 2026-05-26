@@ -102,7 +102,7 @@ export async function getSubgraph(
 function urlFor(collection: Collection, slug: string): string {
   if (collection === 'posts') return `/posts/${slug}/`;
   if (collection === 'wiki') return `/wiki/${slug}/`;
-  return `/notes/#${slug}`;
+  return `/notes/${slug}/`;
 }
 
 interface TaggedEntry {

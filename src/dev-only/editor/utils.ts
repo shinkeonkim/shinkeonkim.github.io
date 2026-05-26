@@ -61,6 +61,5 @@ export function debounce<T extends (...args: never[]) => void>(
 }
 
 export function urlFor(collection: string, slug: string): string {
-  if (collection === 'notes') return '/notes/#' + slug;
   return '/' + collection + '/' + slug + '/';
 }

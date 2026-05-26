@@ -2,6 +2,8 @@ import type { CollectionEntry } from 'astro:content';
 import { createMarkdownProcessor } from '@astrojs/markdown-remark';
 import { SITE_AUTHOR, SITE_URL } from '../consts';
 
+import { notePreview, noteTitle } from './notes';
+
 export interface FeedItem {
   title: string;
   description: string;
@@ -64,17 +66,11 @@ export async function postToFeedItem(
 
 export function noteToFeedItem(note: CollectionEntry<'notes'>): FeedItem {
   const body = (note as { body?: string }).body ?? '';
-  const firstLine = body.split('\n').find((l) => l.trim()) ?? '';
-  const description = firstLine
-    .replace(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]/g, (_m, target, alias) =>
-      String(alias ?? target).trim(),
-    )
-    .slice(0, 240);
   return {
-    title: note.data.date.toISOString().slice(0, 10),
-    description,
+    title: noteTitle(body) || note.data.date.toISOString().slice(0, 10),
+    description: notePreview(body, 240),
     pubDate: note.data.date,
-    link: `${SITE_URL}/notes/#${note.id}`,
+    link: `${SITE_URL}/notes/${note.id}/`,
     categories: note.data.tags,
     author: SITE_AUTHOR,
   };

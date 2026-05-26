@@ -56,7 +56,7 @@ function buildSlugMap() {
         const slug = rel.replace(/\.(md|mdx)$/, '');
         const filename = path.basename(slug);
 
-        const url = collection === 'notes' ? `/notes/#${slug}` : `/${collection}/${slug}/`;
+        const url = `/${collection}/${slug}/`;
 
         let title;
         let aliases = [];

@@ -16,7 +16,7 @@ interface BuildOptions {
 function urlFor(collection: SlugMapEntry['collection'], slug: string): string {
   if (collection === 'posts') return `/posts/${slug}/`;
   if (collection === 'wiki') return `/wiki/${slug}/`;
-  return `/notes/#${slug}`;
+  return `/notes/${slug}/`;
 }
 
 function keyFor(value: string): string {
