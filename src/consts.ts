@@ -50,3 +50,8 @@ export const NAV_ITEMS = [
   { href: '/graph/', label: '그래프' },
   { href: '/about/', label: '소개' },
 ] as const;
+
+export const DEV_NAV_ITEMS = [
+  { href: '/_editor', label: '에디터', icon: '✎' },
+  { href: '/_studio', label: '스튜디오', icon: '🎬' },
+] as const;
