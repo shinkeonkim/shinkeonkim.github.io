@@ -126,7 +126,12 @@ export default defineConfig({
             ariaLabel: 'permalink',
             tabindex: -1,
           },
-          content: { type: 'text', value: '#' },
+          // Empty content: the visible "#" comes from a CSS ::after pseudo-
+          // element on .heading-anchor (see global.css). A bare text node here
+          // would be concatenated into the heading's own text node, so
+          // Astro's getHeadings() returns e.g. "제목#" — which leaks into
+          // the TOC, Pagefind search index, RSS, and OG image titles.
+          content: () => [],
         },
       ],
       [rehypeKatex, { output: 'html', strict: 'ignore' }],
