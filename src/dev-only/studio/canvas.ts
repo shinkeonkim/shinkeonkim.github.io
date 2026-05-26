@@ -1446,6 +1446,7 @@ export function showPreview(def: import('../../animations/schema').AnimationDef)
   const parent = canvasEl.parentElement;
   if (!parent) return;
   hidePreview();
+  canvasEl.style.visibility = 'hidden';
   previewRoot = document.createElement('div');
   const bg = def.canvas.background && def.canvas.background !== 'transparent' ? def.canvas.background : 'transparent';
   previewRoot.style.cssText = `position:absolute;left:0;top:0;width:${def.canvas.width}px;height:${def.canvas.height}px;background:${bg};z-index:2;overflow:hidden;`;
@@ -1455,6 +1456,7 @@ export function showPreview(def: import('../../animations/schema').AnimationDef)
 }
 
 export function hidePreview(): void {
+  if (canvasEl) canvasEl.style.visibility = '';
   if (previewRoot) {
     previewRoot.remove();
     previewRoot = null;
