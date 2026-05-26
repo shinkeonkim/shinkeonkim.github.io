@@ -15,6 +15,8 @@ export const getStaticPaths = (async ({ paginate }) => {
 
 type Props = { page: Page<CollectionEntry<'notes'>> };
 const { page } = Astro.props as Props;
+
+const hasMore = page.currentPage === 1 && page.lastPage > 1;
 ---
 
 <BaseLayout
@@ -39,6 +41,85 @@ const { page } = Astro.props as Props;
       )
     }
 
-    <Pagination currentPage={page.currentPage} lastPage={page.lastPage} baseUrl="/notes/" />
+    {
+      hasMore && (
+        <div
+          id="notes-sentinel"
+          class="notes-sentinel"
+          data-next-page="2"
+          data-last-page={page.lastPage}
+          aria-hidden="true"
+        />
+      )
+    }
+
+    <div data-pagination-fallback>
+      <Pagination currentPage={page.currentPage} lastPage={page.lastPage} baseUrl="/notes/" />
+    </div>
   </section>
 </BaseLayout>
+
+<script>
+  let activeIO: IntersectionObserver | null = null;
+
+  function setupInfiniteScroll() {
+    if (activeIO) {
+      activeIO.disconnect();
+      activeIO = null;
+    }
+
+    const sentinel = document.getElementById('notes-sentinel');
+    const container = document.querySelector<HTMLElement>('.notes-bricks');
+    if (!sentinel || !container) return;
+
+    document.querySelectorAll<HTMLElement>('[data-pagination-fallback]').forEach((el) => {
+      el.hidden = true;
+    });
+
+    let nextPage = Number(sentinel.dataset.nextPage ?? '0');
+    const lastPage = Number(sentinel.dataset.lastPage ?? '0');
+    let loading = false;
+    let exhausted = false;
+
+    const io = new IntersectionObserver(
+      async (entries) => {
+        const entry = entries[0];
+        if (!entry?.isIntersecting || loading || exhausted) return;
+        if (nextPage > lastPage) {
+          exhausted = true;
+          io.disconnect();
+          sentinel.remove();
+          return;
+        }
+        loading = true;
+        try {
+          const res = await fetch(`/notes/${nextPage}/`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const html = await res.text();
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const cards = doc.querySelectorAll('.notes-bricks > .note-card');
+          cards.forEach((card) => container.appendChild(card));
+          nextPage += 1;
+          if (nextPage > lastPage) {
+            exhausted = true;
+            io.disconnect();
+            sentinel.remove();
+          }
+        } catch (err) {
+          console.error('[notes] infinite scroll fetch failed', err);
+          exhausted = true;
+          io.disconnect();
+          sentinel.remove();
+        } finally {
+          loading = false;
+        }
+      },
+      { rootMargin: '300px 0px' },
+    );
+
+    io.observe(sentinel);
+    activeIO = io;
+  }
+
+  document.addEventListener('astro:page-load', setupInfiniteScroll);
+</script>
