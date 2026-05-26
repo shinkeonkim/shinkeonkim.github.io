@@ -36,7 +36,7 @@ export interface ProjectStatRepo {
   pushedAt?: string | null;
   topics?: string[];
   license?: string | null;
-  languages?: Record<string, number>;
+  languages?: Record<string, number | undefined>;
   commitActivity?: CommitActivityWeek[];
   topContributors?: RepoContributor[];
   releases?: RepoRelease[];
@@ -53,12 +53,12 @@ export type ProjectStatsCache = Record<string, ProjectStatEntry>;
 let cachePromise: Promise<ProjectStatsCache> | null = null;
 
 export function loadProjectStats(): Promise<ProjectStatsCache> {
-  if (!cachePromise) {
-    cachePromise = import('../data/project-stats.json')
-      .then((mod) => (mod.default ?? mod) as ProjectStatsCache)
-      .catch(() => ({}) as ProjectStatsCache);
-  }
-  return cachePromise;
+  if (cachePromise) return cachePromise;
+  const promise: Promise<ProjectStatsCache> = import('../data/project-stats.json')
+    .then((mod) => mod.default)
+    .catch(() => ({}));
+  cachePromise = promise;
+  return promise;
 }
 
 export function parseGitHubUrl(url: string): { owner: string; repo: string } | null {
