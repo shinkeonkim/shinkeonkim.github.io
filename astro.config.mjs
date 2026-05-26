@@ -1,5 +1,6 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
+import AutoImport from 'astro-auto-import';
 import mdx from '@astrojs/mdx';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
@@ -33,6 +34,12 @@ export default defineConfig({
     inlineStylesheets: 'auto',
   },
   integrations: [
+    // MUST be listed BEFORE mdx() — astro-auto-import injects import
+    // statements into MDX files at compile time so writers can use
+    // <CodeWithOutput .../> without a per-file import line.
+    AutoImport({
+      imports: ['./src/components/CodeWithOutput.astro'],
+    }),
     mdx(),
     react(),
     sitemap({
