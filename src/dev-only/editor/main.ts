@@ -8,6 +8,14 @@ import { EditorHistory } from './history';
 import { ImageDialogController } from './image-dialog';
 import { AnimationPicker } from './animation-picker';
 import { confirmModal } from './modal';
+import {
+  clearUiState,
+  isFreshSaveSnapshot,
+  loadUiState,
+  saveUiState,
+  type PersistReason,
+  type PersistedUiState,
+} from './persistence';
 import { PreviewPane } from './preview';
 import { ReferencesPicker } from './references-picker';
 import { state } from './state';
@@ -227,7 +235,7 @@ export function initEditor(): void {
     );
   }
 
-  function setCurrent(file: CurrentFile | null): void {
+  function setCurrent(file: CurrentFile | null, caret?: { start: number; end: number; scrollTop: number }): void {
     state.current = file;
     if (file) {
       pathEl.textContent = `${file.collection}/${file.slug}${file.ext}`;
@@ -247,6 +255,12 @@ export function initEditor(): void {
     }
     updateExtToggle();
     textarea.focus();
+    if (caret && file) {
+      const max = textarea.value.length;
+      textarea.selectionStart = Math.min(caret.start, max);
+      textarea.selectionEnd = Math.min(caret.end, max);
+      textarea.scrollTop = caret.scrollTop;
+    }
     void preview.render();
   }
 
@@ -349,8 +363,12 @@ export function initEditor(): void {
     setStatus('새 파일 (저장 안 됨)', 'ok');
   }
 
-  async function loadFile(collection: CollectionName, slug: string): Promise<void> {
-    if (state.isDirty) {
+  async function loadFile(
+    collection: CollectionName,
+    slug: string,
+    opts?: { silent?: boolean; caret?: { start: number; end: number; scrollTop: number } },
+  ): Promise<void> {
+    if (state.isDirty && !opts?.silent) {
       const proceed = await confirmModal({
         title: '변경 사항이 있습니다',
         description: '저장하지 않고 다른 파일로 전환할까요?',
@@ -367,28 +385,58 @@ export function initEditor(): void {
       let serverContent = data.content;
       let useDraft = false;
       if (draft && draft.content !== serverContent) {
-        const restore = await confirmModal({
-          title: '임시 저장본 발견',
-          description: `${new Date(draft.savedAt).toLocaleString('ko-KR')} 에 자동 저장된 미저장 변경 사항이 있습니다. 복원할까요?`,
-          confirmLabel: '복원',
-          cancelLabel: '버리고 서버 버전 사용',
-        });
-        if (restore) {
+        if (opts?.silent) {
           serverContent = draft.content;
           useDraft = true;
         } else {
-          clearDraft(file);
+          const restore = await confirmModal({
+            title: '임시 저장본 발견',
+            description: `${new Date(draft.savedAt).toLocaleString('ko-KR')} 에 자동 저장된 미저장 변경 사항이 있습니다. 복원할까요?`,
+            confirmLabel: '복원',
+            cancelLabel: '버리고 서버 버전 사용',
+          });
+          if (restore) {
+            serverContent = draft.content;
+            useDraft = true;
+          } else {
+            clearDraft(file);
+          }
         }
       }
       textarea.value = serverContent;
       state.isDirty = useDraft;
-      setCurrent(file);
+      setCurrent(file, opts?.caret);
       history.reset();
-      setStatus(useDraft ? '임시 저장본 복원됨' : '로드 완료', 'ok');
+      const okMsg = opts?.silent
+        ? useDraft
+          ? '세션 복원됨 (미저장 변경 포함)'
+          : '세션 복원됨'
+        : useDraft
+          ? '임시 저장본 복원됨'
+          : '로드 완료';
+      setStatus(okMsg, 'ok');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus('로드 실패: ' + msg, 'error');
     }
+  }
+
+  function captureUiState(reason: PersistReason): PersistedUiState {
+    return {
+      current: state.current,
+      caretStart: textarea.selectionStart,
+      caretEnd: textarea.selectionEnd,
+      scrollTop: textarea.scrollTop,
+      previewOpen: previewToggle.checked,
+      treeSearch: treeSearchInput?.value ?? '',
+      gitPanelOpen: !gitPanelRoot.hidden,
+      savedAt: Date.now(),
+      reason,
+    };
+  }
+
+  function persist(reason: PersistReason): void {
+    saveUiState(captureUiState(reason));
   }
 
   async function save(): Promise<void> {
@@ -406,6 +454,7 @@ export function initEditor(): void {
       setStatus(`저장됨 → ${data.path} (${data.bytes}B)`, 'ok');
       clearDraft(file);
       autosaver.reset();
+      persist('save');
       await tree.refresh();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -474,6 +523,7 @@ export function initEditor(): void {
   });
 
   window.addEventListener('beforeunload', (e) => {
+    persist('unload');
     if (state.isDirty) e.preventDefault();
   });
 
@@ -481,5 +531,36 @@ export function initEditor(): void {
 
   textarea.disabled = true;
   saveBtn.disabled = true;
-  setStatus('준비됨', 'ok');
+
+  void (async () => {
+    const snapshot = loadUiState();
+    if (!snapshot) {
+      setStatus('준비됨', 'ok');
+      return;
+    }
+    if (snapshot.treeSearch && treeSearchInput) {
+      treeSearchInput.value = snapshot.treeSearch;
+      treeSearchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (snapshot.previewOpen && !previewToggle.checked) {
+      previewToggle.checked = true;
+      previewToggle.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    if (snapshot.gitPanelOpen) gitPanel.open();
+
+    if (snapshot.current) {
+      const silent = isFreshSaveSnapshot(snapshot);
+      await loadFile(snapshot.current.collection, snapshot.current.slug, {
+        silent,
+        caret: {
+          start: snapshot.caretStart,
+          end: snapshot.caretEnd,
+          scrollTop: snapshot.scrollTop,
+        },
+      });
+      if (!silent) clearUiState();
+    } else {
+      setStatus('준비됨', 'ok');
+    }
+  })();
 }
