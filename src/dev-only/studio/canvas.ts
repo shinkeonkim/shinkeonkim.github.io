@@ -733,7 +733,7 @@ function handleResizeMove(e: MouseEvent): void {
     const cx = resizeState.startCx ?? 0;
     const cy = resizeState.startCy ?? 0;
     const r0 = resizeState.startR ?? 1;
-    let r1 = r0;
+    let r1: number;
     if (h === 'e') r1 = Math.max(2, r0 + dx);
     else if (h === 'w') r1 = Math.max(2, r0 - dx);
     else if (h === 's') r1 = Math.max(2, r0 + dy);
@@ -767,7 +767,7 @@ function renderResizeHandles(
   const baseEl = byId.get(elId);
   const state = snap.get(elId);
   if (!baseEl || !state) return null;
-  let box: { x: number; y: number; w: number; h: number } | null = null;
+  let box: { x: number; y: number; w: number; h: number };
   let handles: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
   if (baseEl.type === 'rect' || baseEl.type === 'image') {
     box = { x: state.x as number, y: state.y as number, w: state.width as number, h: state.height as number };
@@ -783,7 +783,6 @@ function renderResizeHandles(
   } else {
     return null;
   }
-  if (!box) return null;
   const positions: Record<ResizeHandle, { x: number; y: number; cursor: string }> = {
     nw: { x: box.x, y: box.y, cursor: 'nwse-resize' },
     n: { x: box.x + box.w / 2, y: box.y, cursor: 'ns-resize' },

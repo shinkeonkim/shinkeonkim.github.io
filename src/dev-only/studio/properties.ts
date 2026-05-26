@@ -379,7 +379,7 @@ function combineColor(hex: string, alpha: number): string {
   return `${hex}${aa}`;
 }
 
-function normalizeHexColor(value: string | undefined): string {
+function _normalizeHexColor(value: string | undefined): string {
   return parseColor(value).hex;
 }
 
