@@ -11,13 +11,18 @@ import {
   setDraft,
   promoteDraftToSaved,
   setSelection,
-  setElementBase,
+  updateElementBase,
   subscribe,
   updateMeta,
   undo,
   redo,
   deleteElement,
-  deleteStep,
+  deleteChapter,
+  addChapter,
+  deleteEffect,
+  uniqueChapterId,
+  getCurrentTime,
+  setCurrentTime,
   addElement,
   uniqueElementId,
 } from './state';
@@ -222,7 +227,7 @@ function moveOneElement(el: AnimationElement, dx: number, dy: number): boolean {
   } else {
     return false;
   }
-  setElementBase(el.id, patch);
+  updateElementBase(el.id, patch);
   return true;
 }
 
@@ -287,7 +292,7 @@ function startInlineTextEdit(canvas: SVGSVGElement, el: { id: string; x: number;
     const newContent = input.value;
     fo.remove();
     if (newContent !== el.content) {
-      setElementBase(el.id, { content: newContent });
+      updateElementBase(el.id, { content: newContent });
     }
   };
   const cancel = (): void => {
@@ -459,9 +464,12 @@ export function initStudio(): void {
         e.preventDefault();
         for (const id of ids) deleteElement(id);
         setSelection({ kind: 'none' });
-      } else if (sel.kind === 'step') {
+      } else if (sel.kind === 'chapter') {
         e.preventDefault();
-        deleteStep(sel.stepId);
+        deleteChapter(sel.chapterId);
+      } else if (sel.kind === 'effect') {
+        e.preventDefault();
+        deleteEffect(sel.effectId);
       }
       return;
     }
@@ -609,7 +617,7 @@ async function uploadAndInsertImage(file: File, ui: StudioUi): Promise<void> {
     }
     const id = uniqueElementId('img');
     addElement({
-      type: 'image', id, rotation: 0,
+      type: 'image', id, rotation: 0, appearances: [], tracks: [],
       x: Math.round(cx - w / 2), y: Math.round(cy - h / 2),
       width: w, height: h, src: data.path,
       preserveAspectRatio: 'xMidYMid meet', opacity: 1,

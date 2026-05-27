@@ -11,8 +11,11 @@ import type {
   RectElement,
   SnapshotMap,
   TextElement,
+  EntryMode,
+  ExitMode,
+  Chapter,
 } from './schema';
-import { computeSnapshot, isColorKey, isNumericKey } from './schema';
+import { activeEffects as activeEffectsAt, computeSnapshot, currentChapter } from './schema';
 
 const ENGINE_MARKER_DEFS = `
   <marker id="anim-h-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
@@ -63,265 +66,114 @@ function engineMarkerUrl(head: string | undefined, end: 'start' | 'end'): string
   return end === 'start' ? `url(#${idBase}-start)` : `url(#${idBase})`;
 }
 
-function entryDelta(mode: string | undefined, w = 200, h = 200): { dx: number; dy: number; scale?: number } {
-  switch (mode) {
-    case 'slide-left': return { dx: -w, dy: 0 };
-    case 'slide-right': return { dx: w, dy: 0 };
-    case 'slide-up': return { dx: 0, dy: -h };
-    case 'slide-down': return { dx: 0, dy: h };
-    case 'zoom': return { dx: 0, dy: 0, scale: 0.2 };
-    case 'pop': return { dx: 0, dy: 0, scale: 0.4 };
-    default: return { dx: 0, dy: 0 };
-  }
-}
-
-interface ActiveEffect {
+interface ActiveEffectInstance {
   key: string;
   effect: AnimationEffect;
   startedAt: number;
 }
 
-function easeApply(
-  fn: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut',
-  t: number,
-): number {
-  if (fn === 'linear') return t;
-  if (fn === 'easeIn') return t * t;
-  if (fn === 'easeOut') return 1 - (1 - t) * (1 - t);
-  const a = 2 * t * t;
-  const b = 1 - Math.pow(-2 * t + 2, 2) / 2;
-  return t < 0.5 ? a : b;
-}
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function parseColor(s: string): [number, number, number] | null {
-  if (!s) return null;
-  const hex = s.match(/^#([0-9a-f]{6})$/i);
-  if (hex) {
-    const n = parseInt(hex[1], 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-  }
-  const short = s.match(/^#([0-9a-f]{3})$/i);
-  if (short) {
-    const r = parseInt(short[1][0] + short[1][0], 16);
-    const g = parseInt(short[1][1] + short[1][1], 16);
-    const b = parseInt(short[1][2] + short[1][2], 16);
-    return [r, g, b];
-  }
-  return null;
-}
-
-function rgbToHex(r: number, g: number, b: number): string {
-  const c = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
-  return '#' + c(r) + c(g) + c(b);
-}
-
-function lerpValue(a: unknown, b: unknown, t: number, key: string): unknown {
-  if (isNumericKey(key) && typeof a === 'number' && typeof b === 'number') {
-    return lerp(a, b, t);
-  }
-  if (isColorKey(key) && typeof a === 'string' && typeof b === 'string') {
-    const ca = parseColor(a);
-    const cb = parseColor(b);
-    if (ca && cb) {
-      return rgbToHex(lerp(ca[0], cb[0], t), lerp(ca[1], cb[1], t), lerp(ca[2], cb[2], t));
-    }
-  }
-  if (key === 'visible' && typeof a === 'boolean' && typeof b === 'boolean') {
-    return a;
-  }
-  return t < 0.5 ? a : b;
-}
-
-function interpolateSnapshot(
-  prev: SnapshotMap,
-  target: SnapshotMap,
-  t: number,
-  elementMap?: Map<string, AnimationElement>,
-): SnapshotMap {
-  if (t <= 0) return prev;
-  if (t >= 1) return target;
-  const out: SnapshotMap = new Map();
-  for (const [id, prevState] of prev) {
-    const targetState = target.get(id);
-    if (!targetState) {
-      out.set(id, prevState);
-      continue;
-    }
-    const becomingVisible = !prevState.visible && targetState.visible;
-    const becomingInvisible = prevState.visible && !targetState.visible;
-
-    const baseEl = elementMap?.get(id);
-    const entryMode = baseEl ? (baseEl as { entryMode?: string }).entryMode : undefined;
-    const exitMode = baseEl ? (baseEl as { exitMode?: string }).exitMode : undefined;
-    const hasEntry = entryMode && entryMode !== 'instant';
-    const hasExit = exitMode && exitMode !== 'instant';
-
-    let visible: boolean;
-    let useTargetSnapshot: boolean;
-    let appearProgress = 1;
-    if (becomingVisible) {
-      if (hasEntry) {
-        visible = true;
-        useTargetSnapshot = true;
-        appearProgress = t;
-      } else {
-        visible = t >= 0.999;
-        useTargetSnapshot = visible;
-      }
-    } else if (becomingInvisible) {
-      if (hasExit) {
-        visible = true;
-        useTargetSnapshot = false;
-        appearProgress = 1 - t;
-      } else {
-        visible = t <= 0.001;
-        useTargetSnapshot = false;
-      }
-    } else {
-      visible = prevState.visible;
-      useTargetSnapshot = false;
-    }
-
-    const merged: Record<string, unknown> & { visible: boolean } = {
-      ...(useTargetSnapshot ? targetState : prevState),
-      visible,
+function entryStyle(mode: EntryMode, progress: number, baseEl: AnimationElement, state: Record<string, unknown>): { opacity?: number; transform?: string } {
+  if (mode === 'instant') return {};
+  const remaining = 1 - progress;
+  if (mode === 'fade') return { opacity: progress };
+  if (mode === 'zoom' || mode === 'pop') {
+    const center = elementCenterFromState(baseEl, state);
+    if (!center) return { opacity: progress };
+    const base = mode === 'pop' ? 0.4 : 0.2;
+    const scale = base + (1 - base) * progress;
+    return {
+      opacity: progress,
+      transform: `translate(${center.x}px ${center.y}px) scale(${scale}) translate(${-center.x}px ${-center.y}px)`,
     };
-    if (!useTargetSnapshot && !becomingVisible && !becomingInvisible) {
-      for (const [k, v] of Object.entries(targetState)) {
-        if (k === 'visible') continue;
-        const pv = prevState[k];
-        if (pv === undefined) {
-          merged[k] = v;
-        } else {
-          merged[k] = lerpValue(pv, v, t, k);
-        }
-      }
-    }
-
-    if (becomingVisible && hasEntry) {
-      applyEntryTransform(merged, baseEl!, entryMode!, appearProgress);
-    } else if (becomingInvisible && hasExit) {
-      applyEntryTransform(merged, baseEl!, exitMode!, appearProgress);
-    }
-
-    out.set(id, merged);
   }
-  return out;
+  const dx = mode === 'slide-left' ? -200 * remaining : mode === 'slide-right' ? 200 * remaining : 0;
+  const dy = mode === 'slide-up' ? -200 * remaining : mode === 'slide-down' ? 200 * remaining : 0;
+  return { opacity: progress, transform: `translate(${dx}px ${dy}px)` };
 }
 
-function applyEntryTransform(
-  merged: Record<string, unknown>,
-  baseEl: AnimationElement,
-  mode: string,
-  progress: number,
-): void {
-  merged.__opacity = mode === 'fade' ? progress : (merged.__opacity ?? 1);
-  if (mode === 'fade') return;
-  const bounds = elementBounds(baseEl, merged);
-  const w = bounds?.w ?? 100;
-  const h = bounds?.h ?? 100;
-  const off = entryDelta(mode, w * 1.5, h * 1.5);
-  const inv = 1 - progress;
-  if (off.dx || off.dy) {
-    shiftElementCoords(merged, baseEl.type, off.dx * inv, off.dy * inv);
+function exitStyle(mode: ExitMode, progress: number, baseEl: AnimationElement, state: Record<string, unknown>): { opacity?: number; transform?: string } {
+  if (mode === 'instant') return {};
+  if (mode === 'fade') return { opacity: 1 - progress };
+  if (mode === 'zoom' || mode === 'pop') {
+    const center = elementCenterFromState(baseEl, state);
+    if (!center) return { opacity: 1 - progress };
+    const base = mode === 'pop' ? 0.4 : 0.2;
+    const scale = 1 - (1 - base) * progress;
+    return {
+      opacity: 1 - progress,
+      transform: `translate(${center.x}px ${center.y}px) scale(${scale}) translate(${-center.x}px ${-center.y}px)`,
+    };
   }
-  if (typeof off.scale === 'number') {
-    const s = off.scale + (1 - off.scale) * progress;
-    merged.__scale = s;
-  }
+  const dx = mode === 'slide-left' ? -200 * progress : mode === 'slide-right' ? 200 * progress : 0;
+  const dy = mode === 'slide-up' ? -200 * progress : mode === 'slide-down' ? 200 * progress : 0;
+  return { opacity: 1 - progress, transform: `translate(${dx}px ${dy}px)` };
 }
 
 function elementCenterFromState(el: AnimationElement, state: Record<string, unknown>): { x: number; y: number } | null {
   if (el.type === 'rect' || el.type === 'image') {
     return { x: (state.x as number) + (state.width as number) / 2, y: (state.y as number) + (state.height as number) / 2 };
   }
-  if (el.type === 'circle') return { x: state.cx as number, y: state.cy as number };
   if (el.type === 'text') return { x: state.x as number, y: state.y as number };
+  if (el.type === 'circle') return { x: state.cx as number, y: state.cy as number };
+  if (el.type === 'line' || el.type === 'arrow') {
+    const x1 = state.x1 as number | undefined;
+    const y1 = state.y1 as number | undefined;
+    const x2 = state.x2 as number | undefined;
+    const y2 = state.y2 as number | undefined;
+    if (typeof x1 === 'number' && typeof x2 === 'number' && typeof y1 === 'number' && typeof y2 === 'number') {
+      return { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+    }
+    return null;
+  }
   if (el.type === 'path') return { x: (state.x as number) ?? 0, y: (state.y as number) ?? 0 };
   return null;
-}
-
-function elementBounds(el: AnimationElement, state: Record<string, unknown>): { w: number; h: number } | null {
-  if (el.type === 'rect' || el.type === 'image') return { w: state.width as number, h: state.height as number };
-  if (el.type === 'circle') return { w: (state.r as number) * 2, h: (state.r as number) * 2 };
-  if (el.type === 'text') return { w: 100, h: state.fontSize as number };
-  return null;
-}
-
-function shiftElementCoords(merged: Record<string, unknown>, type: string, dx: number, dy: number): void {
-  if (type === 'rect' || type === 'image' || type === 'text' || type === 'path') {
-    if (typeof merged.x === 'number') merged.x = (merged.x as number) + dx;
-    if (typeof merged.y === 'number') merged.y = (merged.y as number) + dy;
-  } else if (type === 'circle') {
-    if (typeof merged.cx === 'number') merged.cx = (merged.cx as number) + dx;
-    if (typeof merged.cy === 'number') merged.cy = (merged.cy as number) + dy;
-  }
-}
-
-function totalDurationOf(def: AnimationDef): number {
-  return def.steps.reduce((acc, s) => acc + s.duration, 0);
 }
 
 interface EngineProps {
   def: AnimationDef;
   speedMultiplier?: number;
   playing?: boolean;
-  onStepChange?: (idx: number) => void;
-  staticAtStep?: number;
+  staticAtTime?: number;
+  onTimeChange?: (time: number) => void;
 }
 
 export default function AnimationEngine({
   def,
   speedMultiplier = 1,
   playing = true,
-  onStepChange,
-  staticAtStep,
+  staticAtTime,
+  onTimeChange,
 }: EngineProps) {
-  const snapshots = useMemo(() => {
-    const list: SnapshotMap[] = [];
-    list.push(computeSnapshot(def, -1));
-    for (let i = 0; i < def.steps.length; i += 1) {
-      list.push(computeSnapshot(def, i));
-    }
-    return list;
-  }, [def]);
-
   const [time, setTime] = useState(0);
-  const [activeEffects, setActiveEffects] = useState<ActiveEffect[]>([]);
+  const [now, setNow] = useState(() => performance.now());
   const rafRef = useRef<number | null>(null);
   const lastFrameTime = useRef<number | null>(null);
-  const lastStepIdx = useRef<number>(-1);
 
   useEffect(() => {
     setTime(0);
-    setActiveEffects([]);
-    lastStepIdx.current = -1;
-  }, [def]);
+  }, [def.id]);
 
   useEffect(() => {
-    if (staticAtStep !== undefined) return;
+    if (staticAtTime !== undefined) return;
     if (!playing) {
       lastFrameTime.current = null;
       return;
     }
-    function frame(now: number) {
-      if (lastFrameTime.current === null) lastFrameTime.current = now;
-      const dt = (now - lastFrameTime.current) * Math.max(0.05, speedMultiplier);
-      lastFrameTime.current = now;
-      setTime((t) => {
-        const total = totalDurationOf(def);
+    function frame(t: number): void {
+      if (lastFrameTime.current === null) lastFrameTime.current = t;
+      const dt = (t - lastFrameTime.current) * Math.max(0.05, speedMultiplier);
+      lastFrameTime.current = t;
+      setTime((cur) => {
+        const total = def.duration;
         if (total === 0) return 0;
-        const next = t + dt;
+        const next = cur + dt;
         if (next >= total) {
           if (def.settings.loop) return next - total;
           return total;
         }
         return next;
       });
+      setNow(t);
       rafRef.current = requestAnimationFrame(frame);
     }
     rafRef.current = requestAnimationFrame(frame);
@@ -329,7 +181,13 @@ export default function AnimationEngine({
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       lastFrameTime.current = null;
     };
-  }, [playing, def, speedMultiplier, staticAtStep]);
+  }, [playing, def, speedMultiplier, staticAtTime]);
+
+  const currentTime = staticAtTime !== undefined ? staticAtTime : time;
+
+  useEffect(() => {
+    onTimeChange?.(currentTime);
+  }, [currentTime, onTimeChange]);
 
   const elementMap = useMemo(() => {
     const m = new Map<string, AnimationElement>();
@@ -337,140 +195,104 @@ export default function AnimationEngine({
     return m;
   }, [def.elements]);
 
-  const { currentSnap, currentStepIdx } = useMemo(() => {
-    if (staticAtStep !== undefined) {
-      const idx = Math.max(-1, Math.min(def.steps.length - 1, staticAtStep));
-      return { currentSnap: snapshots[idx + 1] ?? snapshots[0], currentStepIdx: idx };
-    }
-    if (def.steps.length === 0) {
-      return { currentSnap: snapshots[0], currentStepIdx: -1 };
-    }
-    let acc = 0;
-    for (let i = 0; i < def.steps.length; i += 1) {
-      const step = def.steps[i];
-      const end = acc + step.duration;
-      if (time < end) {
-        const localT = step.duration === 0 ? 1 : (time - acc) / step.duration;
-        const eased = easeApply(step.ease, localT);
-        const snap = interpolateSnapshot(snapshots[i], snapshots[i + 1], eased, elementMap);
-        return { currentSnap: snap, currentStepIdx: i };
-      }
-      acc = end;
-    }
-    return { currentSnap: snapshots[snapshots.length - 1], currentStepIdx: def.steps.length - 1 };
-  }, [time, snapshots, def, staticAtStep, elementMap]);
+  const currentSnap = useMemo(() => computeSnapshot(def, currentTime), [def, currentTime]);
+  const activeEffects = useMemo(() => activeEffectsAt(def, currentTime), [def, currentTime]);
+  const chapter = useMemo(() => currentChapter(def, currentTime), [def, currentTime]);
 
-  useEffect(() => {
-    onStepChange?.(currentStepIdx);
-  }, [currentStepIdx, onStepChange]);
+  const sortedChapters = useMemo(() => [...def.chapters].sort((a, b) => a.time - b.time), [def.chapters]);
 
-  useEffect(() => {
-    if (currentStepIdx === lastStepIdx.current) return;
-    lastStepIdx.current = currentStepIdx;
-    const step = def.steps[currentStepIdx];
-    if (!step || step.effects.length === 0) return;
-    const now = performance.now();
-    const newEffects = step.effects.map((e, idx) => ({
-      key: `${currentStepIdx}-${idx}-${now}`,
-      effect: e,
-      startedAt: now + (e.delay ?? 0) / Math.max(0.05, speedMultiplier),
-    }));
-    setActiveEffects((prev) => [...prev, ...newEffects]);
-    const totalEffectMs = step.effects.reduce(
-      (acc, e) => Math.max(acc, (e.delay ?? 0) + (e.duration ?? 0)),
-      0,
-    );
-    window.setTimeout(() => {
-      setActiveEffects((prev) => prev.filter((p) => !newEffects.find((n) => n.key === p.key)));
-    }, totalEffectMs / Math.max(0.05, speedMultiplier) + 300);
-  }, [currentStepIdx, def.steps, speedMultiplier]);
-
-  const elementOrder = useMemo(() => def.elements.map((e) => e.id), [def.elements]);
-  const currentStep = currentStepIdx >= 0 ? def.steps[currentStepIdx] : null;
   const showCaption = def.settings.showCaption === true;
-  const showStepList = def.settings.showStepList === true;
+  const showChapterList = def.settings.showChapterList === true;
 
   return (
-    <div className={`anim-engine${showStepList ? ' anim-engine-with-list' : ''}`}>
+    <div className={`anim-engine${showChapterList ? ' anim-engine-with-list' : ''}`}>
       <div className="anim-engine-stage">
-      <svg
-        viewBox={`0 0 ${def.canvas.width} ${def.canvas.height}`}
-        role="img"
-        aria-label={def.title}
-        style={{ width: '100%', height: 'auto', background: def.canvas.background }}
-      >
-        <defs dangerouslySetInnerHTML={{ __html: ENGINE_MARKER_DEFS }} />
-
-        {elementOrder.map((id) => {
-          const baseEl = elementMap.get(id);
-          const state = currentSnap.get(id);
-          if (!baseEl || !state || !state.visible) return null;
-          const activeEffect = activeEffects.find((ae) => ae.effect.elementId === id);
-          const entryOpacity = (state as { __opacity?: number }).__opacity;
-          const entryScale = (state as { __scale?: number }).__scale;
-          const wrapStyle: React.CSSProperties = {};
-          if (typeof entryOpacity === 'number') wrapStyle.opacity = entryOpacity;
-          let wrapTransform: string | undefined;
-          if (typeof entryScale === 'number') {
-            const center = elementCenterFromState(baseEl, state);
-            if (center) wrapTransform = `translate(${center.x} ${center.y}) scale(${entryScale}) translate(${-center.x} ${-center.y})`;
-          }
-          return (
-            <g key={id} style={wrapStyle} transform={wrapTransform}>
-              <RenderElement
-                baseType={baseEl.type}
-                state={state}
-                snap={currentSnap}
-                elementMap={elementMap}
-                activeEffect={activeEffect}
-              />
-            </g>
-          );
-        })}
-
-        {activeEffects
-          .filter((ae) => ae.effect.type === 'flow')
-          .map((ae) => {
-            const baseEl = elementMap.get(ae.effect.elementId);
-            if (!baseEl || baseEl.type !== 'arrow') return null;
-            const coords = resolveArrowCoords(baseEl, currentSnap, elementMap);
-            if (!coords) return null;
-            const flow = ae.effect as Extract<AnimationEffect, { type: 'flow' }>;
-            return Array.from({ length: flow.particles }, (_, i) => (
-              <FlowParticle
-                key={`${ae.key}-${i}`}
-                x1={coords.x1}
-                y1={coords.y1}
-                x2={coords.x2}
-                y2={coords.y2}
-                color={flow.color}
-                radius={flow.radius}
-                startOffset={i / flow.particles}
-              />
-            ));
+        <svg
+          viewBox={`0 0 ${def.canvas.width} ${def.canvas.height}`}
+          role="img"
+          aria-label={def.title}
+          style={{ width: '100%', height: 'auto', background: def.canvas.background }}
+        >
+          <defs dangerouslySetInnerHTML={{ __html: ENGINE_MARKER_DEFS }} />
+          {def.elements.map((el) => {
+            const state = currentSnap.get(el.id);
+            if (!state || !state.visible) return null;
+            const entryProgress = state.__entryProgress as number | undefined;
+            const exitProgress = state.__exitProgress as number | undefined;
+            const entryMode = state.__entryMode as EntryMode | undefined;
+            const exitMode = state.__exitMode as ExitMode | undefined;
+            const phaseStyle: { opacity?: number; transform?: string } =
+              entryProgress !== undefined && entryMode
+                ? entryStyle(entryMode, entryProgress, el, state)
+                : exitProgress !== undefined && exitMode
+                  ? exitStyle(exitMode, exitProgress, el, state)
+                  : {};
+            const activeEffect = activeEffects.find(
+              (ae) => ae.elementId === el.id && (ae.type === 'highlight' || ae.type === 'pulse'),
+            );
+            return (
+              <g
+                key={el.id}
+                style={phaseStyle.opacity !== undefined ? { opacity: phaseStyle.opacity } : undefined}
+                transform={phaseStyle.transform}
+              >
+                <RenderElement
+                  baseType={el.type}
+                  state={state}
+                  snap={currentSnap}
+                  elementMap={elementMap}
+                  effect={activeEffect}
+                  currentTime={currentTime}
+                />
+              </g>
+            );
           })}
-      </svg>
-      {showCaption && currentStep && (
-        <div className="anim-caption" aria-live="polite">
-          <span className="anim-caption-num">{currentStepIdx + 1} / {def.steps.length}</span>
-          {currentStep.label && <span className="anim-caption-label">{currentStep.label}</span>}
-          {currentStep.subtitle && <span className="anim-caption-subtitle">{currentStep.subtitle}</span>}
-        </div>
-      )}
+          {activeEffects
+            .filter((eff): eff is Extract<AnimationEffect, { type: 'flow' }> => eff.type === 'flow')
+            .map((eff) => {
+              const baseEl = elementMap.get(eff.elementId);
+              if (!baseEl || baseEl.type !== 'arrow') return null;
+              const coords = resolveArrowCoords(baseEl, currentSnap, elementMap);
+              if (!coords) return null;
+              const elapsed = currentTime - eff.time;
+              const cycle = elapsed / eff.duration;
+              return Array.from({ length: eff.particles }, (_, i) => (
+                <FlowParticle
+                  key={`${eff.id}-${i}`}
+                  x1={coords.x1}
+                  y1={coords.y1}
+                  x2={coords.x2}
+                  y2={coords.y2}
+                  color={eff.color}
+                  radius={eff.radius}
+                  offset={(cycle + i / eff.particles) % 1}
+                />
+              ));
+            })}
+        </svg>
+        {showCaption && chapter && (
+          <div className="anim-caption" aria-live="polite">
+            <span className="anim-caption-num">
+              {chapter.index + 1} / {sortedChapters.length}
+            </span>
+            {chapter.chapter.label && <span className="anim-caption-label">{chapter.chapter.label}</span>}
+            {chapter.chapter.subtitle && <span className="anim-caption-subtitle">{chapter.chapter.subtitle}</span>}
+          </div>
+        )}
       </div>
-      {showStepList && (
-        <aside className="anim-step-list" aria-label="단계 목록">
+      {showChapterList && (
+        <aside className="anim-step-list" aria-label="목차">
           <ol>
-            {def.steps.map((step, idx) => (
+            {sortedChapters.map((c, idx) => (
               <li
-                key={step.id}
-                className={`anim-step-list-item${idx === currentStepIdx ? ' is-current' : ''}`}
-                aria-current={idx === currentStepIdx ? 'step' : undefined}
+                key={c.id}
+                className={`anim-step-list-item${chapter?.index === idx ? ' is-current' : ''}`}
+                aria-current={chapter?.index === idx ? 'step' : undefined}
               >
                 <span className="anim-step-list-num">{idx + 1}</span>
                 <div className="anim-step-list-body">
-                  <span className="anim-step-list-label">{step.label || step.id}</span>
-                  {step.subtitle && <span className="anim-step-list-subtitle">{step.subtitle}</span>}
+                  <span className="anim-step-list-label">{c.label || c.id}</span>
+                  {c.subtitle && <span className="anim-step-list-subtitle">{c.subtitle}</span>}
                 </div>
               </li>
             ))}
@@ -483,388 +305,282 @@ export default function AnimationEngine({
 
 interface RenderProps {
   baseType: AnimationElement['type'];
-  state: Record<string, unknown> & { visible: boolean };
+  state: Record<string, unknown>;
   snap: SnapshotMap;
   elementMap: Map<string, AnimationElement>;
-  activeEffect?: ActiveEffect;
+  effect: AnimationEffect | undefined;
+  currentTime: number;
 }
 
-function RenderElement({ baseType, state, snap, elementMap, activeEffect }: RenderProps) {
-  const highlight =
-    activeEffect && activeEffect.effect.type === 'highlight'
-      ? (activeEffect.effect.color as string)
-      : null;
-  const pulseScale =
-    activeEffect && activeEffect.effect.type === 'pulse'
-      ? (activeEffect.effect.scale as number)
-      : 1;
+function RenderElement({ baseType, state, snap, elementMap, effect, currentTime }: RenderProps): React.ReactElement | null {
+  if (baseType === 'rect') return <RenderRect state={state} effect={effect} currentTime={currentTime} />;
+  if (baseType === 'circle') return <RenderCircle state={state} effect={effect} currentTime={currentTime} />;
+  if (baseType === 'line') return <RenderLine state={state} snap={snap} elementMap={elementMap} />;
+  if (baseType === 'arrow') return <RenderArrow state={state} snap={snap} elementMap={elementMap} />;
+  if (baseType === 'text') return <RenderText state={state} />;
+  if (baseType === 'image') return <RenderImage state={state} />;
+  if (baseType === 'path') return <RenderPath state={state} />;
+  if (baseType === 'polygon') return <RenderPolygon state={state} />;
+  return null;
+}
 
-  const rotation = (state.rotation as number) || 0;
+function applyEffectColor(stateColor: string | undefined, effect: AnimationEffect | undefined, defaultColor: string): string {
+  if (effect && effect.type === 'highlight') return effect.color;
+  return (stateColor as string) ?? defaultColor;
+}
 
-  if (baseType === 'rect') {
-    const r = state as unknown as RectElement;
-    const cx = r.x + r.width / 2;
-    const cy = r.y + r.height / 2;
-    const transform = [
-      pulseScale !== 1 ? `translate(${cx} ${cy}) scale(${pulseScale}) translate(${-cx} ${-cy})` : '',
-      rotation ? `rotate(${rotation} ${cx} ${cy})` : '',
-    ].filter(Boolean).join(' ');
-    return (
-      <g transform={transform || undefined}>
-        <rect
-          x={r.x}
-          y={r.y}
-          width={r.width}
-          height={r.height}
-          rx={r.cornerRadius}
-          fill={highlight ?? r.fill}
-          stroke={highlight ?? r.stroke}
-          strokeWidth={r.strokeWidth}
-        />
-        {r.label && (
-          <text x={cx} y={cy + 5} textAnchor="middle" fontSize={r.labelSize} fontWeight={600} fill={r.labelColor}>
-            {r.label}
-          </text>
-        )}
-        {r.subtitle && (
-          <text x={cx} y={cy + r.labelSize + 8} textAnchor="middle" fontSize={10} fill={r.labelColor} opacity={0.7}>
-            {r.subtitle}
-          </text>
-        )}
-      </g>
-    );
+function applyEffectScale(effect: AnimationEffect | undefined, currentTime: number): number {
+  if (effect && effect.type === 'pulse') {
+    const elapsed = currentTime - effect.time;
+    const t = Math.max(0, Math.min(1, elapsed / effect.duration));
+    const pulse = Math.sin(t * Math.PI);
+    return 1 + (effect.scale - 1) * pulse;
   }
+  return 1;
+}
 
-  if (baseType === 'circle') {
-    const c = state as unknown as CircleElement;
-    const transform = [
-      pulseScale !== 1 ? `translate(${c.cx} ${c.cy}) scale(${pulseScale}) translate(${-c.cx} ${-c.cy})` : '',
-      rotation ? `rotate(${rotation} ${c.cx} ${c.cy})` : '',
-    ].filter(Boolean).join(' ');
-    return (
-      <g transform={transform || undefined}>
-        <circle cx={c.cx} cy={c.cy} r={c.r} fill={highlight ?? c.fill} stroke={highlight ?? c.stroke} strokeWidth={c.strokeWidth} />
-        {c.label && (
-          <text x={c.cx} y={c.cy + 5} textAnchor="middle" fontSize={c.labelSize} fontWeight={600} fill={c.labelColor}>
-            {c.label}
-          </text>
-        )}
-      </g>
-    );
+function RenderRect({ state, effect, currentTime }: { state: Record<string, unknown>; effect: AnimationEffect | undefined; currentTime: number }): React.ReactElement {
+  const r = state as unknown as RectElement;
+  const scale = applyEffectScale(effect, currentTime);
+  const cx = r.x + r.width / 2;
+  const cy = r.y + r.height / 2;
+  const transform = `translate(${cx} ${cy}) rotate(${r.rotation}) scale(${scale}) translate(${-cx} ${-cy})`;
+  return (
+    <g transform={transform}>
+      <rect
+        x={r.x}
+        y={r.y}
+        width={r.width}
+        height={r.height}
+        rx={r.cornerRadius}
+        fill={applyEffectColor(r.fill, effect, '#a5b4fc')}
+        stroke={r.stroke}
+        strokeWidth={r.strokeWidth}
+      />
+      {r.label && (
+        <text x={cx} y={cy + 5} textAnchor="middle" fontSize={r.labelSize} fontWeight={600} fill={r.labelColor}>
+          {r.label}
+        </text>
+      )}
+      {r.subtitle && (
+        <text x={cx} y={cy + r.labelSize + 8} textAnchor="middle" fontSize={10} fill={r.labelColor} opacity={0.7}>
+          {r.subtitle}
+        </text>
+      )}
+    </g>
+  );
+}
+
+function RenderCircle({ state, effect, currentTime }: { state: Record<string, unknown>; effect: AnimationEffect | undefined; currentTime: number }): React.ReactElement {
+  const c = state as unknown as CircleElement;
+  const scale = applyEffectScale(effect, currentTime);
+  const transform = `translate(${c.cx} ${c.cy}) rotate(${c.rotation}) scale(${scale}) translate(${-c.cx} ${-c.cy})`;
+  return (
+    <g transform={transform}>
+      <circle
+        cx={c.cx}
+        cy={c.cy}
+        r={c.r}
+        fill={applyEffectColor(c.fill, effect, '#a5b4fc')}
+        stroke={c.stroke}
+        strokeWidth={c.strokeWidth}
+      />
+      {c.label && (
+        <text x={c.cx} y={c.cy + 5} textAnchor="middle" fontSize={c.labelSize} fontWeight={600} fill={c.labelColor}>
+          {c.label}
+        </text>
+      )}
+    </g>
+  );
+}
+
+function anchorOffset(el: AnimationElement, state: Record<string, unknown>, anchor: Anchor | undefined): { x: number; y: number } {
+  const center = elementCenterFromState(el, state) ?? { x: 0, y: 0 };
+  if (anchor === 'top') {
+    if (el.type === 'rect' || el.type === 'image') return { x: center.x, y: state.y as number };
+    if (el.type === 'circle') return { x: center.x, y: (state.cy as number) - (state.r as number) };
   }
-
-  if (baseType === 'line') {
-    const l = state as unknown as LineElement;
-    const coords = resolveLineCoords(l, snap, elementMap);
-    if (!coords) return null;
-    const ms = engineMarkerUrl(l.headStart, 'start');
-    const me = engineMarkerUrl(l.headEnd, 'end');
-    return (
-      <g style={{ color: highlight ?? l.stroke }}>
-        <line
-          x1={coords.x1} y1={coords.y1} x2={coords.x2} y2={coords.y2}
-          stroke="currentColor"
-          strokeWidth={l.strokeWidth}
-          strokeDasharray={l.strokeDasharray}
-          markerStart={ms}
-          markerEnd={me}
-        />
-      </g>
-    );
+  if (anchor === 'bottom') {
+    if (el.type === 'rect' || el.type === 'image') return { x: center.x, y: (state.y as number) + (state.height as number) };
+    if (el.type === 'circle') return { x: center.x, y: (state.cy as number) + (state.r as number) };
   }
+  if (anchor === 'left') {
+    if (el.type === 'rect' || el.type === 'image') return { x: state.x as number, y: center.y };
+    if (el.type === 'circle') return { x: (state.cx as number) - (state.r as number), y: center.y };
+  }
+  if (anchor === 'right') {
+    if (el.type === 'rect' || el.type === 'image') return { x: (state.x as number) + (state.width as number), y: center.y };
+    if (el.type === 'circle') return { x: (state.cx as number) + (state.r as number), y: center.y };
+  }
+  return center;
+}
 
-  if (baseType === 'arrow') {
-    const a = state as unknown as ArrowElement;
-    const coords = resolveArrowCoords(a, snap, elementMap);
-    if (!coords) return null;
-    const color = highlight ?? a.stroke;
-    const midX = (coords.x1 + coords.x2) / 2;
-    const midY = (coords.y1 + coords.y2) / 2;
-    const isCurved = (a.curvature || 0) !== 0;
-    const ms = engineMarkerUrl(a.headStart ?? 'none', 'start');
-    const me = engineMarkerUrl(a.headEnd ?? 'arrow', 'end');
-    let pathD = '';
-    if (isCurved) {
-      const dx = coords.x2 - coords.x1;
-      const dy = coords.y2 - coords.y1;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-      const cpx = midX + nx * (a.curvature ?? 0);
-      const cpy = midY + ny * (a.curvature ?? 0);
-      pathD = `M ${coords.x1} ${coords.y1} Q ${cpx} ${cpy} ${coords.x2} ${coords.y2}`;
+function resolveArrowCoords(
+  el: ArrowElement | LineElement,
+  snap: SnapshotMap,
+  elementMap: Map<string, AnimationElement>,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  let x1: number | undefined;
+  let y1: number | undefined;
+  let x2: number | undefined;
+  let y2: number | undefined;
+  if (el.fromId) {
+    const fromState = snap.get(el.fromId);
+    const fromBase = elementMap.get(el.fromId);
+    if (fromState && fromBase) {
+      const p = anchorOffset(fromBase, fromState, el.fromAnchor);
+      x1 = p.x;
+      y1 = p.y;
     }
-    return (
-      <g style={{ color }}>
-        {isCurved ? (
-          <path d={pathD} fill="none" stroke="currentColor" strokeWidth={a.strokeWidth} strokeDasharray={a.strokeDasharray} markerStart={ms} markerEnd={me} />
-        ) : (
-          <line x1={coords.x1} y1={coords.y1} x2={coords.x2} y2={coords.y2} stroke="currentColor" strokeWidth={a.strokeWidth} strokeDasharray={a.strokeDasharray} markerStart={ms} markerEnd={me} />
-        )}
-        {a.label && (
-          <g>
-            <rect x={midX - 80} y={midY - 11} width={160} height={22} rx={4} fill="white" stroke="currentColor" strokeOpacity={0.4} />
-            <text x={midX} y={midY + 4} textAnchor="middle" fontSize="12" fontFamily="ui-monospace, monospace" fill={a.labelColor}>{a.label}</text>
-          </g>
-        )}
-      </g>
-    );
+  } else {
+    x1 = el.x1;
+    y1 = el.y1;
   }
-
-  if (baseType === 'text') {
-    const t = state as unknown as TextElement;
-    const transform = rotation ? `rotate(${rotation} ${t.x} ${t.y})` : undefined;
-    return (
-      <text x={t.x} y={t.y} fontSize={t.fontSize} fontWeight={t.fontWeight} fill={highlight ?? t.color} textAnchor={t.textAnchor} transform={transform}>
-        {t.content}
-      </text>
-    );
+  if (el.toId) {
+    const toState = snap.get(el.toId);
+    const toBase = elementMap.get(el.toId);
+    if (toState && toBase) {
+      const p = anchorOffset(toBase, toState, el.toAnchor);
+      x2 = p.x;
+      y2 = p.y;
+    }
+  } else {
+    x2 = el.x2;
+    y2 = el.y2;
   }
+  if (typeof x1 !== 'number' || typeof y1 !== 'number' || typeof x2 !== 'number' || typeof y2 !== 'number') return null;
+  return { x1, y1, x2, y2 };
+}
 
-  if (baseType === 'image') {
-    const i = state as unknown as ImageElement;
-    const cx = i.x + i.width / 2;
-    const cy = i.y + i.height / 2;
-    const transform = rotation ? `rotate(${rotation} ${cx} ${cy})` : undefined;
-    return (
-      <image href={i.src} x={i.x} y={i.y} width={i.width} height={i.height} preserveAspectRatio={i.preserveAspectRatio} opacity={i.opacity} transform={transform} />
-    );
-  }
+function RenderLine({ state, snap, elementMap }: { state: Record<string, unknown>; snap: SnapshotMap; elementMap: Map<string, AnimationElement> }): React.ReactElement | null {
+  const l = state as unknown as LineElement;
+  const coords = resolveArrowCoords(l, snap, elementMap);
+  if (!coords) return null;
+  return (
+    <line
+      x1={coords.x1}
+      y1={coords.y1}
+      x2={coords.x2}
+      y2={coords.y2}
+      stroke={l.stroke}
+      strokeWidth={l.strokeWidth}
+      strokeDasharray={l.strokeDasharray}
+      markerStart={engineMarkerUrl(l.headStart, 'start')}
+      markerEnd={engineMarkerUrl(l.headEnd, 'end')}
+      style={{ color: l.stroke }}
+    />
+  );
+}
 
-  if (baseType === 'path') {
-    const p = state as unknown as import('./schema').PathElement;
-    const transform = [
-      p.x || p.y ? `translate(${p.x ?? 0} ${p.y ?? 0})` : '',
-      rotation ? `rotate(${rotation})` : '',
-    ].filter(Boolean).join(' ');
-    return (
+function RenderArrow({ state, snap, elementMap }: { state: Record<string, unknown>; snap: SnapshotMap; elementMap: Map<string, AnimationElement> }): React.ReactElement | null {
+  const a = state as unknown as ArrowElement;
+  const coords = resolveArrowCoords(a, snap, elementMap);
+  if (!coords) return null;
+  const midX = (coords.x1 + coords.x2) / 2;
+  const midY = (coords.y1 + coords.y2) / 2;
+  const dx = coords.x2 - coords.x1;
+  const dy = coords.y2 - coords.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  const curve = a.curvature ?? 0;
+  const cx = midX + nx * curve;
+  const cy = midY + ny * curve;
+  const d = curve === 0 ? `M ${coords.x1} ${coords.y1} L ${coords.x2} ${coords.y2}` : `M ${coords.x1} ${coords.y1} Q ${cx} ${cy} ${coords.x2} ${coords.y2}`;
+  return (
+    <g style={{ color: a.stroke }}>
       <path
-        d={p.d}
-        fill={highlight ?? p.fill}
-        stroke={highlight ?? p.stroke}
-        strokeWidth={p.strokeWidth}
-        strokeDasharray={p.strokeDasharray}
-        opacity={p.opacity}
-        transform={transform || undefined}
+        d={d}
+        fill="none"
+        stroke={a.stroke}
+        strokeWidth={a.strokeWidth}
+        strokeDasharray={a.strokeDasharray}
+        markerStart={engineMarkerUrl(a.headStart, 'start')}
+        markerEnd={engineMarkerUrl(a.headEnd, 'end')}
       />
-    );
-  }
-
-  if (baseType === 'polygon') {
-    const pg = state as unknown as import('./schema').PolygonElement;
-    return (
-      <polygon
-        points={pg.points}
-        fill={highlight ?? pg.fill}
-        stroke={highlight ?? pg.stroke}
-        strokeWidth={pg.strokeWidth}
-        opacity={pg.opacity}
-      />
-    );
-  }
-
-  return null;
+      {a.label && (
+        <text x={midX} y={midY + 4} textAnchor="middle" fontSize="12" fontFamily="ui-monospace, monospace" fill={a.labelColor}>
+          {a.label}
+        </text>
+      )}
+    </g>
+  );
 }
 
-function anchorPoint(
-  el: AnimationElement,
-  state: Record<string, unknown>,
-  anchor: Anchor,
-): { x: number; y: number } | null {
-  if (el.type === 'rect' || el.type === 'image') {
-    const x = state.x as number;
-    const y = state.y as number;
-    const w = state.width as number;
-    const h = state.height as number;
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    switch (anchor) {
-      case 'top': return { x: cx, y };
-      case 'right': return { x: x + w, y: cy };
-      case 'bottom': return { x: cx, y: y + h };
-      case 'left': return { x, y: cy };
-      case 'center':
-      case 'auto':
-      default: return { x: cx, y: cy };
-    }
-  }
-  if (el.type === 'circle') {
-    const cx = state.cx as number;
-    const cy = state.cy as number;
-    const r = state.r as number;
-    switch (anchor) {
-      case 'top': return { x: cx, y: cy - r };
-      case 'right': return { x: cx + r, y: cy };
-      case 'bottom': return { x: cx, y: cy + r };
-      case 'left': return { x: cx - r, y: cy };
-      default: return { x: cx, y: cy };
-    }
-  }
-  if (el.type === 'text') return { x: state.x as number, y: state.y as number };
-  return null;
+function RenderText({ state }: { state: Record<string, unknown> }): React.ReactElement {
+  const t = state as unknown as TextElement;
+  return (
+    <text
+      x={t.x}
+      y={t.y}
+      fontSize={t.fontSize}
+      fontWeight={t.fontWeight}
+      fill={t.color}
+      textAnchor={t.textAnchor}
+      transform={t.rotation ? `rotate(${t.rotation} ${t.x} ${t.y})` : undefined}
+    >
+      {t.content}
+    </text>
+  );
 }
 
-function pickAutoAnchor(
-  fromEl: AnimationElement,
-  fromState: Record<string, unknown>,
-  toEl: AnimationElement,
-  toState: Record<string, unknown>,
-): { from: Anchor; to: Anchor } {
-  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
-  let bestPair: { from: Anchor; to: Anchor } = { from: 'right', to: 'left' };
-  let bestDist = Infinity;
-  for (const fa of candidates) {
-    for (const ta of candidates) {
-      const fp = anchorPoint(fromEl, fromState, fa);
-      const tp = anchorPoint(toEl, toState, ta);
-      if (!fp || !tp) continue;
-      const d = Math.hypot(tp.x - fp.x, tp.y - fp.y);
-      if (d < bestDist) {
-        bestDist = d;
-        bestPair = { from: fa, to: ta };
-      }
-    }
-  }
-  return bestPair;
+function RenderImage({ state }: { state: Record<string, unknown> }): React.ReactElement {
+  const im = state as unknown as ImageElement;
+  return (
+    <image
+      x={im.x}
+      y={im.y}
+      width={im.width}
+      height={im.height}
+      href={im.src}
+      preserveAspectRatio={im.preserveAspectRatio}
+      opacity={im.opacity}
+    />
+  );
 }
 
-export function resolveLineCoords(
-  line: LineElement,
-  snap: SnapshotMap,
-  elementMap: Map<string, AnimationElement>,
-): { x1: number; y1: number; x2: number; y2: number } | null {
-  const fromFixed = typeof line.x1 === 'number' && typeof line.y1 === 'number'
-    ? { x: line.x1, y: line.y1 } : null;
-  const toFixed = typeof line.x2 === 'number' && typeof line.y2 === 'number'
-    ? { x: line.x2, y: line.y2 } : null;
-  const fromEl = line.fromId ? elementMap.get(line.fromId) : null;
-  const toEl = line.toId ? elementMap.get(line.toId) : null;
-  const fromState = line.fromId ? snap.get(line.fromId) : null;
-  const toState = line.toId ? snap.get(line.toId) : null;
-  const fromConnected = !!(fromEl && fromState);
-  const toConnected = !!(toEl && toState);
-
-  if (!fromConnected && !fromFixed) return null;
-  if (!toConnected && !toFixed) return null;
-
-  let fromAnchor: Anchor = line.fromAnchor ?? 'auto';
-  let toAnchor: Anchor = line.toAnchor ?? 'auto';
-
-  let p1: { x: number; y: number } | null = null;
-  let p2: { x: number; y: number } | null = null;
-
-  if (fromConnected && toConnected) {
-    if (fromAnchor === 'auto' || toAnchor === 'auto') {
-      const picked = pickAutoAnchor(fromEl!, fromState!, toEl!, toState!);
-      if (fromAnchor === 'auto') fromAnchor = picked.from;
-      if (toAnchor === 'auto') toAnchor = picked.to;
-    }
-    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
-    p2 = anchorPoint(toEl!, toState!, toAnchor);
-  } else if (fromConnected && toFixed) {
-    if (fromAnchor === 'auto') fromAnchor = pickAnchorTowardPoint(fromEl!, fromState!, toFixed);
-    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
-    p2 = toFixed;
-  } else if (fromFixed && toConnected) {
-    if (toAnchor === 'auto') toAnchor = pickAnchorTowardPoint(toEl!, toState!, fromFixed);
-    p1 = fromFixed;
-    p2 = anchorPoint(toEl!, toState!, toAnchor);
-  } else if (fromFixed && toFixed) {
-    p1 = fromFixed;
-    p2 = toFixed;
-  }
-
-  if (!p1 || !p2) return null;
-  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+function RenderPath({ state }: { state: Record<string, unknown> }): React.ReactElement {
+  const p = state as unknown as { x: number; y: number; d: string; fill: string; stroke: string; strokeWidth: number; strokeDasharray?: string; opacity: number };
+  const transform = p.x === 0 && p.y === 0 ? undefined : `translate(${p.x} ${p.y})`;
+  return (
+    <path
+      d={p.d}
+      transform={transform}
+      fill={p.fill}
+      stroke={p.stroke}
+      strokeWidth={p.strokeWidth}
+      strokeDasharray={p.strokeDasharray}
+      opacity={p.opacity}
+    />
+  );
 }
 
-function pickAnchorTowardPoint(
-  el: AnimationElement,
-  state: Record<string, unknown>,
-  point: { x: number; y: number },
-): Anchor {
-  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
-  let best: Anchor = 'right';
-  let bestDist = Infinity;
-  for (const a of candidates) {
-    const p = anchorPoint(el, state, a);
-    if (!p) continue;
-    const d = Math.hypot(p.x - point.x, p.y - point.y);
-    if (d < bestDist) { bestDist = d; best = a; }
-  }
-  return best;
-}
-
-export function resolveArrowCoords(
-  arrow: ArrowElement,
-  snap: SnapshotMap,
-  elementMap: Map<string, AnimationElement>,
-): { x1: number; y1: number; x2: number; y2: number } | null {
-  const fromFixed = typeof arrow.x1 === 'number' && typeof arrow.y1 === 'number'
-    ? { x: arrow.x1, y: arrow.y1 } : null;
-  const toFixed = typeof arrow.x2 === 'number' && typeof arrow.y2 === 'number'
-    ? { x: arrow.x2, y: arrow.y2 } : null;
-  const fromEl = arrow.fromId ? elementMap.get(arrow.fromId) : null;
-  const toEl = arrow.toId ? elementMap.get(arrow.toId) : null;
-  const fromState = arrow.fromId ? snap.get(arrow.fromId) : null;
-  const toState = arrow.toId ? snap.get(arrow.toId) : null;
-  const fromConnected = !!(fromEl && fromState);
-  const toConnected = !!(toEl && toState);
-
-  if (!fromConnected && !fromFixed) return null;
-  if (!toConnected && !toFixed) return null;
-
-  let fromAnchor: Anchor = arrow.fromAnchor ?? 'auto';
-  let toAnchor: Anchor = arrow.toAnchor ?? 'auto';
-
-  let p1: { x: number; y: number } | null = null;
-  let p2: { x: number; y: number } | null = null;
-
-  if (fromConnected && toConnected) {
-    if (fromAnchor === 'auto' || toAnchor === 'auto') {
-      const picked = pickAutoAnchor(fromEl!, fromState!, toEl!, toState!);
-      if (fromAnchor === 'auto') fromAnchor = picked.from;
-      if (toAnchor === 'auto') toAnchor = picked.to;
-    }
-    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
-    p2 = anchorPoint(toEl!, toState!, toAnchor);
-  } else if (fromConnected && toFixed) {
-    if (fromAnchor === 'auto') fromAnchor = pickAnchorTowardPoint(fromEl!, fromState!, toFixed);
-    p1 = anchorPoint(fromEl!, fromState!, fromAnchor);
-    p2 = toFixed;
-  } else if (fromFixed && toConnected) {
-    if (toAnchor === 'auto') toAnchor = pickAnchorTowardPoint(toEl!, toState!, fromFixed);
-    p1 = fromFixed;
-    p2 = anchorPoint(toEl!, toState!, toAnchor);
-  } else if (fromFixed && toFixed) {
-    p1 = fromFixed;
-    p2 = toFixed;
-  }
-
-  if (!p1 || !p2) return null;
-  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+function RenderPolygon({ state }: { state: Record<string, unknown> }): React.ReactElement {
+  const p = state as unknown as { points: string; fill: string; stroke: string; strokeWidth: number; opacity: number };
+  return <polygon points={p.points} fill={p.fill} stroke={p.stroke} strokeWidth={p.strokeWidth} opacity={p.opacity} />;
 }
 
 function FlowParticle({
-  x1, y1, x2, y2, color, radius, startOffset,
+  x1,
+  y1,
+  x2,
+  y2,
+  color,
+  radius,
+  offset,
 }: {
-  x1: number; y1: number; x2: number; y2: number;
-  color: string; radius: number; startOffset: number;
-}) {
-  const [t, setT] = useState(startOffset);
-  useEffect(() => {
-    let raf = 0;
-    const start = performance.now();
-    function step(now: number) {
-      const elapsed = (now - start) / 800;
-      const next = (startOffset + elapsed) % 1;
-      setT(next);
-      raf = requestAnimationFrame(step);
-    }
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [startOffset]);
-  const cx = x1 + (x2 - x1) * t;
-  const cy = y1 + (y2 - y1) * t;
-  return <circle cx={cx} cy={cy} r={radius} fill={color} opacity={0.85} />;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+  radius: number;
+  offset: number;
+}): React.ReactElement {
+  const t = offset;
+  const x = x1 + (x2 - x1) * t;
+  const y = y1 + (y2 - y1) * t;
+  return <circle cx={x} cy={y} r={radius} fill={color} opacity={0.85} />;
 }
+
+export type { Chapter, ActiveEffectInstance };

@@ -143,20 +143,20 @@ function onToolsClick(e: Event): void {
 function makeDefaultElement(type: string, id: string, cx: number, cy: number): AnimationElement | null {
   switch (type) {
     case 'rect':
-      return { type: 'rect', id, rotation: 0, x: cx - 60, y: cy - 30, width: 120, height: 60, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, cornerRadius: 8, label: id, labelColor: '#0b0b0f', labelSize: 14 };
+      return { type: 'rect', id, rotation: 0, appearances: [], tracks: [], x: cx - 60, y: cy - 30, width: 120, height: 60, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, cornerRadius: 8, label: id, labelColor: '#0b0b0f', labelSize: 14 };
     case 'circle':
-      return { type: 'circle', id, rotation: 0, cx, cy, r: 36, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, label: id, labelColor: '#0b0b0f', labelSize: 14 };
+      return { type: 'circle', id, rotation: 0, appearances: [], tracks: [], cx, cy, r: 36, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, label: id, labelColor: '#0b0b0f', labelSize: 14 };
     case 'line':
-      return { type: 'line', id, rotation: 0, x1: cx - 80, y1: cy, x2: cx + 80, y2: cy, stroke: '#6366f1', strokeWidth: 2, headStart: 'none', headEnd: 'none' };
+      return { type: 'line', id, rotation: 0, appearances: [], tracks: [], x1: cx - 80, y1: cy, x2: cx + 80, y2: cy, stroke: '#6366f1', strokeWidth: 2, headStart: 'none', headEnd: 'none' };
     case 'arrow':
-      return { type: 'arrow', id, rotation: 0, x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, stroke: '#6366f1', strokeWidth: 2, curvature: 0, labelColor: '#0b0b0f', headStart: 'none', headEnd: 'arrow' };
+      return { type: 'arrow', id, rotation: 0, appearances: [], tracks: [], x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, stroke: '#6366f1', strokeWidth: 2, curvature: 0, labelColor: '#0b0b0f', headStart: 'none', headEnd: 'arrow' };
     case 'text':
-      return { type: 'text', id, rotation: 0, x: cx, y: cy, content: id, fontSize: 18, fontWeight: 400, color: '#18181b', textAnchor: 'middle' };
+      return { type: 'text', id, rotation: 0, appearances: [], tracks: [], x: cx, y: cy, content: id, fontSize: 18, fontWeight: 400, color: '#18181b', textAnchor: 'middle' };
     case 'image':
-      return { type: 'image', id, rotation: 0, x: cx - 50, y: cy - 50, width: 100, height: 100, src: '/uploads/placeholder.png', preserveAspectRatio: 'xMidYMid meet', opacity: 1 };
+      return { type: 'image', id, rotation: 0, appearances: [], tracks: [], x: cx - 50, y: cy - 50, width: 100, height: 100, src: '/uploads/placeholder.png', preserveAspectRatio: 'xMidYMid meet', opacity: 1 };
     case 'path':
       return {
-        type: 'path', id, rotation: 0, x: cx - 40, y: cy - 40,
+        type: 'path', id, rotation: 0, appearances: [], tracks: [], x: cx - 40, y: cy - 40,
         d: 'M 0 0 L 80 0 L 40 80 Z',
         fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 2, opacity: 1,
       };
@@ -167,7 +167,7 @@ function makeDefaultElement(type: string, id: string, cx: number, cy: number): A
         const a = (i * Math.PI * 2) / sides - Math.PI / 2;
         return `${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`;
       }).join(' ');
-      return { type: 'polygon', id, rotation: 0, points: pts, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, opacity: 1 };
+      return { type: 'polygon', id, rotation: 0, appearances: [], tracks: [], points: pts, fill: '#a5b4fc', stroke: '#6366f1', strokeWidth: 1.5, opacity: 1 };
     }
     default:
       return null;

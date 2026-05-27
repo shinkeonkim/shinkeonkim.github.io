@@ -13,8 +13,7 @@ import {
   getSelection,
   getCurrentSnapshot,
   setSelection,
-  setElementKeyframe,
-  setElementBase,
+  updateElementBase,
   addElement,
   uniqueElementId,
   subscribe,
@@ -186,7 +185,7 @@ function onContextMenu(e: MouseEvent): void {
   if (points.length <= 3) return;
   e.preventDefault();
   points.splice(idx, 1);
-  setElementKeyframe(id, { points: points.join(' ') });
+  updateElementBase(id, { points: points.join(' ') });
 }
 
 function onMouseOver(e: MouseEvent): void {
@@ -247,7 +246,7 @@ function onCanvasClick(e: MouseEvent): void {
     const mx = (a[0] + b[0]) / 2;
     const my = (a[1] + b[1]) / 2;
     points.splice(afterIdx + 1, 0, `${mx.toFixed(1)},${my.toFixed(1)}`);
-    setElementKeyframe(id, { points: points.join(' ') });
+    updateElementBase(id, { points: points.join(' ') });
     return;
   }
   if (target?.closest('[data-rotate-handle], [data-anchor-handle], [data-resize-handle]')) return;
@@ -475,7 +474,7 @@ function onMouseMove(e: MouseEvent): void {
     const pts = vertexDragState.originalPoints.trim().split(/\s+/);
     if (vertexDragState.vertexIndex < pts.length) {
       pts[vertexDragState.vertexIndex] = `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`;
-      setElementKeyframe(vertexDragState.elementId, { points: pts.join(' ') });
+      updateElementBase(vertexDragState.elementId, { points: pts.join(' ') });
     }
     return;
   }
@@ -494,13 +493,13 @@ function onMouseMove(e: MouseEvent): void {
     if (baseEl.type === 'line' || baseEl.type === 'arrow') {
       if (endpointDragState.snapTarget) {
         if (endpointDragState.end === 'start') {
-          setElementBase(baseEl.id, {
+          updateElementBase(baseEl.id, {
             fromId: endpointDragState.snapTarget.elementId,
             fromAnchor: endpointDragState.snapTarget.anchor,
             x1: undefined, y1: undefined,
           });
         } else {
-          setElementBase(baseEl.id, {
+          updateElementBase(baseEl.id, {
             toId: endpointDragState.snapTarget.elementId,
             toAnchor: endpointDragState.snapTarget.anchor,
             x2: undefined, y2: undefined,
@@ -508,9 +507,9 @@ function onMouseMove(e: MouseEvent): void {
         }
       } else {
         if (endpointDragState.end === 'start') {
-          setElementBase(baseEl.id, { fromId: undefined, fromAnchor: undefined, x1: finalX, y1: finalY });
+          updateElementBase(baseEl.id, { fromId: undefined, fromAnchor: undefined, x1: finalX, y1: finalY });
         } else {
-          setElementBase(baseEl.id, { toId: undefined, toAnchor: undefined, x2: finalX, y2: finalY });
+          updateElementBase(baseEl.id, { toId: undefined, toAnchor: undefined, x2: finalX, y2: finalY });
         }
       }
     }
@@ -522,7 +521,7 @@ function onMouseMove(e: MouseEvent): void {
     if (!pt) return;
     const angle = (Math.atan2(pt.y - rotateState.centerY, pt.x - rotateState.centerX) * 180) / Math.PI;
     const delta = angle - rotateState.startAngle;
-    setElementKeyframe(rotateState.elementId, {
+    updateElementBase(rotateState.elementId, {
       rotation: Math.round((rotateState.startRotation + delta + 360) % 360),
     });
     return;
@@ -584,7 +583,7 @@ function onMouseUp(e: MouseEvent): void {
         addElement({
           type: 'arrow',
           id: newId,
-          rotation: 0,
+          rotation: 0, appearances: [], tracks: [],
           fromId: connectState.fromId,
           toId: elemId,
           fromAnchor: connectState.fromAnchor,
@@ -628,20 +627,20 @@ function applyMove(
   polygonOriginal?: string,
 ): void {
   if (baseEl.type === 'rect' || baseEl.type === 'image' || baseEl.type === 'text') {
-    setElementKeyframe(baseEl.id, { x, y });
+    updateElementBase(baseEl.id, { x, y });
   } else if (baseEl.type === 'circle') {
-    setElementKeyframe(baseEl.id, { cx: x, cy: y });
+    updateElementBase(baseEl.id, { cx: x, cy: y });
   } else if ((baseEl.type === 'line' || baseEl.type === 'arrow') && typeof state.x1 === 'number' && typeof state.y1 === 'number' && typeof state.x2 === 'number' && typeof state.y2 === 'number') {
     const dx = x - (state.x1 as number);
     const dy = y - (state.y1 as number);
-    setElementKeyframe(baseEl.id, {
+    updateElementBase(baseEl.id, {
       x1: x,
       y1: y,
       x2: (state.x2 as number) + dx,
       y2: (state.y2 as number) + dy,
     });
   } else if (baseEl.type === 'path') {
-    setElementKeyframe(baseEl.id, { x, y });
+    updateElementBase(baseEl.id, { x, y });
   } else if (baseEl.type === 'polygon') {
     const orig = polygonOriginal ?? dragState?.originalPolygonPoints;
     if (!orig) return;
@@ -650,7 +649,7 @@ function applyMove(
     const dx = x - startFirst.x;
     const dy = y - startFirst.y;
     const newPoints = shiftPolygonPoints(orig, dx, dy);
-    setElementKeyframe(baseEl.id, { points: newPoints });
+    updateElementBase(baseEl.id, { points: newPoints });
   }
 }
 
@@ -776,7 +775,7 @@ function handleResizeMove(e: MouseEvent): void {
     if (newH < 0) { newY = newY + newH; newH = -newH; }
     newW = Math.max(2, Math.round(newW));
     newH = Math.max(2, Math.round(newH));
-    setElementKeyframe(baseEl.id, {
+    updateElementBase(baseEl.id, {
       x: Math.round(newX), y: Math.round(newY), width: newW, height: newH,
     });
     return;
@@ -797,7 +796,7 @@ function handleResizeMove(e: MouseEvent): void {
       const dd = uniform ? Math.max(ddx, ddy) : (ddx + ddy) / 2;
       r1 = Math.max(2, r0 + dd);
     }
-    setElementKeyframe(baseEl.id, { r: Math.round(r1), cx, cy });
+    updateElementBase(baseEl.id, { r: Math.round(r1), cx, cy });
     return;
   }
 
@@ -807,7 +806,7 @@ function handleResizeMove(e: MouseEvent): void {
     const newH = h.includes('n') ? Math.max(1, startH0 - dy) : Math.max(1, startH0 + dy);
     const ratio = newH / startH0;
     const newFontSize = Math.max(6, Math.round(startFs * ratio));
-    setElementKeyframe(baseEl.id, { fontSize: newFontSize });
+    updateElementBase(baseEl.id, { fontSize: newFontSize });
     return;
   }
 }

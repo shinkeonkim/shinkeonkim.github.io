@@ -1,51 +1,46 @@
-import type { AnimationStep } from '../../animations/schema';
 import {
+  addChapter,
+  getCurrentTime,
   getDef,
   getSelection,
-  getCurrentStepIdx,
+  setCurrentTime,
   setSelection,
-  setCurrentStepIdx,
   subscribe,
-  addStep,
-  deleteStep,
-  moveStep,
-  updateStep,
-  uniqueStepId,
-  beginTransient,
-  endTransient,
+  uniqueChapterId,
+  updateAppearance,
+  updateChapter,
 } from './state';
-
-const PX_PER_MS = 0.15;
-const MIN_DURATION = 50;
-const MAX_DURATION = 30000;
-const MIN_BAR_PX = 70;
+import type { AnimationElement } from '../../animations/schema';
 
 let tracksEl: HTMLElement | null = null;
-let elementTracksEl: HTMLElement | null = null;
+let elTracksEl: HTMLElement | null = null;
+let addBtn: HTMLButtonElement | null = null;
 
-interface ResizeState {
-  stepId: string;
-  startMouseX: number;
-  startDuration: number;
-}
-let resizeState: ResizeState | null = null;
+const pxPerMs = 0.15;
+type DragMode =
+  | { kind: 'time' }
+  | { kind: 'chapter'; id: string }
+  | { kind: 'appearance'; elementId: string; apIdx: number; edge: 'start' | 'end' | 'move'; startMouseX: number; startApStart: number; startApEnd: number };
+let dragMode: DragMode | null = null;
 
 export function initTimeline(
-  root: HTMLElement,
-  addStepBtn: HTMLButtonElement | null,
-  elementTracks?: HTMLElement | null,
+  tracksRoot: HTMLElement,
+  addChapterBtn: HTMLButtonElement | null,
+  elementTracks: HTMLElement,
 ): void {
-  tracksEl = root;
-  elementTracksEl = elementTracks ?? null;
+  tracksEl = tracksRoot;
+  elTracksEl = elementTracks;
+  addBtn = addChapterBtn;
   subscribe(render);
-  root.addEventListener('click', onClick);
-  root.addEventListener('mousedown', onMouseDown);
+  tracksRoot.addEventListener('click', onTracksClick);
+  tracksRoot.addEventListener('mousedown', onMouseDown);
+  elementTracks.addEventListener('click', onElTracksClick);
+  elementTracks.addEventListener('mousedown', onMouseDown);
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('mouseup', onMouseUp);
-  elementTracksEl?.addEventListener('click', onElementTrackClick);
-  addStepBtn?.addEventListener('click', () => {
-    const id = uniqueStepId();
-    addStep({ id, label: `Step ${id.split('-')[1]}`, subtitle: '', duration: 800, ease: 'easeInOut', keyframes: {}, effects: [] });
+  addBtn?.addEventListener('click', () => {
+    const id = uniqueChapterId();
+    addChapter({ id, time: getCurrentTime(), label: `Chapter ${id.split('-')[1]}`, subtitle: '' });
   });
   render();
 }
@@ -54,198 +49,214 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function stepWidthPx(duration: number): number {
-  return Math.max(MIN_BAR_PX, duration * PX_PER_MS);
+function timeToPx(ms: number): number {
+  return ms * pxPerMs;
+}
+
+function pxToTime(px: number): number {
+  return Math.max(0, Math.round(px / pxPerMs));
 }
 
 function render(): void {
-  if (!tracksEl) return;
+  if (!tracksEl || !elTracksEl) return;
   const def = getDef();
   if (!def) {
-    tracksEl.innerHTML = '<p style="color: var(--color-fg-muted); font-size: 0.8rem;">애니메이션을 먼저 열거나 만드세요.</p>';
-    return;
-  }
-  const totalDur = def.steps.reduce((a, s) => a + s.duration, 0);
-  const sel = getSelection();
-  const curIdx = getCurrentStepIdx();
-
-  const baseSelected = curIdx === -1;
-  const baseCard = `<div class="studio-tl-base ${baseSelected ? 'is-selected' : ''}" data-step-id="__base__" title="초기 상태">
-    <span class="studio-tl-base-label">📍 base</span>
-  </div>`;
-
-  if (def.steps.length === 0) {
-    tracksEl.innerHTML = `<div class="studio-tl-bars">${baseCard}</div>
-      <div class="studio-tl-empty">＋ Step 추가로 keyframe을 만드세요.</div>`;
-    renderElementTracks();
-    return;
-  }
-
-  const barsHtml = def.steps
-    .map((step, idx) => renderBar(step, idx, sel.kind === 'step' && sel.stepId === step.id, curIdx === idx))
-    .join('');
-
-  tracksEl.innerHTML = `
-    <div class="studio-tl-bars">
-      ${baseCard}
-      ${barsHtml}
-    </div>
-    <div class="studio-tl-total">총 ${totalDur}ms · ${def.steps.length} step</div>
-  `;
-  renderElementTracks();
-}
-
-function renderBar(step: AnimationStep, idx: number, selected: boolean, isCurrent: boolean): string {
-  const widthPx = stepWidthPx(step.duration);
-  const keyframeCount = Object.keys(step.keyframes).length;
-  const effectsCount = step.effects.length;
-  const classes = ['studio-tl-bar'];
-  if (selected) classes.push('is-selected');
-  if (isCurrent) classes.push('is-active');
-  return `
-    <div class="${classes.join(' ')}" data-step-id="${escapeHtml(step.id)}" style="width: ${widthPx}px">
-      <div class="studio-tl-bar-main">
-        <div class="studio-tl-bar-label">${idx + 1}. ${escapeHtml(step.label || step.id)}</div>
-        <div class="studio-tl-bar-meta">
-          <span class="studio-tl-bar-duration">${step.duration}ms</span>
-          <span class="studio-tl-bar-ease">${escapeHtml(step.ease)}</span>
-        </div>
-        <div class="studio-tl-bar-marks">
-          ${keyframeCount > 0 ? `<span title="${keyframeCount} keyframe">🔑${keyframeCount}</span>` : ''}
-          ${effectsCount > 0 ? `<span title="${effectsCount} effect">✨${effectsCount}</span>` : ''}
-        </div>
-      </div>
-      <div class="studio-tl-bar-actions">
-        <button type="button" data-move="-1" title="앞으로">◀</button>
-        <button type="button" data-move="1" title="뒤로">▶</button>
-        <button type="button" data-delete title="step 삭제">✕</button>
-      </div>
-      <div class="studio-tl-bar-handle" data-resize-step="${escapeHtml(step.id)}" title="드래그하여 duration 조정">⋮</div>
-    </div>
-  `;
-}
-
-function renderElementTracks(): void {
-  if (!elementTracksEl) return;
-  const def = getDef();
-  if (!def || def.elements.length === 0 || def.steps.length === 0) {
-    elementTracksEl.innerHTML = '';
+    tracksEl.innerHTML = '<p class="studio-tl-empty">애니메이션을 열거나 새로 만드세요.</p>';
+    elTracksEl.innerHTML = '';
     return;
   }
   const sel = getSelection();
-  const curStep = getCurrentStepIdx();
-  const widths = def.steps.map((s) => stepWidthPx(s.duration));
-  const headerCells = def.steps
-    .map((s, i) => `<th data-step-idx="${i}" class="${curStep === i ? 'is-current' : ''}" style="width:${widths[i]}px;min-width:${widths[i]}px;max-width:${widths[i]}px" title="${escapeHtml(s.label)} · ${s.duration}ms">${i + 1} · ${s.duration}ms</th>`)
-    .join('');
-  const rowsHtml = def.elements
-    .map((el) => {
-      const selectedEl =
-        sel.kind === 'element' && sel.elementId === el.id ? ' is-selected-element' : '';
-      const cells = def.steps
-        .map((s, i) => {
-          const kf = s.keyframes[el.id];
-          const fx = s.effects.find((e) => e.elementId === el.id);
-          const hasKf = !!kf && Object.keys(kf).length > 0;
-          const hasFx = !!fx;
-          const cellClasses = ['studio-el-track-cell'];
-          if (curStep === i) cellClasses.push('is-current-step');
-          return `<td class="${cellClasses.join(' ')}" style="width:${widths[i]}px;min-width:${widths[i]}px;max-width:${widths[i]}px" data-step-id="${escapeHtml(s.id)}" data-step-idx="${i}" data-elem-id="${escapeHtml(el.id)}">
-            ${hasKf ? `<span class="studio-el-track-marker" title="${Object.keys(kf).join(', ')}">🔑</span>` : ''}
-            ${hasFx ? `<span class="studio-el-track-marker" title="${fx.type}">✨</span>` : ''}
-          </td>`;
-        })
-        .join('');
-      return `<tr data-elem-id="${escapeHtml(el.id)}" class="${selectedEl}">
-        <th class="studio-el-track-rowhead">${escapeHtml(el.id)} <span class="studio-el-track-type">${escapeHtml(el.type)}</span></th>
-        ${cells}
-      </tr>`;
+  const currentTime = getCurrentTime();
+  const totalPx = Math.max(300, timeToPx(def.duration));
+  const sortedChapters = [...def.chapters].sort((a, b) => a.time - b.time);
+
+  const rulerMarks: string[] = [];
+  const step = def.duration > 10000 ? 1000 : def.duration > 2000 ? 500 : 100;
+  for (let t = 0; t <= def.duration; t += step) {
+    const x = timeToPx(t);
+    rulerMarks.push(`<div class="studio-tl-ruler-mark" style="left:${x}px"><span>${t}</span></div>`);
+  }
+
+  const chapterMarkers = sortedChapters
+    .map((c) => {
+      const x = timeToPx(c.time);
+      const isSel = sel.kind === 'chapter' && sel.chapterId === c.id;
+      return `<div class="studio-tl-chapter-marker ${isSel ? 'is-selected' : ''}" style="left:${x}px" data-chapter-id="${escapeHtml(c.id)}" title="${escapeHtml(c.label)}">
+        <div class="studio-tl-chapter-line"></div>
+        <div class="studio-tl-chapter-label">${escapeHtml(c.label || c.id)}</div>
+      </div>`;
     })
     .join('');
 
-  elementTracksEl.innerHTML = `
-    <table class="studio-el-tracks-table">
-      <thead><tr><th class="studio-el-track-rowhead">요소 \\ Step</th>${headerCells}</tr></thead>
-      <tbody>${rowsHtml}</tbody>
-    </table>
+  const playhead = `<div class="studio-tl-playhead" style="left:${timeToPx(currentTime)}px" title="t=${currentTime}ms"></div>`;
+
+  tracksEl.innerHTML = `
+    <div class="studio-tl-ruler" style="width:${totalPx}px">${rulerMarks.join('')}</div>
+    <div class="studio-tl-chapter-row" style="width:${totalPx}px" data-tl-area="chapter">
+      ${chapterMarkers}
+      ${playhead}
+    </div>
+    <div class="studio-tl-total">전체 ${def.duration} ms · ${sortedChapters.length} chapters · ${def.elements.length} elements · 현재 ${currentTime} ms</div>
   `;
+
+  renderElementTracks(def.elements, currentTime, totalPx, sel);
 }
 
-function onElementTrackClick(e: Event): void {
+function renderElementTracks(elements: AnimationElement[], currentTime: number, totalPx: number, sel: ReturnType<typeof getSelection>): void {
+  if (!elTracksEl) return;
+  if (elements.length === 0) {
+    elTracksEl.innerHTML = '<p class="studio-tl-empty">요소 없음</p>';
+    return;
+  }
+  const rows = elements
+    .map((el) => {
+      const isSel = (sel.kind === 'element' && sel.elementId === el.id) || (sel.kind === 'elements' && sel.elementIds.includes(el.id));
+      const appearanceBars = el.appearances
+        .map((ap, idx) => {
+          const left = timeToPx(ap.start);
+          const width = Math.max(4, timeToPx(ap.end - ap.start));
+          return `<div class="studio-tl-appearance" style="left:${left}px;width:${width}px" data-elem-id="${escapeHtml(el.id)}" data-ap-idx="${idx}" title="${ap.start}-${ap.end}ms">
+            <span class="studio-tl-ap-edge studio-tl-ap-edge-left" data-edge="start"></span>
+            <span class="studio-tl-ap-edge studio-tl-ap-edge-right" data-edge="end"></span>
+            <span class="studio-tl-ap-label">${ap.start}–${ap.end}</span>
+          </div>`;
+        })
+        .join('');
+      const trackKfs = el.tracks
+        .flatMap((t) => t.keyframes.map((kf) => ({ prop: t.property, time: kf.time })))
+        .map((kf) => `<div class="studio-tl-keyframe" style="left:${timeToPx(kf.time)}px" title="${escapeHtml(kf.prop)} @ ${kf.time}ms">◆</div>`)
+        .join('');
+      return `
+        <div class="studio-tl-element-row ${isSel ? 'is-selected' : ''}" data-elem-id="${escapeHtml(el.id)}">
+          <div class="studio-tl-element-label">${escapeHtml(el.id)}</div>
+          <div class="studio-tl-element-track" style="width:${totalPx}px" data-tl-area="elements">
+            ${appearanceBars}
+            ${trackKfs}
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+  const playhead = `<div class="studio-tl-playhead" style="left:${timeToPx(currentTime)}px"></div>`;
+  elTracksEl.innerHTML = `<div class="studio-tl-element-rows">${rows}${playhead}</div>`;
+}
+
+function onTracksClick(e: MouseEvent): void {
   const target = e.target as HTMLElement;
-  const cell = target.closest<HTMLElement>('.studio-el-track-cell');
-  if (cell) {
-    const elemId = cell.dataset.elemId ?? '';
-    const stepIdx = Number(cell.dataset.stepIdx ?? '-1');
-    if (stepIdx >= 0) setCurrentStepIdx(stepIdx);
-    setSelection({ kind: 'element', elementId: elemId });
-    return;
+  const chapterMarker = target.closest<HTMLElement>('[data-chapter-id]');
+  if (chapterMarker) {
+    setSelection({ kind: 'chapter', chapterId: chapterMarker.dataset.chapterId! });
   }
-  const headStep = target.closest<HTMLElement>('th[data-step-idx]');
-  if (headStep) {
-    const idx = Number(headStep.dataset.stepIdx);
-    const def = getDef();
-    if (def && def.steps[idx]) setSelection({ kind: 'step', stepId: def.steps[idx].id });
-    return;
-  }
-  const elHead = target.closest<HTMLElement>('tr[data-elem-id]');
-  if (elHead) {
-    const id = elHead.dataset.elemId ?? '';
-    setSelection({ kind: 'element', elementId: id });
+}
+
+function onElTracksClick(e: MouseEvent): void {
+  if (dragMode) return;
+  const target = e.target as HTMLElement;
+  if (target.closest('[data-ap-idx]') || target.closest('[data-edge]')) return;
+  const row = target.closest<HTMLElement>('[data-elem-id]');
+  if (row) {
+    setSelection({ kind: 'element', elementId: row.dataset.elemId! });
   }
 }
 
 function onMouseDown(e: MouseEvent): void {
+  if (e.button !== 0) return;
   const target = e.target as HTMLElement;
-  const handle = target.closest<HTMLElement>('[data-resize-step]');
-  if (!handle) return;
-  e.preventDefault();
-  e.stopPropagation();
-  const stepId = handle.dataset.resizeStep ?? '';
-  const def = getDef();
-  if (!def) return;
-  const step = def.steps.find((s) => s.id === stepId);
-  if (!step) return;
-  beginTransient();
-  resizeState = { stepId, startMouseX: e.clientX, startDuration: step.duration };
-  document.body.style.cursor = 'col-resize';
+
+  const edge = target.closest<HTMLElement>('[data-edge]');
+  if (edge) {
+    const apEl = edge.closest<HTMLElement>('[data-ap-idx]');
+    if (apEl) {
+      e.preventDefault();
+      const elementId = apEl.dataset.elemId!;
+      const apIdx = Number(apEl.dataset.apIdx);
+      const def = getDef();
+      const el = def?.elements.find((x) => x.id === elementId);
+      const ap = el?.appearances[apIdx];
+      if (ap) {
+        dragMode = {
+          kind: 'appearance',
+          elementId,
+          apIdx,
+          edge: edge.dataset.edge as 'start' | 'end',
+          startMouseX: e.clientX,
+          startApStart: ap.start,
+          startApEnd: ap.end,
+        };
+      }
+      return;
+    }
+  }
+  const apBar = target.closest<HTMLElement>('[data-ap-idx]');
+  if (apBar) {
+    e.preventDefault();
+    const elementId = apBar.dataset.elemId!;
+    const apIdx = Number(apBar.dataset.apIdx);
+    const def = getDef();
+    const el = def?.elements.find((x) => x.id === elementId);
+    const ap = el?.appearances[apIdx];
+    if (ap) {
+      dragMode = {
+        kind: 'appearance',
+        elementId,
+        apIdx,
+        edge: 'move',
+        startMouseX: e.clientX,
+        startApStart: ap.start,
+        startApEnd: ap.end,
+      };
+    }
+    return;
+  }
+
+  const chapterMarker = target.closest<HTMLElement>('[data-chapter-id]');
+  if (chapterMarker) {
+    e.preventDefault();
+    dragMode = { kind: 'chapter', id: chapterMarker.dataset.chapterId! };
+    return;
+  }
+  const area = target.closest<HTMLElement>('[data-tl-area]');
+  if (area) {
+    e.preventDefault();
+    const rect = area.getBoundingClientRect();
+    setCurrentTime(pxToTime(e.clientX - rect.left));
+    dragMode = { kind: 'time' };
+  }
 }
 
 function onMouseMove(e: MouseEvent): void {
-  if (!resizeState) return;
-  const dx = e.clientX - resizeState.startMouseX;
-  const dMs = Math.round(dx / PX_PER_MS);
-  const newDuration = Math.max(MIN_DURATION, Math.min(MAX_DURATION, resizeState.startDuration + dMs));
-  updateStep(resizeState.stepId, { duration: newDuration });
+  if (!dragMode) return;
+  e.preventDefault();
+  if (dragMode.kind === 'time') {
+    const area = tracksEl?.querySelector('[data-tl-area]') as HTMLElement | null;
+    if (!area) return;
+    const rect = area.getBoundingClientRect();
+    setCurrentTime(pxToTime(e.clientX - rect.left));
+    return;
+  }
+  if (dragMode.kind === 'chapter') {
+    const area = tracksEl?.querySelector('[data-tl-area]') as HTMLElement | null;
+    if (!area) return;
+    const rect = area.getBoundingClientRect();
+    updateChapter(dragMode.id, { time: pxToTime(e.clientX - rect.left) });
+    return;
+  }
+  if (dragMode.kind === 'appearance') {
+    const dxPx = e.clientX - dragMode.startMouseX;
+    const dt = Math.round(dxPx / pxPerMs);
+    if (dragMode.edge === 'start') {
+      updateAppearance(dragMode.elementId, dragMode.apIdx, { start: Math.max(0, dragMode.startApStart + dt) });
+    } else if (dragMode.edge === 'end') {
+      updateAppearance(dragMode.elementId, dragMode.apIdx, { end: Math.max(0, dragMode.startApEnd + dt) });
+    } else {
+      updateAppearance(dragMode.elementId, dragMode.apIdx, {
+        start: Math.max(0, dragMode.startApStart + dt),
+        end: Math.max(0, dragMode.startApEnd + dt),
+      });
+    }
+  }
 }
 
 function onMouseUp(): void {
-  if (!resizeState) return;
-  resizeState = null;
-  endTransient();
-  document.body.style.cursor = '';
-}
-
-function onClick(e: Event): void {
-  const target = e.target as HTMLElement;
-  if (target.closest('[data-resize-step]')) return;
-  const stepEl = target.closest<HTMLElement>('[data-step-id]');
-  if (!stepEl) return;
-  const stepId = stepEl.dataset.stepId ?? '';
-  if (stepId === '__base__') {
-    setSelection({ kind: 'none' });
-    setCurrentStepIdx(-1);
-    return;
-  }
-  if (target.closest('[data-delete]')) {
-    deleteStep(stepId);
-    return;
-  }
-  const moveBtn = target.closest<HTMLElement>('[data-move]');
-  if (moveBtn) {
-    const dir = Number(moveBtn.dataset.move) === 1 ? 1 : -1;
-    moveStep(stepId, dir);
-    return;
-  }
-  setSelection({ kind: 'step', stepId });
+  dragMode = null;
 }

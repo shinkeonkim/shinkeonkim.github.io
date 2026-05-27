@@ -1,9 +1,12 @@
 import type {
   AnimationDef,
   AnimationElement,
-  AnimationStep,
   AnimationEffect,
-  ElementKeyframe,
+  Appearance,
+  Chapter,
+  PropertyTrack,
+  TrackKeyframe,
+  SnapshotMap,
 } from '../../animations/schema';
 import { animationDefSchema, computeSnapshot } from '../../animations/schema';
 
@@ -11,38 +14,14 @@ export type Selection =
   | { kind: 'none' }
   | { kind: 'element'; elementId: string }
   | { kind: 'elements'; elementIds: string[] }
-  | { kind: 'step'; stepId: string };
-
-export function getSelectedElementIds(sel: Selection): string[] {
-  if (sel.kind === 'element') return [sel.elementId];
-  if (sel.kind === 'elements') return sel.elementIds;
-  return [];
-}
-
-export function isElementSelected(sel: Selection, id: string): boolean {
-  if (sel.kind === 'element') return sel.elementId === id;
-  if (sel.kind === 'elements') return sel.elementIds.includes(id);
-  return false;
-}
-
-export function toggleSelectionFor(sel: Selection, id: string): Selection {
-  const cur = getSelectedElementIds(sel);
-  if (cur.includes(id)) {
-    const next = cur.filter((x) => x !== id);
-    if (next.length === 0) return { kind: 'none' };
-    if (next.length === 1) return { kind: 'element', elementId: next[0] };
-    return { kind: 'elements', elementIds: next };
-  }
-  const next = [...cur, id];
-  if (next.length === 1) return { kind: 'element', elementId: next[0] };
-  return { kind: 'elements', elementIds: next };
-}
+  | { kind: 'chapter'; chapterId: string }
+  | { kind: 'effect'; effectId: string };
 
 interface State {
   def: AnimationDef | null;
   dirty: boolean;
   selection: Selection;
-  currentStepIdx: number;
+  currentTime: number;
   isDraft: boolean;
 }
 
@@ -53,7 +32,7 @@ const state: State = {
   def: null,
   dirty: false,
   selection: { kind: 'none' },
-  currentStepIdx: -1,
+  currentTime: 0,
   isDraft: false,
 };
 
@@ -66,7 +45,7 @@ export function setDraft(def: AnimationDef): void {
   state.dirty = false;
   state.isDraft = true;
   state.selection = { kind: 'none' };
-  state.currentStepIdx = def.steps.length > 0 ? def.steps.length - 1 : -1;
+  state.currentTime = 0;
   resetHistory();
   emit();
 }
@@ -157,12 +136,12 @@ export function isDirty(): boolean {
   return state.dirty;
 }
 
-export function getCurrentStepIdx(): number {
-  return state.currentStepIdx;
+export function getCurrentTime(): number {
+  return state.currentTime;
 }
 
-export function setCurrentStepIdx(idx: number): void {
-  state.currentStepIdx = idx;
+export function setCurrentTime(time: number): void {
+  state.currentTime = Math.max(0, Math.round(time));
   emit();
 }
 
@@ -170,12 +149,8 @@ export function setDef(def: AnimationDef | null, markDirty = false): void {
   state.def = def;
   state.dirty = markDirty;
   state.isDraft = false;
-  if (def === null) {
-    state.selection = { kind: 'none' };
-    state.currentStepIdx = -1;
-  } else {
-    state.currentStepIdx = def.steps.length > 0 ? def.steps.length - 1 : -1;
-  }
+  state.selection = { kind: 'none' };
+  state.currentTime = 0;
   resetHistory();
   emit();
 }
@@ -187,105 +162,67 @@ export function markClean(): void {
 
 export function setSelection(sel: Selection): void {
   state.selection = sel;
-  if (sel.kind === 'step') {
-    const def = state.def;
-    if (def) {
-      const idx = def.steps.findIndex((s) => s.id === sel.stepId);
-      if (idx >= 0) state.currentStepIdx = idx;
-    }
-  }
   emit();
+}
+
+export function getSelectedElementIds(sel: Selection): string[] {
+  if (sel.kind === 'element') return [sel.elementId];
+  if (sel.kind === 'elements') return sel.elementIds;
+  return [];
+}
+
+export function isElementSelected(sel: Selection, id: string): boolean {
+  if (sel.kind === 'element') return sel.elementId === id;
+  if (sel.kind === 'elements') return sel.elementIds.includes(id);
+  return false;
+}
+
+export function toggleSelectionFor(sel: Selection, id: string): Selection {
+  const cur = getSelectedElementIds(sel);
+  if (cur.includes(id)) {
+    const next = cur.filter((x) => x !== id);
+    if (next.length === 0) return { kind: 'none' };
+    if (next.length === 1) return { kind: 'element', elementId: next[0] };
+    return { kind: 'elements', elementIds: next };
+  }
+  const next = [...cur, id];
+  if (next.length === 1) return { kind: 'element', elementId: next[0] };
+  return { kind: 'elements', elementIds: next };
 }
 
 function mutateDef(fn: (def: AnimationDef) => void): void {
   if (!state.def) return;
   if (!inTransient) pushHistory();
-  const next = animationDefSchema.parse(JSON.parse(JSON.stringify(state.def)));
-  fn(next);
-  state.def = next;
+  const cloned = JSON.parse(JSON.stringify(state.def));
+  fn(cloned);
+  const parsed = animationDefSchema.safeParse(cloned);
+  if (!parsed.success) {
+    past.pop();
+    console.warn('[studio.state] invalid mutation', parsed.error.issues);
+    return;
+  }
+  state.def = parsed.data;
   state.dirty = true;
   emit();
 }
 
-export function getCurrentSnapshot(): Map<string, Record<string, unknown> & { visible: boolean }> {
+export function getCurrentSnapshot(): SnapshotMap {
   if (!state.def) return new Map();
-  return computeSnapshot(state.def, state.currentStepIdx);
+  return computeSnapshot(state.def, state.currentTime);
 }
 
-export function getPrevSnapshot(): Map<string, Record<string, unknown> & { visible: boolean }> {
-  if (!state.def) return new Map();
-  return computeSnapshot(state.def, state.currentStepIdx - 1);
-}
-
-export function setElementKeyframe(elementId: string, patch: ElementKeyframe): void {
-  mutateDef((def) => {
-    if (state.currentStepIdx < 0 || state.currentStepIdx >= def.steps.length) {
-      const idx = def.elements.findIndex((e) => e.id === elementId);
-      if (idx < 0) return;
-      const baseEl = def.elements[idx];
-      const merged: Record<string, unknown> = { ...(baseEl as unknown as Record<string, unknown>) };
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null) {
-          delete merged[k];
-          continue;
-        }
-        merged[k] = v;
-      }
-      def.elements[idx] = merged as unknown as AnimationElement;
-      return;
-    }
-    const step = def.steps[state.currentStepIdx];
-    if (!step.keyframes[elementId]) step.keyframes[elementId] = {};
-    Object.assign(step.keyframes[elementId], patch);
-  });
-}
-
-export function setElementBase(elementId: string, patch: Record<string, unknown>): void {
-  mutateDef((def) => {
-    const idx = def.elements.findIndex((e) => e.id === elementId);
-    if (idx < 0) return;
-    const baseEl = def.elements[idx];
-    const merged: Record<string, unknown> = { ...(baseEl as unknown as Record<string, unknown>) };
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === null || v === undefined) {
-        delete merged[k];
-        continue;
-      }
-      merged[k] = v;
-    }
-    def.elements[idx] = merged as unknown as AnimationElement;
-  });
-}
-
-export function setElementVisibility(elementId: string, visible: boolean): void {
-  mutateDef((def) => {
-    if (state.currentStepIdx < 0) {
-      const initiallyHidden = new Set(def.initiallyHidden);
-      if (visible) initiallyHidden.delete(elementId);
-      else initiallyHidden.add(elementId);
-      def.initiallyHidden = Array.from(initiallyHidden);
-      return;
-    }
-    const step = def.steps[state.currentStepIdx];
-    if (!step.keyframes[elementId]) step.keyframes[elementId] = {};
-    step.keyframes[elementId].visible = visible;
-  });
-}
-
-export function clearKeyframeProp(elementId: string, key: string): void {
-  mutateDef((def) => {
-    const step = def.steps[state.currentStepIdx];
-    if (!step || !step.keyframes[elementId]) return;
-    delete step.keyframes[elementId][key];
-    if (Object.keys(step.keyframes[elementId]).length === 0) {
-      delete step.keyframes[elementId];
-    }
-  });
+function ensureAppearance(el: AnimationElement, def: AnimationDef): void {
+  if (!el.appearances || el.appearances.length === 0) {
+    el.appearances = [{ start: 0, end: def.duration, entryDuration: 300, exitDuration: 300 }];
+  }
 }
 
 export function addElement(el: AnimationElement): void {
   mutateDef((def) => {
-    def.elements.push(el);
+    const cloned = JSON.parse(JSON.stringify(el)) as AnimationElement;
+    ensureAppearance(cloned, def);
+    if (!cloned.tracks) cloned.tracks = [];
+    def.elements.push(cloned);
   });
   state.selection = { kind: 'element', elementId: el.id };
   emit();
@@ -294,16 +231,31 @@ export function addElement(el: AnimationElement): void {
 export function deleteElement(id: string): void {
   mutateDef((def) => {
     def.elements = def.elements.filter((e) => e.id !== id);
-    def.initiallyHidden = def.initiallyHidden.filter((x) => x !== id);
-    for (const step of def.steps) {
-      delete step.keyframes[id];
-      step.effects = step.effects.filter((e) => e.elementId !== id);
-    }
+    def.effects = def.effects.filter((e) => e.elementId !== id);
   });
   if (state.selection.kind === 'element' && state.selection.elementId === id) {
     state.selection = { kind: 'none' };
+  } else if (state.selection.kind === 'elements') {
+    const remaining = state.selection.elementIds.filter((x) => x !== id);
+    if (remaining.length === 0) state.selection = { kind: 'none' };
+    else if (remaining.length === 1) state.selection = { kind: 'element', elementId: remaining[0] };
+    else state.selection = { kind: 'elements', elementIds: remaining };
   }
   emit();
+}
+
+export function updateElementBase(id: string, patch: Record<string, unknown>): void {
+  mutateDef((def) => {
+    const idx = def.elements.findIndex((e) => e.id === id);
+    if (idx < 0) return;
+    const baseEl = def.elements[idx];
+    const merged: Record<string, unknown> = { ...(baseEl as unknown as Record<string, unknown>) };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === undefined) delete merged[k];
+      else merged[k] = v;
+    }
+    def.elements[idx] = merged as unknown as AnimationElement;
+  });
 }
 
 export function reorderElement(sourceId: string, targetId: string, position: 'before' | 'after'): void {
@@ -339,68 +291,129 @@ export function moveElementToFront(id: string): void {
   });
 }
 
-export function addStep(step: AnimationStep): void {
+export function addAppearance(id: string, ap: Appearance): void {
   mutateDef((def) => {
-    def.steps.push(step);
+    const el = def.elements.find((e) => e.id === id);
+    if (!el) return;
+    el.appearances.push(ap);
+    el.appearances.sort((a, b) => a.start - b.start);
   });
-  state.selection = { kind: 'step', stepId: step.id };
-  state.currentStepIdx = (state.def?.steps.length ?? 1) - 1;
+}
+
+export function updateAppearance(id: string, apIdx: number, patch: Partial<Appearance>): void {
+  mutateDef((def) => {
+    const el = def.elements.find((e) => e.id === id);
+    if (!el || !el.appearances[apIdx]) return;
+    el.appearances[apIdx] = { ...el.appearances[apIdx], ...patch };
+    el.appearances.sort((a, b) => a.start - b.start);
+  });
+}
+
+export function removeAppearance(id: string, apIdx: number): void {
+  mutateDef((def) => {
+    const el = def.elements.find((e) => e.id === id);
+    if (!el) return;
+    el.appearances.splice(apIdx, 1);
+    if (el.appearances.length === 0) ensureAppearance(el, def);
+  });
+}
+
+function findTrack(el: AnimationElement, property: string): PropertyTrack | undefined {
+  return el.tracks.find((t) => t.property === property);
+}
+
+export function setTrackKeyframe(elementId: string, property: string, time: number, value: TrackKeyframe['value']): void {
+  mutateDef((def) => {
+    const el = def.elements.find((e) => e.id === elementId);
+    if (!el) return;
+    let track = findTrack(el, property);
+    if (!track) {
+      track = { property, keyframes: [] };
+      el.tracks.push(track);
+    }
+    const existing = track.keyframes.find((k) => k.time === time);
+    if (existing) {
+      existing.value = value;
+    } else {
+      track.keyframes.push({ time, value });
+      track.keyframes.sort((a, b) => a.time - b.time);
+    }
+  });
+}
+
+export function removeTrackKeyframe(elementId: string, property: string, time: number): void {
+  mutateDef((def) => {
+    const el = def.elements.find((e) => e.id === elementId);
+    if (!el) return;
+    const track = findTrack(el, property);
+    if (!track) return;
+    track.keyframes = track.keyframes.filter((k) => k.time !== time);
+    if (track.keyframes.length === 0) {
+      el.tracks = el.tracks.filter((t) => t.property !== property);
+    }
+  });
+}
+
+export function removeTrack(elementId: string, property: string): void {
+  mutateDef((def) => {
+    const el = def.elements.find((e) => e.id === elementId);
+    if (!el) return;
+    el.tracks = el.tracks.filter((t) => t.property !== property);
+  });
+}
+
+export function addChapter(c: Chapter): void {
+  mutateDef((def) => {
+    def.chapters.push(c);
+    def.chapters.sort((a, b) => a.time - b.time);
+  });
+  state.selection = { kind: 'chapter', chapterId: c.id };
   emit();
 }
 
-export function deleteStep(id: string): void {
+export function updateChapter(id: string, patch: Partial<Chapter>): void {
   mutateDef((def) => {
-    def.steps = def.steps.filter((s) => s.id !== id);
+    const idx = def.chapters.findIndex((c) => c.id === id);
+    if (idx < 0) return;
+    def.chapters[idx] = { ...def.chapters[idx], ...patch };
+    def.chapters.sort((a, b) => a.time - b.time);
   });
-  if (state.selection.kind === 'step' && state.selection.stepId === id) {
+}
+
+export function deleteChapter(id: string): void {
+  mutateDef((def) => {
+    def.chapters = def.chapters.filter((c) => c.id !== id);
+  });
+  if (state.selection.kind === 'chapter' && state.selection.chapterId === id) {
     state.selection = { kind: 'none' };
   }
-  if (state.def) {
-    state.currentStepIdx = Math.min(state.currentStepIdx, state.def.steps.length - 1);
-  }
   emit();
 }
 
-export function updateStep(id: string, patch: Partial<AnimationStep>): void {
+export function addEffect(eff: AnimationEffect): void {
   mutateDef((def) => {
-    const idx = def.steps.findIndex((s) => s.id === id);
+    def.effects.push(eff);
+    def.effects.sort((a, b) => a.time - b.time);
+  });
+}
+
+export function updateEffect(id: string, patch: Partial<AnimationEffect>): void {
+  mutateDef((def) => {
+    const idx = def.effects.findIndex((e) => e.id === id);
     if (idx < 0) return;
-    def.steps[idx] = { ...def.steps[idx], ...patch };
+    def.effects[idx] = { ...def.effects[idx], ...patch } as AnimationEffect;
+    def.effects.sort((a, b) => a.time - b.time);
   });
 }
 
-export function moveStep(id: string, direction: -1 | 1): void {
+export function deleteEffect(id: string): void {
   mutateDef((def) => {
-    const idx = def.steps.findIndex((s) => s.id === id);
-    if (idx < 0) return;
-    const target = idx + direction;
-    if (target < 0 || target >= def.steps.length) return;
-    [def.steps[idx], def.steps[target]] = [def.steps[target], def.steps[idx]];
+    def.effects = def.effects.filter((e) => e.id !== id);
   });
-}
-
-export function addEffect(stepId: string, effect: AnimationEffect): void {
-  mutateDef((def) => {
-    const step = def.steps.find((s) => s.id === stepId);
-    if (!step) return;
-    step.effects.push(effect);
-  });
-}
-
-export function removeEffect(stepId: string, idx: number): void {
-  mutateDef((def) => {
-    const step = def.steps.find((s) => s.id === stepId);
-    if (!step) return;
-    step.effects.splice(idx, 1);
-  });
-}
-
-export function updateEffect(stepId: string, idx: number, patch: Partial<AnimationEffect>): void {
-  mutateDef((def) => {
-    const step = def.steps.find((s) => s.id === stepId);
-    if (!step || !step.effects[idx]) return;
-    step.effects[idx] = { ...step.effects[idx], ...patch } as AnimationEffect;
-  });
+  if (state.selection.kind === 'effect' && state.selection.effectId === id) {
+    state.selection = { kind: 'none' };
+  }
+  emit();
 }
 
 export function updateMeta(patch: Partial<Pick<AnimationDef, 'title' | 'description'>>): void {
@@ -421,6 +434,25 @@ export function updateSettings(patch: Partial<AnimationDef['settings']>): void {
   });
 }
 
+export function updateDuration(ms: number): void {
+  mutateDef((def) => {
+    def.duration = Math.max(0, Math.round(ms));
+    for (const el of def.elements) {
+      for (const ap of el.appearances) {
+        if (ap.end > def.duration) ap.end = def.duration;
+        if (ap.start > def.duration) ap.start = def.duration;
+      }
+    }
+    for (const ch of def.chapters) {
+      if (ch.time > def.duration) ch.time = def.duration;
+    }
+    for (const eff of def.effects) {
+      if (eff.time > def.duration) eff.time = def.duration;
+    }
+  });
+  if (state.currentTime > ms) state.currentTime = ms;
+}
+
 export function uniqueElementId(type: string): string {
   if (!state.def) return type + '-1';
   const used = new Set(state.def.elements.map((e) => e.id));
@@ -429,10 +461,18 @@ export function uniqueElementId(type: string): string {
   return `${type}-${i}`;
 }
 
-export function uniqueStepId(): string {
-  if (!state.def) return 'step-1';
-  const used = new Set(state.def.steps.map((s) => s.id));
+export function uniqueChapterId(): string {
+  if (!state.def) return 'chapter-1';
+  const used = new Set(state.def.chapters.map((c) => c.id));
   let i = 1;
-  while (used.has(`step-${i}`)) i += 1;
-  return `step-${i}`;
+  while (used.has(`chapter-${i}`)) i += 1;
+  return `chapter-${i}`;
+}
+
+export function uniqueEffectId(): string {
+  if (!state.def) return 'effect-1';
+  const used = new Set(state.def.effects.map((e) => e.id));
+  let i = 1;
+  while (used.has(`effect-${i}`)) i += 1;
+  return `effect-${i}`;
 }

@@ -8,7 +8,9 @@ const easeSchema = z
   .enum(['linear', 'easeIn', 'easeOut', 'easeInOut'])
   .default('easeInOut');
 
-export const anchorSchema = z.enum(['auto', 'top', 'right', 'bottom', 'left', 'center']).default('auto');
+export const anchorSchema = z
+  .enum(['auto', 'top', 'right', 'bottom', 'left', 'center'])
+  .default('auto');
 
 export const entryModeSchema = z
   .enum(['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom', 'pop'])
@@ -18,17 +20,46 @@ export const exitModeSchema = z
   .enum(['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom', 'pop'])
   .default('instant');
 
-export const transitionEaseSchema = z
-  .enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'easeInQuad', 'easeOutQuad', 'easeInOutQuad', 'easeInCubic', 'easeOutCubic', 'easeInOutCubic', 'spring'])
-  .optional();
+export const arrowHeadSchema = z.enum([
+  'none',
+  'arrow',
+  'triangle',
+  'triangle-open',
+  'circle',
+  'circle-open',
+  'diamond',
+  'diamond-open',
+  'bar',
+]);
+
+export const trackValueSchema = z.union([z.string(), z.number(), z.boolean()]);
+
+export const trackKeyframeSchema = z.object({
+  time: z.number().int().min(0),
+  value: trackValueSchema,
+  ease: easeSchema.optional(),
+});
+
+export const propertyTrackSchema = z.object({
+  property: z.string(),
+  keyframes: z.array(trackKeyframeSchema).min(1),
+});
+
+export const appearanceSchema = z.object({
+  start: z.number().int().min(0),
+  end: z.number().int().min(0),
+  entryMode: entryModeSchema.optional(),
+  entryDuration: z.number().int().min(0).default(300),
+  exitMode: exitModeSchema.optional(),
+  exitDuration: z.number().int().min(0).default(300),
+});
 
 const baseElementProps = {
   id: idSchema,
   name: z.string().optional(),
   rotation: z.number().default(0),
-  entryMode: entryModeSchema.optional(),
-  exitMode: exitModeSchema.optional(),
-  transitionEase: transitionEaseSchema,
+  appearances: z.array(appearanceSchema).default([]),
+  tracks: z.array(propertyTrackSchema).default([]),
 };
 
 export const rectElementSchema = z.object({
@@ -61,9 +92,6 @@ export const circleElementSchema = z.object({
   labelColor: z.string().default('#0b0b0f'),
   labelSize: z.number().positive().default(14),
 });
-
-export const arrowHeadSchema = z
-  .enum(['none', 'arrow', 'triangle', 'triangle-open', 'circle', 'circle-open', 'diamond', 'diamond-open', 'bar']);
 
 export const lineElementSchema = z.object({
   type: z.literal('line'),
@@ -162,48 +190,44 @@ export const elementSchema = z.discriminatedUnion('type', [
   polygonElementSchema,
 ]);
 
-export const keyframeValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
-
-export const elementKeyframeSchema = z.record(z.string(), keyframeValueSchema);
-
 export const effectSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('highlight'),
+    id: idSchema,
     elementId: idSchema,
+    time: z.number().int().min(0),
     color: z.string().default('#facc15'),
     duration: z.number().int().min(0).default(500),
-    delay: z.number().int().min(0).default(0),
   }),
   z.object({
     type: z.literal('pulse'),
+    id: idSchema,
     elementId: idSchema,
+    time: z.number().int().min(0),
     scale: z.number().positive().default(1.12),
     duration: z.number().int().min(0).default(500),
-    delay: z.number().int().min(0).default(0),
   }),
   z.object({
     type: z.literal('flow'),
+    id: idSchema,
     elementId: idSchema,
+    time: z.number().int().min(0),
     color: z.string().default('#facc15'),
     particles: z.number().int().min(1).max(10).default(3),
     radius: z.number().positive().default(4),
     duration: z.number().int().min(0).default(800),
-    delay: z.number().int().min(0).default(0),
   }),
 ]);
 
-export const stepSchema = z.object({
+export const chapterSchema = z.object({
   id: idSchema,
+  time: z.number().int().min(0),
   label: z.string().default(''),
   subtitle: z.string().default(''),
-  duration: z.number().int().min(0).default(800),
-  ease: easeSchema,
-  keyframes: z.record(idSchema, elementKeyframeSchema).default({}),
-  effects: z.array(effectSchema).default([]),
 });
 
 export const animationDefSchema = z.object({
-  version: z.literal(2).default(2),
+  version: z.literal(3).default(3),
   id: idSchema,
   title: z.string().default(''),
   description: z.string().default(''),
@@ -211,6 +235,7 @@ export const animationDefSchema = z.object({
     .enum(['network', 'cache', 'algorithm', 'architecture', 'flow', 'protocol', 'general'])
     .default('general'),
   tags: z.array(z.string()).default([]),
+  duration: z.number().int().min(0).default(5000),
   canvas: z
     .object({
       width: z.number().int().positive().default(800),
@@ -219,17 +244,16 @@ export const animationDefSchema = z.object({
     })
     .default({ width: 800, height: 500, background: 'transparent' }),
   elements: z.array(elementSchema).default([]),
-  initiallyHidden: z.array(idSchema).default([]),
-  steps: z.array(stepSchema).default([]),
+  chapters: z.array(chapterSchema).default([]),
+  effects: z.array(effectSchema).default([]),
   settings: z
     .object({
       loop: z.boolean().default(true),
       autoplay: z.boolean().default(true),
-      stepGapMs: z.number().int().min(0).default(150),
       showCaption: z.boolean().default(false),
-      showStepList: z.boolean().default(false),
+      showChapterList: z.boolean().default(false),
     })
-    .default({ loop: true, autoplay: true, stepGapMs: 150, showCaption: false, showStepList: false }),
+    .default({ loop: true, autoplay: true, showCaption: false, showChapterList: false }),
   updatedAt: z.string().optional(),
 });
 
@@ -237,7 +261,7 @@ export type Anchor = z.infer<typeof anchorSchema>;
 export type ArrowHead = z.infer<typeof arrowHeadSchema>;
 export type EntryMode = z.infer<typeof entryModeSchema>;
 export type ExitMode = z.infer<typeof exitModeSchema>;
-export type TransitionEase = z.infer<typeof transitionEaseSchema>;
+export type Ease = z.infer<typeof easeSchema>;
 export type RectElement = z.infer<typeof rectElementSchema>;
 export type CircleElement = z.infer<typeof circleElementSchema>;
 export type LineElement = z.infer<typeof lineElementSchema>;
@@ -247,10 +271,11 @@ export type ImageElement = z.infer<typeof imageElementSchema>;
 export type PathElement = z.infer<typeof pathElementSchema>;
 export type PolygonElement = z.infer<typeof polygonElementSchema>;
 export type AnimationElement = z.infer<typeof elementSchema>;
-
-export type ElementKeyframe = z.infer<typeof elementKeyframeSchema>;
+export type Appearance = z.infer<typeof appearanceSchema>;
+export type TrackKeyframe = z.infer<typeof trackKeyframeSchema>;
+export type PropertyTrack = z.infer<typeof propertyTrackSchema>;
 export type AnimationEffect = z.infer<typeof effectSchema>;
-export type AnimationStep = z.infer<typeof stepSchema>;
+export type Chapter = z.infer<typeof chapterSchema>;
 export type AnimationDef = z.infer<typeof animationDefSchema>;
 
 export type ElementType = AnimationElement['type'];
@@ -270,28 +295,151 @@ export function isColorKey(key: string): boolean {
   return COLOR_KEYS.has(key);
 }
 
-export type SnapshotMap = Map<string, Record<string, unknown> & { visible: boolean }>;
+export type ElementVisualState = Record<string, unknown> & {
+  visible: boolean;
+  __entryProgress?: number;
+  __entryMode?: EntryMode;
+  __exitProgress?: number;
+  __exitMode?: ExitMode;
+};
 
-export function computeSnapshot(def: AnimationDef, upToStepIdx: number): SnapshotMap {
-  const snap: SnapshotMap = new Map();
-  const initiallyHidden = new Set(def.initiallyHidden ?? []);
-  for (const el of def.elements) {
-    snap.set(el.id, {
-      ...(el as unknown as Record<string, unknown>),
-      visible: !initiallyHidden.has(el.id),
-    });
+export type SnapshotMap = Map<string, ElementVisualState>;
+
+function easeApply(fn: Ease, t: number): number {
+  if (fn === 'linear') return t;
+  if (fn === 'easeIn') return t * t;
+  if (fn === 'easeOut') return 1 - (1 - t) * (1 - t);
+  const a = 2 * t * t;
+  const b = 1 - Math.pow(-2 * t + 2, 2) / 2;
+  return t < 0.5 ? a : b;
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function parseColor(s: string): [number, number, number, number] | null {
+  if (!s) return null;
+  const hex6 = s.match(/^#([0-9a-f]{6})$/i);
+  if (hex6) {
+    const n = parseInt(hex6[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255];
   }
-  for (let i = 0; i <= upToStepIdx; i += 1) {
-    const step = def.steps[i];
-    if (!step) continue;
-    for (const [elId, override] of Object.entries(step.keyframes)) {
-      const cur = snap.get(elId);
-      if (!cur) continue;
-      for (const [k, v] of Object.entries(override)) {
-        if (v === null) continue;
-        cur[k] = v as unknown;
-      }
+  const hex8 = s.match(/^#([0-9a-f]{8})$/i);
+  if (hex8) {
+    const n = parseInt(hex8[1], 16);
+    return [(n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const short = s.match(/^#([0-9a-f]{3})$/i);
+  if (short) {
+    const r = parseInt(short[1][0] + short[1][0], 16);
+    const g = parseInt(short[1][1] + short[1][1], 16);
+    const b = parseInt(short[1][2] + short[1][2], 16);
+    return [r, g, b, 255];
+  }
+  return null;
+}
+
+function rgbaToHex(r: number, g: number, b: number, a: number): string {
+  const c = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  if (a >= 255) return '#' + c(r) + c(g) + c(b);
+  return '#' + c(r) + c(g) + c(b) + c(a);
+}
+
+function lerpValue(prev: unknown, target: unknown, t: number, key: string): unknown {
+  if (typeof prev === 'number' && typeof target === 'number' && isNumericKey(key)) {
+    return lerp(prev, target, t);
+  }
+  if (typeof prev === 'string' && typeof target === 'string' && isColorKey(key)) {
+    const a = parseColor(prev);
+    const b = parseColor(target);
+    if (!a || !b) return t < 0.5 ? prev : target;
+    return rgbaToHex(lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t));
+  }
+  return t < 0.999 ? prev : target;
+}
+
+function trackValueAt(track: PropertyTrack, time: number): unknown {
+  const kfs = track.keyframes;
+  if (kfs.length === 0) return undefined;
+  if (time <= kfs[0].time) return kfs[0].value;
+  if (time >= kfs[kfs.length - 1].time) return kfs[kfs.length - 1].value;
+  for (let i = 0; i < kfs.length - 1; i += 1) {
+    const a = kfs[i];
+    const b = kfs[i + 1];
+    if (time >= a.time && time <= b.time) {
+      const span = b.time - a.time;
+      if (span <= 0) return b.value;
+      const localT = (time - a.time) / span;
+      const eased = easeApply(b.ease ?? 'easeInOut', localT);
+      return lerpValue(a.value, b.value, eased, track.property);
     }
   }
+  return kfs[kfs.length - 1].value;
+}
+
+export function activeAppearance(el: AnimationElement, time: number): {
+  appearance: Appearance;
+  phase: 'entry' | 'visible' | 'exit';
+  phaseProgress: number;
+} | null {
+  if (!el.appearances || el.appearances.length === 0) return null;
+  for (const ap of el.appearances) {
+    if (time < ap.start) continue;
+    if (time > ap.end) continue;
+    const entryEnd = ap.start + (ap.entryMode && ap.entryMode !== 'instant' ? ap.entryDuration : 0);
+    const exitStart = ap.end - (ap.exitMode && ap.exitMode !== 'instant' ? ap.exitDuration : 0);
+    if (time < entryEnd) {
+      const progress = entryEnd === ap.start ? 1 : (time - ap.start) / (entryEnd - ap.start);
+      return { appearance: ap, phase: 'entry', phaseProgress: Math.max(0, Math.min(1, progress)) };
+    }
+    if (time > exitStart) {
+      const progress = ap.end === exitStart ? 1 : (time - exitStart) / (ap.end - exitStart);
+      return { appearance: ap, phase: 'exit', phaseProgress: Math.max(0, Math.min(1, progress)) };
+    }
+    return { appearance: ap, phase: 'visible', phaseProgress: 1 };
+  }
+  return null;
+}
+
+export function computeSnapshot(def: AnimationDef, time: number): SnapshotMap {
+  const snap: SnapshotMap = new Map();
+  for (const el of def.elements) {
+    const base: ElementVisualState = {
+      ...(el as unknown as Record<string, unknown>),
+      visible: false,
+    };
+    for (const track of el.tracks) {
+      const v = trackValueAt(track, time);
+      if (v !== undefined) base[track.property] = v;
+    }
+    const phaseInfo = activeAppearance(el, time);
+    if (phaseInfo) {
+      base.visible = true;
+      if (phaseInfo.phase === 'entry' && phaseInfo.appearance.entryMode) {
+        base.__entryMode = phaseInfo.appearance.entryMode;
+        base.__entryProgress = phaseInfo.phaseProgress;
+      } else if (phaseInfo.phase === 'exit' && phaseInfo.appearance.exitMode) {
+        base.__exitMode = phaseInfo.appearance.exitMode;
+        base.__exitProgress = phaseInfo.phaseProgress;
+      }
+    }
+    snap.set(el.id, base);
+  }
   return snap;
+}
+
+export function currentChapter(def: AnimationDef, time: number): { index: number; chapter: Chapter } | null {
+  if (def.chapters.length === 0) return null;
+  const sorted = [...def.chapters].sort((a, b) => a.time - b.time);
+  let active: { index: number; chapter: Chapter } | null = null;
+  for (let i = 0; i < sorted.length; i += 1) {
+    if (sorted[i].time <= time) active = { index: i, chapter: sorted[i] };
+    else break;
+  }
+  return active;
+}
+
+export function activeEffects(def: AnimationDef, time: number): AnimationEffect[] {
+  return def.effects.filter((eff) => time >= eff.time && time < eff.time + eff.duration);
 }

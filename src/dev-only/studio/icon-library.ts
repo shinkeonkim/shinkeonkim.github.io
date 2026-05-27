@@ -196,7 +196,7 @@ export class IconLibraryDialog {
     const el: ImageElement = {
       type: 'image',
       id,
-      rotation: 0,
+      rotation: 0, appearances: [], tracks: [],
       x: cx - 32,
       y: cy - 32,
       width: 64,
