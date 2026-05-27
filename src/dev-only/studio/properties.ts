@@ -318,6 +318,8 @@ function render(): void {
       <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">설정</span></div>
       ${checkboxField('loop', 'settings.loop', def.settings.loop)}
       ${checkboxField('autoplay', 'settings.autoplay', def.settings.autoplay)}
+      ${checkboxField('자막 표시 (caption)', 'settings.showCaption', def.settings.showCaption ?? false)}
+      ${checkboxField('스텝 목록 표시', 'settings.showStepList', def.settings.showStepList ?? false)}
     `;
     return;
   }
@@ -491,6 +493,7 @@ function renderStepForm(def: AnimationDef, step: AnimationStep): void {
   panelEl.innerHTML = `
     <div class="studio-props-header"><span class="studio-props-header-title">${escapeHtml(step.id)}</span><span class="studio-props-header-type">step</span></div>
     ${textField('label', 'step.label', step.label)}
+    ${textField('subtitle', 'step.subtitle', step.subtitle ?? '')}
     ${numberField('duration (ms)', 'step.duration', step.duration, 50)}
     ${selectField('ease', 'step.ease', step.ease, [{ value: 'linear' }, { value: 'easeIn' }, { value: 'easeOut' }, { value: 'easeInOut' }])}
 
@@ -658,6 +661,8 @@ function onInput(e: Event): void {
     else if (key === 'canvas.background') updateCanvas({ background: String(value) });
     else if (key === 'settings.loop') updateSettings({ loop: Boolean(value) });
     else if (key === 'settings.autoplay') updateSettings({ autoplay: Boolean(value) });
+    else if (key === 'settings.showCaption') updateSettings({ showCaption: Boolean(value) });
+    else if (key === 'settings.showStepList') updateSettings({ showStepList: Boolean(value) });
     return;
   }
 
@@ -681,6 +686,7 @@ function onInput(e: Event): void {
 
   if (sel.kind === 'step') {
     if (key === 'step.label') updateStep(sel.stepId, { label: String(value) });
+    else if (key === 'step.subtitle') updateStep(sel.stepId, { subtitle: String(value) });
     else if (key === 'step.duration') updateStep(sel.stepId, { duration: Number(value) });
     else if (key === 'step.ease') updateStep(sel.stepId, { ease: value as AnimationStep['ease'] });
     return;

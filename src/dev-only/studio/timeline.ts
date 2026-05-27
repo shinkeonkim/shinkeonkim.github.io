@@ -45,7 +45,7 @@ export function initTimeline(
   elementTracksEl?.addEventListener('click', onElementTrackClick);
   addStepBtn?.addEventListener('click', () => {
     const id = uniqueStepId();
-    addStep({ id, label: `Step ${id.split('-')[1]}`, duration: 800, ease: 'easeInOut', keyframes: {}, effects: [] });
+    addStep({ id, label: `Step ${id.split('-')[1]}`, subtitle: '', duration: 800, ease: 'easeInOut', keyframes: {}, effects: [] });
   });
   render();
 }

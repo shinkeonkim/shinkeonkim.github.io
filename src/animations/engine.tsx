@@ -386,9 +386,13 @@ export default function AnimationEngine({
   }, [currentStepIdx, def.steps, speedMultiplier]);
 
   const elementOrder = useMemo(() => def.elements.map((e) => e.id), [def.elements]);
+  const currentStep = currentStepIdx >= 0 ? def.steps[currentStepIdx] : null;
+  const showCaption = def.settings.showCaption === true;
+  const showStepList = def.settings.showStepList === true;
 
   return (
-    <div className="anim-engine">
+    <div className={`anim-engine${showStepList ? ' anim-engine-with-list' : ''}`}>
+      <div className="anim-engine-stage">
       <svg
         viewBox={`0 0 ${def.canvas.width} ${def.canvas.height}`}
         role="img"
@@ -446,6 +450,33 @@ export default function AnimationEngine({
             ));
           })}
       </svg>
+      {showCaption && currentStep && (
+        <div className="anim-caption" aria-live="polite">
+          <span className="anim-caption-num">{currentStepIdx + 1} / {def.steps.length}</span>
+          {currentStep.label && <span className="anim-caption-label">{currentStep.label}</span>}
+          {currentStep.subtitle && <span className="anim-caption-subtitle">{currentStep.subtitle}</span>}
+        </div>
+      )}
+      </div>
+      {showStepList && (
+        <aside className="anim-step-list" aria-label="단계 목록">
+          <ol>
+            {def.steps.map((step, idx) => (
+              <li
+                key={step.id}
+                className={`anim-step-list-item${idx === currentStepIdx ? ' is-current' : ''}`}
+                aria-current={idx === currentStepIdx ? 'step' : undefined}
+              >
+                <span className="anim-step-list-num">{idx + 1}</span>
+                <div className="anim-step-list-body">
+                  <span className="anim-step-list-label">{step.label || step.id}</span>
+                  {step.subtitle && <span className="anim-step-list-subtitle">{step.subtitle}</span>}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </aside>
+      )}
     </div>
   );
 }

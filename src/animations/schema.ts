@@ -195,6 +195,7 @@ export const effectSchema = z.discriminatedUnion('type', [
 export const stepSchema = z.object({
   id: idSchema,
   label: z.string().default(''),
+  subtitle: z.string().default(''),
   duration: z.number().int().min(0).default(800),
   ease: easeSchema,
   keyframes: z.record(idSchema, elementKeyframeSchema).default({}),
@@ -225,8 +226,10 @@ export const animationDefSchema = z.object({
       loop: z.boolean().default(true),
       autoplay: z.boolean().default(true),
       stepGapMs: z.number().int().min(0).default(150),
+      showCaption: z.boolean().default(false),
+      showStepList: z.boolean().default(false),
     })
-    .default({ loop: true, autoplay: true, stepGapMs: 150 }),
+    .default({ loop: true, autoplay: true, stepGapMs: 150, showCaption: false, showStepList: false }),
   updatedAt: z.string().optional(),
 });
 
