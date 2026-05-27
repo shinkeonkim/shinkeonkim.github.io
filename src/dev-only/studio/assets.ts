@@ -1,30 +1,55 @@
 import type { AnimationElement } from '../../animations/schema';
 
-export interface AssetDef {
+export type AssetCategory = 'queue' | 'stack' | 'array' | 'graph' | 'tree' | 'custom';
+
+export interface AssetParam {
+  name: string;
+  type: 'number' | 'string' | 'string-array';
+  label: string;
+  default: unknown;
+  min?: number;
+  max?: number;
+  placeholder?: string;
+}
+
+export interface BuiltinAsset {
   id: string;
   name: string;
   description?: string;
-  category: 'queue' | 'stack' | 'array' | 'graph' | 'tree' | 'custom';
-  elements: AnimationElement[];
-  builtin?: boolean;
+  category: AssetCategory;
+  builtin: true;
+  params: AssetParam[];
+  generate: (params: Record<string, unknown>) => AnimationElement[];
 }
 
-const STORAGE_KEY = 'studio.assets.v1';
-const listeners = new Set<() => void>();
+export interface CustomAsset {
+  id: string;
+  name: string;
+  description?: string;
+  category: AssetCategory;
+  builtin: false;
+  elements: AnimationElement[];
+}
 
-function readSaved(): AssetDef[] {
+export type AssetDef = BuiltinAsset | CustomAsset;
+
+const STORAGE_KEY = 'studio.assets.v3';
+const listeners = new Set<() => void>();
+const TRACK_FIELDS = { appearances: [] as never[], tracks: [] as never[] };
+
+function readSaved(): CustomAsset[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((a): a is AssetDef => !!a && typeof a.id === 'string' && Array.isArray(a.elements));
+    return parsed.filter((a): a is CustomAsset => !!a && typeof a.id === 'string' && Array.isArray(a.elements));
   } catch {
     return [];
   }
 }
 
-function writeSaved(list: AssetDef[]): void {
+function writeSaved(list: CustomAsset[]): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   } catch {
@@ -38,15 +63,249 @@ export function subscribeAssets(fn: () => void): () => void {
   return () => listeners.delete(fn);
 }
 
+function num(params: Record<string, unknown>, key: string, fallback: number): number {
+  const v = params[key];
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function strArr(params: Record<string, unknown>, key: string, fallback: string[]): string[] {
+  const v = params[key];
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === 'string' && v.trim()) return v.split(',').map((s) => s.trim());
+  return fallback;
+}
+
+function queueGenerate(params: Record<string, unknown>): AnimationElement[] {
+  const size = Math.max(1, Math.min(10, num(params, 'size', 3)));
+  const items = strArr(params, 'items', new Array(size).fill(''));
+  const slotW = 70;
+  const gap = 5;
+  const startX = 100;
+  const out: AnimationElement[] = [];
+  for (let i = 0; i < size; i += 1) {
+    out.push({
+      type: 'rect', id: `q-s${i}`, rotation: 0, ...TRACK_FIELDS,
+      x: startX + i * (slotW + gap), y: 100, width: slotW, height: 60,
+      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
+      label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
+    });
+  }
+  out.push(
+    { type: 'text', id: 'q-lbl-front', rotation: 0, ...TRACK_FIELDS, x: startX + slotW / 2, y: 90, content: 'front', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
+    { type: 'text', id: 'q-lbl-back', rotation: 0, ...TRACK_FIELDS, x: startX + (size - 1) * (slotW + gap) + slotW / 2, y: 90, content: 'back', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
+    { type: 'arrow', id: 'q-arr-in', rotation: 0, ...TRACK_FIELDS, x1: startX + size * (slotW + gap) + 40, y1: 130, x2: startX + size * (slotW + gap), y2: 130, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+    { type: 'text', id: 'q-lbl-in', rotation: 0, ...TRACK_FIELDS, x: startX + size * (slotW + gap) + 50, y: 135, content: 'enqueue', fontSize: 12, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
+    { type: 'arrow', id: 'q-arr-out', rotation: 0, ...TRACK_FIELDS, x1: startX, y1: 130, x2: startX - 40, y2: 130, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+    { type: 'text', id: 'q-lbl-out', rotation: 0, ...TRACK_FIELDS, x: startX - 50, y: 135, content: 'dequeue', fontSize: 12, fontWeight: 700, color: '#dc2626', textAnchor: 'end' },
+  );
+  return out;
+}
+
+function stackGenerate(params: Record<string, unknown>): AnimationElement[] {
+  const size = Math.max(1, Math.min(10, num(params, 'size', 3)));
+  const items = strArr(params, 'items', new Array(size).fill(''));
+  const slotH = 50;
+  const gap = 5;
+  const topY = 60;
+  const out: AnimationElement[] = [];
+  for (let i = 0; i < size; i += 1) {
+    const idxFromTop = size - 1 - i;
+    out.push({
+      type: 'rect', id: `s-s${i}`, rotation: 0, ...TRACK_FIELDS,
+      x: 200, y: topY + idxFromTop * (slotH + gap), width: 90, height: slotH,
+      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
+      label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
+    });
+  }
+  out.push(
+    { type: 'text', id: 's-lbl-top', rotation: 0, ...TRACK_FIELDS, x: 305, y: topY + 30, content: '← top', fontSize: 13, fontWeight: 700, color: '#64748b', textAnchor: 'start' },
+    { type: 'arrow', id: 's-arr-push', rotation: 0, ...TRACK_FIELDS, x1: 130, y1: topY - 10, x2: 195, y2: topY + 25, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+    { type: 'text', id: 's-lbl-push', rotation: 0, ...TRACK_FIELDS, x: 80, y: topY - 15, content: 'push', fontSize: 13, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
+    { type: 'arrow', id: 's-arr-pop', rotation: 0, ...TRACK_FIELDS, x1: 195, y1: topY + 50, x2: 130, y2: topY + 85, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+    { type: 'text', id: 's-lbl-pop', rotation: 0, ...TRACK_FIELDS, x: 80, y: topY + 95, content: 'pop', fontSize: 13, fontWeight: 700, color: '#dc2626', textAnchor: 'start' },
+  );
+  return out;
+}
+
+function arrayGenerate(params: Record<string, unknown>): AnimationElement[] {
+  const size = Math.max(1, Math.min(20, num(params, 'size', 6)));
+  const items = strArr(params, 'items', new Array(size).fill(''));
+  const cellW = num(params, 'cellWidth', 60);
+  const gap = 5;
+  const startX = num(params, 'startX', 100);
+  const startY = num(params, 'startY', 100);
+  const out: AnimationElement[] = [];
+  for (let i = 0; i < size; i += 1) {
+    out.push({
+      type: 'rect', id: `a-${i}`, rotation: 0, ...TRACK_FIELDS,
+      x: startX + i * (cellW + gap), y: startY, width: cellW, height: 55,
+      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
+      label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
+    });
+    out.push({
+      type: 'text', id: `a-${i}-idx`, rotation: 0, ...TRACK_FIELDS,
+      x: startX + i * (cellW + gap) + cellW / 2, y: startY + 75,
+      content: String(i), fontSize: 11, fontWeight: 600, color: '#94a3b8', textAnchor: 'middle',
+    });
+  }
+  return out;
+}
+
+function treeGenerate(params: Record<string, unknown>): AnimationElement[] {
+  const depth = Math.max(1, Math.min(5, num(params, 'depth', 3)));
+  const out: AnimationElement[] = [];
+  const canvasW = 500;
+  const levelGap = 90;
+  const startY = 80;
+  let nodeIdx = 0;
+  const ids: string[][] = [];
+  for (let level = 0; level < depth; level += 1) {
+    const count = 2 ** level;
+    const row: string[] = [];
+    const spacing = canvasW / (count + 1);
+    for (let i = 0; i < count; i += 1) {
+      nodeIdx += 1;
+      const id = `t-n${nodeIdx}`;
+      row.push(id);
+      const cx = (i + 1) * spacing;
+      const cy = startY + level * levelGap;
+      out.push({
+        type: 'circle', id, rotation: 0, ...TRACK_FIELDS,
+        cx, cy, r: Math.max(15, 30 - level * 4),
+        fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2,
+        label: String(nodeIdx), labelColor: '#312e81', labelSize: 14,
+      });
+    }
+    ids.push(row);
+  }
+  let edgeIdx = 0;
+  for (let level = 1; level < depth; level += 1) {
+    for (let i = 0; i < ids[level].length; i += 1) {
+      const parentIdx = Math.floor(i / 2);
+      edgeIdx += 1;
+      out.push({
+        type: 'line', id: `t-e${edgeIdx}`, rotation: 0, ...TRACK_FIELDS,
+        fromId: ids[level - 1][parentIdx], toId: ids[level][i],
+        stroke: '#94a3b8', strokeWidth: 2,
+      });
+    }
+  }
+  return out;
+}
+
+function graphGenerate(params: Record<string, unknown>): AnimationElement[] {
+  const nodes = Math.max(3, Math.min(10, num(params, 'nodes', 5)));
+  const layout = String(params.layout ?? 'pentagon');
+  const out: AnimationElement[] = [];
+  const cx = 280;
+  const cy = 200;
+  const r = 130;
+  for (let i = 0; i < nodes; i += 1) {
+    const angle = layout === 'line' ? 0 : (i / nodes) * Math.PI * 2 - Math.PI / 2;
+    const px = layout === 'line' ? 80 + i * 100 : cx + r * Math.cos(angle);
+    const py = layout === 'line' ? cy : cy + r * Math.sin(angle);
+    out.push({
+      type: 'circle', id: `g-n${i + 1}`, rotation: 0, ...TRACK_FIELDS,
+      cx: Math.round(px), cy: Math.round(py), r: 28,
+      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2,
+      label: String(i + 1), labelColor: '#312e81', labelSize: 16,
+    });
+  }
+  for (let i = 0; i < nodes; i += 1) {
+    const next = (i + 1) % nodes;
+    if (layout === 'line' && next === 0) break;
+    out.push({
+      type: 'line', id: `g-e${i + 1}`, rotation: 0, ...TRACK_FIELDS,
+      fromId: `g-n${i + 1}`, toId: `g-n${next + 1}`,
+      stroke: '#94a3b8', strokeWidth: 2,
+    });
+  }
+  return out;
+}
+
+const BUILTINS: BuiltinAsset[] = [
+  {
+    id: 'builtin-queue', name: '큐 (Queue)',
+    description: 'FIFO 큐. front / back 라벨 + enqueue / dequeue 화살표', category: 'queue', builtin: true,
+    params: [
+      { name: 'size', type: 'number', label: '슬롯 개수', default: 3, min: 1, max: 10 },
+      { name: 'items', type: 'string-array', label: '초기 내용 (쉼표 구분)', default: '' },
+    ],
+    generate: queueGenerate,
+  },
+  {
+    id: 'builtin-stack', name: '스택 (Stack)',
+    description: 'LIFO 스택. top 라벨 + push / pop 화살표', category: 'stack', builtin: true,
+    params: [
+      { name: 'size', type: 'number', label: '슬롯 개수', default: 3, min: 1, max: 10 },
+      { name: 'items', type: 'string-array', label: '초기 내용 (바닥→top, 쉼표 구분)', default: '' },
+    ],
+    generate: stackGenerate,
+  },
+  {
+    id: 'builtin-array', name: '배열 (Array)',
+    description: '인덱스 표시된 셀 묶음', category: 'array', builtin: true,
+    params: [
+      { name: 'size', type: 'number', label: '셀 개수', default: 6, min: 1, max: 20 },
+      { name: 'items', type: 'string-array', label: '초기 값 (쉼표 구분)', default: '' },
+      { name: 'cellWidth', type: 'number', label: '셀 너비', default: 60, min: 30, max: 120 },
+    ],
+    generate: arrayGenerate,
+  },
+  {
+    id: 'builtin-tree', name: '이진 트리 (Tree)',
+    description: '완전 이진 트리. depth=N 이면 2^N - 1 개 노드', category: 'tree', builtin: true,
+    params: [{ name: 'depth', type: 'number', label: '깊이', default: 3, min: 1, max: 5 }],
+    generate: treeGenerate,
+  },
+  {
+    id: 'builtin-graph', name: '그래프 (Graph)',
+    description: '다각형 또는 선형 layout 의 무방향 그래프', category: 'graph', builtin: true,
+    params: [
+      { name: 'nodes', type: 'number', label: '노드 개수', default: 5, min: 3, max: 10 },
+      { name: 'layout', type: 'string', label: 'layout (pentagon | line)', default: 'pentagon' },
+    ],
+    generate: graphGenerate,
+  },
+];
+
+export function listAssets(): AssetDef[] {
+  return [...BUILTINS, ...readSaved()];
+}
+
+export function saveAsset(name: string, elements: AnimationElement[], category: AssetCategory = 'custom'): CustomAsset {
+  const id = `custom-${Date.now()}`;
+  const asset: CustomAsset = {
+    id, name: name.trim() || 'Untitled', category, builtin: false,
+    elements: JSON.parse(JSON.stringify(elements)),
+  };
+  const saved = readSaved();
+  saved.push(asset);
+  writeSaved(saved);
+  return asset;
+}
+
+export function deleteAsset(id: string): void {
+  if (id.startsWith('builtin-')) return;
+  const saved = readSaved().filter((a) => a.id !== id);
+  writeSaved(saved);
+}
+
+export function resolveAssetElements(asset: AssetDef, params: Record<string, unknown>): AnimationElement[] {
+  if (asset.builtin) return asset.generate(params);
+  return JSON.parse(JSON.stringify(asset.elements));
+}
+
 function bbox(elements: AnimationElement[]): { x: number; y: number; w: number; h: number } {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const el of elements) {
     let ex = 0, ey = 0, ew = 0, eh = 0;
-    if (el.type === 'rect' || el.type === 'image' || el.type === 'text') {
-      ex = el.x; ey = el.y;
-      ew = 'width' in el ? el.width : 60;
-      eh = 'height' in el ? el.height : 30;
-      if (el.type === 'text') { ew = 100; eh = 24; }
+    if (el.type === 'rect' || el.type === 'image') {
+      ex = el.x; ey = el.y; ew = el.width; eh = el.height;
+    } else if (el.type === 'text') {
+      ex = el.x - 50; ey = el.y - 12; ew = 100; eh = 24;
     } else if (el.type === 'circle') {
       ex = el.cx - el.r; ey = el.cy - el.r; ew = el.r * 2; eh = el.r * 2;
     } else if (el.type === 'line' || el.type === 'arrow') {
@@ -96,22 +355,20 @@ function shiftElement(el: AnimationElement, dx: number, dy: number): AnimationEl
   return clone;
 }
 
-export function assetBoundingBox(asset: AssetDef): { x: number; y: number; w: number; h: number } {
-  return bbox(asset.elements);
-}
-
 export function instantiateAsset(
   asset: AssetDef,
+  params: Record<string, unknown>,
   offsetX: number,
   offsetY: number,
   uniqueId: (prefix: string) => string,
 ): AnimationElement[] {
-  const box = bbox(asset.elements);
+  const sourceElements = resolveAssetElements(asset, params);
+  const box = bbox(sourceElements);
   const dx = offsetX - box.x;
   const dy = offsetY - box.y;
   const idMap = new Map<string, string>();
   const out: AnimationElement[] = [];
-  for (const el of asset.elements) {
+  for (const el of sourceElements) {
     const newId = uniqueId(el.type);
     idMap.set(el.id, newId);
     const shifted = shiftElement(el, dx, dy);
@@ -125,135 +382,4 @@ export function instantiateAsset(
     out.push(shifted);
   }
   return out;
-}
-
-function builtin(): AssetDef[] {
-  const queue: AssetDef = {
-    id: 'builtin-queue',
-    name: '큐 (Queue) — 3 slot',
-    description: 'FIFO 큐. front/back 라벨 + 3개 슬롯',
-    category: 'queue',
-    builtin: true,
-    elements: [
-      { type: 'rect', id: 'q-s0', rotation: 0, appearances: [], tracks: [], x: 100, y: 100, width: 70, height: 60, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6, label: '', labelColor: '#312e81', labelSize: 18 },
-      { type: 'rect', id: 'q-s1', rotation: 0, appearances: [], tracks: [], x: 175, y: 100, width: 70, height: 60, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6, label: '', labelColor: '#312e81', labelSize: 18 },
-      { type: 'rect', id: 'q-s2', rotation: 0, appearances: [], tracks: [], x: 250, y: 100, width: 70, height: 60, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6, label: '', labelColor: '#312e81', labelSize: 18 },
-      { type: 'text', id: 'q-lbl-front', rotation: 0, appearances: [], tracks: [], x: 135, y: 90, content: 'front', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
-      { type: 'text', id: 'q-lbl-back', rotation: 0, appearances: [], tracks: [], x: 285, y: 90, content: 'back', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
-      { type: 'arrow', id: 'q-arr-in', rotation: 0, appearances: [], tracks: [], x1: 360, y1: 130, x2: 320, y2: 130, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-      { type: 'text', id: 'q-lbl-in', rotation: 0, appearances: [], tracks: [], x: 380, y: 135, content: 'enqueue', fontSize: 12, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
-      { type: 'arrow', id: 'q-arr-out', rotation: 0, appearances: [], tracks: [], x1: 100, y1: 130, x2: 60, y2: 130, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-      { type: 'text', id: 'q-lbl-out', rotation: 0, appearances: [], tracks: [], x: 55, y: 135, content: 'dequeue', fontSize: 12, fontWeight: 700, color: '#dc2626', textAnchor: 'end' },
-    ],
-  };
-
-  const stack: AssetDef = {
-    id: 'builtin-stack',
-    name: '스택 (Stack) — 3 slot',
-    description: 'LIFO 스택. top 라벨 + push/pop 화살표',
-    category: 'stack',
-    builtin: true,
-    elements: [
-      { type: 'rect', id: 's-s2', rotation: 0, appearances: [], tracks: [], x: 200, y: 60, width: 90, height: 50, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6, label: '', labelColor: '#312e81', labelSize: 18 },
-      { type: 'rect', id: 's-s1', rotation: 0, appearances: [], tracks: [], x: 200, y: 115, width: 90, height: 50, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6, label: '', labelColor: '#312e81', labelSize: 18 },
-      { type: 'rect', id: 's-s0', rotation: 0, appearances: [], tracks: [], x: 200, y: 170, width: 90, height: 50, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6, label: '', labelColor: '#312e81', labelSize: 18 },
-      { type: 'text', id: 's-lbl-top', rotation: 0, appearances: [], tracks: [], x: 305, y: 90, content: '← top', fontSize: 13, fontWeight: 700, color: '#64748b', textAnchor: 'start' },
-      { type: 'arrow', id: 's-arr-push', rotation: 0, appearances: [], tracks: [], x1: 130, y1: 50, x2: 195, y2: 85, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-      { type: 'text', id: 's-lbl-push', rotation: 0, appearances: [], tracks: [], x: 80, y: 45, content: 'push', fontSize: 13, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
-      { type: 'arrow', id: 's-arr-pop', rotation: 0, appearances: [], tracks: [], x1: 195, y1: 110, x2: 130, y2: 145, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-      { type: 'text', id: 's-lbl-pop', rotation: 0, appearances: [], tracks: [], x: 80, y: 155, content: 'pop', fontSize: 13, fontWeight: 700, color: '#dc2626', textAnchor: 'start' },
-    ],
-  };
-
-  const arrayDef: AssetDef = {
-    id: 'builtin-array',
-    name: '배열 (Array) — 6 elements',
-    description: '인덱스 0..5 의 빈 배열',
-    category: 'array',
-    builtin: true,
-    elements: [
-      ...[0, 1, 2, 3, 4, 5].flatMap((i) => [
-        {
-          type: 'rect' as const, id: `a-${i}`, rotation: 0, appearances: [], tracks: [],
-          x: 100 + i * 65, y: 100, width: 60, height: 55,
-          fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
-          label: '', labelColor: '#312e81', labelSize: 18,
-        },
-        {
-          type: 'text' as const, id: `a-${i}-idx`, rotation: 0, appearances: [], tracks: [],
-          x: 130 + i * 65, y: 175, content: String(i),
-          fontSize: 11, fontWeight: 600, color: '#94a3b8', textAnchor: 'middle' as const,
-        },
-      ]),
-    ],
-  };
-
-  const tree: AssetDef = {
-    id: 'builtin-tree',
-    name: '이진 트리 (Tree) — depth 3',
-    description: '7개 노드의 완전 이진 트리 (라벨 비어있음)',
-    category: 'tree',
-    builtin: true,
-    elements: [
-      { type: 'line', id: 't-e-1-2', rotation: 0, appearances: [], tracks: [], fromId: 't-n1', toId: 't-n2', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 't-e-1-3', rotation: 0, appearances: [], tracks: [], fromId: 't-n1', toId: 't-n3', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 't-e-2-4', rotation: 0, appearances: [], tracks: [], fromId: 't-n2', toId: 't-n4', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 't-e-2-5', rotation: 0, appearances: [], tracks: [], fromId: 't-n2', toId: 't-n5', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 't-e-3-6', rotation: 0, appearances: [], tracks: [], fromId: 't-n3', toId: 't-n6', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 't-e-3-7', rotation: 0, appearances: [], tracks: [], fromId: 't-n3', toId: 't-n7', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'circle', id: 't-n1', rotation: 0, appearances: [], tracks: [], cx: 250, cy: 80, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 't-n2', rotation: 0, appearances: [], tracks: [], cx: 150, cy: 170, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 't-n3', rotation: 0, appearances: [], tracks: [], cx: 350, cy: 170, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 't-n4', rotation: 0, appearances: [], tracks: [], cx: 90, cy: 260, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 't-n5', rotation: 0, appearances: [], tracks: [], cx: 210, cy: 260, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 't-n6', rotation: 0, appearances: [], tracks: [], cx: 290, cy: 260, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 't-n7', rotation: 0, appearances: [], tracks: [], cx: 410, cy: 260, r: 25, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-    ],
-  };
-
-  const graph: AssetDef = {
-    id: 'builtin-graph',
-    name: '그래프 (Graph) — 5 nodes',
-    description: '5 노드의 무방향 그래프 (pentagon)',
-    category: 'graph',
-    builtin: true,
-    elements: [
-      { type: 'line', id: 'g-e-1-2', rotation: 0, appearances: [], tracks: [], fromId: 'g-n1', toId: 'g-n2', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 'g-e-2-3', rotation: 0, appearances: [], tracks: [], fromId: 'g-n2', toId: 'g-n3', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 'g-e-3-4', rotation: 0, appearances: [], tracks: [], fromId: 'g-n3', toId: 'g-n4', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 'g-e-4-5', rotation: 0, appearances: [], tracks: [], fromId: 'g-n4', toId: 'g-n5', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'line', id: 'g-e-5-1', rotation: 0, appearances: [], tracks: [], fromId: 'g-n5', toId: 'g-n1', stroke: '#94a3b8', strokeWidth: 2 },
-      { type: 'circle', id: 'g-n1', rotation: 0, appearances: [], tracks: [], cx: 250, cy: 80, r: 28, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 'g-n2', rotation: 0, appearances: [], tracks: [], cx: 380, cy: 170, r: 28, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 'g-n3', rotation: 0, appearances: [], tracks: [], cx: 330, cy: 310, r: 28, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 'g-n4', rotation: 0, appearances: [], tracks: [], cx: 170, cy: 310, r: 28, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-      { type: 'circle', id: 'g-n5', rotation: 0, appearances: [], tracks: [], cx: 120, cy: 170, r: 28, fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, label: '', labelColor: '#312e81', labelSize: 16 },
-    ],
-  };
-
-  return [queue, stack, arrayDef, tree, graph];
-}
-
-export function listAssets(): AssetDef[] {
-  return [...builtin(), ...readSaved()];
-}
-
-export function saveAsset(name: string, elements: AnimationElement[], category: AssetDef['category'] = 'custom'): AssetDef {
-  const id = `custom-${Date.now()}`;
-  const asset: AssetDef = {
-    id,
-    name: name.trim() || 'Untitled',
-    category,
-    elements: JSON.parse(JSON.stringify(elements)),
-  };
-  const saved = readSaved();
-  saved.push(asset);
-  writeSaved(saved);
-  return asset;
-}
-
-export function deleteAsset(id: string): void {
-  if (id.startsWith('builtin-')) return;
-  const saved = readSaved().filter((a) => a.id !== id);
-  writeSaved(saved);
 }

@@ -1,5 +1,20 @@
-import { listAssets, deleteAsset, subscribeAssets, instantiateAsset, saveAsset, type AssetDef } from './assets';
-import { addElement, getDef, getSelection, getSelectedElementIds, setSelection, uniqueElementId } from './state';
+import {
+  listAssets,
+  deleteAsset,
+  subscribeAssets,
+  instantiateAsset,
+  saveAsset,
+  type AssetDef,
+  type AssetParam,
+} from './assets';
+import {
+  addElement,
+  getDef,
+  getSelection,
+  getSelectedElementIds,
+  setSelection,
+  uniqueElementId,
+} from './state';
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -26,6 +41,8 @@ export class AssetLibraryDialog {
   private dialog: HTMLDialogElement;
   private list: HTMLElement;
   private searchInput: HTMLInputElement;
+  private paramArea: HTMLElement;
+  private activeAssetId: string | null = null;
 
   constructor() {
     const root = document.createElement('div');
@@ -44,8 +61,13 @@ export class AssetLibraryDialog {
             autocomplete="off"
             aria-label="자산 검색"
           />
-          <p class="studio-asset-hint">자산을 클릭하면 캔버스 가운데에 삽입됩니다. 다중 선택 후 props 패널의 [자산으로 저장] 버튼으로 새 자산을 추가할 수 있습니다.</p>
-          <ul id="studio-asset-list" class="studio-asset-list"></ul>
+          <p class="studio-asset-hint">자산 선택 → 파라미터 조정 → [삽입] 으로 캔버스에 추가.</p>
+          <div class="studio-asset-split">
+            <ul id="studio-asset-list" class="studio-asset-list"></ul>
+            <div id="studio-asset-params" class="studio-asset-params">
+              <p class="studio-asset-empty">왼쪽에서 자산을 선택하세요</p>
+            </div>
+          </div>
         </div>
       </dialog>
     `;
@@ -53,14 +75,17 @@ export class AssetLibraryDialog {
     this.dialog = document.getElementById('studio-asset-dialog') as HTMLDialogElement;
     this.list = document.getElementById('studio-asset-list') as HTMLElement;
     this.searchInput = document.getElementById('studio-asset-search') as HTMLInputElement;
+    this.paramArea = document.getElementById('studio-asset-params') as HTMLElement;
     this.bind();
-    subscribeAssets(() => this.render());
-    this.render();
+    subscribeAssets(() => this.renderList());
+    this.renderList();
   }
 
   open(): void {
     this.searchInput.value = '';
-    this.render();
+    this.activeAssetId = null;
+    this.renderList();
+    this.renderParams();
     if (typeof this.dialog.showModal === 'function') this.dialog.showModal();
     else this.dialog.setAttribute('open', '');
     setTimeout(() => this.searchInput.focus(), 0);
@@ -73,7 +98,7 @@ export class AssetLibraryDialog {
 
   private bind(): void {
     this.dialog.querySelector('[data-asset-close]')?.addEventListener('click', () => this.close());
-    this.searchInput.addEventListener('input', () => this.render());
+    this.searchInput.addEventListener('input', () => this.renderList());
     this.list.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
       const deleteBtn = target.closest<HTMLElement>('[data-asset-delete]');
@@ -85,15 +110,17 @@ export class AssetLibraryDialog {
       }
       const item = target.closest<HTMLElement>('[data-asset-id]');
       if (!item) return;
-      const id = item.dataset.assetId ?? '';
-      const asset = listAssets().find((a) => a.id === id);
-      if (!asset) return;
-      this.insertAsset(asset);
-      this.close();
+      this.activeAssetId = item.dataset.assetId ?? null;
+      this.renderList();
+      this.renderParams();
+    });
+    this.paramArea.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('[data-asset-insert]')) this.insertActive();
     });
   }
 
-  private render(): void {
+  private renderList(): void {
     const q = this.searchInput.value.trim().toLowerCase();
     const all = listAssets();
     const filtered = q
@@ -104,65 +131,99 @@ export class AssetLibraryDialog {
       return;
     }
     this.list.innerHTML = filtered
-      .map((a) => `<li class="studio-asset-item" data-asset-id="${escapeHtml(a.id)}">
+      .map((a) => `<li class="studio-asset-item ${a.id === this.activeAssetId ? 'is-active' : ''}" data-asset-id="${escapeHtml(a.id)}">
         <div class="studio-asset-item-main">
           <div class="studio-asset-item-name">${escapeHtml(a.name)}</div>
-          <div class="studio-asset-item-meta">${CATEGORY_LABEL[a.category] ?? a.category} · ${a.elements.length} elements${a.builtin ? ' · built-in' : ''}</div>
-          ${a.description ? `<div class="studio-asset-item-desc">${escapeHtml(a.description)}</div>` : ''}
+          <div class="studio-asset-item-meta">${CATEGORY_LABEL[a.category] ?? a.category}${a.builtin ? ' · 동적' : ` · ${a.elements.length} elements`}</div>
         </div>
-        <div class="studio-asset-item-actions">
-          <button type="button" class="studio-btn">＋ 삽입</button>
-          ${!a.builtin ? `<button type="button" class="studio-btn studio-btn-danger" data-asset-delete="${escapeHtml(a.id)}" aria-label="삭제">🗑</button>` : ''}
-        </div>
+        ${a.builtin ? '' : `<button type="button" class="studio-btn studio-btn-small studio-btn-danger" data-asset-delete="${escapeHtml(a.id)}" aria-label="삭제">🗑</button>`}
       </li>`)
       .join('');
   }
 
-  private insertAsset(asset: AssetDef): void {
+  private renderParams(): void {
+    if (!this.activeAssetId) {
+      this.paramArea.innerHTML = '<p class="studio-asset-empty">왼쪽에서 자산을 선택하세요</p>';
+      return;
+    }
+    const asset = listAssets().find((a) => a.id === this.activeAssetId);
+    if (!asset) {
+      this.paramArea.innerHTML = '<p class="studio-asset-empty">자산을 찾을 수 없음</p>';
+      return;
+    }
+    if (!asset.builtin) {
+      this.paramArea.innerHTML = `
+        <h3 class="studio-asset-params-title">${escapeHtml(asset.name)}</h3>
+        ${asset.description ? `<p class="studio-asset-item-desc">${escapeHtml(asset.description)}</p>` : ''}
+        <p class="studio-asset-empty">정적 자산 (${asset.elements.length} elements)</p>
+        <button type="button" class="studio-btn studio-btn-primary" data-asset-insert>＋ 캔버스에 삽입</button>
+      `;
+      return;
+    }
+    const fields = asset.params.map((p) => this.renderParamField(p)).join('');
+    this.paramArea.innerHTML = `
+      <h3 class="studio-asset-params-title">${escapeHtml(asset.name)}</h3>
+      ${asset.description ? `<p class="studio-asset-item-desc">${escapeHtml(asset.description)}</p>` : ''}
+      <div class="studio-asset-params-form">${fields}</div>
+      <button type="button" class="studio-btn studio-btn-primary" data-asset-insert>＋ 캔버스에 삽입</button>
+    `;
+  }
+
+  private renderParamField(p: AssetParam): string {
+    const fieldId = `studio-asset-param-${escapeHtml(p.name)}`;
+    const defaultVal = p.default;
+    if (p.type === 'number') {
+      const minAttr = p.min !== undefined ? ` min="${p.min}"` : '';
+      const maxAttr = p.max !== undefined ? ` max="${p.max}"` : '';
+      return `<label class="studio-field">
+        <span>${escapeHtml(p.label)}</span>
+        <input type="number" id="${fieldId}" data-param-name="${escapeHtml(p.name)}" value="${defaultVal as number}"${minAttr}${maxAttr} />
+      </label>`;
+    }
+    if (p.type === 'string-array') {
+      const placeholder = p.placeholder ?? '쉼표 구분 (예: A, B, C)';
+      return `<label class="studio-field">
+        <span>${escapeHtml(p.label)}</span>
+        <input type="text" id="${fieldId}" data-param-name="${escapeHtml(p.name)}" value="${escapeHtml(String(defaultVal ?? ''))}" placeholder="${escapeHtml(placeholder)}" />
+      </label>`;
+    }
+    return `<label class="studio-field">
+      <span>${escapeHtml(p.label)}</span>
+      <input type="text" id="${fieldId}" data-param-name="${escapeHtml(p.name)}" value="${escapeHtml(String(defaultVal ?? ''))}" ${p.placeholder ? `placeholder="${escapeHtml(p.placeholder)}"` : ''} />
+    </label>`;
+  }
+
+  private collectParams(asset: AssetDef): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (!asset.builtin) return out;
+    for (const p of asset.params) {
+      const input = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${CSS.escape(p.name)}"]`);
+      if (!input) {
+        out[p.name] = p.default;
+        continue;
+      }
+      if (p.type === 'number') out[p.name] = Number(input.value);
+      else out[p.name] = input.value;
+    }
+    return out;
+  }
+
+  private insertActive(): void {
+    if (!this.activeAssetId) return;
+    const asset = listAssets().find((a) => a.id === this.activeAssetId);
+    if (!asset) return;
     const def = getDef();
     if (!def) return;
+    const params = this.collectParams(asset);
     const cx = def.canvas.width / 2;
     const cy = def.canvas.height / 2;
-    const box = bboxOfAsset(asset);
-    const offsetX = cx - box.w / 2;
-    const offsetY = cy - box.h / 2;
-    const elements = instantiateAsset(asset, offsetX, offsetY, uniqueElementId);
+    const elements = instantiateAsset(asset, params, cx - 200, cy - 100, uniqueElementId);
     for (const el of elements) addElement(el);
     const ids = elements.map((e) => e.id);
     if (ids.length === 1) setSelection({ kind: 'element', elementId: ids[0] });
     else if (ids.length > 1) setSelection({ kind: 'elements', elementIds: ids });
+    this.close();
   }
-}
-
-function bboxOfAsset(asset: AssetDef): { w: number; h: number } {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const el of asset.elements) {
-    let ex = 0, ey = 0, ew = 0, eh = 0;
-    if (el.type === 'rect' || el.type === 'image') {
-      ex = el.x; ey = el.y; ew = el.width; eh = el.height;
-    } else if (el.type === 'text') {
-      ex = el.x - 50; ey = el.y - 12; ew = 100; eh = 24;
-    } else if (el.type === 'circle') {
-      ex = el.cx - el.r; ey = el.cy - el.r; ew = el.r * 2; eh = el.r * 2;
-    } else if (el.type === 'line' || el.type === 'arrow') {
-      const x1 = el.x1 ?? 0, y1 = el.y1 ?? 0, x2 = el.x2 ?? 0, y2 = el.y2 ?? 0;
-      ex = Math.min(x1, x2); ey = Math.min(y1, y2); ew = Math.abs(x2 - x1); eh = Math.abs(y2 - y1);
-    } else if (el.type === 'polygon') {
-      const pts = el.points.trim().split(/\s+/).map((p) => p.split(',').map(Number));
-      const xs = pts.map((p) => p[0]).filter(Number.isFinite);
-      const ys = pts.map((p) => p[1]).filter(Number.isFinite);
-      if (xs.length === 0) continue;
-      ex = Math.min(...xs); ey = Math.min(...ys); ew = Math.max(...xs) - ex; eh = Math.max(...ys) - ey;
-    } else if (el.type === 'path') {
-      ex = el.x ?? 0; ey = el.y ?? 0; ew = 80; eh = 80;
-    }
-    minX = Math.min(minX, ex);
-    minY = Math.min(minY, ey);
-    maxX = Math.max(maxX, ex + ew);
-    maxY = Math.max(maxY, ey + eh);
-  }
-  if (!Number.isFinite(minX)) return { w: 0, h: 0 };
-  return { w: maxX - minX, h: maxY - minY };
 }
 
 export function saveSelectionAsAsset(): void {
