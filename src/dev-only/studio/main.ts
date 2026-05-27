@@ -23,8 +23,6 @@ import {
   uniqueChapterId,
   getCurrentTime,
   setCurrentTime,
-  addElement,
-  uniqueElementId,
 } from './state';
 import { animationDefSchema } from '../../animations/schema';
 import { initCanvas, showPreview, hidePreview } from './canvas';
@@ -41,6 +39,11 @@ import {
   pasteFromClipboard,
   moveSelectedElement,
 } from './studio-clipboard';
+import {
+  uploadAndInsertImage,
+  setupImageDropAndPaste,
+  type ImageUploadHost,
+} from './studio-image-upload';
 
 interface StudioUi {
   app: HTMLElement;
@@ -271,10 +274,14 @@ export function initStudio(): void {
     if (h >= 100 && h <= 8000) updateCanvas({ height: h });
   });
 
+  const imageHost: ImageUploadHost = {
+    app: ui.app,
+    setStatus: (text, kind) => setStatus(ui, text, kind),
+  };
   ui.imageUploadBtn.addEventListener('click', () => ui.imageFileInput.click());
   ui.imageFileInput.addEventListener('change', () => {
     const file = ui.imageFileInput.files?.[0];
-    if (file) void uploadAndInsertImage(file, ui);
+    if (file) void uploadAndInsertImage(file, imageHost);
     ui.imageFileInput.value = '';
   });
 
@@ -283,7 +290,7 @@ export function initStudio(): void {
     else ui.helpDialog.setAttribute('open', '');
   });
 
-  setupImageDropAndPaste(ui);
+  setupImageDropAndPaste(imageHost);
   setupTimelineResizer(ui);
 
   ui.canvas.addEventListener('dblclick', (e) => {
@@ -489,52 +496,6 @@ function reflectState(ui: StudioUi): void {
   }
 }
 
-async function uploadAndInsertImage(file: File, ui: StudioUi): Promise<void> {
-  const def = getDef();
-  if (!def) {
-    setStatus(ui, '먼저 애니메이션을 열거나 만드세요', 'warn');
-    return;
-  }
-  try {
-    setStatus(ui, '이미지 업로드 중…');
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await fetch('/_editor/api/upload', { method: 'POST', body: fd });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { path: string };
-    const cx = def.canvas.width / 2;
-    const cy = def.canvas.height / 2;
-    const tempImg = await loadImageSize(data.path);
-    const maxDim = Math.min(def.canvas.width, def.canvas.height) * 0.5;
-    let w = tempImg?.w ?? 200;
-    let h = tempImg?.h ?? 200;
-    if (w > maxDim || h > maxDim) {
-      const s = maxDim / Math.max(w, h);
-      w = Math.round(w * s);
-      h = Math.round(h * s);
-    }
-    const id = uniqueElementId('img');
-    addElement({
-      type: 'image', id, rotation: 0, appearances: [], tracks: [],
-      x: Math.round(cx - w / 2), y: Math.round(cy - h / 2),
-      width: w, height: h, src: data.path,
-      preserveAspectRatio: 'xMidYMid meet', opacity: 1,
-    });
-    setStatus(ui, `업로드 완료: ${data.path}`, 'ok');
-  } catch (err) {
-    setStatus(ui, '업로드 실패: ' + (err instanceof Error ? err.message : String(err)), 'error');
-  }
-}
-
-function loadImageSize(src: string): Promise<{ w: number; h: number } | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-    img.onerror = () => resolve(null);
-    img.src = src;
-  });
-}
-
 function setupTimelineResizer(ui: StudioUi): void {
   const resizer = document.getElementById('studio-timeline-resizer');
   if (!resizer) return;
@@ -584,47 +545,6 @@ function setupTimelineResizer(ui: StudioUi): void {
     const h = Math.max(120, Math.min(window.innerHeight * 0.8, current + delta));
     ui.app.style.setProperty('--studio-timeline-h', `${h}px`);
     localStorage.setItem(STORAGE_KEY, String(h));
-  });
-}
-
-function setupImageDropAndPaste(ui: StudioUi): void {
-  const canvasWrap = ui.app.querySelector<HTMLElement>('.studio-canvas-wrap');
-  if (canvasWrap) {
-    canvasWrap.addEventListener('dragover', (e) => {
-      if (!e.dataTransfer) return;
-      const hasFiles = Array.from(e.dataTransfer.items ?? []).some((it) => it.kind === 'file');
-      if (hasFiles) {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy';
-        canvasWrap.classList.add('is-drop-target');
-      }
-    });
-    canvasWrap.addEventListener('dragleave', () => canvasWrap.classList.remove('is-drop-target'));
-    canvasWrap.addEventListener('drop', (e) => {
-      canvasWrap.classList.remove('is-drop-target');
-      const file = e.dataTransfer?.files?.[0];
-      if (file && file.type.startsWith('image/')) {
-        e.preventDefault();
-        void uploadAndInsertImage(file, ui);
-      }
-    });
-  }
-  document.addEventListener('paste', (e) => {
-    if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) {
-      return;
-    }
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of Array.from(items)) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        if (file) {
-          e.preventDefault();
-          void uploadAndInsertImage(file, ui);
-          return;
-        }
-      }
-    }
   });
 }
 
