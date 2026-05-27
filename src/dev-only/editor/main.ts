@@ -7,6 +7,7 @@ import { GitPanel } from './git-panel';
 import { EditorHistory } from './history';
 import { ImageDialogController } from './image-dialog';
 import { AnimationPicker } from './animation-picker';
+import { setupListContinuation } from './list-continuation';
 import { confirmModal } from './modal';
 import {
   clearUiState,
@@ -198,6 +199,7 @@ export function initEditor(): void {
   const wikilink = new WikilinkAutocomplete(textarea);
   const history = new EditorHistory(textarea);
   const findReplace = new FindReplaceBar(textarea);
+  setupListContinuation(textarea);
 
   const frontmatterPanelEl = document.getElementById('editor-frontmatter-panel');
   const frontmatterPanel = frontmatterPanelEl

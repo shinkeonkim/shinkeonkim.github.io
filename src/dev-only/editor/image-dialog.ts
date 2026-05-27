@@ -178,6 +178,9 @@ export class ImageDialogController {
       if (target.dataset.imageCancel !== undefined) this.dialog.close('cancel');
     });
 
+    this.altInput.addEventListener('input', () => {
+      this.altInput.classList.remove('editor-image-alt-invalid');
+    });
     this.form.addEventListener('submit', (e) => {
       e.preventDefault();
       if (!this.pending) {
@@ -186,6 +189,12 @@ export class ImageDialogController {
       }
       const purpose = this.currentPurpose();
       const alt = this.altInput.value.trim();
+      if (purpose !== 'thumbnail' && !alt) {
+        this.sourceStatus.textContent = '⚠ 대체 텍스트(alt) 는 필수입니다 — 접근성 / SEO';
+        this.altInput.classList.add('editor-image-alt-invalid');
+        this.altInput.focus();
+        return;
+      }
       if (purpose === 'cover') {
         const update: Record<string, unknown> = { cover: this.pending.path };
         if (alt) update.coverAlt = alt;
