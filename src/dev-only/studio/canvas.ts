@@ -155,7 +155,6 @@ let endpointDragState: EndpointDragState | null = null;
 let vertexDragState: VertexDragState | null = null;
 let resizeState: ResizeState | null = null;
 let canvasEl: SVGSVGElement | null = null;
-let previewRoot: HTMLDivElement | null = null;
 let hoveredElementId: string | null = null;
 
 export function initCanvas(root: SVGSVGElement): void {
@@ -1500,35 +1499,10 @@ function renderSelectionOutline(
   return rect;
 }
 
+import { showPreview as _showPreview, hidePreview as _hidePreview } from './canvas-preview';
 export function showPreview(def: import('../../animations/schema').AnimationDef): void {
-  if (!canvasEl) return;
-  const parent = canvasEl.parentElement;
-  if (!parent) return;
-  hidePreview();
-  canvasEl.style.visibility = 'hidden';
-  previewRoot = document.createElement('div');
-  const bg = def.canvas.background && def.canvas.background !== 'transparent' ? def.canvas.background : 'transparent';
-  previewRoot.style.cssText = `position:absolute;left:0;top:0;width:${def.canvas.width}px;height:${def.canvas.height}px;background:${bg};z-index:2;overflow:hidden;`;
-  parent.style.position = 'relative';
-  parent.appendChild(previewRoot);
-  void mountReactPreview(previewRoot, def);
+  _showPreview(canvasEl, def);
 }
-
 export function hidePreview(): void {
-  if (canvasEl) canvasEl.style.visibility = '';
-  if (previewRoot) {
-    previewRoot.remove();
-    previewRoot = null;
-  }
-}
-
-async function mountReactPreview(host: HTMLElement, def: import('../../animations/schema').AnimationDef): Promise<void> {
-  const [{ createRoot }, { createElement }, EngineMod] = await Promise.all([
-    import('react-dom/client'),
-    import('react'),
-    import('../../animations/engine'),
-  ]);
-  const Engine = EngineMod.default;
-  const root = createRoot(host);
-  root.render(createElement(Engine, { def, playing: true, speedMultiplier: 1 }));
+  _hidePreview(canvasEl);
 }
