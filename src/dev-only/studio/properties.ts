@@ -329,6 +329,7 @@ function render(): void {
       <div class="studio-props-header"><span class="studio-props-header-title">다중 선택</span><span class="studio-props-header-type">${sel.elementIds.length} elements</span></div>
       <p class="studio-props-empty">${sel.elementIds.length}개 element 가 선택되었습니다.<br/>
       <span style="font-size:0.72rem;color:var(--color-fg-muted)">캔버스에서 드래그 = 함께 이동<br/>화살표 키 = 함께 이동 (Shift 로 10px)<br/>Delete = 모두 삭제<br/>⌘C / ⌘X = 모두 복사 / 잘라내기</span></p>
+      <button type="button" class="studio-btn" data-save-as-asset style="margin-top:0.6rem">📦 자산으로 저장</button>
       <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">선택된 ID</span></div>
       <ul style="font-family:var(--font-mono);font-size:0.72rem;color:var(--color-fg-muted);padding-left:1rem;margin:0">
         ${sel.elementIds.map((id) => `<li>${escapeHtml(id)}</li>`).join('')}

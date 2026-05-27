@@ -28,6 +28,7 @@ import { initElementList } from './element-list';
 import { initProperties } from './properties';
 import { initTimeline } from './timeline';
 import { IconLibraryDialog } from './icon-library';
+import { AssetLibraryDialog, saveSelectionAsAsset } from './asset-library';
 import { initGrid, isGridEnabled, setGridEnabled, getGridSize, subscribeGrid } from './grid';
 import * as api from './api';
 import { updateCanvas } from './state';
@@ -342,6 +343,12 @@ export function initStudio(): void {
 
   const iconDialog = IconLibraryDialog.mount();
   document.getElementById('studio-open-icons')?.addEventListener('click', () => iconDialog?.open());
+
+  const assetDialog = AssetLibraryDialog.mount();
+  document.getElementById('studio-assets')?.addEventListener('click', () => assetDialog?.open());
+  document.body.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('[data-save-as-asset]')) saveSelectionAsAsset();
+  });
 
   ui.toolsRoot.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-canvas-preset]');
