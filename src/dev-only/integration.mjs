@@ -62,6 +62,10 @@ export default function devEditor() {
           pattern: '/_editor/api/url-preview',
           entrypoint: path.join(here, 'api-url-preview.ts'),
         });
+        injectRoute({
+          pattern: '/_editor/api/grep',
+          entrypoint: path.join(here, 'api-grep.ts'),
+        });
       },
     },
   };

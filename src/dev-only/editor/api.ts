@@ -253,7 +253,34 @@ export const api = {
     if (force) q.set('force', '1');
     return jsonRequest(`/_editor/api/url-preview?${q.toString()}`);
   },
+  grep(payload: {
+    query: string;
+    regex: boolean;
+    caseSensitive: boolean;
+    maxResults?: number;
+  }): Promise<GrepResponse> {
+    return jsonRequest('/_editor/api/grep', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
 };
+
+export interface GrepMatch {
+  collection: CollectionName;
+  slug: string;
+  ext: Ext;
+  line: number;
+  column: number;
+  text: string;
+}
+
+export interface GrepResponse {
+  matches: GrepMatch[];
+  truncated: boolean;
+  scanned: number;
+}
 
 export interface UrlPreviewResponse {
   url: string;

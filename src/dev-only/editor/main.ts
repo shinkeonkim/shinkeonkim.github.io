@@ -5,6 +5,7 @@ import { FindReplaceBar } from './find-replace';
 import { FrontmatterPanel } from './frontmatter-panel';
 import { GitPanel } from './git-panel';
 import { EditorHistory } from './history';
+import { GlobalSearch } from './global-search';
 import { ImageDialogController } from './image-dialog';
 import { AnimationPicker } from './animation-picker';
 import { setupListContinuation } from './list-continuation';
@@ -200,6 +201,21 @@ export function initEditor(): void {
   const history = new EditorHistory(textarea);
   const findReplace = new FindReplaceBar(textarea);
   setupListContinuation(textarea);
+  const globalSearch = new GlobalSearch(async (collection, slug, ext, line, column) => {
+    void ext;
+    await loadFile(collection, slug);
+    const value = textarea.value;
+    const lines = value.split('\n');
+    let offset = 0;
+    for (let i = 0; i < Math.min(line - 1, lines.length); i += 1) {
+      offset += lines[i].length + 1;
+    }
+    offset += Math.min(column - 1, lines[line - 1]?.length ?? 0);
+    textarea.focus();
+    textarea.setSelectionRange(offset, offset);
+    const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight || '20');
+    textarea.scrollTop = Math.max(0, (line - 1) * lineHeight - textarea.clientHeight / 2);
+  });
 
   const frontmatterPanelEl = document.getElementById('editor-frontmatter-panel');
   const frontmatterPanel = frontmatterPanelEl
@@ -478,6 +494,11 @@ export function initEditor(): void {
       return;
     }
     const inTextarea = e.target === textarea;
+    if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      globalSearch.toggle();
+      return;
+    }
     if (mod && e.key.toLowerCase() === 'f' && inTextarea) {
       e.preventDefault();
       findReplace.show();
