@@ -19,6 +19,7 @@ import {
   uniqueElementId,
   subscribe,
 } from './state';
+import { snapPoint, subscribeGrid } from './grid';
 import type { Anchor } from '../../animations/schema';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -199,7 +200,7 @@ function svgPoint(clientX: number, clientY: number): { x: number; y: number } | 
   const rect = canvasEl.getBoundingClientRect();
   const sx = def.canvas.width / rect.width;
   const sy = def.canvas.height / rect.height;
-  return { x: (clientX - rect.left) * sx, y: (clientY - rect.top) * sy };
+  return snapPoint({ x: (clientX - rect.left) * sx, y: (clientY - rect.top) * sy });
 }
 
 function findElementId(target: EventTarget | null): string | null {

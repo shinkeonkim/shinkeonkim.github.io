@@ -1,4 +1,6 @@
 import {
+  canRedo,
+  canUndo,
   getDef,
   getSelection,
   isDirty,
@@ -8,6 +10,7 @@ import {
   setDraft,
   promoteDraftToSaved,
   setSelection,
+  setElementBase,
   subscribe,
   updateMeta,
   undo,
@@ -24,6 +27,7 @@ import { initElementList } from './element-list';
 import { initProperties } from './properties';
 import { initTimeline } from './timeline';
 import { IconLibraryDialog } from './icon-library';
+import { initGrid, isGridEnabled, setGridEnabled, getGridSize, subscribeGrid } from './grid';
 import * as api from './api';
 import { updateCanvas } from './state';
 
@@ -60,6 +64,9 @@ interface StudioUi {
   imageFileInput: HTMLInputElement;
   helpBtn: HTMLButtonElement;
   helpDialog: HTMLDialogElement;
+  undoBtn: HTMLButtonElement;
+  redoBtn: HTMLButtonElement;
+  gridToggleBtn: HTMLButtonElement;
 }
 
 function queryUi(): StudioUi | null {
@@ -98,13 +105,17 @@ function queryUi(): StudioUi | null {
   const imageFileInput = $<HTMLInputElement>('studio-image-file');
   const helpBtn = $<HTMLButtonElement>('studio-help');
   const helpDialog = $<HTMLDialogElement>('studio-help-dialog');
+  const undoBtn = $<HTMLButtonElement>('studio-undo');
+  const redoBtn = $<HTMLButtonElement>('studio-redo');
+  const gridToggleBtn = $<HTMLButtonElement>('studio-grid-toggle');
 
   if (
     !titleInput || !idDisplay || !status || !saveBtn || !deleteBtn || !newBtn || !openBtn ||
     !playBtn || !restartBtn || !speedInput || !speedValue || !canvas || !elementList || !toolsRoot ||
     !propsRoot || !timelineTracks || !elementTracks || !addStepBtn || !libraryDialog || !libraryList || !newDialog ||
     !newIdInput || !newTitleInput || !newCreateBtn || !newError ||
-    !canvasWidthInput || !canvasHeightInput || !imageUploadBtn || !imageFileInput || !helpBtn || !helpDialog
+    !canvasWidthInput || !canvasHeightInput || !imageUploadBtn || !imageFileInput || !helpBtn || !helpDialog ||
+    !undoBtn || !redoBtn || !gridToggleBtn
   ) {
     return null;
   }
@@ -115,6 +126,7 @@ function queryUi(): StudioUi | null {
     propsRoot, timelineTracks, elementTracks, addStepBtn, libraryDialog, libraryList, newDialog,
     newIdInput, newTitleInput, newCreateBtn, newError,
     canvasWidthInput, canvasHeightInput, imageUploadBtn, imageFileInput, helpBtn, helpDialog,
+    undoBtn, redoBtn, gridToggleBtn,
   };
 }
 
@@ -168,6 +180,125 @@ function pasteFromClipboard(): boolean {
   return true;
 }
 
+function moveSelectedElement(dx: number, dy: number): boolean {
+  const sel = getSelection();
+  if (sel.kind !== 'element') return false;
+  const def = getDef();
+  if (!def) return false;
+  const el = def.elements.find((e) => e.id === sel.elementId);
+  if (!el) return false;
+  const patch: Record<string, unknown> = {};
+  if (el.type === 'rect' || el.type === 'image' || el.type === 'text') {
+    patch.x = el.x + dx;
+    patch.y = el.y + dy;
+  } else if (el.type === 'circle') {
+    patch.cx = el.cx + dx;
+    patch.cy = el.cy + dy;
+  } else if (el.type === 'line' || el.type === 'arrow') {
+    if (typeof el.x1 === 'number') patch.x1 = el.x1 + dx;
+    if (typeof el.y1 === 'number') patch.y1 = el.y1 + dy;
+    if (typeof el.x2 === 'number') patch.x2 = el.x2 + dx;
+    if (typeof el.y2 === 'number') patch.y2 = el.y2 + dy;
+  } else if (el.type === 'path') {
+    patch.x = (el.x ?? 0) + dx;
+    patch.y = (el.y ?? 0) + dy;
+  } else if (el.type === 'polygon') {
+    const pts = el.points.trim().split(/\s+/).map((pair) => {
+      const [x, y] = pair.split(',').map(Number);
+      if (Number.isFinite(x) && Number.isFinite(y)) return `${x + dx},${y + dy}`;
+      return pair;
+    });
+    patch.points = pts.join(' ');
+  } else {
+    return false;
+  }
+  setElementBase(sel.elementId, patch);
+  return true;
+}
+
+function reflectGridUi(ui: StudioUi): void {
+  const on = isGridEnabled();
+  ui.gridToggleBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  ui.gridToggleBtn.classList.toggle('is-active', on);
+  document.body.classList.toggle('studio-grid-on', on);
+  ui.app.style.setProperty('--studio-grid-size', `${getGridSize()}px`);
+}
+
+function startInlineTextEdit(canvas: SVGSVGElement, el: { id: string; x: number; y: number; content: string; fontSize?: number; fontWeight?: string | number; color?: string }): void {
+  canvas.querySelectorAll('[data-inline-text-editor]').forEach((n) => n.remove());
+  const fontSize = el.fontSize ?? 16;
+  const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
+  fo.setAttribute('data-inline-text-editor', '');
+  fo.setAttribute('x', String(el.x - 8));
+  fo.setAttribute('y', String(el.y - fontSize));
+  const width = Math.max(160, (el.content?.length ?? 5) * fontSize * 0.7);
+  fo.setAttribute('width', String(width));
+  fo.setAttribute('height', String(fontSize * 1.6));
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = el.content ?? '';
+  Object.assign(input.style, {
+    width: '100%',
+    height: '100%',
+    boxSizing: 'border-box',
+    border: '2px solid #6366f1',
+    borderRadius: '4px',
+    background: 'rgba(255, 255, 255, 0.96)',
+    padding: '0 6px',
+    font: `${el.fontWeight ?? 400} ${fontSize}px ui-sans-serif,system-ui,sans-serif`,
+    color: el.color ?? '#0f172a',
+    outline: 'none',
+    boxShadow: '0 0 0 3px rgba(99, 102, 241, 0.2)',
+  });
+  fo.appendChild(input);
+  canvas.appendChild(fo);
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+  let settled = false;
+  const commit = (): void => {
+    if (settled) return;
+    settled = true;
+    const newContent = input.value;
+    fo.remove();
+    if (newContent !== el.content) {
+      setElementBase(el.id, { content: newContent });
+    }
+  };
+  const cancel = (): void => {
+    if (settled) return;
+    settled = true;
+    fo.remove();
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+}
+
+function selectAdjacentElement(direction: 1 | -1): boolean {
+  const def = getDef();
+  if (!def || def.elements.length === 0) return false;
+  const sel = getSelection();
+  if (sel.kind !== 'element') {
+    const target = direction === 1 ? def.elements[0] : def.elements[def.elements.length - 1];
+    setSelection({ kind: 'element', elementId: target.id });
+    return true;
+  }
+  const idx = def.elements.findIndex((e) => e.id === sel.elementId);
+  if (idx < 0) return false;
+  const nextIdx = (idx + direction + def.elements.length) % def.elements.length;
+  setSelection({ kind: 'element', elementId: def.elements[nextIdx].id });
+  return true;
+}
+
 export function initStudio(): void {
   const ui = queryUi();
   if (!ui) {
@@ -176,6 +307,10 @@ export function initStudio(): void {
   }
   document.body.classList.add('editor-active');
   document.documentElement.classList.add('editor-active');
+
+  initGrid();
+  reflectGridUi(ui);
+  subscribeGrid(() => reflectGridUi(ui));
 
   initCanvas(ui.canvas);
   initElementList(ui.elementList, ui.toolsRoot);
@@ -218,6 +353,18 @@ export function initStudio(): void {
   setupImageDropAndPaste(ui);
   setupTimelineResizer(ui);
 
+  ui.canvas.addEventListener('dblclick', (e) => {
+    const target = (e.target as Element).closest<SVGGElement>('[data-elem-id]');
+    if (!target) return;
+    const id = target.getAttribute('data-elem-id');
+    if (!id) return;
+    const def = getDef();
+    const el = def?.elements.find((x) => x.id === id);
+    if (!el || el.type !== 'text') return;
+    e.preventDefault();
+    startInlineTextEdit(ui.canvas, el);
+  });
+
   subscribe(() => reflectState(ui));
   reflectState(ui);
 
@@ -229,6 +376,9 @@ export function initStudio(): void {
   ui.newBtn.addEventListener('click', () => openNewDialog(ui));
   ui.saveBtn.addEventListener('click', () => void saveCurrent(ui));
   ui.deleteBtn.addEventListener('click', () => void deleteCurrent(ui));
+  ui.undoBtn.addEventListener('click', () => undo());
+  ui.redoBtn.addEventListener('click', () => redo());
+  ui.gridToggleBtn.addEventListener('click', () => setGridEnabled(!isGridEnabled()));
   ui.playBtn.addEventListener('click', () => togglePlay(ui));
   ui.restartBtn.addEventListener('click', () => {
     if (playState === 'playing') {
@@ -282,6 +432,25 @@ export function initStudio(): void {
         e.preventDefault();
         deleteStep(sel.stepId);
       }
+      return;
+    }
+
+    if (!inText && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const step = e.shiftKey ? 10 : 1;
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+      const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+      if (moveSelectedElement(dx, dy)) e.preventDefault();
+      return;
+    }
+
+    if (!inText && !mod && e.key === 'Tab') {
+      if (selectAdjacentElement(e.shiftKey ? -1 : 1)) e.preventDefault();
+      return;
+    }
+
+    if (!inText && !mod && (e.key === 'g' || e.key === 'G')) {
+      e.preventDefault();
+      setGridEnabled(!isGridEnabled());
       return;
     }
 
@@ -346,6 +515,8 @@ function startDraft(): void {
 }
 
 function reflectState(ui: StudioUi): void {
+  ui.undoBtn.disabled = !canUndo();
+  ui.redoBtn.disabled = !canRedo();
   const def = getDef();
   if (!def) {
     ui.titleInput.value = '';
@@ -565,17 +736,9 @@ async function openLibrary(ui: StudioUi): Promise<void> {
       if (dupBtn) {
         const sourceId = dupBtn.dataset.dupId ?? '';
         const sourceTitle = dupBtn.dataset.dupTitle ?? '';
-        const newId = prompt(`복제할 새 ID (영문 소문자 / 숫자 / - / _):`, `${sourceId}-copy`);
-        if (!newId || !/^[a-z0-9][a-z0-9_-]*$/.test(newId)) return;
-        const newTitle = prompt('새 제목:', `${sourceTitle} (사본)`) ?? newId;
-        try {
-          const def = await api.duplicateAnimation(sourceId, newId, newTitle);
-          setStatus(ui, `복제 완료: ${def.id}`, 'ok');
-          ui.libraryList.removeEventListener('click', onClick);
-          await openLibrary(ui);
-        } catch (err) {
-          setStatus(ui, '복제 실패: ' + (err instanceof Error ? err.message : String(err)), 'error');
-        }
+        ui.libraryDialog.close();
+        ui.libraryList.removeEventListener('click', onClick);
+        openDuplicateDialog(ui, sourceId, sourceTitle);
       }
     };
     ui.libraryList.addEventListener('click', onClick);
@@ -596,11 +759,29 @@ async function loadAnimation(ui: StudioUi, id: string): Promise<void> {
   }
 }
 
+function setNewDialogTitle(text: string): void {
+  const titleEl = document.getElementById('studio-new-dialog-title');
+  if (titleEl) titleEl.textContent = text;
+}
+
 function openNewDialog(ui: StudioUi): void {
   ui.newIdInput.value = '';
   ui.newTitleInput.value = '';
   ui.newError.textContent = '';
   ui.newDialog.dataset.mode = 'create';
+  delete ui.newDialog.dataset.sourceId;
+  setNewDialogTitle('새 애니메이션 만들기');
+  if (typeof ui.newDialog.showModal === 'function') ui.newDialog.showModal();
+  else ui.newDialog.setAttribute('open', '');
+}
+
+function openDuplicateDialog(ui: StudioUi, sourceId: string, sourceTitle: string): void {
+  ui.newIdInput.value = `${sourceId}-copy`;
+  ui.newTitleInput.value = `${sourceTitle} (사본)`;
+  ui.newError.textContent = '';
+  ui.newDialog.dataset.mode = 'duplicate';
+  ui.newDialog.dataset.sourceId = sourceId;
+  setNewDialogTitle(`"${sourceId}" 복제`);
   if (typeof ui.newDialog.showModal === 'function') ui.newDialog.showModal();
   else ui.newDialog.setAttribute('open', '');
 }
@@ -615,6 +796,20 @@ async function createNew(ui: StudioUi): Promise<void> {
   const mode = ui.newDialog.dataset.mode ?? 'create';
   if (mode === 'draft-save') {
     await saveDraftWithId(ui, id, title);
+    return;
+  }
+  if (mode === 'duplicate') {
+    const sourceId = ui.newDialog.dataset.sourceId ?? '';
+    try {
+      const def = await api.duplicateAnimation(sourceId, id, title);
+      setDef(def);
+      markClean();
+      ui.newDialog.close();
+      delete ui.newDialog.dataset.sourceId;
+      setStatus(ui, `복제 완료: ${def.id}`, 'ok');
+    } catch (err) {
+      ui.newError.textContent = err instanceof Error ? err.message : String(err);
+    }
     return;
   }
   try {
