@@ -354,6 +354,29 @@ export function removeTrackKeyframe(elementId: string, property: string, time: n
   });
 }
 
+export function setElementValueAtTime(elementId: string, patch: Record<string, unknown>): void {
+  const time = state.currentTime;
+  if (time <= 0) {
+    updateElementBase(elementId, patch);
+    return;
+  }
+  if (!state.def) return;
+  const el = state.def.elements.find((e) => e.id === elementId);
+  if (!el) return;
+  for (const [prop, value] of Object.entries(patch)) {
+    if (value === null || value === undefined) continue;
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') continue;
+    const hasTrack = el.tracks.some((t) => t.property === prop);
+    if (!hasTrack) {
+      const baseVal = (el as unknown as Record<string, unknown>)[prop];
+      if (typeof baseVal === 'string' || typeof baseVal === 'number' || typeof baseVal === 'boolean') {
+        setTrackKeyframe(elementId, prop, 0, baseVal);
+      }
+    }
+    setTrackKeyframe(elementId, prop, time, value);
+  }
+}
+
 export function removeTrack(elementId: string, property: string): void {
   mutateDef((def) => {
     const el = def.elements.find((e) => e.id === elementId);

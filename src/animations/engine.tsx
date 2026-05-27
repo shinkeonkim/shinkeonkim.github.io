@@ -145,7 +145,6 @@ export default function AnimationEngine({
   onTimeChange,
 }: EngineProps) {
   const [time, setTime] = useState(0);
-  const [now, setNow] = useState(() => performance.now());
   const rafRef = useRef<number | null>(null);
   const lastFrameTime = useRef<number | null>(null);
 
@@ -173,7 +172,6 @@ export default function AnimationEngine({
         }
         return next;
       });
-      setNow(t);
       rafRef.current = requestAnimationFrame(frame);
     }
     rafRef.current = requestAnimationFrame(frame);

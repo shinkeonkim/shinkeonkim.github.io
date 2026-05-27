@@ -9,8 +9,11 @@ import {
   getSelection,
   removeAppearance,
   removeTrack,
+  removeTrackKeyframe,
+  setCurrentTime,
   setSelection,
   setTrackKeyframe,
+  setElementValueAtTime,
   subscribe,
   updateAppearance,
   updateCanvas,
@@ -316,19 +319,24 @@ function renderAppearances(def: AnimationDef, el: AnimationElement): string {
 
 function renderTracks(el: AnimationElement): string {
   if (el.tracks.length === 0) {
-    return '<p class="studio-props-empty">트랙 없음</p>';
+    return '<p class="studio-props-empty" style="font-size:0.72rem">트랙 없음. 시간 t&gt;0 에서 base 속성을 바꾸면 자동 생성됩니다.</p>';
   }
   return el.tracks
     .map((t) => {
       const list = t.keyframes
-        .map((kf) => `<li>t=${kf.time}ms: <code>${escapeHtml(String(kf.value))}</code></li>`)
+        .map((kf, idx) => `<li>
+          <button type="button" class="studio-tl-kf-btn" data-jump-time="${kf.time}" title="${kf.time}ms 로 이동">t=${kf.time}ms</button>
+          <code>${escapeHtml(String(kf.value))}</code>
+          <button type="button" class="studio-btn studio-btn-small studio-btn-danger" data-remove-kf-prop="${escapeHtml(t.property)}" data-remove-kf-time="${kf.time}" data-kf-idx="${idx}" title="삭제">✕</button>
+        </li>`)
         .join('');
       return `
         <div class="studio-track-row">
           <div class="studio-track-row-head">
             <span class="studio-track-row-prop">${escapeHtml(t.property)}</span>
             <span class="studio-track-row-count">${t.keyframes.length} kf</span>
-            <button type="button" class="studio-btn studio-btn-small studio-btn-danger" data-remove-track="${escapeHtml(t.property)}">✕</button>
+            <button type="button" class="studio-btn studio-btn-small" data-add-kf="${escapeHtml(t.property)}" title="현재 시간에 keyframe 추가">＋ kf</button>
+            <button type="button" class="studio-btn studio-btn-small studio-btn-danger" data-remove-track="${escapeHtml(t.property)}" title="트랙 삭제">✕</button>
           </div>
           <ul class="studio-track-list">${list}</ul>
         </div>
@@ -448,6 +456,28 @@ function onClick(e: Event): void {
   const removeTk = target.closest<HTMLElement>('[data-remove-track]');
   if (removeTk && sel.kind === 'element') {
     removeTrack(sel.elementId, removeTk.dataset.removeTrack ?? '');
+    return;
+  }
+  const removeKf = target.closest<HTMLElement>('[data-remove-kf-prop]');
+  if (removeKf && sel.kind === 'element') {
+    const prop = removeKf.dataset.removeKfProp ?? '';
+    const time = Number(removeKf.dataset.removeKfTime ?? '0');
+    removeTrackKeyframe(sel.elementId, prop, time);
+    return;
+  }
+  const addKf = target.closest<HTMLElement>('[data-add-kf]');
+  if (addKf && sel.kind === 'element') {
+    const prop = addKf.dataset.addKf ?? '';
+    const el = def.elements.find((e) => e.id === sel.elementId);
+    const baseVal = el ? (el as unknown as Record<string, unknown>)[prop] : undefined;
+    if (typeof baseVal === 'string' || typeof baseVal === 'number' || typeof baseVal === 'boolean') {
+      setTrackKeyframe(sel.elementId, prop, getCurrentTime(), baseVal);
+    }
+    return;
+  }
+  const jumpTime = target.closest<HTMLElement>('[data-jump-time]');
+  if (jumpTime) {
+    setCurrentTime(Number(jumpTime.dataset.jumpTime ?? '0'));
     return;
   }
   const addAp = target.closest('[data-add-appearance]');
