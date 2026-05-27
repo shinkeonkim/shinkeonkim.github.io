@@ -26,8 +26,26 @@ import {
 } from './state';
 import { snapPoint, subscribeGrid } from './grid';
 import type { Anchor } from '../../animations/schema';
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
+import {
+  SVG_NS,
+  escapeXml,
+  centerOfElement,
+  anchorPointsOf,
+  firstPolygonPoint,
+  shiftPolygonPoints,
+  textBBoxOnCanvas,
+  resolveArrowCoords,
+  resolveLineCoords,
+} from './canvas-utils';
+import {
+  renderResizeHandles,
+  renderRotationHandle,
+  renderAnchorDots,
+  renderLineEndpointHandles,
+  renderPolygonVertexHandles,
+  renderSnapTargets,
+  renderSelectionOutline,
+} from './canvas-handles';
 
 interface DragExtra {
   id: string;
@@ -305,7 +323,7 @@ function onMouseDown(e: MouseEvent): void {
       rs.startCy = elState.cy as number;
       rs.startR = elState.r as number;
     } else if (baseEl.type === 'text') {
-      const bbox = textBBoxOnCanvas(id);
+      const bbox = textBBoxOnCanvas(canvasEl, id);
       rs.startX = bbox?.x ?? (elState.x as number);
       rs.startY = bbox?.y ?? (elState.y as number);
       rs.startW = bbox?.w ?? 100;
@@ -606,21 +624,6 @@ function onMouseUp(e: MouseEvent): void {
   rotateState = null;
 }
 
-function centerOfElement(
-  baseEl: import('../../animations/schema').AnimationElement,
-  state: Record<string, unknown>,
-): { x: number; y: number } | null {
-  if (baseEl.type === 'rect' || baseEl.type === 'image') {
-    return {
-      x: (state.x as number) + (state.width as number) / 2,
-      y: (state.y as number) + (state.height as number) / 2,
-    };
-  }
-  if (baseEl.type === 'circle') return { x: state.cx as number, y: state.cy as number };
-  if (baseEl.type === 'text') return { x: state.x as number, y: state.y as number };
-  return null;
-}
-
 function applyMove(
   baseEl: AnimationElement,
   state: Record<string, unknown>,
@@ -672,68 +675,6 @@ function readPositionAnchor(
     return first;
   }
   return null;
-}
-
-function firstPolygonPoint(points: string): { x: number; y: number } | null {
-  const first = points.trim().split(/\s+/)[0];
-  if (!first) return null;
-  const [x, y] = first.split(',').map(Number);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x, y };
-}
-
-function shiftPolygonPoints(points: string, dx: number, dy: number): string {
-  return points
-    .trim()
-    .split(/\s+/)
-    .map((pair) => {
-      const [x, y] = pair.split(',').map(Number);
-      if (Number.isFinite(x) && Number.isFinite(y)) return `${(x + dx).toFixed(1)},${(y + dy).toFixed(1)}`;
-      return pair;
-    })
-    .join(' ');
-}
-
-function polygonBoundingBox(points: string): { x: number; y: number; w: number; h: number } | null {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  let any = false;
-  for (const pair of points.trim().split(/\s+/)) {
-    const [x, y] = pair.split(',').map(Number);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    any = true;
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-  }
-  if (!any) return null;
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-}
-
-function pathBBoxOnCanvas(elementId: string): { x: number; y: number; w: number; h: number } | null {
-  if (!canvasEl) return null;
-  const g = canvasEl.querySelector<SVGGElement>(`[data-elem-id="${cssAttrEscape(elementId)}"]`);
-  if (!g) return null;
-  try {
-    const bbox = g.getBBox();
-    return { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
-  } catch {
-    return null;
-  }
-}
-
-function textBBoxOnCanvas(elementId: string): { x: number; y: number; w: number; h: number } | null {
-  if (!canvasEl) return null;
-  const g = canvasEl.querySelector<SVGGElement>(`[data-elem-id="${cssAttrEscape(elementId)}"]`);
-  if (!g) return null;
-  const textEl = g.querySelector('text');
-  if (!textEl) return null;
-  try {
-    const bbox = textEl.getBBox();
-    return { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
-  } catch {
-    return null;
-  }
 }
 
 function handleResizeMove(e: MouseEvent): void {
@@ -813,62 +754,6 @@ function handleResizeMove(e: MouseEvent): void {
   }
 }
 
-function renderResizeHandles(
-  elId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const baseEl = byId.get(elId);
-  const state = snap.get(elId);
-  if (!baseEl || !state) return null;
-  let box: { x: number; y: number; w: number; h: number };
-  let handles: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
-  if (baseEl.type === 'rect' || baseEl.type === 'image') {
-    box = { x: state.x as number, y: state.y as number, w: state.width as number, h: state.height as number };
-  } else if (baseEl.type === 'circle') {
-    const r = state.r as number;
-    box = { x: (state.cx as number) - r, y: (state.cy as number) - r, w: r * 2, h: r * 2 };
-    handles = ['n', 'e', 's', 'w'];
-  } else if (baseEl.type === 'text') {
-    const bbox = textBBoxOnCanvas(elId);
-    if (!bbox) return null;
-    box = bbox;
-    handles = ['se'];
-  } else {
-    return null;
-  }
-  const positions: Record<ResizeHandle, { x: number; y: number; cursor: string }> = {
-    nw: { x: box.x, y: box.y, cursor: 'nwse-resize' },
-    n: { x: box.x + box.w / 2, y: box.y, cursor: 'ns-resize' },
-    ne: { x: box.x + box.w, y: box.y, cursor: 'nesw-resize' },
-    e: { x: box.x + box.w, y: box.y + box.h / 2, cursor: 'ew-resize' },
-    se: { x: box.x + box.w, y: box.y + box.h, cursor: 'nwse-resize' },
-    s: { x: box.x + box.w / 2, y: box.y + box.h, cursor: 'ns-resize' },
-    sw: { x: box.x, y: box.y + box.h, cursor: 'nesw-resize' },
-    w: { x: box.x, y: box.y + box.h / 2, cursor: 'ew-resize' },
-  };
-  const g = document.createElementNS(SVG_NS, 'g');
-  const rotation = (state.rotation as number) || 0;
-  if (rotation && (baseEl.type === 'rect' || baseEl.type === 'image' || baseEl.type === 'circle')) {
-    const cx = box.x + box.w / 2;
-    const cy = box.y + box.h / 2;
-    g.setAttribute('transform', `rotate(${rotation} ${cx} ${cy})`);
-  }
-  let html = '';
-  for (const h of handles) {
-    const p = positions[h];
-    html += `<rect x="${p.x - 5}" y="${p.y - 5}" width="10" height="10"
-      fill="white" stroke="var(--color-accent)" stroke-width="2" rx="2"
-      data-resize-handle="${h}" data-elem-id="${escapeXml(elId)}" style="cursor: ${p.cursor}" />`;
-  }
-  g.innerHTML = html;
-  return g;
-}
-
-function cssAttrEscape(s: string): string {
-  return s.replace(/["\\]/g, (m) => `\\${m}`);
-}
-
 function render(): void {
   if (!canvasEl) return;
   const def = getDef();
@@ -902,7 +787,7 @@ function render(): void {
 
   const selection = getSelection();
   if (selection.kind === 'element') {
-    const outline = renderSelectionOutline(selection.elementId, snap, elementsById);
+    const outline = renderSelectionOutline(canvasEl, selection.elementId, snap, elementsById);
     if (outline) canvasEl.appendChild(outline);
     const handle = renderRotationHandle(selection.elementId, snap, elementsById);
     if (handle) canvasEl.appendChild(handle);
@@ -910,17 +795,22 @@ function render(): void {
     if (endpoints) canvasEl.appendChild(endpoints);
     const vertices = renderPolygonVertexHandles(selection.elementId, snap, elementsById);
     if (vertices) canvasEl.appendChild(vertices);
-    const resize = renderResizeHandles(selection.elementId, snap, elementsById);
+    const resize = renderResizeHandles(canvasEl, selection.elementId, snap, elementsById);
     if (resize) canvasEl.appendChild(resize);
   } else if (selection.kind === 'elements') {
     for (const elId of selection.elementIds) {
-      const outline = renderSelectionOutline(elId, snap, elementsById);
+      const outline = renderSelectionOutline(canvasEl, elId, snap, elementsById);
       if (outline) canvasEl.appendChild(outline);
     }
   }
 
   if (endpointDragState) {
-    const guides = renderSnapTargets(endpointDragState.elementId, snap, elementsById);
+    const guides = renderSnapTargets(
+      endpointDragState.elementId,
+      snap,
+      elementsById,
+      endpointDragState.snapTarget,
+    );
     if (guides) canvasEl.appendChild(guides);
   }
 
@@ -948,149 +838,6 @@ function render(): void {
   }
 }
 
-function renderRotationHandle(
-  elId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const baseEl = byId.get(elId);
-  const state = snap.get(elId);
-  if (!baseEl || !state) return null;
-  const center = centerOfElement(baseEl, state);
-  if (!center) return null;
-  let topY: number | null = null;
-  if (baseEl.type === 'rect' || baseEl.type === 'image') topY = (state.y as number) - 24;
-  else if (baseEl.type === 'circle') topY = (state.cy as number) - (state.r as number) - 24;
-  if (topY === null) return null;
-
-  const g = document.createElementNS(SVG_NS, 'g');
-  const rotation = (state.rotation as number) || 0;
-  if (rotation) g.setAttribute('transform', `rotate(${rotation} ${center.x} ${center.y})`);
-  g.innerHTML = `
-    <line x1="${center.x}" y1="${center.y}" x2="${center.x}" y2="${topY + 8}" stroke="var(--color-accent)" stroke-width="1.5" stroke-dasharray="3 2" pointer-events="none" />
-    <circle cx="${center.x}" cy="${topY}" r="8" fill="var(--color-accent)" stroke="white" stroke-width="2" data-rotate-handle="${escapeXml(elId)}" style="cursor: grab" />
-    <text x="${center.x + 14}" y="${topY + 4}" font-size="10" fill="var(--color-accent)" font-family="ui-monospace, monospace" pointer-events="none">${Math.round(rotation)}°</text>
-  `;
-  return g;
-}
-
-function renderAnchorDots(
-  elId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const baseEl = byId.get(elId);
-  const state = snap.get(elId);
-  if (!baseEl || !state) return null;
-  if (baseEl.type !== 'rect' && baseEl.type !== 'circle' && baseEl.type !== 'image') return null;
-  const points = anchorPointsOf(baseEl, state);
-  const g = document.createElementNS(SVG_NS, 'g');
-  for (const p of points) {
-    g.innerHTML += `<circle cx="${p.x}" cy="${p.y}" r="6" fill="white" stroke="#6366f1" stroke-width="2"
-      data-anchor-handle data-elem-id="${escapeXml(elId)}" data-anchor="${p.anchor}" style="cursor: crosshair" />`;
-  }
-  return g;
-}
-
-function renderLineEndpointHandles(
-  elId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const baseEl = byId.get(elId);
-  const state = snap.get(elId);
-  if (!baseEl || !state) return null;
-  if (baseEl.type !== 'line' && baseEl.type !== 'arrow') return null;
-  const coords = baseEl.type === 'line'
-    ? resolveLineCoords(state as unknown as LineElement, snap, byId)
-    : resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
-  if (!coords) return null;
-  const midX = (coords.x1 + coords.x2) / 2;
-  const midY = (coords.y1 + coords.y2) / 2;
-  const g = document.createElementNS(SVG_NS, 'g');
-  g.innerHTML = `
-    <rect x="${coords.x1 - 6}" y="${coords.y1 - 6}" width="12" height="12" rx="2"
-      fill="white" stroke="var(--color-accent)" stroke-width="2"
-      data-endpoint-handle="start" data-elem-id="${escapeXml(elId)}" style="cursor: grab" />
-    <rect x="${coords.x2 - 6}" y="${coords.y2 - 6}" width="12" height="12" rx="2"
-      fill="white" stroke="var(--color-accent)" stroke-width="2"
-      data-endpoint-handle="end" data-elem-id="${escapeXml(elId)}" style="cursor: grab" />
-    <circle cx="${midX}" cy="${midY}" r="6"
-      fill="var(--color-accent)" stroke="white" stroke-width="2"
-      data-line-mid-handle data-elem-id="${escapeXml(elId)}" style="cursor: move" />
-  `;
-  return g;
-}
-
-function renderPolygonVertexHandles(
-  elId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const baseEl = byId.get(elId);
-  const state = snap.get(elId);
-  if (!baseEl || !state) return null;
-  if (baseEl.type !== 'polygon') return null;
-  const points = String(state.points ?? '').trim().split(/\s+/);
-  const parsed: { x: number; y: number; i: number }[] = [];
-  for (let i = 0; i < points.length; i += 1) {
-    const [x, y] = points[i].split(',').map(Number);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    parsed.push({ x, y, i });
-  }
-  const g = document.createElementNS(SVG_NS, 'g');
-  let html = '';
-  if (parsed.length >= 2) {
-    for (let i = 0; i < parsed.length; i += 1) {
-      const a = parsed[i];
-      const b = parsed[(i + 1) % parsed.length];
-      const mx = (a.x + b.x) / 2;
-      const my = (a.y + b.y) / 2;
-      html += `<g data-vertex-add data-elem-id="${escapeXml(elId)}" data-after-index="${a.i}" style="cursor: copy">
-        <circle cx="${mx}" cy="${my}" r="6" fill="rgba(99, 102, 241, 0.15)" stroke="var(--color-accent)" stroke-width="1.5" stroke-dasharray="2 2" />
-        <text x="${mx}" y="${my + 3}" text-anchor="middle" font-size="10" fill="var(--color-accent)" font-weight="700" pointer-events="none">+</text>
-      </g>`;
-    }
-  }
-  for (const p of parsed) {
-    const removable = parsed.length > 3;
-    html += `<circle cx="${p.x}" cy="${p.y}" r="6" fill="white" stroke="var(--color-accent)" stroke-width="2"
-      data-vertex-handle data-elem-id="${escapeXml(elId)}" data-vertex-index="${p.i}"
-      style="cursor: grab" >
-      <title>${removable ? '드래그=이동, 우클릭=삭제' : '드래그=이동'}</title>
-    </circle>`;
-  }
-  g.innerHTML = html;
-  return g;
-}
-
-function renderSnapTargets(
-  draggingElementId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const g = document.createElementNS(SVG_NS, 'g');
-  let html = '';
-  for (const baseEl of byId.values()) {
-    if (baseEl.id === draggingElementId) continue;
-    if (baseEl.type !== 'rect' && baseEl.type !== 'circle' && baseEl.type !== 'image') continue;
-    const state = snap.get(baseEl.id);
-    if (!state || !state.visible) continue;
-    const points = anchorPointsOf(baseEl, state);
-    for (const p of points) {
-      const isActive =
-        endpointDragState?.snapTarget?.elementId === baseEl.id &&
-        endpointDragState?.snapTarget?.anchor === p.anchor;
-      const fill = isActive ? 'var(--color-accent)' : 'white';
-      const stroke = isActive ? 'white' : 'var(--color-accent)';
-      const r = isActive ? 8 : 5;
-      html += `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2" opacity="${isActive ? 1 : 0.7}" pointer-events="none" />`;
-    }
-  }
-  g.innerHTML = html;
-  return g;
-}
-
 function findSnapTarget(
   x: number,
   y: number,
@@ -1116,40 +863,6 @@ function findSnapTarget(
   }
   if (!best) return null;
   return { elementId: best.elementId, anchor: best.anchor, x: best.x, y: best.y };
-}
-
-function anchorPointsOf(
-  baseEl: AnimationElement,
-  state: Record<string, unknown>,
-): { x: number; y: number; anchor: Anchor }[] {
-  if (baseEl.type === 'rect' || baseEl.type === 'image') {
-    const x = state.x as number;
-    const y = state.y as number;
-    const w = state.width as number;
-    const h = state.height as number;
-    return [
-      { x: x + w / 2, y, anchor: 'top' },
-      { x: x + w, y: y + h / 2, anchor: 'right' },
-      { x: x + w / 2, y: y + h, anchor: 'bottom' },
-      { x, y: y + h / 2, anchor: 'left' },
-    ];
-  }
-  if (baseEl.type === 'circle') {
-    const cx = state.cx as number;
-    const cy = state.cy as number;
-    const r = state.r as number;
-    return [
-      { x: cx, y: cy - r, anchor: 'top' },
-      { x: cx + r, y: cy, anchor: 'right' },
-      { x: cx, y: cy + r, anchor: 'bottom' },
-      { x: cx - r, y: cy, anchor: 'left' },
-    ];
-  }
-  return [];
-}
-
-function escapeXml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function makeG(elementId: string, rotation: number, cx: number, cy: number): SVGGElement {
@@ -1273,230 +986,6 @@ function renderElement(
     return g;
   }
   return null;
-}
-
-function resolveArrowCoords(
-  a: ArrowElement,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): { x1: number; y1: number; x2: number; y2: number } | null {
-  const fromFixed = typeof a.x1 === 'number' && typeof a.y1 === 'number'
-    ? { x: a.x1, y: a.y1 } : null;
-  const toFixed = typeof a.x2 === 'number' && typeof a.y2 === 'number'
-    ? { x: a.x2, y: a.y2 } : null;
-  const fromEl = a.fromId ? byId.get(a.fromId) : null;
-  const toEl = a.toId ? byId.get(a.toId) : null;
-  const fromState = a.fromId ? snap.get(a.fromId) : null;
-  const toState = a.toId ? snap.get(a.toId) : null;
-  const fromConnected = !!(fromEl && fromState);
-  const toConnected = !!(toEl && toState);
-
-  if (!fromConnected && !fromFixed) return null;
-  if (!toConnected && !toFixed) return null;
-
-  let fromAnchor: Anchor = a.fromAnchor ?? 'auto';
-  let toAnchor: Anchor = a.toAnchor ?? 'auto';
-
-  let p1: { x: number; y: number } | null = null;
-  let p2: { x: number; y: number } | null = null;
-
-  if (fromConnected && toConnected) {
-    if (fromAnchor === 'auto' || toAnchor === 'auto') {
-      const picked = pickAutoAnchorPair(fromEl!, fromState!, toEl!, toState!);
-      if (fromAnchor === 'auto') fromAnchor = picked.from;
-      if (toAnchor === 'auto') toAnchor = picked.to;
-    }
-    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
-    p2 = anchorPointOf(toEl!, toState!, toAnchor);
-  } else if (fromConnected && toFixed) {
-    if (fromAnchor === 'auto') fromAnchor = pickAutoAnchorTowardPoint(fromEl!, fromState!, toFixed);
-    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
-    p2 = toFixed;
-  } else if (fromFixed && toConnected) {
-    if (toAnchor === 'auto') toAnchor = pickAutoAnchorTowardPoint(toEl!, toState!, fromFixed);
-    p1 = fromFixed;
-    p2 = anchorPointOf(toEl!, toState!, toAnchor);
-  } else if (fromFixed && toFixed) {
-    p1 = fromFixed;
-    p2 = toFixed;
-  }
-
-  if (!p1 || !p2) return null;
-  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
-}
-
-function resolveLineCoords(
-  l: LineElement,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): { x1: number; y1: number; x2: number; y2: number } | null {
-  const fromFixed = typeof l.x1 === 'number' && typeof l.y1 === 'number'
-    ? { x: l.x1, y: l.y1 } : null;
-  const toFixed = typeof l.x2 === 'number' && typeof l.y2 === 'number'
-    ? { x: l.x2, y: l.y2 } : null;
-  const fromEl = l.fromId ? byId.get(l.fromId) : null;
-  const toEl = l.toId ? byId.get(l.toId) : null;
-  const fromState = l.fromId ? snap.get(l.fromId) : null;
-  const toState = l.toId ? snap.get(l.toId) : null;
-  const fromConnected = !!(fromEl && fromState);
-  const toConnected = !!(toEl && toState);
-  if (!fromConnected && !fromFixed) return null;
-  if (!toConnected && !toFixed) return null;
-
-  let fromAnchor: Anchor = l.fromAnchor ?? 'auto';
-  let toAnchor: Anchor = l.toAnchor ?? 'auto';
-
-  let p1: { x: number; y: number } | null = null;
-  let p2: { x: number; y: number } | null = null;
-
-  if (fromConnected && toConnected) {
-    if (fromAnchor === 'auto' || toAnchor === 'auto') {
-      const picked = pickAutoAnchorPair(fromEl!, fromState!, toEl!, toState!);
-      if (fromAnchor === 'auto') fromAnchor = picked.from;
-      if (toAnchor === 'auto') toAnchor = picked.to;
-    }
-    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
-    p2 = anchorPointOf(toEl!, toState!, toAnchor);
-  } else if (fromConnected && toFixed) {
-    if (fromAnchor === 'auto') fromAnchor = pickAutoAnchorTowardPoint(fromEl!, fromState!, toFixed);
-    p1 = anchorPointOf(fromEl!, fromState!, fromAnchor);
-    p2 = toFixed;
-  } else if (fromFixed && toConnected) {
-    if (toAnchor === 'auto') toAnchor = pickAutoAnchorTowardPoint(toEl!, toState!, fromFixed);
-    p1 = fromFixed;
-    p2 = anchorPointOf(toEl!, toState!, toAnchor);
-  } else if (fromFixed && toFixed) {
-    p1 = fromFixed;
-    p2 = toFixed;
-  }
-
-  if (!p1 || !p2) return null;
-  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
-}
-
-function pickAutoAnchorTowardPoint(
-  el: AnimationElement,
-  state: Record<string, unknown>,
-  point: { x: number; y: number },
-): Anchor {
-  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
-  let best: Anchor = 'right';
-  let bestDist = Infinity;
-  for (const a of candidates) {
-    const p = anchorPointOf(el, state, a);
-    if (!p) continue;
-    const d = Math.hypot(p.x - point.x, p.y - point.y);
-    if (d < bestDist) { bestDist = d; best = a; }
-  }
-  return best;
-}
-
-function anchorPointOf(
-  el: AnimationElement,
-  state: Record<string, unknown>,
-  anchor: Anchor,
-): { x: number; y: number } | null {
-  if (el.type === 'rect' || el.type === 'image') {
-    const x = state.x as number;
-    const y = state.y as number;
-    const w = state.width as number;
-    const h = state.height as number;
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    switch (anchor) {
-      case 'top': return { x: cx, y };
-      case 'right': return { x: x + w, y: cy };
-      case 'bottom': return { x: cx, y: y + h };
-      case 'left': return { x, y: cy };
-      case 'center':
-      case 'auto':
-      default: return { x: cx, y: cy };
-    }
-  }
-  if (el.type === 'circle') {
-    const cx = state.cx as number;
-    const cy = state.cy as number;
-    const r = state.r as number;
-    switch (anchor) {
-      case 'top': return { x: cx, y: cy - r };
-      case 'right': return { x: cx + r, y: cy };
-      case 'bottom': return { x: cx, y: cy + r };
-      case 'left': return { x: cx - r, y: cy };
-      default: return { x: cx, y: cy };
-    }
-  }
-  if (el.type === 'text') return { x: state.x as number, y: state.y as number };
-  return null;
-}
-
-function pickAutoAnchorPair(
-  fromEl: AnimationElement,
-  fromState: Record<string, unknown>,
-  toEl: AnimationElement,
-  toState: Record<string, unknown>,
-): { from: Anchor; to: Anchor } {
-  const candidates: Anchor[] = ['top', 'right', 'bottom', 'left'];
-  let bestPair: { from: Anchor; to: Anchor } = { from: 'right', to: 'left' };
-  let bestDist = Infinity;
-  for (const fa of candidates) {
-    for (const ta of candidates) {
-      const fp = anchorPointOf(fromEl, fromState, fa);
-      const tp = anchorPointOf(toEl, toState, ta);
-      if (!fp || !tp) continue;
-      const d = Math.hypot(tp.x - fp.x, tp.y - fp.y);
-      if (d < bestDist) {
-        bestDist = d;
-        bestPair = { from: fa, to: ta };
-      }
-    }
-  }
-  return bestPair;
-}
-
-function renderSelectionOutline(
-  elId: string,
-  snap: SnapshotMap,
-  byId: Map<string, AnimationElement>,
-): SVGElement | null {
-  const baseEl = byId.get(elId);
-  const state = snap.get(elId);
-  if (!baseEl || !state) return null;
-  let box: { x: number; y: number; w: number; h: number } | null = null;
-  if (baseEl.type === 'rect' || baseEl.type === 'image') {
-    box = { x: (state.x as number) - 4, y: (state.y as number) - 4, w: (state.width as number) + 8, h: (state.height as number) + 8 };
-  } else if (baseEl.type === 'circle') {
-    const r = state.r as number;
-    box = { x: (state.cx as number) - r - 4, y: (state.cy as number) - r - 4, w: r * 2 + 8, h: r * 2 + 8 };
-  } else if (baseEl.type === 'text') {
-    const bbox = textBBoxOnCanvas(elId);
-    if (bbox) box = { x: bbox.x - 4, y: bbox.y - 4, w: bbox.w + 8, h: bbox.h + 8 };
-  } else if (baseEl.type === 'line' || baseEl.type === 'arrow') {
-    const coords =
-      baseEl.type === 'line'
-        ? resolveLineCoords(state as unknown as LineElement, snap, byId)
-        : resolveArrowCoords(state as unknown as ArrowElement, snap, byId);
-    if (!coords) return null;
-    box = {
-      x: Math.min(coords.x1, coords.x2) - 4,
-      y: Math.min(coords.y1, coords.y2) - 4,
-      w: Math.abs(coords.x2 - coords.x1) + 8,
-      h: Math.abs(coords.y2 - coords.y1) + 8,
-    };
-  } else if (baseEl.type === 'polygon') {
-    const bbox = polygonBoundingBox(String(state.points ?? ''));
-    if (bbox) box = { x: bbox.x - 4, y: bbox.y - 4, w: bbox.w + 8, h: bbox.h + 8 };
-  } else if (baseEl.type === 'path') {
-    const bbox = pathBBoxOnCanvas(elId);
-    if (bbox) box = { x: bbox.x - 4, y: bbox.y - 4, w: bbox.w + 8, h: bbox.h + 8 };
-  }
-  if (!box) return null;
-  const rect = document.createElementNS(SVG_NS, 'rect');
-  rect.setAttribute('x', String(box.x));
-  rect.setAttribute('y', String(box.y));
-  rect.setAttribute('width', String(box.w));
-  rect.setAttribute('height', String(box.h));
-  rect.classList.add('element-selected-outline');
-  return rect;
 }
 
 import { showPreview as _showPreview, hidePreview as _hidePreview } from './canvas-preview';
