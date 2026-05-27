@@ -18,11 +18,21 @@ import {
   addElement,
   uniqueElementId,
   subscribe,
+  isElementSelected,
+  toggleSelectionFor,
+  getSelectedElementIds,
 } from './state';
 import { snapPoint, subscribeGrid } from './grid';
 import type { Anchor } from '../../animations/schema';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+interface DragExtra {
+  id: string;
+  startX: number;
+  startY: number;
+  originalPolygonPoints?: string;
+}
 
 interface DragState {
   elementId: string;
@@ -31,6 +41,7 @@ interface DragState {
   startElemX: number;
   startElemY: number;
   originalPolygonPoints?: string;
+  extras: DragExtra[];
 }
 
 interface RotateState {
@@ -241,8 +252,13 @@ function onCanvasClick(e: MouseEvent): void {
   }
   if (target?.closest('[data-rotate-handle], [data-anchor-handle], [data-resize-handle]')) return;
   const id = findElementId(e.target);
-  if (id) setSelection({ kind: 'element', elementId: id });
-  else if (e.target === canvasEl) setSelection({ kind: 'none' });
+  if (id) {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      setSelection(toggleSelectionFor(getSelection(), id));
+    } else {
+      setSelection({ kind: 'element', elementId: id });
+    }
+  } else if (e.target === canvasEl) setSelection({ kind: 'none' });
 }
 
 function onMouseDown(e: MouseEvent): void {
@@ -351,8 +367,11 @@ function onMouseDown(e: MouseEvent): void {
       startMouseY: e.clientY,
       startElemX: anchor.x,
       startElemY: anchor.y,
+      extras: collectDragExtras(id, def, snap),
     };
-    setSelection({ kind: 'element', elementId: id });
+    if (!isElementSelected(getSelection(), id)) {
+      setSelection({ kind: 'element', elementId: id });
+    }
     return;
   }
 
@@ -417,8 +436,32 @@ function onMouseDown(e: MouseEvent): void {
     startElemX: anchor.x,
     startElemY: anchor.y,
     originalPolygonPoints: baseEl.type === 'polygon' ? String(elState.points ?? '') : undefined,
+    extras: collectDragExtras(id, def, snap),
   };
-  setSelection({ kind: 'element', elementId: id });
+  if (!isElementSelected(getSelection(), id)) {
+    setSelection({ kind: 'element', elementId: id });
+  }
+}
+
+function collectDragExtras(anchorId: string, def: ReturnType<typeof getDef>, snap: SnapshotMap): DragExtra[] {
+  if (!def) return [];
+  const sel = getSelection();
+  const ids = getSelectedElementIds(sel).filter((id) => id !== anchorId);
+  const extras: DragExtra[] = [];
+  for (const id of ids) {
+    const el = def.elements.find((x) => x.id === id);
+    const st = snap.get(id);
+    if (!el || !st) continue;
+    const a = readPositionAnchor(el, st);
+    if (!a) continue;
+    extras.push({
+      id,
+      startX: a.x,
+      startY: a.y,
+      originalPolygonPoints: el.type === 'polygon' ? String(st.points ?? '') : undefined,
+    });
+  }
+  return extras;
 }
 
 function onMouseMove(e: MouseEvent): void {
@@ -508,6 +551,12 @@ function onMouseMove(e: MouseEvent): void {
   const elState = snap.get(dragState.elementId);
   if (!elState) return;
   applyMove(baseEl, elState, targetX, targetY);
+  for (const extra of dragState.extras) {
+    const eEl = def.elements.find((x) => x.id === extra.id);
+    const eState = snap.get(extra.id);
+    if (!eEl || !eState) continue;
+    applyMove(eEl, eState, Math.round(extra.startX + dx), Math.round(extra.startY + dy), extra.originalPolygonPoints);
+  }
 }
 
 function onMouseUp(e: MouseEvent): void {
@@ -576,6 +625,7 @@ function applyMove(
   state: Record<string, unknown>,
   x: number,
   y: number,
+  polygonOriginal?: string,
 ): void {
   if (baseEl.type === 'rect' || baseEl.type === 'image' || baseEl.type === 'text') {
     setElementKeyframe(baseEl.id, { x, y });
@@ -592,12 +642,14 @@ function applyMove(
     });
   } else if (baseEl.type === 'path') {
     setElementKeyframe(baseEl.id, { x, y });
-  } else if (baseEl.type === 'polygon' && dragState?.originalPolygonPoints) {
-    const startFirst = firstPolygonPoint(dragState.originalPolygonPoints);
+  } else if (baseEl.type === 'polygon') {
+    const orig = polygonOriginal ?? dragState?.originalPolygonPoints;
+    if (!orig) return;
+    const startFirst = firstPolygonPoint(orig);
     if (!startFirst) return;
     const dx = x - startFirst.x;
     const dy = y - startFirst.y;
-    const newPoints = shiftPolygonPoints(dragState.originalPolygonPoints, dx, dy);
+    const newPoints = shiftPolygonPoints(orig, dx, dy);
     setElementKeyframe(baseEl.id, { points: newPoints });
   }
 }
@@ -859,6 +911,11 @@ function render(): void {
     if (vertices) canvasEl.appendChild(vertices);
     const resize = renderResizeHandles(selection.elementId, snap, elementsById);
     if (resize) canvasEl.appendChild(resize);
+  } else if (selection.kind === 'elements') {
+    for (const elId of selection.elementIds) {
+      const outline = renderSelectionOutline(elId, snap, elementsById);
+      if (outline) canvasEl.appendChild(outline);
+    }
   }
 
   if (endpointDragState) {

@@ -3,6 +3,7 @@ import {
   canUndo,
   getDef,
   getSelection,
+  getSelectedElementIds,
   isDirty,
   isDraft,
   markClean,
@@ -131,7 +132,7 @@ function queryUi(): StudioUi | null {
 }
 
 let playState: 'idle' | 'playing' = 'idle';
-let clipboard: AnimationElement | null = null;
+let clipboard: AnimationElement[] = [];
 
 function shiftCloneCoords(el: AnimationElement, dx: number, dy: number): AnimationElement {
   const clone = JSON.parse(JSON.stringify(el)) as AnimationElement;
@@ -162,31 +163,39 @@ function shiftCloneCoords(el: AnimationElement, dx: number, dy: number): Animati
 
 function copySelection(): boolean {
   const sel = getSelection();
-  if (sel.kind !== 'element') return false;
+  const ids = getSelectedElementIds(sel);
+  if (ids.length === 0) return false;
   const def = getDef();
   if (!def) return false;
-  const el = def.elements.find((e) => e.id === sel.elementId);
-  if (!el) return false;
-  clipboard = JSON.parse(JSON.stringify(el));
+  const copies: AnimationElement[] = [];
+  for (const id of ids) {
+    const el = def.elements.find((e) => e.id === id);
+    if (el) copies.push(JSON.parse(JSON.stringify(el)));
+  }
+  if (copies.length === 0) return false;
+  clipboard = copies;
   return true;
 }
 
 function pasteFromClipboard(): boolean {
-  if (!clipboard) return false;
-  const newId = uniqueElementId(clipboard.type);
-  const shifted = shiftCloneCoords(clipboard, 20, 20);
-  shifted.id = newId;
-  addElement(shifted);
+  if (clipboard.length === 0) return false;
+  const newIds: string[] = [];
+  for (const item of clipboard) {
+    const newId = uniqueElementId(item.type);
+    const shifted = shiftCloneCoords(item, 20, 20);
+    shifted.id = newId;
+    addElement(shifted);
+    newIds.push(newId);
+  }
+  if (newIds.length === 1) {
+    setSelection({ kind: 'element', elementId: newIds[0] });
+  } else if (newIds.length > 1) {
+    setSelection({ kind: 'elements', elementIds: newIds });
+  }
   return true;
 }
 
-function moveSelectedElement(dx: number, dy: number): boolean {
-  const sel = getSelection();
-  if (sel.kind !== 'element') return false;
-  const def = getDef();
-  if (!def) return false;
-  const el = def.elements.find((e) => e.id === sel.elementId);
-  if (!el) return false;
+function moveOneElement(el: AnimationElement, dx: number, dy: number): boolean {
   const patch: Record<string, unknown> = {};
   if (el.type === 'rect' || el.type === 'image' || el.type === 'text') {
     patch.x = el.x + dx;
@@ -212,8 +221,22 @@ function moveSelectedElement(dx: number, dy: number): boolean {
   } else {
     return false;
   }
-  setElementBase(sel.elementId, patch);
+  setElementBase(el.id, patch);
   return true;
+}
+
+function moveSelectedElement(dx: number, dy: number): boolean {
+  const sel = getSelection();
+  const ids = getSelectedElementIds(sel);
+  if (ids.length === 0) return false;
+  const def = getDef();
+  if (!def) return false;
+  let moved = false;
+  for (const id of ids) {
+    const el = def.elements.find((e) => e.id === id);
+    if (el && moveOneElement(el, dx, dy)) moved = true;
+  }
+  return moved;
 }
 
 function reflectGridUi(ui: StudioUi): void {
@@ -424,9 +447,10 @@ export function initStudio(): void {
 
     if (!inText && (e.key === 'Delete' || e.key === 'Backspace')) {
       const sel = getSelection();
-      if (sel.kind === 'element') {
+      const ids = getSelectedElementIds(sel);
+      if (ids.length > 0) {
         e.preventDefault();
-        deleteElement(sel.elementId);
+        for (const id of ids) deleteElement(id);
         setSelection({ kind: 'none' });
       } else if (sel.kind === 'step') {
         e.preventDefault();
@@ -477,10 +501,9 @@ export function initStudio(): void {
         e.preventDefault();
         if (key === 'x') {
           const sel = getSelection();
-          if (sel.kind === 'element') {
-            deleteElement(sel.elementId);
-            setSelection({ kind: 'none' });
-          }
+          const ids = getSelectedElementIds(sel);
+          for (const id of ids) deleteElement(id);
+          if (ids.length > 0) setSelection({ kind: 'none' });
         }
       }
       return;

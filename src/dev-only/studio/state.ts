@@ -10,7 +10,33 @@ import { animationDefSchema, computeSnapshot } from '../../animations/schema';
 export type Selection =
   | { kind: 'none' }
   | { kind: 'element'; elementId: string }
+  | { kind: 'elements'; elementIds: string[] }
   | { kind: 'step'; stepId: string };
+
+export function getSelectedElementIds(sel: Selection): string[] {
+  if (sel.kind === 'element') return [sel.elementId];
+  if (sel.kind === 'elements') return sel.elementIds;
+  return [];
+}
+
+export function isElementSelected(sel: Selection, id: string): boolean {
+  if (sel.kind === 'element') return sel.elementId === id;
+  if (sel.kind === 'elements') return sel.elementIds.includes(id);
+  return false;
+}
+
+export function toggleSelectionFor(sel: Selection, id: string): Selection {
+  const cur = getSelectedElementIds(sel);
+  if (cur.includes(id)) {
+    const next = cur.filter((x) => x !== id);
+    if (next.length === 0) return { kind: 'none' };
+    if (next.length === 1) return { kind: 'element', elementId: next[0] };
+    return { kind: 'elements', elementIds: next };
+  }
+  const next = [...cur, id];
+  if (next.length === 1) return { kind: 'element', elementId: next[0] };
+  return { kind: 'elements', elementIds: next };
+}
 
 interface State {
   def: AnimationDef | null;

@@ -7,6 +7,8 @@ import {
   addElement,
   uniqueElementId,
   reorderElement,
+  isElementSelected,
+  toggleSelectionFor,
 } from './state';
 import type { AnimationElement } from '../../animations/schema';
 
@@ -41,11 +43,13 @@ function render(): void {
   }
   const sel = getSelection();
   const items = [...def.elements].reverse();
+  const multiHint = sel.kind === 'elements' ? `<div class="studio-element-list-hint">다중 선택: ${sel.elementIds.length}개 (Shift+클릭으로 추가/해제)</div>` : '';
   listEl.innerHTML =
-    `<div class="studio-element-list-hint">위 = 앞쪽 (z-index ↑)</div>` +
+    `<div class="studio-element-list-hint">위 = 앞쪽 (z-index ↑) · Shift+클릭 = 다중 선택</div>` +
+    multiHint +
     items
       .map((el) => {
-        const isSel = sel.kind === 'element' && sel.elementId === el.id;
+        const isSel = isElementSelected(sel, el.id);
         return `<li class="studio-element-list-item ${isSel ? 'is-selected' : ''}" data-elem-id="${escapeHtml(el.id)}" draggable="true">
           <span class="studio-element-grip" aria-hidden="true">⋮⋮</span>
           <span class="studio-element-list-item-label">${escapeHtml(el.id)} <span class="studio-element-list-item-type">${escapeHtml(el.type)}</span></span>
@@ -62,6 +66,12 @@ function onClick(e: Event): void {
   const id = li.dataset.elemId ?? '';
   if (target.closest('[data-delete]')) {
     deleteElement(id);
+    return;
+  }
+  const me = e as MouseEvent;
+  if (me.shiftKey || me.ctrlKey || me.metaKey) {
+    const sel = getSelection();
+    setSelection(toggleSelectionFor(sel, id));
     return;
   }
   setSelection({ kind: 'element', elementId: id });
