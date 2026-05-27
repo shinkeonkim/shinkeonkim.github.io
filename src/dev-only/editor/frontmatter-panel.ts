@@ -52,6 +52,32 @@ const SUMMARY_KEYS = [
   'status',
 ];
 
+type EditorKind = 'text' | 'date' | 'number' | 'boolean' | 'select' | 'tags';
+
+interface EditorSpec {
+  kind: EditorKind;
+  options?: string[];
+}
+
+const EDITORS: Record<string, EditorSpec> = {
+  title: { kind: 'text' },
+  description: { kind: 'text' },
+  date: { kind: 'date' },
+  updated: { kind: 'date' },
+  start: { kind: 'date' },
+  end: { kind: 'date' },
+  tags: { kind: 'tags' },
+  category: { kind: 'text' },
+  series: { kind: 'text' },
+  cover: { kind: 'text' },
+  coverAlt: { kind: 'text' },
+  thumbnail: { kind: 'text' },
+  role: { kind: 'text' },
+  teamSize: { kind: 'number' },
+  draft: { kind: 'boolean' },
+  status: { kind: 'select', options: ['ongoing', 'completed', 'archived'] },
+};
+
 function formatValue(value: unknown): string {
   if (value === undefined || value === null || value === '') return '<em class="empty">(없음)</em>';
   if (Array.isArray(value)) {
@@ -69,11 +95,21 @@ function formatValue(value: unknown): string {
   return escapeHtml(String(value));
 }
 
+function toIsoDate(value: unknown): string {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value === 'string') {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  return '';
+}
+
 export class FrontmatterPanel {
   private root: HTMLElement;
   private textarea: HTMLTextAreaElement;
   private toolbar: MarkdownToolbar;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private editingKey: string | null = null;
 
   constructor(root: HTMLElement, textarea: HTMLTextAreaElement, toolbar: MarkdownToolbar) {
     this.root = root;
@@ -81,6 +117,31 @@ export class FrontmatterPanel {
     this.toolbar = toolbar;
     this.render();
     this.textarea.addEventListener('input', this.schedule);
+    this.root.addEventListener('click', (e) => this.handleRowClick(e));
+    this.root.addEventListener('keydown', (e) => this.handleRowKeydown(e));
+  }
+
+  private handleRowClick(e: Event): void {
+    if (this.editingKey) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('input,select')) return;
+    const row = target.closest<HTMLElement>('.fm-row-editable');
+    if (!row) return;
+    const key = row.dataset.fmKey ?? '';
+    const spec = EDITORS[key];
+    if (!spec) return;
+    const fm = this.parseCurrent();
+    this.startEdit(row, key, spec, fm[key]);
+  }
+
+  private handleRowKeydown(e: Event): void {
+    const ke = e as KeyboardEvent;
+    if (ke.key !== 'Enter' && ke.key !== ' ') return;
+    const target = e.target as HTMLElement;
+    const row = target.closest<HTMLElement>('.fm-row-editable');
+    if (!row || row !== target) return;
+    e.preventDefault();
+    this.handleRowClick(e);
   }
 
   private schedule = (): void => {
@@ -95,6 +156,7 @@ export class FrontmatterPanel {
   }
 
   private render(): void {
+    if (this.editingKey) return;
     const fm = this.parseCurrent();
     if (Object.keys(fm).length === 0) {
       this.root.hidden = true;
@@ -107,8 +169,9 @@ export class FrontmatterPanel {
       if (!(key in fm)) continue;
       const label = KEY_LABEL[key] ?? key;
       const value = formatValue(fm[key]);
+      const editable = key in EDITORS;
       rows.push(
-        `<div class="fm-row"><span class="fm-key">${escapeHtml(label)}</span><span class="fm-val">${value}</span></div>`,
+        `<div class="fm-row${editable ? ' fm-row-editable' : ''}" data-fm-key="${escapeHtml(key)}"${editable ? ' role="button" tabindex="0" title="클릭하여 편집"' : ''}><span class="fm-key">${escapeHtml(label)}</span><span class="fm-val">${value}</span></div>`,
       );
     }
     const otherKeys = Object.keys(fm).filter((k) => !SUMMARY_KEYS.includes(k));
@@ -120,12 +183,129 @@ export class FrontmatterPanel {
     }
     this.root.innerHTML = `
       <details class="fm-panel-details" open>
-        <summary class="fm-panel-summary">📑 Frontmatter</summary>
+        <summary class="fm-panel-summary">📑 Frontmatter <span class="fm-panel-hint">(클릭하여 편집)</span></summary>
         <div class="fm-panel-grid">
           ${rows.join('')}
         </div>
       </details>
     `;
+  }
+
+  private startEdit(row: HTMLElement, key: string, spec: EditorSpec, value: unknown): void {
+    if (this.editingKey) return;
+    if (spec.kind === 'boolean') {
+      const next = !(value === true);
+      this.toolbar.upsertFrontmatter({ [key]: next });
+      return;
+    }
+    this.editingKey = key;
+    const valSpan = row.querySelector<HTMLElement>('.fm-val');
+    if (!valSpan) {
+      this.editingKey = null;
+      return;
+    }
+    const original = valSpan.innerHTML;
+    const editor = this.buildEditor(spec, value);
+    valSpan.innerHTML = '';
+    valSpan.appendChild(editor);
+    if (editor instanceof HTMLInputElement || editor instanceof HTMLSelectElement) {
+      editor.focus();
+      if (editor instanceof HTMLInputElement) editor.select();
+    }
+    let settled = false;
+    const clearScheduledRender = (): void => {
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
+      }
+    };
+    const commit = (): void => {
+      if (settled) return;
+      settled = true;
+      const newVal = this.readEditor(spec, editor);
+      this.editingKey = null;
+      if (newVal === null) {
+        valSpan.innerHTML = original;
+        return;
+      }
+      this.toolbar.upsertFrontmatter({ [key]: newVal });
+      clearScheduledRender();
+      this.render();
+      clearScheduledRender();
+    };
+    const cancel = (): void => {
+      if (settled) return;
+      settled = true;
+      this.editingKey = null;
+      valSpan.innerHTML = original;
+      clearScheduledRender();
+      this.render();
+    };
+    editor.addEventListener('keydown', (e) => {
+      const ke = e as KeyboardEvent;
+      if (ke.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      } else if (ke.key === 'Escape') {
+        e.preventDefault();
+        cancel();
+      }
+    });
+    editor.addEventListener('blur', () => commit());
+  }
+
+  private buildEditor(spec: EditorSpec, value: unknown): HTMLElement {
+    if (spec.kind === 'select') {
+      const sel = document.createElement('select');
+      sel.className = 'fm-edit-input';
+      for (const opt of spec.options ?? []) {
+        const o = document.createElement('option');
+        o.value = opt;
+        o.textContent = opt;
+        if (value === opt) o.selected = true;
+        sel.appendChild(o);
+      }
+      return sel;
+    }
+    const input = document.createElement('input');
+    input.className = 'fm-edit-input';
+    if (spec.kind === 'date') {
+      input.type = 'date';
+      input.value = toIsoDate(value);
+    } else if (spec.kind === 'number') {
+      input.type = 'number';
+      input.value = typeof value === 'number' ? String(value) : '';
+    } else if (spec.kind === 'tags') {
+      input.type = 'text';
+      input.value = Array.isArray(value) ? value.join(', ') : typeof value === 'string' ? value : '';
+      input.placeholder = '쉼표로 구분 (예: meta, blog, tip)';
+    } else {
+      input.type = 'text';
+      input.value = value === null || value === undefined ? '' : String(value);
+    }
+    return input;
+  }
+
+  private readEditor(spec: EditorSpec, editor: HTMLElement): unknown {
+    if (editor instanceof HTMLSelectElement) return editor.value;
+    if (!(editor instanceof HTMLInputElement)) return null;
+    const raw = editor.value.trim();
+    if (spec.kind === 'tags') {
+      const tags = raw
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+      return tags;
+    }
+    if (spec.kind === 'number') {
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    }
+    if (spec.kind === 'date') {
+      return raw || null;
+    }
+    return raw;
   }
 
   refresh(): void {
