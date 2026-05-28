@@ -35,6 +35,7 @@ import type {
   EntryMode,
   ExitMode,
 } from '../../animations/schema';
+import { captureFocusWithin, restoreFocusWithin } from './studio-focus';
 
 let panelEl: HTMLElement | null = null;
 
@@ -45,6 +46,13 @@ export function initProperties(root: HTMLElement): void {
   root.addEventListener('change', onChange);
   root.addEventListener('click', onClick);
   render();
+}
+
+function render(): void {
+  if (!panelEl) return;
+  const focusSnap = captureFocusWithin(panelEl);
+  renderInner();
+  restoreFocusWithin(panelEl, focusSnap);
 }
 
 function escapeHtml(s: string): string {
@@ -90,7 +98,7 @@ function selectField(label: string, key: string, value: string, options: { value
   </label>`;
 }
 
-function render(): void {
+function renderInner(): void {
   if (!panelEl) return;
   const def = getDef();
   const sel = getSelection();
