@@ -5,7 +5,6 @@ import {
   instantiateAsset,
   saveAsset,
   type AssetDef,
-  type AssetParam,
 } from './assets';
 import {
   addElement,
@@ -15,6 +14,11 @@ import {
   setSelection,
   uniqueElementId,
 } from './state';
+import {
+  toSpec,
+  type AssetParamSpec,
+  type AnyAssetParam,
+} from './asset-schema';
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -169,43 +173,136 @@ export class AssetLibraryDialog {
     `;
   }
 
-  private renderParamField(p: AssetParam): string {
-    const fieldId = `studio-asset-param-${escapeHtml(p.name)}`;
-    const defaultVal = p.default;
-    if (p.type === 'number') {
-      const minAttr = p.min !== undefined ? ` min="${p.min}"` : '';
-      const maxAttr = p.max !== undefined ? ` max="${p.max}"` : '';
+  private renderParamField(rawParam: AnyAssetParam): string {
+    return this.renderSpec(toSpec(rawParam));
+  }
+
+  private renderSpec(spec: AssetParamSpec): string {
+    const name = escapeHtml(spec.name);
+    const label = escapeHtml(spec.label);
+    const help = spec.kind !== 'group' && spec.help ? `<span class="studio-asset-param-help">${escapeHtml(spec.help)}</span>` : '';
+    if (spec.kind === 'group') {
+      const inner = spec.fields.map((f) => this.renderSpec(f)).join('');
+      return `<details class="studio-asset-param-group" ${spec.collapsed ? '' : 'open'}>
+        <summary>${label}</summary>
+        <div class="studio-asset-param-group-body">${inner}</div>
+      </details>`;
+    }
+    if (spec.kind === 'number') {
+      const min = spec.min !== undefined ? ` min="${spec.min}"` : '';
+      const max = spec.max !== undefined ? ` max="${spec.max}"` : '';
+      const step = spec.step !== undefined ? ` step="${spec.step}"` : '';
       return `<label class="studio-field">
-        <span>${escapeHtml(p.label)}</span>
-        <input type="number" id="${fieldId}" data-param-name="${escapeHtml(p.name)}" value="${defaultVal as number}"${minAttr}${maxAttr} />
+        <span>${label}${help}</span>
+        <input type="number" data-param-name="${name}" data-kind="number" value="${spec.default}"${min}${max}${step} />
       </label>`;
     }
-    if (p.type === 'string-array') {
-      const placeholder = p.placeholder ?? '쉼표 구분 (예: A, B, C)';
+    if (spec.kind === 'string') {
+      const ph = spec.placeholder ? ` placeholder="${escapeHtml(spec.placeholder)}"` : '';
       return `<label class="studio-field">
-        <span>${escapeHtml(p.label)}</span>
-        <input type="text" id="${fieldId}" data-param-name="${escapeHtml(p.name)}" value="${escapeHtml(String(defaultVal ?? ''))}" placeholder="${escapeHtml(placeholder)}" />
+        <span>${label}${help}</span>
+        <input type="text" data-param-name="${name}" data-kind="string" value="${escapeHtml(spec.default)}"${ph} />
       </label>`;
     }
-    return `<label class="studio-field">
-      <span>${escapeHtml(p.label)}</span>
-      <input type="text" id="${fieldId}" data-param-name="${escapeHtml(p.name)}" value="${escapeHtml(String(defaultVal ?? ''))}" ${p.placeholder ? `placeholder="${escapeHtml(p.placeholder)}"` : ''} />
-    </label>`;
+    if (spec.kind === 'select') {
+      const opts = spec.options.map((o) =>
+        `<option value="${escapeHtml(o.value)}" ${o.value === spec.default ? 'selected' : ''}>${escapeHtml(o.label ?? o.value)}</option>`,
+      ).join('');
+      return `<label class="studio-field">
+        <span>${label}${help}</span>
+        <select data-param-name="${name}" data-kind="select">${opts}</select>
+      </label>`;
+    }
+    if (spec.kind === 'color') {
+      const v = spec.default;
+      const hex = v.startsWith('#') ? v.slice(0, 7) : '#000000';
+      return `<label class="studio-field studio-field-color">
+        <span>${label}${help}</span>
+        <input type="color" data-param-name="${name}" data-kind="color" data-color-picker value="${escapeHtml(hex)}" />
+        <input type="text" data-param-name="${name}" data-kind="color" data-color-text value="${escapeHtml(v)}" />
+      </label>`;
+    }
+    if (spec.kind === 'boolean') {
+      return `<label class="studio-field studio-field-checkbox">
+        <input type="checkbox" data-param-name="${name}" data-kind="boolean" ${spec.default ? 'checked' : ''} />
+        <span>${label}${help}</span>
+      </label>`;
+    }
+    if (spec.kind === 'string-list') {
+      const sep = spec.separator ?? ',';
+      const ph = spec.placeholder ?? `${sep === ',' ? '쉼표' : `'${sep}'`} 구분 (예: A${sep} B${sep} C)`;
+      const v = spec.default.join(sep === ',' ? ', ' : sep);
+      return `<label class="studio-field">
+        <span>${label}${help}</span>
+        <input type="text" data-param-name="${name}" data-kind="string-list" data-separator="${escapeHtml(sep)}" value="${escapeHtml(v)}" placeholder="${escapeHtml(ph)}" />
+      </label>`;
+    }
+    if (spec.kind === 'point') {
+      return `<div class="studio-field studio-field-point">
+        <span>${label}${help}</span>
+        <span class="studio-field-point-inputs">
+          <input type="number" data-param-name="${name}" data-kind="point" data-axis="x" value="${spec.default.x}" />
+          <input type="number" data-param-name="${name}" data-kind="point" data-axis="y" value="${spec.default.y}" />
+        </span>
+      </div>`;
+    }
+    return '';
   }
 
   private collectParams(asset: AssetDef): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     if (!asset.builtin) return out;
-    for (const p of asset.params) {
-      const input = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${CSS.escape(p.name)}"]`);
-      if (!input) {
-        out[p.name] = p.default;
-        continue;
-      }
-      if (p.type === 'number') out[p.name] = Number(input.value);
-      else out[p.name] = input.value;
+    for (const rawParam of asset.params) {
+      const spec = toSpec(rawParam);
+      this.collectSpec(spec, out);
     }
     return out;
+  }
+
+  private collectSpec(spec: AssetParamSpec, out: Record<string, unknown>): void {
+    if (spec.kind === 'group') {
+      for (const f of spec.fields) this.collectSpec(f, out);
+      return;
+    }
+    const escapedName = CSS.escape(spec.name);
+    if (spec.kind === 'number') {
+      const input = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-kind="number"]`);
+      out[spec.name] = input ? Number(input.value) : spec.default;
+      return;
+    }
+    if (spec.kind === 'string') {
+      const input = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-kind="string"]`);
+      out[spec.name] = input ? input.value : spec.default;
+      return;
+    }
+    if (spec.kind === 'select') {
+      const input = this.paramArea.querySelector<HTMLSelectElement>(`[data-param-name="${escapedName}"][data-kind="select"]`);
+      out[spec.name] = input ? input.value : spec.default;
+      return;
+    }
+    if (spec.kind === 'color') {
+      const text = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-color-text]`);
+      const picker = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-color-picker]`);
+      out[spec.name] = text?.value ?? picker?.value ?? spec.default;
+      return;
+    }
+    if (spec.kind === 'boolean') {
+      const input = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-kind="boolean"]`);
+      out[spec.name] = input ? input.checked : spec.default;
+      return;
+    }
+    if (spec.kind === 'string-list') {
+      const input = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-kind="string-list"]`);
+      if (!input) { out[spec.name] = spec.default; return; }
+      const sep = input.dataset.separator ?? ',';
+      out[spec.name] = input.value.split(sep).map((s) => s.trim()).filter(Boolean);
+      return;
+    }
+    if (spec.kind === 'point') {
+      const x = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-axis="x"]`);
+      const y = this.paramArea.querySelector<HTMLInputElement>(`[data-param-name="${escapedName}"][data-axis="y"]`);
+      out[spec.name] = { x: x ? Number(x.value) : spec.default.x, y: y ? Number(y.value) : spec.default.y };
+    }
   }
 
   private insertActive(): void {

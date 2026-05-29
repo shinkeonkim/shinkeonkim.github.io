@@ -1,4 +1,5 @@
 import type { AnimationElement } from '../../animations/schema';
+import type { AnyAssetParam } from './asset-schema';
 
 export type AssetCategory = 'queue' | 'stack' | 'array' | 'graph' | 'tree' | 'custom';
 
@@ -18,7 +19,7 @@ export interface BuiltinAsset {
   description?: string;
   category: AssetCategory;
   builtin: true;
-  params: AssetParam[];
+  params: AnyAssetParam[];
   generate: (params: Record<string, unknown>) => AnimationElement[];
 }
 
