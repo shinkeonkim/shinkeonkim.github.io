@@ -114,10 +114,14 @@ let playState: 'idle' | 'playing' = 'idle';
 
 function reflectGridUi(ui: StudioUi): void {
   const on = isGridEnabled();
+  const size = getGridSize();
   ui.gridToggleBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
   ui.gridToggleBtn.classList.toggle('is-active', on);
+  ui.gridToggleBtn.title = on ? `격자 켬 (${size}px) — G 로 끔` : '격자 켜기 (G)';
   document.body.classList.toggle('studio-grid-on', on);
-  ui.app.style.setProperty('--studio-grid-size', `${getGridSize()}px`);
+  ui.app.style.setProperty('--studio-grid-size', `${size}px`);
+  const label = document.getElementById('studio-grid-label');
+  if (label) label.textContent = on ? `격자 ${size}px` : '격자 끔';
 }
 
 function startInlineTextEdit(canvas: SVGSVGElement, el: { id: string; x: number; y: number; content: string; fontSize?: number; fontWeight?: string | number; color?: string }): void {
@@ -251,10 +255,26 @@ export function initStudio(): void {
     ui.imageFileInput.value = '';
   });
 
-  ui.helpBtn.addEventListener('click', () => {
+  const openHelp = (): void => {
     if (typeof ui.helpDialog.showModal === 'function') ui.helpDialog.showModal();
     else ui.helpDialog.setAttribute('open', '');
-  });
+  };
+  ui.helpBtn.addEventListener('click', openHelp);
+  document.getElementById('studio-floating-help')?.addEventListener('click', openHelp);
+
+  const HELP_HINT_KEY = 'studio.helpHintDismissed';
+  const helpHint = document.getElementById('studio-help-hint');
+  if (helpHint && !localStorage.getItem(HELP_HINT_KEY)) {
+    helpHint.hidden = false;
+    setTimeout(() => helpHint.classList.add('is-visible'), 200);
+    const dismiss = (): void => {
+      helpHint.classList.remove('is-visible');
+      setTimeout(() => { helpHint.hidden = true; }, 300);
+      localStorage.setItem(HELP_HINT_KEY, '1');
+    };
+    document.getElementById('studio-help-hint-close')?.addEventListener('click', dismiss);
+    setTimeout(dismiss, 7000);
+  }
 
   setupImageDropAndPaste(imageHost);
   setupTimelineResizer(ui);
