@@ -17,6 +17,7 @@ let tracksEl: HTMLElement | null = null;
 let elTracksEl: HTMLElement | null = null;
 let addBtn: HTMLButtonElement | null = null;
 let scrollSyncSuppress = false;
+let dragTooltipEl: HTMLDivElement | null = null;
 
 const pxPerMs = 0.15;
 const GUTTER_PX = 140;
@@ -43,7 +44,15 @@ export function initTimeline(
   document.addEventListener('mouseup', onMouseUp);
   addBtn?.addEventListener('click', () => {
     const id = uniqueChapterId();
-    addChapter({ id, time: getCurrentTime(), label: `Chapter ${id.split('-')[1]}`, subtitle: '' });
+    const def = getDef();
+    const lastTime = def
+      ? def.chapters.reduce((max, c) => (c.time > max ? c.time : max), -1)
+      : -1;
+    const newTime = lastTime < 0
+      ? getCurrentTime()
+      : Math.max(getCurrentTime(), lastTime + 500);
+    addChapter({ id, time: newTime, label: `Chapter ${id.split('-')[1]}`, subtitle: '' });
+    setSelection({ kind: 'chapter', chapterId: id });
   });
   const headerWrap = tracksRoot.parentElement;
   const elementWrap = elementTracks.parentElement;
@@ -59,6 +68,22 @@ function mirrorScroll(source: HTMLElement, target: HTMLElement): void {
   scrollSyncSuppress = true;
   target.scrollLeft = source.scrollLeft;
   requestAnimationFrame(() => { scrollSyncSuppress = false; });
+}
+
+function showDragTooltip(clientX: number, clientY: number, text: string): void {
+  if (!dragTooltipEl) {
+    dragTooltipEl = document.createElement('div');
+    dragTooltipEl.className = 'studio-tl-drag-tooltip';
+    document.body.appendChild(dragTooltipEl);
+  }
+  dragTooltipEl.textContent = text;
+  dragTooltipEl.style.left = `${clientX + 14}px`;
+  dragTooltipEl.style.top = `${clientY - 28}px`;
+  dragTooltipEl.style.display = 'block';
+}
+
+function hideDragTooltip(): void {
+  if (dragTooltipEl) dragTooltipEl.style.display = 'none';
 }
 
 function escapeHtml(s: string): string {
@@ -265,14 +290,18 @@ function onMouseMove(e: MouseEvent): void {
     const area = tracksEl?.querySelector('[data-tl-area]') as HTMLElement | null;
     if (!area) return;
     const rect = area.getBoundingClientRect();
-    setCurrentTime(pxToTime(e.clientX - rect.left));
+    const t = pxToTime(e.clientX - rect.left);
+    setCurrentTime(t);
+    showDragTooltip(e.clientX, e.clientY, `⏱ ${t} ms`);
     return;
   }
   if (dragMode.kind === 'chapter') {
     const area = tracksEl?.querySelector('[data-tl-area]') as HTMLElement | null;
     if (!area) return;
     const rect = area.getBoundingClientRect();
-    updateChapter(dragMode.id, { time: pxToTime(e.clientX - rect.left) });
+    const t = pxToTime(e.clientX - rect.left);
+    updateChapter(dragMode.id, { time: t });
+    showDragTooltip(e.clientX, e.clientY, `📌 ${t} ms`);
     return;
   }
   if (dragMode.kind === 'appearance') {
@@ -288,9 +317,13 @@ function onMouseMove(e: MouseEvent): void {
         end: Math.max(0, dragMode.startApEnd + dt),
       });
     }
+    const a = dragMode.startApStart + dt;
+    const b = dragMode.startApEnd + dt;
+    showDragTooltip(e.clientX, e.clientY, `▶ ${Math.max(0, a)}–${Math.max(0, b)} ms`);
   }
 }
 
 function onMouseUp(): void {
   dragMode = null;
+  hideDragTooltip();
 }

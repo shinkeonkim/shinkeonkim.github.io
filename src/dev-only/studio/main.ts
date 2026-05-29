@@ -14,6 +14,7 @@ import {
   redo,
   deleteElement,
   deleteChapter,
+  updateChapter,
   addChapter,
   deleteEffect,
   uniqueChapterId,
@@ -345,6 +346,18 @@ export function initStudio(): void {
     }
 
     if (!inText && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const sel = getSelection();
+      if (sel.kind === 'chapter' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        const def = getDef();
+        const ch = def?.chapters.find((c) => c.id === sel.chapterId);
+        if (ch) {
+          const step = e.shiftKey ? 1000 : 100;
+          const dt = e.key === 'ArrowLeft' ? -step : step;
+          updateChapter(sel.chapterId, { time: Math.max(0, ch.time + dt) });
+          e.preventDefault();
+        }
+        return;
+      }
       const step = e.shiftKey ? 10 : 1;
       const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
       const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
@@ -353,6 +366,21 @@ export function initStudio(): void {
     }
 
     if (!inText && !mod && e.key === 'Tab') {
+      const sel = getSelection();
+      if (sel.kind === 'chapter') {
+        const def = getDef();
+        if (def && def.chapters.length > 0) {
+          const sorted = [...def.chapters].sort((a, b) => a.time - b.time);
+          const idx = sorted.findIndex((c) => c.id === sel.chapterId);
+          if (idx >= 0) {
+            const dir = e.shiftKey ? -1 : 1;
+            const nextIdx = (idx + dir + sorted.length) % sorted.length;
+            setSelection({ kind: 'chapter', chapterId: sorted[nextIdx].id });
+            e.preventDefault();
+          }
+        }
+        return;
+      }
       if (selectAdjacentElement(e.shiftKey ? -1 : 1)) e.preventDefault();
       return;
     }
