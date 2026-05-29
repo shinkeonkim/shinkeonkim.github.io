@@ -15,8 +15,10 @@ import type { AnimationElement } from '../../animations/schema';
 let tracksEl: HTMLElement | null = null;
 let elTracksEl: HTMLElement | null = null;
 let addBtn: HTMLButtonElement | null = null;
+let scrollSyncSuppress = false;
 
 const pxPerMs = 0.15;
+const GUTTER_PX = 140;
 type DragMode =
   | { kind: 'time' }
   | { kind: 'chapter'; id: string }
@@ -42,7 +44,20 @@ export function initTimeline(
     const id = uniqueChapterId();
     addChapter({ id, time: getCurrentTime(), label: `Chapter ${id.split('-')[1]}`, subtitle: '' });
   });
+  const headerWrap = tracksRoot.parentElement;
+  const elementWrap = elementTracks.parentElement;
+  if (headerWrap && elementWrap) {
+    headerWrap.addEventListener('scroll', () => mirrorScroll(headerWrap, elementWrap), { passive: true });
+    elementWrap.addEventListener('scroll', () => mirrorScroll(elementWrap, headerWrap), { passive: true });
+  }
   render();
+}
+
+function mirrorScroll(source: HTMLElement, target: HTMLElement): void {
+  if (scrollSyncSuppress) return;
+  scrollSyncSuppress = true;
+  target.scrollLeft = source.scrollLeft;
+  requestAnimationFrame(() => { scrollSyncSuppress = false; });
 }
 
 function escapeHtml(s: string): string {
@@ -81,25 +96,44 @@ function render(): void {
     .map((c) => {
       const x = timeToPx(c.time);
       const isSel = sel.kind === 'chapter' && sel.chapterId === c.id;
-      return `<div class="studio-tl-chapter-marker ${isSel ? 'is-selected' : ''}" style="left:${x}px" data-chapter-id="${escapeHtml(c.id)}" title="${escapeHtml(c.label)}">
+      return `<div class="studio-tl-chapter-marker ${isSel ? 'is-selected' : ''}" style="left:${x}px" data-chapter-id="${escapeHtml(c.id)}" title="${escapeHtml(c.label)} @ ${c.time}ms">
         <div class="studio-tl-chapter-line"></div>
         <div class="studio-tl-chapter-label">${escapeHtml(c.label || c.id)}</div>
       </div>`;
     })
     .join('');
 
-  const playhead = `<div class="studio-tl-playhead" style="left:${timeToPx(currentTime)}px" title="t=${currentTime}ms"></div>`;
+  const playheadCol = `<div class="studio-tl-playhead-col" style="left:${GUTTER_PX}px;width:${totalPx}px"><div class="studio-tl-playhead" style="left:${timeToPx(currentTime)}px" title="t=${currentTime}ms"></div></div>`;
 
   tracksEl.innerHTML = `
-    <div class="studio-tl-ruler" style="width:${totalPx}px">${rulerMarks.join('')}</div>
-    <div class="studio-tl-chapter-row" style="width:${totalPx}px" data-tl-area="chapter">
-      ${chapterMarkers}
-      ${playhead}
+    <div class="studio-tl-chart">
+      <div class="studio-tl-row studio-tl-ruler-row">
+        <div class="studio-tl-gutter studio-tl-gutter-header" aria-hidden="true">⏱ 시간 (ms)</div>
+        <div class="studio-tl-body" style="width:${totalPx}px">
+          <div class="studio-tl-ruler">${rulerMarks.join('')}</div>
+        </div>
+      </div>
+      <div class="studio-tl-row studio-tl-chapter-row-wrap">
+        <div class="studio-tl-gutter">Chapters</div>
+        <div class="studio-tl-body" style="width:${totalPx}px">
+          <div class="studio-tl-chapter-row" data-tl-area="chapter">
+            ${chapterMarkers}
+          </div>
+        </div>
+      </div>
+      ${playheadCol}
     </div>
     <div class="studio-tl-total">전체 ${def.duration} ms · ${sortedChapters.length} chapters · ${def.elements.length} elements · 현재 ${currentTime} ms</div>
   `;
 
   renderElementTracks(def.elements, currentTime, totalPx, sel);
+}
+
+function elementListLabel(el: AnimationElement): string {
+  const e = el as unknown as { label?: string; content?: string; name?: string };
+  const visible = e.name?.trim() || e.label?.trim() || e.content?.trim();
+  if (visible) return `${visible} · ${el.type}`;
+  return `${el.id} · ${el.type}`;
 }
 
 function renderElementTracks(elements: AnimationElement[], currentTime: number, totalPx: number, sel: ReturnType<typeof getSelection>): void {
@@ -127,18 +161,20 @@ function renderElementTracks(elements: AnimationElement[], currentTime: number, 
         .map((kf) => `<div class="studio-tl-keyframe" style="left:${timeToPx(kf.time)}px" title="${escapeHtml(kf.prop)} @ ${kf.time}ms">◆</div>`)
         .join('');
       return `
-        <div class="studio-tl-element-row ${isSel ? 'is-selected' : ''}" data-elem-id="${escapeHtml(el.id)}">
-          <div class="studio-tl-element-label">${escapeHtml(el.id)}</div>
-          <div class="studio-tl-element-track" style="width:${totalPx}px" data-tl-area="elements">
-            ${appearanceBars}
-            ${trackKfs}
+        <div class="studio-tl-row studio-tl-element-row ${isSel ? 'is-selected' : ''}" data-elem-id="${escapeHtml(el.id)}">
+          <div class="studio-tl-gutter studio-tl-element-label" title="${escapeHtml(el.id)}">${escapeHtml(elementListLabel(el))}</div>
+          <div class="studio-tl-body" style="width:${totalPx}px">
+            <div class="studio-tl-element-track" data-tl-area="elements">
+              ${appearanceBars}
+              ${trackKfs}
+            </div>
           </div>
         </div>
       `;
     })
     .join('');
-  const playhead = `<div class="studio-tl-playhead" style="left:${timeToPx(currentTime)}px"></div>`;
-  elTracksEl.innerHTML = `<div class="studio-tl-element-rows">${rows}${playhead}</div>`;
+  const playheadCol = `<div class="studio-tl-playhead-col" style="left:${GUTTER_PX}px;width:${totalPx}px"><div class="studio-tl-playhead" style="left:${timeToPx(currentTime)}px"></div></div>`;
+  elTracksEl.innerHTML = `<div class="studio-tl-chart">${rows}${playheadCol}</div>`;
 }
 
 function onTracksClick(e: MouseEvent): void {
