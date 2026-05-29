@@ -72,13 +72,64 @@ that holds form inputs:
    - Type 3+ characters into **x** (number input).
    - Type 3+ characters into **fill** (color field's text variant).
    - For a text element, type 3+ characters into **content**.
-4. Open the new-animation dialog and type 3+ chars in the ID + title
+   - Type 3+ characters into **name (별칭)** — this is the per-element
+     friendly name that the element list / timeline gutter / command
+     palette all surface.
+4. In the sidebar:
+   - Type 3+ chars into the **요소 검색** (element search) input. The
+     list must filter in real-time without focus loss. Esc clears.
+5. Open the asset dialog (📦 자산) and pick any builtin:
+   - Type 3+ chars into a string-list param (e.g. queue `items`).
+   - Tick / untick a boolean param (e.g. `showArrows`).
+   - Change a select param (e.g. graph `layout`).
+   - The param inputs should accept input without focus loss.
+6. Open the new-animation dialog and type 3+ chars in the ID + title
    fields (these are NOT subscribe-driven but the dialog reopen logic
    could regress them).
+7. Press **⌘K** to open the command palette. Type 3+ chars to filter.
+   ArrowDown / ArrowUp navigate. Enter activates the highlighted item
+   (selects element or runs command). Esc closes. The input must accept
+   continuous typing.
 
 If any of these regresses, the relevant `render()` either lost its
 `captureFocusWithin` / `restoreFocusWithin` pair, or a new input was
-added that doesn't carry a `data-prop-key`. Fix before commit.
+added that doesn't carry a `data-prop-key` / `data-param-name` / `id`
+that the focus-restore selector can re-target. Fix before commit.
+
+## Non-text interaction surfaces that should also be smoke-tested
+
+When you touch anything under `src/dev-only/studio/canvas.ts`,
+`timeline.ts`, `main.ts:setupCanvasPan`, or `studio-align.ts`, also
+verify these don't regress:
+
+- **Canvas zoom** (Ctrl/Cmd + wheel on the SVG): SVG `style.width`
+  changes; click coordinates still hit the right SVG element at zoom
+  ≠ 1 (svgPoint uses rect.width to scale).
+- **Canvas pan** (Space + drag on the canvas wrap): body gains
+  `studio-pan-mode` class, mousedown updates `wrap.scrollLeft/Top`,
+  mouseup clears.
+- **Timeline zoom** (Ctrl/Cmd + wheel on either timeline wrap): pxPerMs
+  changes and persists to localStorage('studio.timeline.pxPerMs').
+- **Timeline alignment**: chapter ruler playhead x === element-tracks
+  playhead x; chapter markers at t=0 line up with appearance bars at
+  t=0 (both at 140px gutter + body-left). Scrolling one timeline
+  mirrors the other.
+- **Keyframe drag** (mousedown on a ◆ in the element timeline): drag
+  tooltip shows `◆ prop @ time ms`; the keyframe's time updates,
+  value preserved.
+- **Chapter editing**: selected chapter accepts ←/→ for ±100ms
+  (Shift ±1000ms); Tab/Shift+Tab cycles between sorted chapters.
+- **Multi-select align/distribute**: with 2+ elements selected, the
+  6 align buttons + 2 distribute buttons appear in the properties
+  panel.
+
+## Generated artifact cleanup
+
+If you change any of the asset builtins in `studio/assets.ts`, the
+v4 localStorage entries are forward-compatible (params is optional on
+CustomAsset). If you bump the storage schema, add a
+`migrateFromVNIfNeeded()` helper next to the existing v3→v4 one and
+keep the migration idempotent.
 
 ## Module map (dev-only)
 
