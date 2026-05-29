@@ -38,6 +38,7 @@ import type {
 import { captureFocusWithin, restoreFocusWithin } from './studio-focus';
 
 let panelEl: HTMLElement | null = null;
+const closedSections = new Set<string>();
 
 export function initProperties(root: HTMLElement): void {
   panelEl = root;
@@ -45,7 +46,40 @@ export function initProperties(root: HTMLElement): void {
   root.addEventListener('input', onInput);
   root.addEventListener('change', onChange);
   root.addEventListener('click', onClick);
+  root.addEventListener('toggle', onSectionToggle, true);
+  root.addEventListener('wheel', onNumberWheel, { passive: false });
   render();
+}
+
+function onSectionToggle(e: Event): void {
+  const t = e.target as HTMLElement;
+  if (!(t instanceof HTMLDetailsElement)) return;
+  const name = t.dataset.section;
+  if (!name) return;
+  if (t.open) closedSections.delete(name);
+  else closedSections.add(name);
+}
+
+function onNumberWheel(e: WheelEvent): void {
+  const target = e.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  if (target.type !== 'number') return;
+  if (document.activeElement !== target) return;
+  e.preventDefault();
+  const step = Number(target.step) || 1;
+  const multiplier = e.shiftKey ? 10 : 1;
+  const dir = e.deltaY < 0 ? 1 : -1;
+  const newVal = (Number(target.value) || 0) + dir * step * multiplier;
+  target.value = String(newVal);
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function section(name: string, headerInner: string, contentInner: string): string {
+  const isOpen = !closedSections.has(name);
+  return `<details class="studio-props-section" ${isOpen ? 'open' : ''} data-section="${escapeHtml(name)}">
+    <summary class="studio-props-header studio-props-summary">${headerInner}</summary>
+    <div class="studio-props-section-body">${contentInner}</div>
+  </details>`;
 }
 
 function render(): void {
@@ -110,20 +144,26 @@ function renderInner(): void {
   const timeHint = `<span class="studio-step-hint">📍 t = ${getCurrentTime()} ms / ${def.duration} ms</span>`;
 
   if (sel.kind === 'none') {
+    const metaHeader = `<span class="studio-props-header-title">애니메이션 메타</span><span class="studio-props-header-type">${escapeHtml(def.id)}</span>`;
+    const metaBody = [
+      textField('title', 'meta.title', def.title),
+      textField('description', 'meta.description', def.description),
+      numberField('duration (ms)', 'meta.duration', def.duration, 100),
+      numberField('canvas.width', 'canvas.width', def.canvas.width),
+      numberField('canvas.height', 'canvas.height', def.canvas.height),
+      colorField('canvas.background', 'canvas.background', def.canvas.background),
+    ].join('');
+    const settingsHeader = `<span class="studio-props-header-title">설정</span>`;
+    const settingsBody = [
+      checkboxField('loop', 'settings.loop', def.settings.loop),
+      checkboxField('autoplay', 'settings.autoplay', def.settings.autoplay),
+      checkboxField('자막 표시 (caption)', 'settings.showCaption', def.settings.showCaption ?? false),
+      checkboxField('목차 표시 (chapter list)', 'settings.showChapterList', def.settings.showChapterList ?? false),
+    ].join('');
     panelEl.innerHTML = `
       ${timeHint}
-      <div class="studio-props-header"><span class="studio-props-header-title">애니메이션 메타</span><span class="studio-props-header-type">${escapeHtml(def.id)}</span></div>
-      ${textField('title', 'meta.title', def.title)}
-      ${textField('description', 'meta.description', def.description)}
-      ${numberField('duration (ms)', 'meta.duration', def.duration, 100)}
-      ${numberField('canvas.width', 'canvas.width', def.canvas.width)}
-      ${numberField('canvas.height', 'canvas.height', def.canvas.height)}
-      ${colorField('canvas.background', 'canvas.background', def.canvas.background)}
-      <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">설정</span></div>
-      ${checkboxField('loop', 'settings.loop', def.settings.loop)}
-      ${checkboxField('autoplay', 'settings.autoplay', def.settings.autoplay)}
-      ${checkboxField('자막 표시 (caption)', 'settings.showCaption', def.settings.showCaption ?? false)}
-      ${checkboxField('목차 표시 (chapter list)', 'settings.showChapterList', def.settings.showChapterList ?? false)}
+      ${section('meta', metaHeader, metaBody)}
+      ${section('settings', settingsHeader, settingsBody)}
       <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">목차 (${def.chapters.length})</span></div>
       <button type="button" class="studio-btn" data-add-chapter>＋ 현재 시간에 chapter 추가</button>
       <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">효과 (${def.effects.length})</span></div>
@@ -219,14 +259,15 @@ function renderElementForm(def: AnimationDef, el: AnimationElement): void {
   const appearances = renderAppearances(def, el);
   const tracks = renderTracks(el);
 
+  const baseHeader = `<span class="studio-props-header-title">${escapeHtml(el.id)}</span><span class="studio-props-header-type">${escapeHtml(el.type)}</span>`;
+  const apHeader = `<span class="studio-props-header-title">출현 (Appearances)</span><button type="button" class="studio-btn studio-btn-small" data-add-appearance>＋</button>`;
+  const tracksHeader = `<span class="studio-props-header-title">키프레임 트랙 (${el.tracks.length})</span>`;
+
   panelEl.innerHTML = `
     ${timeHint}
-    <div class="studio-props-header"><span class="studio-props-header-title">${escapeHtml(el.id)}</span><span class="studio-props-header-type">${escapeHtml(el.type)}</span></div>
-    ${baseFields}
-    <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">출현 (Appearances)</span><button type="button" class="studio-btn studio-btn-small" data-add-appearance>＋</button></div>
-    ${appearances}
-    <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">키프레임 트랙 (${el.tracks.length})</span></div>
-    ${tracks}
+    ${section('el-base', baseHeader, baseFields)}
+    ${section('el-appearances', apHeader, appearances)}
+    ${section('el-tracks', tracksHeader, tracks)}
     <div class="studio-props-empty" style="font-size:0.72rem;margin-top:0.5rem">
       base 속성을 변경하면 → t=${getCurrentTime()} ms 에 keyframe 추가<br/>
       트랙이 없는 속성은 base 값이 항상 사용됨
