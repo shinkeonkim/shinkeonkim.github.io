@@ -26,6 +26,7 @@ import {
 } from './state';
 import { snapPoint, subscribeGrid } from './grid';
 import type { Anchor } from '../../animations/schema';
+import { findContainingGroup, groupBbox, isGroup, moveGroupBy } from './studio-groups';
 import {
   SVG_NS,
   escapeXml,
@@ -303,10 +304,11 @@ function onCanvasClick(e: MouseEvent): void {
   if (target?.closest('[data-rotate-handle], [data-anchor-handle], [data-resize-handle]')) return;
   const id = findElementId(e.target);
   if (id) {
+    const resolvedId = e.altKey ? id : (findContainingGroup(id)?.id ?? id);
     if (e.shiftKey || e.ctrlKey || e.metaKey) {
-      setSelection(toggleSelectionFor(getSelection(), id));
+      setSelection(toggleSelectionFor(getSelection(), resolvedId));
     } else {
-      setSelection({ kind: 'element', elementId: id });
+      setSelection({ kind: 'element', elementId: resolvedId });
     }
   } else if (e.target === canvasEl) setSelection({ kind: 'none' });
 }
@@ -467,8 +469,9 @@ function onMouseDown(e: MouseEvent): void {
     return;
   }
 
-  const id = findElementId(e.target);
-  if (!id) return;
+  const rawId = findElementId(e.target);
+  if (!rawId) return;
+  const id = e.altKey ? rawId : (findContainingGroup(rawId)?.id ?? rawId);
   const snap = getCurrentSnapshot();
   const elState = snap.get(id);
   const baseEl = def.elements.find((x) => x.id === id);
@@ -686,6 +689,10 @@ function applyMove(
     const dy = y - startFirst.y;
     const newPoints = shiftPolygonPoints(orig, dx, dy);
     setElementValueAtTime(baseEl.id, { points: newPoints });
+  } else if (baseEl.type === 'group') {
+    const dx = x - baseEl.x;
+    const dy = y - baseEl.y;
+    moveGroupBy(baseEl.id, dx, dy);
   }
 }
 
@@ -704,6 +711,9 @@ function readPositionAnchor(
   if (baseEl.type === 'polygon') {
     const first = firstPolygonPoint(String(state.points ?? ''));
     return first;
+  }
+  if (baseEl.type === 'group') {
+    return { x: baseEl.x, y: baseEl.y };
   }
   return null;
 }
@@ -818,16 +828,22 @@ function render(): void {
 
   const selection = getSelection();
   if (selection.kind === 'element') {
-    const outline = renderSelectionOutline(canvasEl, selection.elementId, snap, elementsById);
-    if (outline) canvasEl.appendChild(outline);
-    const handle = renderRotationHandle(selection.elementId, snap, elementsById);
-    if (handle) canvasEl.appendChild(handle);
-    const endpoints = renderLineEndpointHandles(selection.elementId, snap, elementsById);
-    if (endpoints) canvasEl.appendChild(endpoints);
-    const vertices = renderPolygonVertexHandles(selection.elementId, snap, elementsById);
-    if (vertices) canvasEl.appendChild(vertices);
-    const resize = renderResizeHandles(canvasEl, selection.elementId, snap, elementsById);
-    if (resize) canvasEl.appendChild(resize);
+    const selEl = elementsById.get(selection.elementId);
+    if (selEl && isGroup(selEl)) {
+      const groupOutline = renderGroupOutline(selection.elementId);
+      if (groupOutline) canvasEl.appendChild(groupOutline);
+    } else {
+      const outline = renderSelectionOutline(canvasEl, selection.elementId, snap, elementsById);
+      if (outline) canvasEl.appendChild(outline);
+      const handle = renderRotationHandle(selection.elementId, snap, elementsById);
+      if (handle) canvasEl.appendChild(handle);
+      const endpoints = renderLineEndpointHandles(selection.elementId, snap, elementsById);
+      if (endpoints) canvasEl.appendChild(endpoints);
+      const vertices = renderPolygonVertexHandles(selection.elementId, snap, elementsById);
+      if (vertices) canvasEl.appendChild(vertices);
+      const resize = renderResizeHandles(canvasEl, selection.elementId, snap, elementsById);
+      if (resize) canvasEl.appendChild(resize);
+    }
   } else if (selection.kind === 'elements') {
     for (const elId of selection.elementIds) {
       const outline = renderSelectionOutline(canvasEl, elId, snap, elementsById);
@@ -894,6 +910,32 @@ function findSnapTarget(
   }
   if (!best) return null;
   return { elementId: best.elementId, anchor: best.anchor, x: best.x, y: best.y };
+}
+
+function renderGroupOutline(groupId: string): SVGElement | null {
+  const box = groupBbox(groupId);
+  if (!box) return null;
+  const g = document.createElementNS(SVG_NS, 'g');
+  g.setAttribute('data-elem-id', groupId);
+  const pad = 6;
+  const x = box.x - pad;
+  const y = box.y - pad;
+  const w = box.w + pad * 2;
+  const h = box.h + pad * 2;
+  const thickness = 8;
+  g.innerHTML = `
+    <rect x="${x}" y="${y}" width="${w}" height="${h}"
+      fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-dasharray="6 4" rx="4" pointer-events="none" />
+    <rect x="${x - thickness}" y="${y - thickness}" width="${w + thickness * 2}" height="${thickness * 2}"
+      fill="rgba(0,0,0,0.0001)" style="cursor: move" pointer-events="all" />
+    <rect x="${x - thickness}" y="${y + h - thickness}" width="${w + thickness * 2}" height="${thickness * 2}"
+      fill="rgba(0,0,0,0.0001)" style="cursor: move" pointer-events="all" />
+    <rect x="${x - thickness}" y="${y}" width="${thickness * 2}" height="${h}"
+      fill="rgba(0,0,0,0.0001)" style="cursor: move" pointer-events="all" />
+    <rect x="${x + w - thickness}" y="${y}" width="${thickness * 2}" height="${h}"
+      fill="rgba(0,0,0,0.0001)" style="cursor: move" pointer-events="all" />
+  `;
+  return g;
 }
 
 function makeG(elementId: string, rotation: number, cx: number, cy: number): SVGGElement {

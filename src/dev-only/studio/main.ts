@@ -6,6 +6,7 @@ import {
   getSelectedElementIds,
   isDirty,
   isDraft,
+  setDef,
   setSelection,
   updateElementBase,
   subscribe,
@@ -53,6 +54,7 @@ import {
   deleteCurrent,
 } from './studio-save-load';
 import { initPalette, openPalette, registerCommands } from './studio-palette';
+import { groupElements, ungroupElement, isGroup } from './studio-groups';
 
 function queryUi(): StudioUi | null {
   const app = document.getElementById('studio-app');
@@ -204,11 +206,25 @@ function selectAdjacentElement(direction: 1 | -1): boolean {
   return true;
 }
 
+declare global {
+  interface Window {
+    __studio__?: {
+      setDef: typeof setDef;
+      setSelection: typeof setSelection;
+      getDef: typeof getDef;
+      getSelection: typeof getSelection;
+    };
+  }
+}
+
 export function initStudio(): void {
   const ui = queryUi();
   if (!ui) {
     console.error('[studio] missing required elements');
     return;
+  }
+  if (import.meta.env.DEV) {
+    window.__studio__ = { setDef, setSelection, getDef, getSelection };
   }
   document.body.classList.add('editor-active');
   document.documentElement.classList.add('editor-active');
@@ -475,6 +491,23 @@ export function initStudio(): void {
     if (key === 'd' && !inText) {
       if (duplicateSelection()) {
         e.preventDefault();
+      }
+      return;
+    }
+    if (key === 'g' && !inText) {
+      const sel = getSelection();
+      if (e.shiftKey) {
+        if (sel.kind === 'element') {
+          const def = getDef();
+          const el = def?.elements.find((x) => x.id === sel.elementId);
+          if (el && isGroup(el)) {
+            ungroupElement(sel.elementId);
+            e.preventDefault();
+          }
+        }
+      } else if (sel.kind === 'elements' && sel.elementIds.length >= 2) {
+        const newId = groupElements(sel.elementIds);
+        if (newId) e.preventDefault();
       }
       return;
     }

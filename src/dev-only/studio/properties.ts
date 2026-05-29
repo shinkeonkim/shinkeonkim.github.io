@@ -37,6 +37,7 @@ import type {
 } from '../../animations/schema';
 import { captureFocusWithin, restoreFocusWithin } from './studio-focus';
 import { alignSelected, distributeSelected, type AlignKind, type DistributeKind } from './studio-align';
+import { ungroupElement } from './studio-groups';
 
 let panelEl: HTMLElement | null = null;
 const closedSections = new Set<string>();
@@ -277,6 +278,26 @@ function renderInner(): void {
 function renderElementForm(def: AnimationDef, el: AnimationElement): void {
   if (!panelEl) return;
   const timeHint = `<span class="studio-step-hint">📍 t = ${getCurrentTime()} ms</span>`;
+
+  if (el.type === 'group') {
+    panelEl.innerHTML = `
+      ${timeHint}
+      <div class="studio-props-header"><span class="studio-props-header-title">${escapeHtml(el.name || el.id)}</span><span class="studio-props-header-type">group · ${el.childIds.length} children</span></div>
+      ${textField('name (별칭)', 'el.name', el.name ?? '')}
+      <div class="studio-props-empty" style="font-size:0.72rem;margin:0.4rem 0">
+        그룹은 자식 요소를 함께 이동합니다.<br/>
+        Alt+클릭으로 자식을 직접 선택할 수 있습니다.<br/>
+        ⌘⇧G 로 그룹 해제.
+      </div>
+      <button type="button" class="studio-btn studio-btn-danger" data-ungroup style="margin-top:0.4rem">⬚ 그룹 해제 (⌘⇧G)</button>
+      <div class="studio-props-header" style="margin-top:0.6rem"><span class="studio-props-header-title">자식 (${el.childIds.length})</span></div>
+      <ul style="font-family:var(--font-mono);font-size:0.72rem;color:var(--color-fg-muted);padding-left:1rem;margin:0">
+        ${el.childIds.map((cid) => `<li><a href="#" data-select-child="${escapeHtml(cid)}" style="color:inherit">${escapeHtml(cid)}</a></li>`).join('')}
+      </ul>
+    `;
+    return;
+  }
+
   const baseFields = renderBaseFields(el);
   const appearances = renderAppearances(def, el);
   const tracks = renderTracks(el);
@@ -501,6 +522,17 @@ function onClick(e: Event): void {
   const distBtn = target.closest<HTMLElement>('[data-distribute]');
   if (distBtn) {
     distributeSelected(distBtn.dataset.distribute as DistributeKind);
+    return;
+  }
+
+  if (target.closest('[data-ungroup]') && sel.kind === 'element') {
+    ungroupElement(sel.elementId);
+    return;
+  }
+  const childLink = target.closest<HTMLElement>('[data-select-child]');
+  if (childLink) {
+    e.preventDefault();
+    setSelection({ kind: 'element', elementId: childLink.dataset.selectChild ?? '' });
     return;
   }
 

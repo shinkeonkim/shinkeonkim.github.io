@@ -8,6 +8,7 @@ import {
   uniqueElementId,
   updateElementBase,
 } from './state';
+import { isGroup, moveGroupBy } from './studio-groups';
 
 let clipboard: AnimationElement[] = [];
 
@@ -98,6 +99,10 @@ export function duplicateSelection(): boolean {
 }
 
 function moveOneElement(el: AnimationElement, dx: number, dy: number): boolean {
+  if (isGroup(el)) {
+    moveGroupBy(el.id, dx, dy);
+    return true;
+  }
   const patch: Record<string, unknown> = {};
   if (el.type === 'rect' || el.type === 'image' || el.type === 'text') {
     patch.x = el.x + dx;

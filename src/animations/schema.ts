@@ -179,6 +179,14 @@ export const polygonElementSchema = z.object({
   opacity: z.number().min(0).max(1).default(1),
 });
 
+export const groupElementSchema = z.object({
+  type: z.literal('group'),
+  ...baseElementProps,
+  x: z.number().default(0),
+  y: z.number().default(0),
+  childIds: z.array(idSchema).default([]),
+});
+
 export const elementSchema = z.discriminatedUnion('type', [
   rectElementSchema,
   circleElementSchema,
@@ -188,6 +196,7 @@ export const elementSchema = z.discriminatedUnion('type', [
   imageElementSchema,
   pathElementSchema,
   polygonElementSchema,
+  groupElementSchema,
 ]);
 
 export const effectSchema = z.discriminatedUnion('type', [
@@ -227,7 +236,7 @@ export const chapterSchema = z.object({
 });
 
 export const animationDefSchema = z.object({
-  version: z.literal(3).default(3),
+  version: z.union([z.literal(3), z.literal(4)]).default(4),
   id: idSchema,
   title: z.string().default(''),
   description: z.string().default(''),
@@ -270,6 +279,7 @@ export type TextElement = z.infer<typeof textElementSchema>;
 export type ImageElement = z.infer<typeof imageElementSchema>;
 export type PathElement = z.infer<typeof pathElementSchema>;
 export type PolygonElement = z.infer<typeof polygonElementSchema>;
+export type GroupElement = z.infer<typeof groupElementSchema>;
 export type AnimationElement = z.infer<typeof elementSchema>;
 export type Appearance = z.infer<typeof appearanceSchema>;
 export type TrackKeyframe = z.infer<typeof trackKeyframeSchema>;

@@ -232,6 +232,11 @@ export function deleteElement(id: string): void {
   mutateDef((def) => {
     def.elements = def.elements.filter((e) => e.id !== id);
     def.effects = def.effects.filter((e) => e.elementId !== id);
+    for (const el of def.elements) {
+      if (el.type === 'group' && el.childIds.includes(id)) {
+        el.childIds = el.childIds.filter((c) => c !== id);
+      }
+    }
   });
   if (state.selection.kind === 'element' && state.selection.elementId === id) {
     state.selection = { kind: 'none' };
