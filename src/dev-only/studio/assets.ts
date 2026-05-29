@@ -1,5 +1,5 @@
 import type { AnimationElement } from '../../animations/schema';
-import type { AnyAssetParam } from './asset-schema';
+import type { AnyAssetParam, AssetParamSpec } from './asset-schema';
 
 export type AssetCategory = 'queue' | 'stack' | 'array' | 'graph' | 'tree' | 'custom';
 
@@ -78,88 +78,189 @@ function strArr(params: Record<string, unknown>, key: string, fallback: string[]
   return fallback;
 }
 
+function str(params: Record<string, unknown>, key: string, fallback: string): string {
+  const v = params[key];
+  return typeof v === 'string' ? v : fallback;
+}
+
+function bool(params: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const v = params[key];
+  return typeof v === 'boolean' ? v : fallback;
+}
+
+function pt(params: Record<string, unknown>, key: string, fallback: { x: number; y: number }): { x: number; y: number } {
+  const v = params[key];
+  if (v && typeof v === 'object' && 'x' in v && 'y' in v) {
+    const o = v as { x: unknown; y: unknown };
+    return { x: typeof o.x === 'number' ? o.x : fallback.x, y: typeof o.y === 'number' ? o.y : fallback.y };
+  }
+  return fallback;
+}
+
+const QUEUE_PARAMS: AssetParamSpec[] = [
+  { kind: 'number', name: 'size', label: '슬롯 개수', default: 3, min: 1, max: 10 },
+  { kind: 'string-list', name: 'items', label: '초기 내용', default: [], placeholder: '쉼표 구분 (예: A, B, C)' },
+  { kind: 'boolean', name: 'showArrows', label: 'enqueue / dequeue 화살표', default: true },
+  { kind: 'point', name: 'start', label: '시작 위치 (x, y)', default: { x: 100, y: 100 } },
+  { kind: 'group', name: 'style', label: '스타일', collapsed: true, fields: [
+    { kind: 'color', name: 'slotFill', label: '슬롯 배경', default: '#e0e7ff' },
+    { kind: 'color', name: 'slotStroke', label: '슬롯 테두리', default: '#6366f1' },
+    { kind: 'number', name: 'slotWidth', label: '슬롯 너비', default: 70, min: 30, max: 200 },
+    { kind: 'number', name: 'slotHeight', label: '슬롯 높이', default: 60, min: 20, max: 200 },
+  ]},
+];
+
 function queueGenerate(params: Record<string, unknown>): AnimationElement[] {
   const size = Math.max(1, Math.min(10, num(params, 'size', 3)));
   const items = strArr(params, 'items', new Array(size).fill(''));
-  const slotW = 70;
+  const showArrows = bool(params, 'showArrows', true);
+  const start = pt(params, 'start', { x: 100, y: 100 });
+  const slotW = num(params, 'slotWidth', 70);
+  const slotH = num(params, 'slotHeight', 60);
+  const slotFill = str(params, 'slotFill', '#e0e7ff');
+  const slotStroke = str(params, 'slotStroke', '#6366f1');
   const gap = 5;
-  const startX = 100;
+  const startX = start.x;
+  const startY = start.y;
   const out: AnimationElement[] = [];
   for (let i = 0; i < size; i += 1) {
     out.push({
-      type: 'rect', id: `q-s${i}`, rotation: 0, ...TRACK_FIELDS,
-      x: startX + i * (slotW + gap), y: 100, width: slotW, height: 60,
-      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
+      type: 'rect', id: `q-s${i}`, name: `Slot ${i + 1}`, rotation: 0, ...TRACK_FIELDS,
+      x: startX + i * (slotW + gap), y: startY, width: slotW, height: slotH,
+      fill: slotFill, stroke: slotStroke, strokeWidth: 2, cornerRadius: 6,
       label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
     });
   }
   out.push(
-    { type: 'text', id: 'q-lbl-front', rotation: 0, ...TRACK_FIELDS, x: startX + slotW / 2, y: 90, content: 'front', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
-    { type: 'text', id: 'q-lbl-back', rotation: 0, ...TRACK_FIELDS, x: startX + (size - 1) * (slotW + gap) + slotW / 2, y: 90, content: 'back', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
-    { type: 'arrow', id: 'q-arr-in', rotation: 0, ...TRACK_FIELDS, x1: startX + size * (slotW + gap) + 40, y1: 130, x2: startX + size * (slotW + gap), y2: 130, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-    { type: 'text', id: 'q-lbl-in', rotation: 0, ...TRACK_FIELDS, x: startX + size * (slotW + gap) + 50, y: 135, content: 'enqueue', fontSize: 12, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
-    { type: 'arrow', id: 'q-arr-out', rotation: 0, ...TRACK_FIELDS, x1: startX, y1: 130, x2: startX - 40, y2: 130, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-    { type: 'text', id: 'q-lbl-out', rotation: 0, ...TRACK_FIELDS, x: startX - 50, y: 135, content: 'dequeue', fontSize: 12, fontWeight: 700, color: '#dc2626', textAnchor: 'end' },
+    { type: 'text', id: 'q-lbl-front', name: 'front 라벨', rotation: 0, ...TRACK_FIELDS, x: startX + slotW / 2, y: startY - 10, content: 'front', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
+    { type: 'text', id: 'q-lbl-back', name: 'back 라벨', rotation: 0, ...TRACK_FIELDS, x: startX + (size - 1) * (slotW + gap) + slotW / 2, y: startY - 10, content: 'back', fontSize: 12, fontWeight: 700, color: '#64748b', textAnchor: 'middle' },
   );
+  if (showArrows) {
+    const arrowY = startY + slotH / 2;
+    out.push(
+      { type: 'arrow', id: 'q-arr-in', name: 'enqueue 화살표', rotation: 0, ...TRACK_FIELDS, x1: startX + size * (slotW + gap) + 40, y1: arrowY, x2: startX + size * (slotW + gap), y2: arrowY, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+      { type: 'text', id: 'q-lbl-in', name: 'enqueue 라벨', rotation: 0, ...TRACK_FIELDS, x: startX + size * (slotW + gap) + 50, y: arrowY + 5, content: 'enqueue', fontSize: 12, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
+      { type: 'arrow', id: 'q-arr-out', name: 'dequeue 화살표', rotation: 0, ...TRACK_FIELDS, x1: startX, y1: arrowY, x2: startX - 40, y2: arrowY, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+      { type: 'text', id: 'q-lbl-out', name: 'dequeue 라벨', rotation: 0, ...TRACK_FIELDS, x: startX - 50, y: arrowY + 5, content: 'dequeue', fontSize: 12, fontWeight: 700, color: '#dc2626', textAnchor: 'end' },
+    );
+  }
   return out;
 }
+
+const STACK_PARAMS: AssetParamSpec[] = [
+  { kind: 'number', name: 'size', label: '슬롯 개수', default: 3, min: 1, max: 10 },
+  { kind: 'string-list', name: 'items', label: '초기 내용 (바닥 → top)', default: [], placeholder: '쉼표 구분' },
+  { kind: 'boolean', name: 'showArrows', label: 'push / pop 화살표', default: true },
+  { kind: 'point', name: 'topAt', label: 'top 위치 (x, y)', default: { x: 200, y: 60 } },
+  { kind: 'group', name: 'style', label: '스타일', collapsed: true, fields: [
+    { kind: 'color', name: 'slotFill', label: '슬롯 배경', default: '#e0e7ff' },
+    { kind: 'color', name: 'slotStroke', label: '슬롯 테두리', default: '#6366f1' },
+    { kind: 'number', name: 'slotWidth', label: '슬롯 너비', default: 90, min: 30, max: 200 },
+    { kind: 'number', name: 'slotHeight', label: '슬롯 높이', default: 50, min: 20, max: 200 },
+  ]},
+];
 
 function stackGenerate(params: Record<string, unknown>): AnimationElement[] {
   const size = Math.max(1, Math.min(10, num(params, 'size', 3)));
   const items = strArr(params, 'items', new Array(size).fill(''));
-  const slotH = 50;
+  const showArrows = bool(params, 'showArrows', true);
+  const top = pt(params, 'topAt', { x: 200, y: 60 });
+  const slotW = num(params, 'slotWidth', 90);
+  const slotH = num(params, 'slotHeight', 50);
+  const slotFill = str(params, 'slotFill', '#e0e7ff');
+  const slotStroke = str(params, 'slotStroke', '#6366f1');
   const gap = 5;
-  const topY = 60;
+  const topY = top.y;
+  const topX = top.x;
   const out: AnimationElement[] = [];
   for (let i = 0; i < size; i += 1) {
     const idxFromTop = size - 1 - i;
     out.push({
-      type: 'rect', id: `s-s${i}`, rotation: 0, ...TRACK_FIELDS,
-      x: 200, y: topY + idxFromTop * (slotH + gap), width: 90, height: slotH,
-      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
+      type: 'rect', id: `s-s${i}`, name: `Slot ${i + 1}`, rotation: 0, ...TRACK_FIELDS,
+      x: topX, y: topY + idxFromTop * (slotH + gap), width: slotW, height: slotH,
+      fill: slotFill, stroke: slotStroke, strokeWidth: 2, cornerRadius: 6,
       label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
     });
   }
   out.push(
-    { type: 'text', id: 's-lbl-top', rotation: 0, ...TRACK_FIELDS, x: 305, y: topY + 30, content: '← top', fontSize: 13, fontWeight: 700, color: '#64748b', textAnchor: 'start' },
-    { type: 'arrow', id: 's-arr-push', rotation: 0, ...TRACK_FIELDS, x1: 130, y1: topY - 10, x2: 195, y2: topY + 25, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-    { type: 'text', id: 's-lbl-push', rotation: 0, ...TRACK_FIELDS, x: 80, y: topY - 15, content: 'push', fontSize: 13, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
-    { type: 'arrow', id: 's-arr-pop', rotation: 0, ...TRACK_FIELDS, x1: 195, y1: topY + 50, x2: 130, y2: topY + 85, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
-    { type: 'text', id: 's-lbl-pop', rotation: 0, ...TRACK_FIELDS, x: 80, y: topY + 95, content: 'pop', fontSize: 13, fontWeight: 700, color: '#dc2626', textAnchor: 'start' },
+    { type: 'text', id: 's-lbl-top', name: 'top 라벨', rotation: 0, ...TRACK_FIELDS, x: topX + slotW + 15, y: topY + slotH / 2 + 5, content: '← top', fontSize: 13, fontWeight: 700, color: '#64748b', textAnchor: 'start' },
   );
-  return out;
-}
-
-function arrayGenerate(params: Record<string, unknown>): AnimationElement[] {
-  const size = Math.max(1, Math.min(20, num(params, 'size', 6)));
-  const items = strArr(params, 'items', new Array(size).fill(''));
-  const cellW = num(params, 'cellWidth', 60);
-  const gap = 5;
-  const startX = num(params, 'startX', 100);
-  const startY = num(params, 'startY', 100);
-  const out: AnimationElement[] = [];
-  for (let i = 0; i < size; i += 1) {
-    out.push({
-      type: 'rect', id: `a-${i}`, rotation: 0, ...TRACK_FIELDS,
-      x: startX + i * (cellW + gap), y: startY, width: cellW, height: 55,
-      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2, cornerRadius: 6,
-      label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
-    });
-    out.push({
-      type: 'text', id: `a-${i}-idx`, rotation: 0, ...TRACK_FIELDS,
-      x: startX + i * (cellW + gap) + cellW / 2, y: startY + 75,
-      content: String(i), fontSize: 11, fontWeight: 600, color: '#94a3b8', textAnchor: 'middle',
-    });
+  if (showArrows) {
+    out.push(
+      { type: 'arrow', id: 's-arr-push', name: 'push 화살표', rotation: 0, ...TRACK_FIELDS, x1: topX - 70, y1: topY - 10, x2: topX - 5, y2: topY + 25, stroke: '#16a34a', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+      { type: 'text', id: 's-lbl-push', name: 'push 라벨', rotation: 0, ...TRACK_FIELDS, x: topX - 120, y: topY - 15, content: 'push', fontSize: 13, fontWeight: 700, color: '#16a34a', textAnchor: 'start' },
+      { type: 'arrow', id: 's-arr-pop', name: 'pop 화살표', rotation: 0, ...TRACK_FIELDS, x1: topX - 5, y1: topY + 50, x2: topX - 70, y2: topY + 85, stroke: '#dc2626', strokeWidth: 2.5, curvature: 0, labelColor: '#0b0b0f', headEnd: 'arrow' },
+      { type: 'text', id: 's-lbl-pop', name: 'pop 라벨', rotation: 0, ...TRACK_FIELDS, x: topX - 120, y: topY + 95, content: 'pop', fontSize: 13, fontWeight: 700, color: '#dc2626', textAnchor: 'start' },
+    );
   }
   return out;
 }
 
+const ARRAY_PARAMS: AssetParamSpec[] = [
+  { kind: 'number', name: 'size', label: '셀 개수', default: 6, min: 1, max: 20 },
+  { kind: 'string-list', name: 'items', label: '초기 값', default: [], placeholder: '쉼표 구분' },
+  { kind: 'boolean', name: 'showIndex', label: '인덱스 표시', default: true },
+  { kind: 'point', name: 'start', label: '시작 위치 (x, y)', default: { x: 100, y: 100 } },
+  { kind: 'group', name: 'style', label: '스타일', collapsed: true, fields: [
+    { kind: 'color', name: 'cellFill', label: '셀 배경', default: '#e0e7ff' },
+    { kind: 'color', name: 'cellStroke', label: '셀 테두리', default: '#6366f1' },
+    { kind: 'number', name: 'cellWidth', label: '셀 너비', default: 60, min: 20, max: 200 },
+    { kind: 'number', name: 'cellHeight', label: '셀 높이', default: 55, min: 20, max: 200 },
+    { kind: 'number', name: 'gap', label: '셀 간격', default: 5, min: 0, max: 30 },
+  ]},
+];
+
+function arrayGenerate(params: Record<string, unknown>): AnimationElement[] {
+  const size = Math.max(1, Math.min(20, num(params, 'size', 6)));
+  const items = strArr(params, 'items', new Array(size).fill(''));
+  const showIndex = bool(params, 'showIndex', true);
+  const cellW = num(params, 'cellWidth', 60);
+  const cellH = num(params, 'cellHeight', 55);
+  const gap = num(params, 'gap', 5);
+  const start = pt(params, 'start', { x: 100, y: 100 });
+  const cellFill = str(params, 'cellFill', '#e0e7ff');
+  const cellStroke = str(params, 'cellStroke', '#6366f1');
+  const out: AnimationElement[] = [];
+  for (let i = 0; i < size; i += 1) {
+    out.push({
+      type: 'rect', id: `a-${i}`, name: `Cell [${i}]`, rotation: 0, ...TRACK_FIELDS,
+      x: start.x + i * (cellW + gap), y: start.y, width: cellW, height: cellH,
+      fill: cellFill, stroke: cellStroke, strokeWidth: 2, cornerRadius: 6,
+      label: items[i] ?? '', labelColor: '#312e81', labelSize: 18,
+    });
+    if (showIndex) {
+      out.push({
+        type: 'text', id: `a-${i}-idx`, name: `Index ${i}`, rotation: 0, ...TRACK_FIELDS,
+        x: start.x + i * (cellW + gap) + cellW / 2, y: start.y + cellH + 20,
+        content: String(i), fontSize: 11, fontWeight: 600, color: '#94a3b8', textAnchor: 'middle',
+      });
+    }
+  }
+  return out;
+}
+
+const TREE_PARAMS: AssetParamSpec[] = [
+  { kind: 'number', name: 'depth', label: '깊이', default: 3, min: 1, max: 5 },
+  { kind: 'point', name: 'rootAt', label: '루트 위치 (x, y)', default: { x: 250, y: 80 } },
+  { kind: 'number', name: 'spreadWidth', label: '폭 (가로 전개)', default: 500, min: 200, max: 1200 },
+  { kind: 'number', name: 'levelGap', label: '레벨 간격', default: 90, min: 40, max: 200 },
+  { kind: 'group', name: 'style', label: '스타일', collapsed: true, fields: [
+    { kind: 'color', name: 'nodeFill', label: '노드 배경', default: '#e0e7ff' },
+    { kind: 'color', name: 'nodeStroke', label: '노드 테두리', default: '#6366f1' },
+    { kind: 'color', name: 'edgeStroke', label: '엣지 색', default: '#94a3b8' },
+  ]},
+];
+
 function treeGenerate(params: Record<string, unknown>): AnimationElement[] {
   const depth = Math.max(1, Math.min(5, num(params, 'depth', 3)));
+  const root = pt(params, 'rootAt', { x: 250, y: 80 });
+  const canvasW = num(params, 'spreadWidth', 500);
+  const levelGap = num(params, 'levelGap', 90);
+  const nodeFill = str(params, 'nodeFill', '#e0e7ff');
+  const nodeStroke = str(params, 'nodeStroke', '#6366f1');
+  const edgeStroke = str(params, 'edgeStroke', '#94a3b8');
   const out: AnimationElement[] = [];
-  const canvasW = 500;
-  const levelGap = 90;
-  const startY = 80;
+  const startX = root.x - canvasW / 2;
   let nodeIdx = 0;
   const ids: string[][] = [];
   for (let level = 0; level < depth; level += 1) {
@@ -170,12 +271,12 @@ function treeGenerate(params: Record<string, unknown>): AnimationElement[] {
       nodeIdx += 1;
       const id = `t-n${nodeIdx}`;
       row.push(id);
-      const cx = (i + 1) * spacing;
-      const cy = startY + level * levelGap;
+      const cx = startX + (i + 1) * spacing;
+      const cy = root.y + level * levelGap;
       out.push({
-        type: 'circle', id, rotation: 0, ...TRACK_FIELDS,
+        type: 'circle', id, name: `Node ${nodeIdx}`, rotation: 0, ...TRACK_FIELDS,
         cx, cy, r: Math.max(15, 30 - level * 4),
-        fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2,
+        fill: nodeFill, stroke: nodeStroke, strokeWidth: 2,
         label: String(nodeIdx), labelColor: '#312e81', labelSize: 14,
       });
     }
@@ -187,30 +288,49 @@ function treeGenerate(params: Record<string, unknown>): AnimationElement[] {
       const parentIdx = Math.floor(i / 2);
       edgeIdx += 1;
       out.push({
-        type: 'line', id: `t-e${edgeIdx}`, rotation: 0, ...TRACK_FIELDS,
+        type: 'line', id: `t-e${edgeIdx}`, name: `Edge ${edgeIdx}`, rotation: 0, ...TRACK_FIELDS,
         fromId: ids[level - 1][parentIdx], toId: ids[level][i],
-        stroke: '#94a3b8', strokeWidth: 2,
+        stroke: edgeStroke, strokeWidth: 2,
       });
     }
   }
   return out;
 }
 
+const GRAPH_PARAMS: AssetParamSpec[] = [
+  { kind: 'number', name: 'nodes', label: '노드 개수', default: 5, min: 3, max: 12 },
+  { kind: 'select', name: 'layout', label: '배치', default: 'polygon', options: [
+    { value: 'polygon', label: '다각형 (원형)' },
+    { value: 'line', label: '선형' },
+  ]},
+  { kind: 'point', name: 'center', label: '중심 (x, y)', default: { x: 280, y: 200 } },
+  { kind: 'number', name: 'radius', label: '반지름 (다각형)', default: 130, min: 30, max: 500 },
+  { kind: 'number', name: 'nodeR', label: '노드 반지름', default: 28, min: 8, max: 80 },
+  { kind: 'group', name: 'style', label: '스타일', collapsed: true, fields: [
+    { kind: 'color', name: 'nodeFill', label: '노드 배경', default: '#e0e7ff' },
+    { kind: 'color', name: 'nodeStroke', label: '노드 테두리', default: '#6366f1' },
+    { kind: 'color', name: 'edgeStroke', label: '엣지 색', default: '#94a3b8' },
+  ]},
+];
+
 function graphGenerate(params: Record<string, unknown>): AnimationElement[] {
-  const nodes = Math.max(3, Math.min(10, num(params, 'nodes', 5)));
-  const layout = String(params.layout ?? 'pentagon');
+  const nodes = Math.max(3, Math.min(12, num(params, 'nodes', 5)));
+  const layout = str(params, 'layout', 'polygon');
+  const center = pt(params, 'center', { x: 280, y: 200 });
+  const r = num(params, 'radius', 130);
+  const nodeR = num(params, 'nodeR', 28);
+  const nodeFill = str(params, 'nodeFill', '#e0e7ff');
+  const nodeStroke = str(params, 'nodeStroke', '#6366f1');
+  const edgeStroke = str(params, 'edgeStroke', '#94a3b8');
   const out: AnimationElement[] = [];
-  const cx = 280;
-  const cy = 200;
-  const r = 130;
   for (let i = 0; i < nodes; i += 1) {
     const angle = layout === 'line' ? 0 : (i / nodes) * Math.PI * 2 - Math.PI / 2;
-    const px = layout === 'line' ? 80 + i * 100 : cx + r * Math.cos(angle);
-    const py = layout === 'line' ? cy : cy + r * Math.sin(angle);
+    const px = layout === 'line' ? center.x - ((nodes - 1) * 100) / 2 + i * 100 : center.x + r * Math.cos(angle);
+    const py = layout === 'line' ? center.y : center.y + r * Math.sin(angle);
     out.push({
-      type: 'circle', id: `g-n${i + 1}`, rotation: 0, ...TRACK_FIELDS,
-      cx: Math.round(px), cy: Math.round(py), r: 28,
-      fill: '#e0e7ff', stroke: '#6366f1', strokeWidth: 2,
+      type: 'circle', id: `g-n${i + 1}`, name: `Node ${i + 1}`, rotation: 0, ...TRACK_FIELDS,
+      cx: Math.round(px), cy: Math.round(py), r: nodeR,
+      fill: nodeFill, stroke: nodeStroke, strokeWidth: 2,
       label: String(i + 1), labelColor: '#312e81', labelSize: 16,
     });
   }
@@ -218,9 +338,9 @@ function graphGenerate(params: Record<string, unknown>): AnimationElement[] {
     const next = (i + 1) % nodes;
     if (layout === 'line' && next === 0) break;
     out.push({
-      type: 'line', id: `g-e${i + 1}`, rotation: 0, ...TRACK_FIELDS,
+      type: 'line', id: `g-e${i + 1}`, name: `Edge ${i + 1}`, rotation: 0, ...TRACK_FIELDS,
       fromId: `g-n${i + 1}`, toId: `g-n${next + 1}`,
-      stroke: '#94a3b8', strokeWidth: 2,
+      stroke: edgeStroke, strokeWidth: 2,
     });
   }
   return out;
@@ -230,44 +350,31 @@ const BUILTINS: BuiltinAsset[] = [
   {
     id: 'builtin-queue', name: '큐 (Queue)',
     description: 'FIFO 큐. front / back 라벨 + enqueue / dequeue 화살표', category: 'queue', builtin: true,
-    params: [
-      { name: 'size', type: 'number', label: '슬롯 개수', default: 3, min: 1, max: 10 },
-      { name: 'items', type: 'string-array', label: '초기 내용 (쉼표 구분)', default: '' },
-    ],
+    params: QUEUE_PARAMS,
     generate: queueGenerate,
   },
   {
     id: 'builtin-stack', name: '스택 (Stack)',
     description: 'LIFO 스택. top 라벨 + push / pop 화살표', category: 'stack', builtin: true,
-    params: [
-      { name: 'size', type: 'number', label: '슬롯 개수', default: 3, min: 1, max: 10 },
-      { name: 'items', type: 'string-array', label: '초기 내용 (바닥→top, 쉼표 구분)', default: '' },
-    ],
+    params: STACK_PARAMS,
     generate: stackGenerate,
   },
   {
     id: 'builtin-array', name: '배열 (Array)',
     description: '인덱스 표시된 셀 묶음', category: 'array', builtin: true,
-    params: [
-      { name: 'size', type: 'number', label: '셀 개수', default: 6, min: 1, max: 20 },
-      { name: 'items', type: 'string-array', label: '초기 값 (쉼표 구분)', default: '' },
-      { name: 'cellWidth', type: 'number', label: '셀 너비', default: 60, min: 30, max: 120 },
-    ],
+    params: ARRAY_PARAMS,
     generate: arrayGenerate,
   },
   {
     id: 'builtin-tree', name: '이진 트리 (Tree)',
     description: '완전 이진 트리. depth=N 이면 2^N - 1 개 노드', category: 'tree', builtin: true,
-    params: [{ name: 'depth', type: 'number', label: '깊이', default: 3, min: 1, max: 5 }],
+    params: TREE_PARAMS,
     generate: treeGenerate,
   },
   {
     id: 'builtin-graph', name: '그래프 (Graph)',
     description: '다각형 또는 선형 layout 의 무방향 그래프', category: 'graph', builtin: true,
-    params: [
-      { name: 'nodes', type: 'number', label: '노드 개수', default: 5, min: 3, max: 10 },
-      { name: 'layout', type: 'string', label: 'layout (pentagon | line)', default: 'pentagon' },
-    ],
+    params: GRAPH_PARAMS,
     generate: graphGenerate,
   },
 ];
