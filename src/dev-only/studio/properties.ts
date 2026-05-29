@@ -36,6 +36,7 @@ import type {
   ExitMode,
 } from '../../animations/schema';
 import { captureFocusWithin, restoreFocusWithin } from './studio-focus';
+import { alignSelected, distributeSelected, type AlignKind, type DistributeKind } from './studio-align';
 
 let panelEl: HTMLElement | null = null;
 const closedSections = new Set<string>();
@@ -180,11 +181,32 @@ function renderInner(): void {
   }
 
   if (sel.kind === 'elements') {
+    const alignBtn = (kind: string, label: string, title: string): string =>
+      `<button type="button" class="studio-btn studio-align-btn" data-align="${kind}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${label}</button>`;
+    const distributeDisabled = sel.elementIds.length < 3 ? 'disabled' : '';
     panelEl.innerHTML = `
       ${timeHint}
       <div class="studio-props-header"><span class="studio-props-header-title">다중 선택</span><span class="studio-props-header-type">${sel.elementIds.length} elements</span></div>
-      <p class="studio-props-empty">${sel.elementIds.length}개 element 선택됨.<br/>
-      <span style="font-size:0.72rem;color:var(--color-fg-muted)">캔버스 드래그 / 화살표키 = 함께 이동<br/>Delete = 모두 삭제<br/>⌘C / ⌘X = 모두 복사 / 잘라내기</span></p>
+      <p class="studio-props-empty" style="margin-bottom:0.4rem">${sel.elementIds.length}개 element 선택됨.<br/>
+      <span style="font-size:0.72rem;color:var(--color-fg-muted)">캔버스 드래그 / 화살표키 = 함께 이동<br/>Delete = 모두 삭제 · ⌘D = 복제<br/>⌘C / ⌘X = 모두 복사 / 잘라내기</span></p>
+      <div class="studio-align-section">
+        <div class="studio-align-title">정렬</div>
+        <div class="studio-align-row">
+          ${alignBtn('left', '⫷', '왼쪽 정렬')}
+          ${alignBtn('center-h', '⊟', '가로 중앙')}
+          ${alignBtn('right', '⫸', '오른쪽 정렬')}
+        </div>
+        <div class="studio-align-row">
+          ${alignBtn('top', '⫶', '위쪽 정렬')}
+          ${alignBtn('middle-v', '⊟', '세로 중앙')}
+          ${alignBtn('bottom', '⫶', '아래쪽 정렬')}
+        </div>
+        <div class="studio-align-title" style="margin-top:0.5rem">분포 (≥3개)</div>
+        <div class="studio-align-row">
+          <button type="button" class="studio-btn studio-align-btn" data-distribute="horizontal" title="가로 균등 분포" ${distributeDisabled}>↔</button>
+          <button type="button" class="studio-btn studio-align-btn" data-distribute="vertical" title="세로 균등 분포" ${distributeDisabled}>↕</button>
+        </div>
+      </div>
       <button type="button" class="studio-btn" data-save-as-asset style="margin-top:0.6rem">📦 자산으로 저장</button>
       <ul style="font-family:var(--font-mono);font-size:0.72rem;color:var(--color-fg-muted);padding-left:1rem;margin:0.6rem 0 0">
         ${sel.elementIds.map((id) => `<li>${escapeHtml(id)}</li>`).join('')}
@@ -470,6 +492,17 @@ function onClick(e: Event): void {
   const def = getDef();
   if (!def) return;
   const sel = getSelection();
+
+  const alignBtn = target.closest<HTMLElement>('[data-align]');
+  if (alignBtn) {
+    alignSelected(alignBtn.dataset.align as AlignKind);
+    return;
+  }
+  const distBtn = target.closest<HTMLElement>('[data-distribute]');
+  if (distBtn) {
+    distributeSelected(distBtn.dataset.distribute as DistributeKind);
+    return;
+  }
 
   if (target.closest('[data-add-chapter]')) {
     const id = uniqueChapterId();
