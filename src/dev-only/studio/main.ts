@@ -52,6 +52,7 @@ import {
   saveCurrent,
   deleteCurrent,
 } from './studio-save-load';
+import { initPalette, openPalette, registerCommands } from './studio-palette';
 
 function queryUi(): StudioUi | null {
   const app = document.getElementById('studio-app');
@@ -306,6 +307,19 @@ export function initStudio(): void {
 
   ui.openBtn.addEventListener('click', () => void openLibrary(ui));
   ui.newBtn.addEventListener('click', () => openNewDialog(ui));
+
+  initPalette();
+  registerCommands([
+    { id: 'open', label: '📂 라이브러리 열기', hint: '저장된 애니메이션 목록', run: () => void openLibrary(ui) },
+    { id: 'new', label: '🆕 새 애니메이션', hint: '빈 캔버스로 시작', run: () => openNewDialog(ui) },
+    { id: 'save', label: '💾 저장', hint: '⌘S', run: () => void saveCurrent(ui) },
+    { id: 'delete', label: '🗑 삭제', hint: '현재 애니메이션 삭제', run: () => void deleteCurrent(ui) },
+    { id: 'undo', label: '↶ 실행 취소', hint: '⌘Z', run: () => undo() },
+    { id: 'redo', label: '↷ 다시 실행', hint: '⌘⇧Z / ⌘Y', run: () => redo() },
+    { id: 'play', label: '▶ 재생 토글', hint: '미리보기 시작/중지', run: () => togglePlay(ui) },
+    { id: 'grid', label: '⊞ 격자 토글', hint: 'G', run: () => setGridEnabled(!isGridEnabled()) },
+    { id: 'help', label: '⌨ 단축키 보기', hint: '? / Shift+/', run: openHelp },
+  ]);
   ui.saveBtn.addEventListener('click', () => void saveCurrent(ui));
   ui.deleteBtn.addEventListener('click', () => void deleteCurrent(ui));
   ui.undoBtn.addEventListener('click', () => undo());
@@ -419,6 +433,11 @@ export function initStudio(): void {
 
     if (!mod) return;
     const key = e.key.toLowerCase();
+    if (key === 'k') {
+      e.preventDefault();
+      openPalette();
+      return;
+    }
     if (key === 's') {
       e.preventDefault();
       void saveCurrent(ui);

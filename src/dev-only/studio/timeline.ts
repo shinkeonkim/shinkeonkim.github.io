@@ -3,8 +3,10 @@ import {
   getCurrentTime,
   getDef,
   getSelection,
+  removeTrackKeyframe,
   setCurrentTime,
   setSelection,
+  setTrackKeyframe,
   subscribe,
   uniqueChapterId,
   updateAppearance,
@@ -32,7 +34,8 @@ try {
 type DragMode =
   | { kind: 'time' }
   | { kind: 'chapter'; id: string }
-  | { kind: 'appearance'; elementId: string; apIdx: number; edge: 'start' | 'end' | 'move'; startMouseX: number; startApStart: number; startApEnd: number };
+  | { kind: 'appearance'; elementId: string; apIdx: number; edge: 'start' | 'end' | 'move'; startMouseX: number; startApStart: number; startApEnd: number }
+  | { kind: 'keyframe'; elementId: string; prop: string; startTime: number; startValue: string | number | boolean; startMouseX: number; currentTime: number };
 let dragMode: DragMode | null = null;
 
 export function initTimeline(
@@ -206,7 +209,7 @@ function renderElementTracks(elements: AnimationElement[], currentTime: number, 
         .join('');
       const trackKfs = el.tracks
         .flatMap((t) => t.keyframes.map((kf) => ({ prop: t.property, time: kf.time })))
-        .map((kf) => `<div class="studio-tl-keyframe" style="left:${timeToPx(kf.time)}px" title="${escapeHtml(kf.prop)} @ ${kf.time}ms">◆</div>`)
+        .map((kf) => `<div class="studio-tl-keyframe" style="left:${timeToPx(kf.time)}px" data-kf-elem-id="${escapeHtml(el.id)}" data-kf-prop="${escapeHtml(kf.prop)}" data-kf-time="${kf.time}" title="${escapeHtml(kf.prop)} @ ${kf.time}ms (드래그로 이동)">◆</div>`)
         .join('');
       return `
         <div class="studio-tl-row studio-tl-element-row ${isSel ? 'is-selected' : ''}" data-elem-id="${escapeHtml(el.id)}">
@@ -246,6 +249,31 @@ function onElTracksClick(e: MouseEvent): void {
 function onMouseDown(e: MouseEvent): void {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement;
+
+  const kfEl = target.closest<HTMLElement>('[data-kf-elem-id]');
+  if (kfEl) {
+    e.preventDefault();
+    e.stopPropagation();
+    const elementId = kfEl.dataset.kfElemId!;
+    const prop = kfEl.dataset.kfProp!;
+    const startTime = Number(kfEl.dataset.kfTime);
+    const def = getDef();
+    const baseEl = def?.elements.find((x) => x.id === elementId);
+    const track = baseEl?.tracks.find((t) => t.property === prop);
+    const kf = track?.keyframes.find((k) => k.time === startTime);
+    if (kf && (typeof kf.value === 'string' || typeof kf.value === 'number' || typeof kf.value === 'boolean')) {
+      dragMode = {
+        kind: 'keyframe',
+        elementId,
+        prop,
+        startTime,
+        startValue: kf.value,
+        startMouseX: e.clientX,
+        currentTime: startTime,
+      };
+    }
+    return;
+  }
 
   const edge = target.closest<HTMLElement>('[data-edge]');
   if (edge) {
@@ -327,6 +355,18 @@ function onMouseMove(e: MouseEvent): void {
     const t = pxToTime(e.clientX - rect.left);
     updateChapter(dragMode.id, { time: t });
     showDragTooltip(e.clientX, e.clientY, `📌 ${t} ms`);
+    return;
+  }
+  if (dragMode.kind === 'keyframe') {
+    const dxPx = e.clientX - dragMode.startMouseX;
+    const dt = Math.round(dxPx / pxPerMs);
+    const newTime = Math.max(0, dragMode.startTime + dt);
+    if (newTime !== dragMode.currentTime) {
+      removeTrackKeyframe(dragMode.elementId, dragMode.prop, dragMode.currentTime);
+      setTrackKeyframe(dragMode.elementId, dragMode.prop, newTime, dragMode.startValue);
+      dragMode.currentTime = newTime;
+    }
+    showDragTooltip(e.clientX, e.clientY, `◆ ${dragMode.prop} @ ${newTime} ms`);
     return;
   }
   if (dragMode.kind === 'appearance') {
