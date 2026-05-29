@@ -11,6 +11,7 @@ import {
   updateChapter,
 } from './state';
 import type { AnimationElement } from '../../animations/schema';
+import { friendlyElementLabel } from './element-list';
 
 let tracksEl: HTMLElement | null = null;
 let elTracksEl: HTMLElement | null = null;
@@ -129,11 +130,8 @@ function render(): void {
   renderElementTracks(def.elements, currentTime, totalPx, sel);
 }
 
-function elementListLabel(el: AnimationElement): string {
-  const e = el as unknown as { label?: string; content?: string; name?: string };
-  const visible = e.name?.trim() || e.label?.trim() || e.content?.trim();
-  if (visible) return `${visible} · ${el.type}`;
-  return `${el.id} · ${el.type}`;
+function gutterLabel(el: AnimationElement): string {
+  return `${friendlyElementLabel(el)} · ${el.type}`;
 }
 
 function renderElementTracks(elements: AnimationElement[], currentTime: number, totalPx: number, sel: ReturnType<typeof getSelection>): void {
@@ -162,7 +160,7 @@ function renderElementTracks(elements: AnimationElement[], currentTime: number, 
         .join('');
       return `
         <div class="studio-tl-row studio-tl-element-row ${isSel ? 'is-selected' : ''}" data-elem-id="${escapeHtml(el.id)}">
-          <div class="studio-tl-gutter studio-tl-element-label" title="${escapeHtml(el.id)}">${escapeHtml(elementListLabel(el))}</div>
+          <div class="studio-tl-gutter studio-tl-element-label" title="${escapeHtml(el.id)}">${escapeHtml(gutterLabel(el))}</div>
           <div class="studio-tl-body" style="width:${totalPx}px">
             <div class="studio-tl-element-track" data-tl-area="elements">
               ${appearanceBars}

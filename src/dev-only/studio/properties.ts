@@ -240,6 +240,8 @@ function renderBaseFields(el: AnimationElement): string {
   const textFields: { label: string; key: string; value: string }[] = [];
   const e = el as unknown as Record<string, unknown>;
 
+  textFields.push({ label: 'name (별칭)', key: 'name', value: (e.name as string | undefined) ?? '' });
+
   if (el.type === 'rect' || el.type === 'image' || el.type === 'text') {
     numberFields.push({ label: 'x', key: 'x', value: e.x as number });
     numberFields.push({ label: 'y', key: 'y', value: e.y as number });
