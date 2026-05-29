@@ -30,16 +30,30 @@ export interface CustomAsset {
   category: AssetCategory;
   builtin: false;
   elements: AnimationElement[];
+  params?: AnyAssetParam[];
 }
 
 export type AssetDef = BuiltinAsset | CustomAsset;
 
-const STORAGE_KEY = 'studio.assets.v3';
+const STORAGE_KEY = 'studio.assets.v4';
+const LEGACY_STORAGE_KEY_V3 = 'studio.assets.v3';
+
+function migrateFromV3IfNeeded(): void {
+  try {
+    if (localStorage.getItem(STORAGE_KEY) !== null) return;
+    const v3 = localStorage.getItem(LEGACY_STORAGE_KEY_V3);
+    if (!v3) return;
+    localStorage.setItem(STORAGE_KEY, v3);
+  } catch {
+    void 0;
+  }
+}
 const listeners = new Set<() => void>();
 const TRACK_FIELDS = { appearances: [] as never[], tracks: [] as never[] };
 
 function readSaved(): CustomAsset[] {
   try {
+    migrateFromV3IfNeeded();
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
