@@ -72,6 +72,31 @@ export function pasteFromClipboard(): boolean {
   return true;
 }
 
+export function duplicateSelection(): boolean {
+  const sel = getSelection();
+  const ids = getSelectedElementIds(sel);
+  if (ids.length === 0) return false;
+  const def = getDef();
+  if (!def) return false;
+  const newIds: string[] = [];
+  for (const id of ids) {
+    const el = def.elements.find((e) => e.id === id);
+    if (!el) continue;
+    const newId = uniqueElementId(el.type);
+    const cloned = JSON.parse(JSON.stringify(el)) as AnimationElement;
+    const shifted = shiftCloneCoords(cloned, 20, 20);
+    shifted.id = newId;
+    addElement(shifted);
+    newIds.push(newId);
+  }
+  if (newIds.length === 1) {
+    setSelection({ kind: 'element', elementId: newIds[0] });
+  } else if (newIds.length > 1) {
+    setSelection({ kind: 'elements', elementIds: newIds });
+  }
+  return newIds.length > 0;
+}
+
 function moveOneElement(el: AnimationElement, dx: number, dy: number): boolean {
   const patch: Record<string, unknown> = {};
   if (el.type === 'rect' || el.type === 'image' || el.type === 'text') {

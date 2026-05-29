@@ -20,6 +20,9 @@ import {
   uniqueChapterId,
   getCurrentTime,
   setCurrentTime,
+  reorderElement,
+  moveElementToEnd,
+  moveElementToFront,
 } from './state';
 import { initCanvas, showPreview, hidePreview } from './canvas';
 import { initElementList } from './element-list';
@@ -33,6 +36,7 @@ import {
   copySelection,
   pasteFromClipboard,
   moveSelectedElement,
+  duplicateSelection,
 } from './studio-clipboard';
 import {
   uploadAndInsertImage,
@@ -444,6 +448,35 @@ export function initStudio(): void {
     if (key === 'v' && !inText) {
       if (pasteFromClipboard()) {
         e.preventDefault();
+      }
+      return;
+    }
+    if (key === 'd' && !inText) {
+      if (duplicateSelection()) {
+        e.preventDefault();
+      }
+      return;
+    }
+    if ((e.code === 'BracketRight' || e.code === 'BracketLeft') && !inText) {
+      const sel = getSelection();
+      const ids = getSelectedElementIds(sel);
+      if (ids.length === 0) return;
+      const def = getDef();
+      if (!def) return;
+      e.preventDefault();
+      const forward = e.code === 'BracketRight';
+      for (const id of ids) {
+        if (e.shiftKey) {
+          if (forward) moveElementToEnd(id);
+          else moveElementToFront(id);
+        } else {
+          const idx = def.elements.findIndex((x) => x.id === id);
+          if (forward && idx < def.elements.length - 1) {
+            reorderElement(id, def.elements[idx + 1].id, 'after');
+          } else if (!forward && idx > 0) {
+            reorderElement(id, def.elements[idx - 1].id, 'before');
+          }
+        }
       }
     }
   });
