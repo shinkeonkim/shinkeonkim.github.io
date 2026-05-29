@@ -19,8 +19,16 @@ let addBtn: HTMLButtonElement | null = null;
 let scrollSyncSuppress = false;
 let dragTooltipEl: HTMLDivElement | null = null;
 
-const pxPerMs = 0.15;
+let pxPerMs = 0.15;
 const GUTTER_PX = 140;
+const PX_PER_MS_KEY = 'studio.timeline.pxPerMs';
+
+try {
+  const saved = Number(localStorage.getItem(PX_PER_MS_KEY));
+  if (Number.isFinite(saved) && saved > 0.02 && saved < 2) pxPerMs = saved;
+} catch {
+  void 0;
+}
 type DragMode =
   | { kind: 'time' }
   | { kind: 'chapter'; id: string }
@@ -59,6 +67,23 @@ export function initTimeline(
   if (headerWrap && elementWrap) {
     headerWrap.addEventListener('scroll', () => mirrorScroll(headerWrap, elementWrap), { passive: true });
     elementWrap.addEventListener('scroll', () => mirrorScroll(elementWrap, headerWrap), { passive: true });
+    const onZoomWheel = (e: WheelEvent): void => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const wrap = e.currentTarget as HTMLElement;
+      const wrapRect = wrap.getBoundingClientRect();
+      const cursorBodyX = e.clientX - wrapRect.left - GUTTER_PX + wrap.scrollLeft;
+      const oldPx = pxPerMs;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      pxPerMs = Math.max(0.025, Math.min(1.5, oldPx * factor));
+      try { localStorage.setItem(PX_PER_MS_KEY, String(pxPerMs)); } catch { void 0; }
+      const ratio = pxPerMs / oldPx;
+      render();
+      const newScrollLeft = (cursorBodyX * ratio) - (e.clientX - wrapRect.left - GUTTER_PX);
+      wrap.scrollLeft = Math.max(0, newScrollLeft);
+    };
+    headerWrap.addEventListener('wheel', onZoomWheel, { passive: false });
+    elementWrap.addEventListener('wheel', onZoomWheel, { passive: false });
   }
   render();
 }

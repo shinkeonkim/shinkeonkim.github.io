@@ -298,6 +298,8 @@ export function initStudio(): void {
   subscribe(() => reflectState(ui));
   reflectState(ui);
 
+  setupCanvasPan(ui);
+
   ui.titleInput.addEventListener('input', () => {
     updateMeta({ title: ui.titleInput.value });
   });
@@ -581,6 +583,57 @@ function setupTimelineResizer(ui: StudioUi): void {
     const h = Math.max(120, Math.min(window.innerHeight * 0.8, current + delta));
     ui.app.style.setProperty('--studio-timeline-h', `${h}px`);
     localStorage.setItem(STORAGE_KEY, String(h));
+  });
+}
+
+function setupCanvasPan(ui: StudioUi): void {
+  const wrap = ui.app.querySelector<HTMLElement>('.studio-canvas-wrap');
+  if (!wrap) return;
+  let spaceHeld = false;
+  let panState: { startX: number; startY: number; startScrollL: number; startScrollT: number } | null = null;
+
+  const isInputTarget = (t: EventTarget | null): boolean =>
+    t instanceof HTMLInputElement ||
+    t instanceof HTMLTextAreaElement ||
+    (t instanceof HTMLElement && t.isContentEditable);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space') return;
+    if (isInputTarget(e.target)) return;
+    if (e.repeat) return;
+    spaceHeld = true;
+    document.body.classList.add('studio-pan-mode');
+    e.preventDefault();
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.code !== 'Space') return;
+    spaceHeld = false;
+    document.body.classList.remove('studio-pan-mode');
+  });
+
+  wrap.addEventListener('mousedown', (e) => {
+    if (!spaceHeld) return;
+    e.preventDefault();
+    e.stopPropagation();
+    panState = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startScrollL: wrap.scrollLeft,
+      startScrollT: wrap.scrollTop,
+    };
+    document.body.classList.add('studio-panning');
+  }, { capture: true });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!panState) return;
+    e.preventDefault();
+    wrap.scrollLeft = panState.startScrollL - (e.clientX - panState.startX);
+    wrap.scrollTop = panState.startScrollT - (e.clientY - panState.startY);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!panState) return;
+    panState = null;
+    document.body.classList.remove('studio-panning');
   });
 }
 

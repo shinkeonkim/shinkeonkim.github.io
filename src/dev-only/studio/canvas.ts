@@ -174,6 +174,7 @@ let vertexDragState: VertexDragState | null = null;
 let resizeState: ResizeState | null = null;
 let canvasEl: SVGSVGElement | null = null;
 let hoveredElementId: string | null = null;
+let canvasZoom = 1;
 
 export function initCanvas(root: SVGSVGElement): void {
   canvasEl = root;
@@ -182,10 +183,40 @@ export function initCanvas(root: SVGSVGElement): void {
   root.addEventListener('mouseover', onMouseOver);
   root.addEventListener('mouseleave', onMouseLeave);
   root.addEventListener('contextmenu', onContextMenu);
+  root.addEventListener('wheel', onCanvasWheel, { passive: false });
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('mouseup', onMouseUp);
   subscribe(render);
   render();
+}
+
+export function getCanvasZoom(): number {
+  return canvasZoom;
+}
+
+export function setCanvasZoom(z: number): void {
+  canvasZoom = Math.max(0.1, Math.min(5, z));
+  render();
+}
+
+function onCanvasWheel(e: WheelEvent): void {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  const wrap = canvasEl?.closest('.studio-canvas-wrap') as HTMLElement | null;
+  if (!wrap) {
+    canvasZoom = Math.max(0.1, Math.min(5, canvasZoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    render();
+    return;
+  }
+  const wrapRect = wrap.getBoundingClientRect();
+  const mxInWrap = e.clientX - wrapRect.left + wrap.scrollLeft;
+  const myInWrap = e.clientY - wrapRect.top + wrap.scrollTop;
+  const old = canvasZoom;
+  canvasZoom = Math.max(0.1, Math.min(5, canvasZoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+  const ratio = canvasZoom / old;
+  render();
+  wrap.scrollLeft = mxInWrap * ratio - (e.clientX - wrapRect.left);
+  wrap.scrollTop = myInWrap * ratio - (e.clientY - wrapRect.top);
 }
 
 function onContextMenu(e: MouseEvent): void {
@@ -765,8 +796,8 @@ function render(): void {
     return;
   }
   canvasEl.setAttribute('viewBox', `0 0 ${def.canvas.width} ${def.canvas.height}`);
-  canvasEl.style.width = def.canvas.width + 'px';
-  canvasEl.style.height = def.canvas.height + 'px';
+  canvasEl.style.width = (def.canvas.width * canvasZoom) + 'px';
+  canvasEl.style.height = (def.canvas.height * canvasZoom) + 'px';
   canvasEl.style.backgroundColor = def.canvas.background;
 
   canvasEl.innerHTML = `<defs>${HEAD_MARKER_DEFS}</defs>`;
