@@ -99,8 +99,9 @@ that the focus-restore selector can re-target. Fix before commit.
 ## Non-text interaction surfaces that should also be smoke-tested
 
 When you touch anything under `src/dev-only/studio/canvas.ts`,
-`timeline.ts`, `main.ts:setupCanvasPan`, or `studio-align.ts`, also
-verify these don't regress:
+`timeline.ts`, `main.ts:setupCanvasPan`, `studio-align.ts`,
+`studio-groups.ts` or `studio-history.ts`, also verify these don't
+regress:
 
 - **Canvas zoom** (Ctrl/Cmd + wheel on the SVG): SVG `style.width`
   changes; click coordinates still hit the right SVG element at zoom
@@ -122,6 +123,35 @@ verify these don't regress:
 - **Multi-select align/distribute**: with 2+ elements selected, the
   6 align buttons + 2 distribute buttons appear in the properties
   panel.
+- **Element grouping** (Cmd+G / Cmd+Shift+G): with 2+ elements
+  selected, Cmd+G wraps them in a `type: 'group'` element with
+  childIds. Selection switches to the group. Arrow keys and canvas
+  drag move all leaf descendants together. Cmd+Shift+G on a selected
+  group dissolves it; children are restored as a multi-select.
+  Alt+click on the canvas drills into a child of the selected group.
+  The properties panel for a group shows a name field + ungroup
+  button + clickable child id list (no x/y inputs — the group reads
+  its position from the children's bbox).
+- **History panel** (Cmd+Shift+H, also reachable from Cmd+K): renders
+  past entries below a `— 현재 위치 —` marker and any future entries
+  above (faded). Each row shows a kind icon + the mutator's label
+  (e.g. `이동: client`, `Chapter 추가: ...`). Clicking a past row
+  jumps that many undos backward; clicking a future row redoes. The
+  panel auto-refreshes on state changes while open. Every mutator in
+  `state.ts` should pass a sensible label + kind through
+  `mutateDef(fn, label, kind)` — when adding a new mutator, name your
+  label in the same `domain: target (keys)` style and choose the
+  closest HistoryKind, defaulting to 'other' only if nothing fits.
+
+## Schema versioning notes
+
+- `animationDefSchema.version` is now `z.union([z.literal(3),
+  z.literal(4)]).default(4)`. v3 files (the 29 already in
+  `public/animations/`) keep loading without change. The `'group'`
+  element type added in v4 is optional — old files have no groups.
+  If you add a NEW element type or field that v3 cannot represent,
+  bump to v5 inside the union and add a one-time migration helper
+  next to the v3 \u2192 v4 pattern in `assets.ts`.
 
 ## Generated artifact cleanup
 
