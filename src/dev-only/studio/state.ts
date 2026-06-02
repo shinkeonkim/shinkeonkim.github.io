@@ -56,25 +56,52 @@ export function promoteDraftToSaved(): void {
 }
 
 const HISTORY_LIMIT = 60;
-const past: string[] = [];
-const future: string[] = [];
+
+export type HistoryKind =
+  | 'meta'
+  | 'canvas'
+  | 'settings'
+  | 'add'
+  | 'delete'
+  | 'move'
+  | 'style'
+  | 'rotate'
+  | 'resize'
+  | 'reorder'
+  | 'track'
+  | 'appearance'
+  | 'chapter'
+  | 'effect'
+  | 'group'
+  | 'other';
+
+export interface HistoryEntry {
+  snap: string;
+  label: string;
+  kind: HistoryKind;
+  timestamp: number;
+}
+
+const past: HistoryEntry[] = [];
+const future: HistoryEntry[] = [];
 let inTransient = false;
+let pendingLabel: { label: string; kind: HistoryKind } | null = null;
 
 function snapshotJson(): string | null {
   return state.def ? JSON.stringify(state.def) : null;
 }
 
-function pushHistory(): void {
+function pushHistory(label: string, kind: HistoryKind): void {
   const snap = snapshotJson();
   if (snap === null) return;
-  past.push(snap);
+  past.push({ snap, label, kind, timestamp: Date.now() });
   if (past.length > HISTORY_LIMIT) past.shift();
   future.length = 0;
 }
 
-export function beginTransient(): void {
+export function beginTransient(label = 'edit', kind: HistoryKind = 'other'): void {
   if (!state.def) return;
-  pushHistory();
+  pushHistory(label, kind);
   inTransient = true;
 }
 
@@ -93,9 +120,9 @@ export function canRedo(): boolean {
 export function undo(): void {
   if (past.length === 0) return;
   const cur = snapshotJson();
-  if (cur !== null) future.push(cur);
+  if (cur !== null) future.push({ snap: cur, label: '(redo)', kind: 'other', timestamp: Date.now() });
   const prev = past.pop()!;
-  state.def = JSON.parse(prev);
+  state.def = JSON.parse(prev.snap);
   state.dirty = true;
   emit();
 }
@@ -103,9 +130,9 @@ export function undo(): void {
 export function redo(): void {
   if (future.length === 0) return;
   const cur = snapshotJson();
-  if (cur !== null) past.push(cur);
+  if (cur !== null) past.push({ snap: cur, label: '(undo)', kind: 'other', timestamp: Date.now() });
   const next = future.pop()!;
-  state.def = JSON.parse(next);
+  state.def = JSON.parse(next.snap);
   state.dirty = true;
   emit();
 }
@@ -114,6 +141,24 @@ export function resetHistory(): void {
   past.length = 0;
   future.length = 0;
 }
+
+export function getHistory(): { past: readonly HistoryEntry[]; future: readonly HistoryEntry[] } {
+  return { past, future };
+}
+
+export function jumpBack(steps: number): void {
+  if (steps <= 0 || past.length === 0) return;
+  const n = Math.min(steps, past.length);
+  for (let i = 0; i < n; i += 1) undo();
+}
+
+export function jumpForward(steps: number): void {
+  if (steps <= 0 || future.length === 0) return;
+  const n = Math.min(steps, future.length);
+  for (let i = 0; i < n; i += 1) redo();
+}
+
+
 
 export function subscribe(fn: Listener): () => void {
   listeners.add(fn);
@@ -190,9 +235,12 @@ export function toggleSelectionFor(sel: Selection, id: string): Selection {
   return { kind: 'elements', elementIds: next };
 }
 
-function mutateDef(fn: (def: AnimationDef) => void): void {
+function mutateDef(fn: (def: AnimationDef) => void, label = 'edit', kind: HistoryKind = 'other'): void {
   if (!state.def) return;
-  if (!inTransient) pushHistory();
+  const effectiveLabel = pendingLabel?.label ?? label;
+  const effectiveKind = pendingLabel?.kind ?? kind;
+  pendingLabel = null;
+  if (!inTransient) pushHistory(effectiveLabel, effectiveKind);
   const cloned = JSON.parse(JSON.stringify(state.def));
   fn(cloned);
   const parsed = animationDefSchema.safeParse(cloned);
@@ -218,17 +266,21 @@ function ensureAppearance(el: AnimationElement, def: AnimationDef): void {
 }
 
 export function addElement(el: AnimationElement): void {
+  const kind: HistoryKind = el.type === 'group' ? 'group' : 'add';
+  const label = el.type === 'group' ? `그룹 생성 (${(el as { childIds?: string[] }).childIds?.length ?? 0}개)` : `요소 추가: ${el.type}`;
   mutateDef((def) => {
     const cloned = JSON.parse(JSON.stringify(el)) as AnimationElement;
     ensureAppearance(cloned, def);
     if (!cloned.tracks) cloned.tracks = [];
     def.elements.push(cloned);
-  });
+  }, label, kind);
   state.selection = { kind: 'element', elementId: el.id };
   emit();
 }
 
 export function deleteElement(id: string): void {
+  const targetEl = state.def?.elements.find((e) => e.id === id);
+  const isGroupKind = targetEl?.type === 'group';
   mutateDef((def) => {
     def.elements = def.elements.filter((e) => e.id !== id);
     def.effects = def.effects.filter((e) => e.elementId !== id);
@@ -237,7 +289,7 @@ export function deleteElement(id: string): void {
         el.childIds = el.childIds.filter((c) => c !== id);
       }
     }
-  });
+  }, isGroupKind ? `그룹 해제` : `요소 삭제: ${id}`, isGroupKind ? 'group' : 'delete');
   if (state.selection.kind === 'element' && state.selection.elementId === id) {
     state.selection = { kind: 'none' };
   } else if (state.selection.kind === 'elements') {
@@ -249,7 +301,22 @@ export function deleteElement(id: string): void {
   emit();
 }
 
+function labelForPatch(id: string, patch: Record<string, unknown>): { label: string; kind: HistoryKind } {
+  const keys = Object.keys(patch);
+  if (keys.length === 0) return { label: `요소 수정: ${id}`, kind: 'other' };
+  const posKeys = ['x', 'y', 'cx', 'cy', 'x1', 'y1', 'x2', 'y2', 'points'];
+  const sizeKeys = ['width', 'height', 'r', 'fontSize', 'cellWidth'];
+  const styleKeys = ['fill', 'stroke', 'strokeWidth', 'color', 'opacity', 'cornerRadius', 'labelColor', 'labelSize'];
+  if (keys.some((k) => posKeys.includes(k))) return { label: `이동: ${id}`, kind: 'move' };
+  if (keys.some((k) => sizeKeys.includes(k))) return { label: `크기 변경: ${id}`, kind: 'resize' };
+  if (keys.includes('rotation')) return { label: `회전: ${id}`, kind: 'rotate' };
+  if (keys.some((k) => styleKeys.includes(k))) return { label: `스타일: ${id} (${keys.join(', ')})`, kind: 'style' };
+  if (keys.includes('name')) return { label: `이름 변경: ${id}`, kind: 'meta' };
+  return { label: `요소 수정: ${id} (${keys.join(', ')})`, kind: 'other' };
+}
+
 export function updateElementBase(id: string, patch: Record<string, unknown>): void {
+  const { label, kind } = labelForPatch(id, patch);
   mutateDef((def) => {
     const idx = def.elements.findIndex((e) => e.id === id);
     if (idx < 0) return;
@@ -260,7 +327,7 @@ export function updateElementBase(id: string, patch: Record<string, unknown>): v
       else merged[k] = v;
     }
     def.elements[idx] = merged as unknown as AnimationElement;
-  });
+  }, label, kind);
 }
 
 export function reorderElement(sourceId: string, targetId: string, position: 'before' | 'after'): void {
@@ -275,7 +342,7 @@ export function reorderElement(sourceId: string, targetId: string, position: 'be
     }
     if (position === 'after') targetIdx += 1;
     def.elements.splice(targetIdx, 0, moved);
-  });
+  }, `순서 변경: ${sourceId}`, 'reorder');
 }
 
 export function moveElementToEnd(id: string): void {
@@ -284,7 +351,7 @@ export function moveElementToEnd(id: string): void {
     if (idx < 0) return;
     const [moved] = def.elements.splice(idx, 1);
     def.elements.push(moved);
-  });
+  }, `맨 앞으로: ${id}`, 'reorder');
 }
 
 export function moveElementToFront(id: string): void {
@@ -293,7 +360,7 @@ export function moveElementToFront(id: string): void {
     if (idx < 0) return;
     const [moved] = def.elements.splice(idx, 1);
     def.elements.unshift(moved);
-  });
+  }, `맨 뒤로: ${id}`, 'reorder');
 }
 
 export function addAppearance(id: string, ap: Appearance): void {
@@ -302,7 +369,7 @@ export function addAppearance(id: string, ap: Appearance): void {
     if (!el) return;
     el.appearances.push(ap);
     el.appearances.sort((a, b) => a.start - b.start);
-  });
+  }, `출현 추가: ${id}`, 'appearance');
 }
 
 export function updateAppearance(id: string, apIdx: number, patch: Partial<Appearance>): void {
@@ -311,7 +378,7 @@ export function updateAppearance(id: string, apIdx: number, patch: Partial<Appea
     if (!el || !el.appearances[apIdx]) return;
     el.appearances[apIdx] = { ...el.appearances[apIdx], ...patch };
     el.appearances.sort((a, b) => a.start - b.start);
-  });
+  }, `출현 조정: ${id}`, 'appearance');
 }
 
 export function removeAppearance(id: string, apIdx: number): void {
@@ -320,7 +387,7 @@ export function removeAppearance(id: string, apIdx: number): void {
     if (!el) return;
     el.appearances.splice(apIdx, 1);
     if (el.appearances.length === 0) ensureAppearance(el, def);
-  });
+  }, `출현 삭제: ${id}`, 'appearance');
 }
 
 function findTrack(el: AnimationElement, property: string): PropertyTrack | undefined {
@@ -343,7 +410,7 @@ export function setTrackKeyframe(elementId: string, property: string, time: numb
       track.keyframes.push({ time, value });
       track.keyframes.sort((a, b) => a.time - b.time);
     }
-  });
+  }, `keyframe ${property} @ ${time}ms`, 'track');
 }
 
 export function removeTrackKeyframe(elementId: string, property: string, time: number): void {
@@ -356,7 +423,7 @@ export function removeTrackKeyframe(elementId: string, property: string, time: n
     if (track.keyframes.length === 0) {
       el.tracks = el.tracks.filter((t) => t.property !== property);
     }
-  });
+  }, `keyframe 삭제 ${property} @ ${time}ms`, 'track');
 }
 
 export function setElementValueAtTime(elementId: string, patch: Record<string, unknown>): void {
@@ -387,31 +454,32 @@ export function removeTrack(elementId: string, property: string): void {
     const el = def.elements.find((e) => e.id === elementId);
     if (!el) return;
     el.tracks = el.tracks.filter((t) => t.property !== property);
-  });
+  }, `트랙 삭제: ${property}`, 'track');
 }
 
 export function addChapter(c: Chapter): void {
   mutateDef((def) => {
     def.chapters.push(c);
     def.chapters.sort((a, b) => a.time - b.time);
-  });
+  }, `Chapter 추가: ${c.label || c.id}`, 'chapter');
   state.selection = { kind: 'chapter', chapterId: c.id };
   emit();
 }
 
 export function updateChapter(id: string, patch: Partial<Chapter>): void {
+  const keys = Object.keys(patch).join(', ');
   mutateDef((def) => {
     const idx = def.chapters.findIndex((c) => c.id === id);
     if (idx < 0) return;
     def.chapters[idx] = { ...def.chapters[idx], ...patch };
     def.chapters.sort((a, b) => a.time - b.time);
-  });
+  }, `Chapter 수정: ${id} (${keys})`, 'chapter');
 }
 
 export function deleteChapter(id: string): void {
   mutateDef((def) => {
     def.chapters = def.chapters.filter((c) => c.id !== id);
-  });
+  }, `Chapter 삭제: ${id}`, 'chapter');
   if (state.selection.kind === 'chapter' && state.selection.chapterId === id) {
     state.selection = { kind: 'none' };
   }
@@ -422,7 +490,7 @@ export function addEffect(eff: AnimationEffect): void {
   mutateDef((def) => {
     def.effects.push(eff);
     def.effects.sort((a, b) => a.time - b.time);
-  });
+  }, `효과 추가: ${eff.type}`, 'effect');
 }
 
 export function updateEffect(id: string, patch: Partial<AnimationEffect>): void {
@@ -431,13 +499,13 @@ export function updateEffect(id: string, patch: Partial<AnimationEffect>): void 
     if (idx < 0) return;
     def.effects[idx] = { ...def.effects[idx], ...patch } as AnimationEffect;
     def.effects.sort((a, b) => a.time - b.time);
-  });
+  }, `효과 수정: ${id}`, 'effect');
 }
 
 export function deleteEffect(id: string): void {
   mutateDef((def) => {
     def.effects = def.effects.filter((e) => e.id !== id);
-  });
+  }, `효과 삭제: ${id}`, 'effect');
   if (state.selection.kind === 'effect' && state.selection.effectId === id) {
     state.selection = { kind: 'none' };
   }
@@ -445,21 +513,24 @@ export function deleteEffect(id: string): void {
 }
 
 export function updateMeta(patch: Partial<Pick<AnimationDef, 'title' | 'description'>>): void {
+  const keys = Object.keys(patch).join(', ');
   mutateDef((def) => {
     Object.assign(def, patch);
-  });
+  }, `메타 수정: ${keys}`, 'meta');
 }
 
 export function updateCanvas(patch: Partial<AnimationDef['canvas']>): void {
+  const keys = Object.keys(patch).join(', ');
   mutateDef((def) => {
     def.canvas = { ...def.canvas, ...patch };
-  });
+  }, `캔버스: ${keys}`, 'canvas');
 }
 
 export function updateSettings(patch: Partial<AnimationDef['settings']>): void {
+  const keys = Object.keys(patch).join(', ');
   mutateDef((def) => {
     def.settings = { ...def.settings, ...patch };
-  });
+  }, `설정: ${keys}`, 'settings');
 }
 
 export function updateDuration(ms: number): void {
@@ -477,7 +548,7 @@ export function updateDuration(ms: number): void {
     for (const eff of def.effects) {
       if (eff.time > def.duration) eff.time = def.duration;
     }
-  });
+  }, `duration: ${ms} ms`, 'meta');
   if (state.currentTime > ms) state.currentTime = ms;
 }
 

@@ -55,6 +55,7 @@ import {
 } from './studio-save-load';
 import { initPalette, openPalette, registerCommands } from './studio-palette';
 import { groupElements, ungroupElement, isGroup } from './studio-groups';
+import { initHistoryPanel, openHistoryPanel } from './studio-history';
 
 function queryUi(): StudioUi | null {
   const app = document.getElementById('studio-app');
@@ -325,6 +326,7 @@ export function initStudio(): void {
   ui.newBtn.addEventListener('click', () => openNewDialog(ui));
 
   initPalette();
+  initHistoryPanel();
   registerCommands([
     { id: 'open', label: '📂 라이브러리 열기', hint: '저장된 애니메이션 목록', run: () => void openLibrary(ui) },
     { id: 'new', label: '🆕 새 애니메이션', hint: '빈 캔버스로 시작', run: () => openNewDialog(ui) },
@@ -332,6 +334,7 @@ export function initStudio(): void {
     { id: 'delete', label: '🗑 삭제', hint: '현재 애니메이션 삭제', run: () => void deleteCurrent(ui) },
     { id: 'undo', label: '↶ 실행 취소', hint: '⌘Z', run: () => undo() },
     { id: 'redo', label: '↷ 다시 실행', hint: '⌘⇧Z / ⌘Y', run: () => redo() },
+    { id: 'history', label: '📜 작업 이력', hint: '⌘⇧H', run: () => openHistoryPanel() },
     { id: 'play', label: '▶ 재생 토글', hint: '미리보기 시작/중지', run: () => togglePlay(ui) },
     { id: 'grid', label: '⊞ 격자 토글', hint: 'G', run: () => setGridEnabled(!isGridEnabled()) },
     { id: 'help', label: '⌨ 단축키 보기', hint: '? / Shift+/', run: openHelp },
@@ -452,6 +455,11 @@ export function initStudio(): void {
     if (key === 'k') {
       e.preventDefault();
       openPalette();
+      return;
+    }
+    if (key === 'h' && e.shiftKey) {
+      e.preventDefault();
+      openHistoryPanel();
       return;
     }
     if (key === 's') {
