@@ -13,7 +13,6 @@ import {
   setCurrentTime,
   setSelection,
   setTrackKeyframe,
-  setElementValueAtTime,
   subscribe,
   updateAppearance,
   updateCanvas,
@@ -31,7 +30,6 @@ import type {
   AnimationElement,
   AnimationEffect,
   Appearance,
-  Chapter,
   EntryMode,
   ExitMode,
 } from '../../animations/schema';
@@ -251,16 +249,13 @@ function renderInner(): void {
     }
     const elemOpts = def.elements.map((e) => `<option value="${escapeHtml(e.id)}" ${e.id === eff.elementId ? 'selected' : ''}>${escapeHtml(e.id)}</option>`).join('');
     const typeOpts = (['highlight', 'pulse', 'flow'] as const).map((t) => `<option value="${t}" ${t === eff.type ? 'selected' : ''}>${t}</option>`).join('');
-    let specific = '';
-    if (eff.type === 'highlight') {
-      specific = colorField('color', 'effect.color', eff.color);
-    } else if (eff.type === 'pulse') {
-      specific = numberField('scale', 'effect.scale', eff.scale, 0.05);
-    } else {
-      specific = colorField('color', 'effect.color', eff.color) +
-        numberField('particles', 'effect.particles', eff.particles, 1) +
-        numberField('radius', 'effect.radius', eff.radius, 0.5);
-    }
+    const specific = eff.type === 'highlight'
+      ? colorField('color', 'effect.color', eff.color)
+      : eff.type === 'pulse'
+        ? numberField('scale', 'effect.scale', eff.scale, 0.05)
+        : colorField('color', 'effect.color', eff.color) +
+          numberField('particles', 'effect.particles', eff.particles, 1) +
+          numberField('radius', 'effect.radius', eff.radius, 0.5);
     panelEl.innerHTML = `
       ${timeHint}
       <div class="studio-props-header"><span class="studio-props-header-title">${escapeHtml(eff.id)}</span><span class="studio-props-header-type">effect</span></div>

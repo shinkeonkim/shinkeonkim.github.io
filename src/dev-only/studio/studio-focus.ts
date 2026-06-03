@@ -45,7 +45,7 @@ export function captureFocusWithin(root: HTMLElement): FocusSnapshot | null {
 
 export function restoreFocusWithin(root: HTMLElement, snap: FocusSnapshot | null): void {
   if (!snap) return;
-  let target: HTMLElement | null = null;
+  let target: HTMLElement | null;
   try {
     target = root.querySelector<HTMLElement>(snap.selector);
   } catch {

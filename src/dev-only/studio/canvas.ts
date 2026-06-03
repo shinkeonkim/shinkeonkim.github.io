@@ -12,9 +12,7 @@ import {
   getDef,
   getSelection,
   getCurrentSnapshot,
-  getCurrentTime,
   setSelection,
-  setTrackKeyframe,
   updateElementBase,
   setElementValueAtTime,
   addElement,
@@ -24,7 +22,7 @@ import {
   toggleSelectionFor,
   getSelectedElementIds,
 } from './state';
-import { snapPoint, subscribeGrid } from './grid';
+import { snapPoint } from './grid';
 import type { Anchor } from '../../animations/schema';
 import { findContainingGroup, groupBbox, isGroup, moveGroupBy } from './studio-groups';
 import {
