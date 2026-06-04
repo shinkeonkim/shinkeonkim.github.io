@@ -13,8 +13,11 @@ const PROFILE_URL_RE = /url:\s*['"](https?:\/\/[^'"]+)['"]/g;
 
 const args = process.argv.slice(2);
 const force = args.includes('--force');
+const quiet = args.includes('--quiet');
 const maxAgeArg = args.find((a) => a.startsWith('--max-age='));
 const maxAgeHours = maxAgeArg ? Number(maxAgeArg.split('=')[1]) : 24 * 30;
+const errorMaxAgeArg = args.find((a) => a.startsWith('--error-max-age='));
+const errorMaxAgeHours = errorMaxAgeArg ? Number(errorMaxAgeArg.split('=')[1]) : 6;
 
 function cacheKey(url) {
   try {
@@ -124,9 +127,13 @@ async function fetchOne(url) {
   }
 }
 
+const log = (msg) => {
+  if (!quiet) console.log(msg);
+};
+
 const urls = await collectUrls();
 if (urls.length === 0) {
-  console.log('no <UrlPreview /> usages found.');
+  log('no <UrlPreview /> usages found.');
   process.exit(0);
 }
 const cache = await loadCache();
@@ -134,16 +141,19 @@ let fetched = 0;
 let skipped = 0;
 for (const url of urls) {
   const key = cacheKey(url);
-  if (!force && isFresh(cache[key], maxAgeHours) && !cache[key].error) {
-    skipped++;
-    continue;
+  if (!force) {
+    const ttl = cache[key]?.error ? errorMaxAgeHours : maxAgeHours;
+    if (isFresh(cache[key], ttl)) {
+      skipped++;
+      continue;
+    }
   }
-  process.stdout.write(`fetching ${url}\n`);
+  log(`fetching ${url}`);
   cache[key] = await fetchOne(url);
   fetched++;
 }
 await fs.mkdir(path.dirname(CACHE_PATH), { recursive: true });
 await fs.writeFile(CACHE_PATH, JSON.stringify(cache, null, 2) + '\n', 'utf-8');
-console.log(
-  `done: ${fetched} fetched, ${skipped} cached, ${urls.length} total → ${path.relative(REPO_ROOT, CACHE_PATH)}`,
+log(
+  `url previews: ${fetched} fetched, ${skipped} cached, ${urls.length} total → ${path.relative(REPO_ROOT, CACHE_PATH)}`,
 );
