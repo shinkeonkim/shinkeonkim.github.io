@@ -7,7 +7,9 @@ import ogs from 'open-graph-scraper';
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const CONTENT_ROOT = path.join(REPO_ROOT, 'src/content');
 const CACHE_PATH = path.join(REPO_ROOT, 'src/data/url-previews.json');
+const EXTERNAL_PROFILES_PATH = path.join(REPO_ROOT, 'src/lib/external-profiles.ts');
 const TAG_RE = /<UrlPreview\s+url=["']([^"']+)["']\s*\/>/g;
+const PROFILE_URL_RE = /url:\s*['"]([^'"]+)['"][^}]*status:\s*['"]live['"]/g;
 
 const args = process.argv.slice(2);
 const force = args.includes('--force');
@@ -51,6 +53,16 @@ async function collectUrls() {
     while ((m = TAG_RE.exec(text)) !== null) {
       urls.add(m[1]);
     }
+  }
+  try {
+    const profileText = await fs.readFile(EXTERNAL_PROFILES_PATH, 'utf-8');
+    PROFILE_URL_RE.lastIndex = 0;
+    let m;
+    while ((m = PROFILE_URL_RE.exec(profileText)) !== null) {
+      urls.add(m[1]);
+    }
+  } catch {
+    /* no external profiles file — fine */
   }
   return Array.from(urls);
 }
