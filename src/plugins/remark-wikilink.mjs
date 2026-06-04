@@ -6,6 +6,8 @@ const COLLECTIONS = ['posts', 'wiki', 'notes'];
 const CONTENT_DIR = path.resolve(process.cwd(), 'src/content');
 const WIKILINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g;
 
+const normKey = (s) => String(s).normalize('NFC').toLowerCase();
+
 function parseFrontmatter(raw) {
   const match = raw.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return { title: undefined, aliases: [] };
@@ -70,7 +72,7 @@ function buildSlugMap() {
         }
 
         const keys = new Set(
-          [slug, filename, title, ...aliases].filter(Boolean).map((k) => k.toLowerCase()),
+          [slug, filename, title, ...aliases].filter(Boolean).map(normKey),
         );
         for (const key of keys) {
           if (!map.has(key)) {
@@ -84,10 +86,21 @@ function buildSlugMap() {
   return map;
 }
 
-export default function remarkWikilink() {
-  const slugMap = buildSlugMap();
+let cachedMap = null;
+let cachedAt = 0;
+const CACHE_TTL_MS = 1500;
 
+function getSlugMap() {
+  const now = Date.now();
+  if (cachedMap && now - cachedAt < CACHE_TTL_MS) return cachedMap;
+  cachedMap = buildSlugMap();
+  cachedAt = now;
+  return cachedMap;
+}
+
+export default function remarkWikilink() {
   return (tree) => {
+    const slugMap = getSlugMap();
     visit(tree, 'text', (node, index, parent) => {
       if (!parent || typeof index !== 'number') return;
       const text = node.value;
@@ -107,7 +120,7 @@ export default function remarkWikilink() {
         const target = m[1].trim();
         const heading = m[2]?.trim();
         const display = (m[3]?.trim() ?? target).replace(/\s+/g, ' ');
-        const found = slugMap.get(target.toLowerCase());
+        const found = slugMap.get(normKey(target));
         const broken = !found;
         const href = found
           ? heading
