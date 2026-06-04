@@ -9,7 +9,7 @@ const CONTENT_ROOT = path.join(REPO_ROOT, 'src/content');
 const CACHE_PATH = path.join(REPO_ROOT, 'src/data/url-previews.json');
 const EXTERNAL_PROFILES_PATH = path.join(REPO_ROOT, 'src/lib/external-profiles.ts');
 const TAG_RE = /<UrlPreview\s+url=["']([^"']+)["']\s*\/>/g;
-const PROFILE_URL_RE = /url:\s*['"]([^'"]+)['"][^}]*status:\s*['"]live['"]/g;
+const PROFILE_URL_RE = /url:\s*['"](https?:\/\/[^'"]+)['"]/g;
 
 const args = process.argv.slice(2);
 const force = args.includes('--force');
