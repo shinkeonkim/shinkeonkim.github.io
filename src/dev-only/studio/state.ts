@@ -119,9 +119,12 @@ export function canRedo(): boolean {
 
 export function undo(): void {
   if (past.length === 0) return;
+  const prev = past[past.length - 1]!;
   const cur = snapshotJson();
-  if (cur !== null) future.push({ snap: cur, label: '(redo)', kind: 'other', timestamp: Date.now() });
-  const prev = past.pop()!;
+  if (cur !== null) {
+    future.push({ snap: cur, label: prev.label, kind: prev.kind, timestamp: prev.timestamp });
+  }
+  past.pop();
   state.def = JSON.parse(prev.snap);
   state.dirty = true;
   emit();
@@ -129,9 +132,12 @@ export function undo(): void {
 
 export function redo(): void {
   if (future.length === 0) return;
+  const next = future[future.length - 1]!;
   const cur = snapshotJson();
-  if (cur !== null) past.push({ snap: cur, label: '(undo)', kind: 'other', timestamp: Date.now() });
-  const next = future.pop()!;
+  if (cur !== null) {
+    past.push({ snap: cur, label: next.label, kind: next.kind, timestamp: next.timestamp });
+  }
+  future.pop();
   state.def = JSON.parse(next.snap);
   state.dirty = true;
   emit();

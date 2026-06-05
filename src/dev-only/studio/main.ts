@@ -354,11 +354,12 @@ export function initStudio(): void {
   ui.newCreateBtn.addEventListener('click', () => void createNew(ui));
 
   document.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).closest('[data-studio-dialog-close]')) {
-      ui.libraryDialog.close();
-      ui.newDialog.close();
-      ui.newDialog.removeAttribute('data-mode');
-    }
+    const closer = (e.target as HTMLElement).closest('[data-studio-dialog-close]');
+    if (!closer) return;
+    const dialog = closer.closest<HTMLDialogElement>('dialog');
+    if (!dialog) return;
+    dialog.close();
+    if (dialog === ui.newDialog) dialog.removeAttribute('data-mode');
   });
 
   document.addEventListener('keydown', (e) => {
