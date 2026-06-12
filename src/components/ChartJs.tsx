@@ -111,8 +111,8 @@ export default function ChartJs({
 
     chartRef.current = new Chart(canvasRef.current, {
       type,
-      data: data as any,
-      options: merged as any,
+      data: data as Record<string, unknown>,
+      options: merged as Record<string, unknown>,
     });
 
     // Theme toggle 감지
@@ -130,8 +130,8 @@ export default function ChartJs({
         if (opts.scales?.y?.grid) opts.scales.y.grid.color = gc;
         chartRef.current = new Chart(canvasRef.current!, {
           type,
-          data: data as any,
-          options: opts as any,
+          data: data as Record<string, unknown>,
+          options: opts as Record<string, unknown>,
         });
       }
     });
@@ -158,8 +158,8 @@ export default function ChartJs({
   );
 }
 
-function deepMerge(target: any, source: any): any {
-  const result = { ...target };
+function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...target };
   for (const key of Object.keys(source)) {
     if (
       source[key] &&
@@ -168,7 +168,7 @@ function deepMerge(target: any, source: any): any {
       target[key] &&
       typeof target[key] === 'object'
     ) {
-      result[key] = deepMerge(target[key], source[key]);
+      result[key] = deepMerge(target[key] as Record<string, unknown>, source[key] as Record<string, unknown>);
     } else {
       result[key] = source[key];
     }
