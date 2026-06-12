@@ -79,7 +79,7 @@ function buildSlugMap(entries) {
   return map;
 }
 
-function classify(severity, entries, collection, slug, message) {
+function classify(severity, _entries, collection, slug, message) {
   return { severity, collection, slug, message };
 }
 

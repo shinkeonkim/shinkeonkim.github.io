@@ -13,6 +13,7 @@
  *   caption: chart caption shown below (optional)
  */
 import { useEffect, useRef } from 'react';
+import type { ChartData, ChartOptions } from 'chart.js';
 import {
   Chart,
   CategoryScale,
@@ -111,8 +112,8 @@ export default function ChartJs({
 
     chartRef.current = new Chart(canvasRef.current, {
       type,
-      data: data as Record<string, unknown>,
-      options: merged as Record<string, unknown>,
+      data: data as unknown as ChartData,
+      options: merged as unknown as ChartOptions,
     });
 
     // Theme toggle 감지
@@ -123,15 +124,17 @@ export default function ChartJs({
         const tc = nowDark ? '#e2e8f0' : '#1e293b';
         const gc = nowDark ? '#334155' : '#f1f5f9';
         const opts = deepMerge(defaultOptions, (options as Record<string, unknown>) ?? {});
-        if (opts.plugins?.legend?.labels) opts.plugins.legend.labels.color = tc;
-        if (opts.scales?.x?.ticks) opts.scales.x.ticks.color = tc;
-        if (opts.scales?.x?.grid) opts.scales.x.grid.color = gc;
-        if (opts.scales?.y?.ticks) opts.scales.y.ticks.color = tc;
-        if (opts.scales?.y?.grid) opts.scales.y.grid.color = gc;
+        const scales = opts.scales as Record<string, Record<string, Record<string, unknown>>> | undefined;
+        const plugins = opts.plugins as Record<string, Record<string, Record<string, unknown>>> | undefined;
+        if (plugins?.legend?.labels) plugins.legend.labels.color = tc;
+        if (scales?.x?.ticks) scales.x.ticks.color = tc;
+        if (scales?.x?.grid) scales.x.grid.color = gc;
+        if (scales?.y?.ticks) scales.y.ticks.color = tc;
+        if (scales?.y?.grid) scales.y.grid.color = gc;
         chartRef.current = new Chart(canvasRef.current!, {
           type,
-          data: data as Record<string, unknown>,
-          options: opts as Record<string, unknown>,
+          data: data as unknown as ChartData,
+          options: opts as unknown as ChartOptions,
         });
       }
     });
