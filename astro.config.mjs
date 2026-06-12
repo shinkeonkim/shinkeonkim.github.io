@@ -38,7 +38,10 @@ export default defineConfig({
     // statements into MDX files at compile time so writers can use
     // <CodeWithOutput .../> without a per-file import line.
     AutoImport({
-      imports: ['./src/components/CodeWithOutput.astro'],
+      imports: [
+        './src/components/CodeWithOutput.astro',
+        './src/components/ChartJs.tsx',
+      ],
     }),
     mdx(),
     react(),

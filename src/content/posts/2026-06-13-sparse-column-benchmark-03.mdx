@@ -1,0 +1,215 @@
+---
+title: 'UNION vs OR vs IN 벤치마크 (3) — 전체 데이터와 실무 권고'
+description: 'PostgreSQL 3버전 + MySQL 3버전의 전체 측정 데이터와, 이 결과를 실무에 어떻게 적용할지 정리한다.'
+date: 2026-06-13
+tags: [postgresql, mysql, benchmark, sql]
+series: "Sparse Column 쿼리 벤치마크"
+seriesOrder: 3
+references:
+  - id: "sql-레벨업"
+---
+
+## 전체 성능 데이터
+
+### PostgreSQL (전 버전)
+
+<ChartJs
+  client:visible
+  type="line"
+  title="PostgreSQL 13 / 15 / 17 — OR 조건 p50 비교"
+  caption="세 버전 모두 동일한 패턴. PG 13에서도 BitmapOr가 안정적으로 동작한다."
+  height="250px"
+  data={{
+    labels: ['n=1', 'n=3', 'n=5', 'n=10', 'n=20', 'n=50'],
+    datasets: [
+      { label: 'PG 13 OR', data: [0.002, 0.004, 0.008, 0.024, 0.032, 0.085], borderColor: '#6366f1', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 3 },
+      { label: 'PG 15 OR', data: [0.002, 0.005, 0.008, 0.015, 0.027, 0.086], borderColor: '#22c55e', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 3 },
+      { label: 'PG 17 OR', data: [0.003, 0.005, 0.007, 0.014, 0.023, 0.077], borderColor: '#f97316', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 3 }
+    ]
+  }}
+  options={{ scales: { y: { title: { display: true, text: 'p50 (ms)' }, beginAtZero: true } } }}
+/>
+
+<details>
+<summary>PostgreSQL 전 버전 상세 테이블 (접기/펼치기)</summary>
+
+| DB | 방식 | n | p50 (ms) | p95 (ms) | I/O 블록 | Plan |
+|:---|:-----|:-:|:--------:|:--------:|:--------:|:-----|
+| pg13 | Tuple IN | 1 | 0.001 | 0.002 | 2 | index_scan |
+| pg13 | UNION ALL | 1 | 0.001 | 0.002 | 2 | index_scan |
+| pg13 | OR 조건 | 1 | 0.002 | 0.002 | 2 | index_scan |
+| pg13 | OR 조건 | 3 | 0.004 | 0.005 | 6 | bitmap_heap_scan |
+| pg13 | Tuple IN | 3 | 0.004 | 0.009 | 6 | bitmap_heap_scan |
+| pg13 | UNION ALL | 3 | 0.005 | 0.006 | 6 | append |
+| pg13 | UNION ALL | 5 | 0.007 | 0.007 | 13 | append |
+| pg13 | OR 조건 | 5 | 0.008 | 0.011 | 13 | bitmap_heap_scan |
+| pg13 | Tuple IN | 5 | 0.008 | 0.010 | 13 | bitmap_heap_scan |
+| pg13 | Tuple IN | 10 | 0.015 | 0.023 | 29 | bitmap_heap_scan |
+| pg13 | UNION ALL | 10 | 0.017 | 0.023 | 29 | append |
+| pg13 | OR 조건 | 10 | 0.024 | 0.041 | 29 | bitmap_heap_scan |
+| pg13 | OR 조건 | 20 | 0.032 | 0.043 | 55 | bitmap_heap_scan |
+| pg13 | Tuple IN | 20 | 0.032 | 0.033 | 55 | bitmap_heap_scan |
+| pg13 | UNION ALL | 20 | 0.032 | 0.032 | 56 | append |
+| pg13 | OR 조건 | 50 | 0.085 | 0.101 | 140 | bitmap_heap_scan |
+| pg13 | UNION ALL | 50 | 0.087 | 0.103 | 142 | append |
+| pg13 | Tuple IN | 50 | 0.102 | 0.164 | 140 | bitmap_heap_scan |
+| pg15 | OR 조건 | 1 | 0.002 | 0.002 | 2 | index_scan |
+| pg15 | Tuple IN | 1 | 0.002 | 0.005 | 2 | index_scan |
+| pg15 | UNION ALL | 1 | 0.002 | 0.004 | 2 | index_scan |
+| pg15 | Tuple IN | 3 | 0.004 | 0.005 | 6 | bitmap_heap_scan |
+| pg15 | UNION ALL | 3 | 0.004 | 0.009 | 6 | append |
+| pg15 | OR 조건 | 3 | 0.005 | 0.008 | 6 | bitmap_heap_scan |
+| pg15 | UNION ALL | 5 | 0.007 | 0.007 | 13 | append |
+| pg15 | OR 조건 | 5 | 0.008 | 0.011 | 13 | bitmap_heap_scan |
+| pg15 | Tuple IN | 5 | 0.008 | 0.013 | 13 | bitmap_heap_scan |
+| pg15 | Tuple IN | 10 | 0.014 | 0.020 | 29 | bitmap_heap_scan |
+| pg15 | OR 조건 | 10 | 0.015 | 0.017 | 29 | bitmap_heap_scan |
+| pg15 | UNION ALL | 10 | 0.015 | 0.022 | 29 | append |
+| pg15 | OR 조건 | 20 | 0.027 | 0.032 | 55 | bitmap_heap_scan |
+| pg15 | Tuple IN | 20 | 0.028 | 0.037 | 55 | bitmap_heap_scan |
+| pg15 | UNION ALL | 20 | 0.035 | 0.044 | 56 | append |
+| pg15 | Tuple IN | 50 | 0.081 | 0.104 | 140 | bitmap_heap_scan |
+| pg15 | OR 조건 | 50 | 0.086 | 0.092 | 140 | bitmap_heap_scan |
+| pg15 | UNION ALL | 50 | 0.098 | 0.106 | 142 | append |
+| pg17 | Tuple IN | 1 | 0.002 | 0.005 | 2 | index_scan |
+| pg17 | UNION ALL | 1 | 0.002 | 0.003 | 2 | index_scan |
+| pg17 | OR 조건 | 1 | 0.003 | 0.006 | 2 | index_scan |
+| pg17 | Tuple IN | 3 | 0.004 | 0.007 | 6 | bitmap_heap_scan |
+| pg17 | OR 조건 | 3 | 0.005 | 0.007 | 6 | bitmap_heap_scan |
+| pg17 | UNION ALL | 3 | 0.005 | 0.008 | 6 | append |
+| pg17 | OR 조건 | 5 | 0.007 | 0.009 | 13 | bitmap_heap_scan |
+| pg17 | Tuple IN | 5 | 0.007 | 0.014 | 13 | bitmap_heap_scan |
+| pg17 | UNION ALL | 5 | 0.007 | 0.012 | 13 | append |
+| pg17 | Tuple IN | 10 | 0.013 | 0.021 | 29 | bitmap_heap_scan |
+| pg17 | OR 조건 | 10 | 0.014 | 0.020 | 29 | bitmap_heap_scan |
+| pg17 | UNION ALL | 10 | 0.018 | 0.029 | 29 | append |
+| pg17 | OR 조건 | 20 | 0.023 | 0.025 | 55 | bitmap_heap_scan |
+| pg17 | Tuple IN | 20 | 0.030 | 0.044 | 55 | bitmap_heap_scan |
+| pg17 | UNION ALL | 20 | 0.036 | 0.041 | 56 | append |
+| pg17 | Tuple IN | 50 | 0.066 | 0.088 | 140 | bitmap_heap_scan |
+| pg17 | OR 조건 | 50 | 0.077 | 0.090 | 140 | bitmap_heap_scan |
+| pg17 | UNION ALL | 50 | 0.096 | 0.184 | 142 | append |
+
+</details>
+
+---
+
+### MySQL (전 버전)
+
+<ChartJs
+  client:visible
+  type="line"
+  title="MySQL 전 버전 — UNION ALL vs OR (p50, log scale)"
+  caption="모든 버전에서 UNION ALL(점선)만 인덱스 활용. OR(실선)은 Full Scan."
+  height="280px"
+  data={{
+    labels: ['n=1', 'n=3', 'n=5', 'n=10', 'n=20', 'n=50'],
+    datasets: [
+      { label: '5.7 OR', data: [0.128, 552.1, 557.0, 619.4, 603.6, 691.3], borderColor: '#ef4444', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 3 },
+      { label: '8.0 OR', data: [0.002, 37.2, 43.3, 51.8, 72.1, 133.0], borderColor: '#f97316', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 3 },
+      { label: '8.4 OR', data: [0.002, 40.4, 44.5, 56.1, 80.5, 147.0], borderColor: '#eab308', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 3 },
+      { label: '5.7 UNION', data: [0.118, 0.111, 0.195, 0.459, 0.730, 1.3], borderColor: '#ef4444', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [5, 5], tension: 0.3, pointRadius: 2 },
+      { label: '8.0 UNION', data: [0.002, 0.006, 0.014, 0.028, 0.055, 0.158], borderColor: '#f97316', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [5, 5], tension: 0.3, pointRadius: 2 },
+      { label: '8.4 UNION', data: [0.002, 0.006, 0.013, 0.028, 0.055, 0.158], borderColor: '#eab308', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [5, 5], tension: 0.3, pointRadius: 2 }
+    ]
+  }}
+  options={{
+    scales: {
+      y: { type: 'logarithmic', title: { display: true, text: 'p50 (ms, log)' } }
+    }
+  }}
+/>
+
+<details>
+<summary>MySQL 전 버전 상세 테이블 (접기/펼치기)</summary>
+
+| DB | 방식 | n | p50 (ms) | p95 (ms) | I/O 블록 | Plan | 판정 |
+|:---|:-----|:-:|:--------:|:--------:|:--------:|:-----|:-----|
+| mysql57 | Tuple IN | 1 | 0.084 | 0.105 | 9 | ref | ✓ |
+| mysql57 | UNION ALL | 1 | 0.118 | 0.129 | 9 | ref | ✓ |
+| mysql57 | OR 조건 | 1 | 0.128 | 0.166 | 9 | ref | ✓ |
+| mysql57 | UNION ALL | 3 | 0.111 | 0.174 | 26 | ref | ✓ |
+| mysql57 | Tuple IN | 3 | 549.0 | 559.6 | 850,026 | ALL | ✗ |
+| mysql57 | OR 조건 | 3 | 552.1 | 556.4 | 850,026 | ALL | ✗ |
+| mysql57 | UNION ALL | 5 | 0.195 | 0.221 | 68 | ref | ✓ |
+| mysql57 | OR 조건 | 5 | 557.0 | 563.5 | 850,026 | ALL | ✗ |
+| mysql57 | Tuple IN | 5 | 560.3 | 569.1 | 850,026 | ALL | ✗ |
+| mysql57 | UNION ALL | 10 | 0.459 | 1.0 | 162 | ref | ✓ |
+| mysql57 | Tuple IN | 10 | 579.4 | 623.5 | 850,026 | ALL | ✗ |
+| mysql57 | OR 조건 | 10 | 619.4 | 754.0 | 850,026 | ALL | ✗ |
+| mysql57 | UNION ALL | 20 | 0.730 | 0.948 | 306 | ref | ✓ |
+| mysql57 | OR 조건 | 20 | 603.6 | 611.2 | 850,026 | ALL | ✗ |
+| mysql57 | Tuple IN | 20 | 680.4 | 710.8 | 850,026 | ALL | ✗ |
+| mysql57 | UNION ALL | 50 | 1.3 | 1.4 | 782 | ref | ✓ |
+| mysql57 | OR 조건 | 50 | 691.3 | 700.3 | 850,026 | ALL | ✗ |
+| mysql57 | Tuple IN | 50 | 693.6 | 697.7 | 850,026 | ALL | ✗ |
+| mysql80 | UNION ALL | 1 | 0.002 | 0.002 | 119 | ref | ✓ |
+| mysql80 | OR 조건 | 1 | 0.002 | 0.002 | 119 | ref | ✓ |
+| mysql80 | Tuple IN | 1 | 0.002 | 0.003 | 119 | ref | ✓ |
+| mysql80 | UNION ALL | 3 | 0.006 | 0.006 | 153 | ref | ✓ |
+| mysql80 | OR 조건 | 3 | 37.2 | 37.9 | 1,700,153 | ALL | ✗ |
+| mysql80 | Tuple IN | 3 | 37.5 | 38.0 | 1,700,153 | ALL | ✗ |
+| mysql80 | UNION ALL | 5 | 0.014 | 0.017 | 238 | ref | ✓ |
+| mysql80 | Tuple IN | 5 | 41.9 | 44.6 | 1,700,153 | ALL | ✗ |
+| mysql80 | OR 조건 | 5 | 43.3 | 46.8 | 1,700,153 | ALL | ✗ |
+| mysql80 | UNION ALL | 10 | 0.028 | 0.042 | 425 | ref | ✓ |
+| mysql80 | OR 조건 | 10 | 51.8 | 60.0 | 1,700,153 | ALL | ✗ |
+| mysql80 | Tuple IN | 10 | 52.4 | 53.3 | 1,700,153 | ALL | ✗ |
+| mysql80 | UNION ALL | 20 | 0.055 | 0.067 | 714 | ref | ✓ |
+| mysql80 | Tuple IN | 20 | 71.2 | 72.1 | 1,700,153 | ALL | ✗ |
+| mysql80 | OR 조건 | 20 | 72.1 | 77.0 | 1,700,153 | ALL | ✗ |
+| mysql80 | UNION ALL | 50 | 0.158 | 0.178 | 1,666 | ref | ✓ |
+| mysql80 | Tuple IN | 50 | 131.0 | 134.1 | 1,700,153 | ALL | ✗ |
+| mysql80 | OR 조건 | 50 | 133.0 | 138.8 | 1,700,153 | ALL | ✗ |
+| mysql84 | UNION ALL | 1 | 0.002 | 0.002 | 221 | ref | ✓ |
+| mysql84 | Tuple IN | 1 | 0.002 | 0.002 | 221 | ref | ✓ |
+| mysql84 | OR 조건 | 1 | 0.002 | 0.002 | 221 | ref | ✓ |
+| mysql84 | UNION ALL | 3 | 0.006 | 0.008 | 255 | ref | ✓ |
+| mysql84 | Tuple IN | 3 | 40.3 | 41.1 | 1,700,255 | ALL | ✗ |
+| mysql84 | OR 조건 | 3 | 40.4 | 41.1 | 1,700,255 | ALL | ✗ |
+| mysql84 | UNION ALL | 5 | 0.013 | 0.014 | 340 | ref | ✓ |
+| mysql84 | OR 조건 | 5 | 44.5 | 45.6 | 1,700,255 | ALL | ✗ |
+| mysql84 | Tuple IN | 5 | 45.1 | 46.5 | 1,700,255 | ALL | ✗ |
+| mysql84 | UNION ALL | 10 | 0.028 | 0.034 | 527 | ref | ✓ |
+| mysql84 | Tuple IN | 10 | 56.0 | 57.0 | 1,700,255 | ALL | ✗ |
+| mysql84 | OR 조건 | 10 | 56.1 | 59.0 | 1,700,255 | ALL | ✗ |
+| mysql84 | UNION ALL | 20 | 0.055 | 0.064 | 816 | ref | ✓ |
+| mysql84 | Tuple IN | 20 | 77.5 | 79.8 | 1,700,255 | ALL | ✗ |
+| mysql84 | OR 조건 | 20 | 80.5 | 81.5 | 1,700,255 | ALL | ✗ |
+| mysql84 | UNION ALL | 50 | 0.158 | 0.174 | 1,768 | ref | ✓ |
+| mysql84 | OR 조건 | 50 | 147.0 | 149.0 | 1,700,255 | ALL | ✗ |
+| mysql84 | Tuple IN | 50 | 148.0 | 148.6 | 1,700,255 | ALL | ✗ |
+
+</details>
+
+---
+
+## 실무 권고
+
+### PostgreSQL 사용자
+
+- **편한 문법을 쓰면 된다.** 플래너가 BitmapOr로 최적화한다.
+- "OR은 느리니 UNION으로 분리해라"는 조언을 맹목적으로 따를 필요 없다.
+- `work_mem`이 너무 작으면 Lossy 비트맵이 많아져 Recheck 비용이 증가할 수 있다. 대규모 쿼리에서 `EXPLAIN (ANALYZE, BUFFERS)`의 `Heap Blocks: lossy=`를 확인하자.
+- PG 13 이상이면 모두 동일하게 동작한다.
+
+### MySQL 사용자
+
+- 서로 다른 컬럼에 대한 OR/IN이 **2개 이상**이면 **반드시 UNION ALL로 분리**.
+- 이 제약은 MySQL 5.7 → 8.0 → 8.4에서 **변하지 않았다.**
+- ORM 생성 쿼리를 확인하라. 자동으로 OR을 생성하고 있다면 raw query로 교체.
+- IN이 OR보다 안전하다는 생각도 버리자. 둘 다 동일하게 퇴화한다.
+
+### 책의 조언은 틀렸나?
+
+"SQL 레벨업"의 UNION 권장은 **범용적으로 안전한 조언**이다. MySQL에서는 여전히 유효하고, Oracle에서도 비슷한 제약이 있을 수 있다.
+
+다만 PostgreSQL이라면 이미 자유롭다. 불필요하게 UNION ALL로 쿼리를 복잡하게 만들 필요 없다. **쓰는 DB의 옵티마이저를 이해하고, EXPLAIN으로 확인하는 습관**이 가장 중요하다.
+
+---
+
+## 참고 자료
+
+- [PostgreSQL Docs — Combining Multiple Indexes](https://www.postgresql.org/docs/current/indexes-bitmap-scans.html)
+- [PostgreSQL Source — tidbitmap.c](https://doxygen.postgresql.org/tidbitmap_8c_source.html)
+- [MySQL Docs — Index Merge Optimization](https://dev.mysql.com/doc/refman/8.0/en/index-merge-optimization.html)

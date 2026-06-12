@@ -1,0 +1,340 @@
+---
+title: 'UNION vs OR vs IN 벤치마크 (1) — 실험 설계와 결과'
+description: '"SQL 레벨업"에서 UNION을 권장하는 패턴을 PostgreSQL/MySQL 6개 버전에서 실측한 결과. MySQL에서는 900배 차이가 난다.'
+date: 2026-06-13
+tags: [postgresql, mysql, benchmark, index, sql]
+series: "Sparse Column 쿼리 벤치마크"
+seriesOrder: 1
+references:
+  - id: "sql-레벨업"
+---
+
+## 동기: "OR은 인덱스를 못 탄다"는 게 진짜일까?
+
+"SQL 레벨업"이라는 책을 읽다가 **UNION을 사용할 수밖에 없는 경우**로 소개되는 사례가 눈에 들어왔다.
+
+> 서로 다른 테이블이라면 당연히 UNION을 사용해야 한다. 하지만 같은 테이블에서도, 서로 다른 컬럼에 대한 OR 조건이 걸리면 인덱스를 활용할 수 없으므로 UNION ALL로 분리해야 한다.
+
+PostgreSQL을 주로 쓰는 입장에서 두 가지 의문이 생겼다.
+
+1. **`IN`으로 쓰면 오히려 더 빠르지 않을까?** — `(col_a, col_b) IN ((v1, v2))` 형태가 옵티마이저에게 더 많은 정보를 줄 것 같았다.
+2. **OR도 생각보다 괜찮지 않을까?** — PostgreSQL은 뭔가 다르게 처리하는 것 같은 느낌이 있었다.
+
+추측만으로 판단하긴 싫어서, Docker Compose로 PostgreSQL 3개 버전(13/15/17)과 MySQL 3개 버전(5.7/8.0/8.4)을 띄우고 직접 벤치마크를 돌려보기로 했다.
+
+---
+
+## 실험 설계
+
+### 테이블 구조: Sparse Multi-Column
+
+하나의 행에 50개의 `(date_N, bool_N)` 쌍이 있되, **정확히 하나의 쌍만 값이 있고 나머지는 NULL**인 구조다. 현실에서 이벤트 타입별 메타데이터가 다른 테이블을 하나로 합친 것, 또는 다형성을 가진 엔티티 테이블과 유사하다.
+
+```sql
+CREATE TABLE bench_target (
+    id BIGSERIAL PRIMARY KEY,
+    date_1 DATE, bool_1 BOOLEAN,   -- 쌍 1
+    date_2 DATE, bool_2 BOOLEAN,   -- 쌍 2
+    ...
+    date_50 DATE, bool_50 BOOLEAN, -- 쌍 50
+    payload TEXT
+);
+
+-- 각 쌍에 복합 인덱스
+CREATE INDEX idx_pair_1 ON bench_target (date_1, bool_1);
+CREATE INDEX idx_pair_2 ON bench_target (date_2, bool_2);
+...
+CREATE INDEX idx_pair_50 ON bench_target (date_50, bool_50);
+```
+
+핵심은 **각 행이 50개 쌍 중 딱 하나에만 데이터를 가진다**는 점이다. 따라서 `date_1 = '2024-03-15' AND bool_1 = TRUE`를 찾으면 `idx_pair_1`이 매우 효율적으로 동작해야 한다. 문제는 이런 조건을 **여러 쌍에 대해 동시에** 걸 때 발생한다.
+
+### 세 가지 쿼리 변형
+
+같은 데이터를 조회하는 세 가지 SQL 문법:
+
+<CodeWithOutput
+  language="sql"
+  label="Variant A: tuple IN"
+  outputLanguage="sql"
+  outputLabel="Variant B: OR conditions"
+  title="같은 의미, 다른 문법"
+  codeWidth={50}
+  code={`-- tuple IN
+SELECT id, payload FROM bench_target
+WHERE (date_26, bool_26) IN (('2023-01-03', TRUE))
+   OR (date_24, bool_24) IN (('2020-09-12', TRUE))
+   OR (date_20, bool_20) IN (('2022-02-14', TRUE));`}
+  output={`-- OR conditions (DNF 형태)
+SELECT id, payload FROM bench_target
+WHERE (date_26 = '2023-01-03' AND bool_26 = TRUE)
+   OR (date_24 = '2020-09-12' AND bool_24 = TRUE)
+   OR (date_20 = '2022-02-14' AND bool_20 = TRUE);`}
+/>
+
+<CodeWithOutput
+  language="sql"
+  label="Variant C: UNION ALL"
+  outputLanguage="text"
+  outputLabel="측정 조건"
+  title="UNION ALL로 분리"
+  codeWidth={55}
+  code={`-- UNION ALL: 각 조건을 독립 쿼리로
+SELECT id, payload FROM bench_target
+  WHERE date_26 = '2023-01-03' AND bool_26 = TRUE
+UNION ALL
+SELECT id, payload FROM bench_target
+  WHERE date_24 = '2020-09-12' AND bool_24 = TRUE
+UNION ALL
+SELECT id, payload FROM bench_target
+  WHERE date_20 = '2022-02-14' AND bool_20 = TRUE;`}
+  output={`대상 DB:
+  PostgreSQL 13.17 / 15.10 / 17.2
+  MySQL 5.7.44 / 8.0.40 / 8.4.3
+
+데이터: 100,000 rows (sparse, 시드 고정)
+
+측정:
+  warmup 3회 후 10회 측정
+  EXPLAIN ANALYZE actual time (서버사이드)
+  p50 / p95 / p99 / stddev 보고
+
+쌍 수 스윕: n = 1, 3, 5, 10, 20, 50`}
+/>
+
+### 재현성을 위한 환경 통제
+
+- Docker Compose로 각 버전을 격리 (CPU/mem pinned)
+- Prepared statement 미사용 → 파싱 비용까지 포함하여 통일
+- 동일 시드로 데이터 생성 → 동일 조건으로 비교
+- **Cross-DBMS 절대 비교 금지**: 같은 DB 내에서 변형 간 비교만 유효
+
+---
+
+## 결과 요약
+
+### PostgreSQL: 세 변형 모두 비등
+
+<ChartJs
+  client:visible
+  type="line"
+  title="PostgreSQL 17 — 실행 시간 (p50)"
+  caption="세 방식이 겹쳐 보임 = 성능 차이 없음. 모두 0.1ms 이하."
+  height="280px"
+  data={{
+    labels: ['n=1', 'n=3', 'n=5', 'n=10', 'n=20', 'n=50'],
+    datasets: [
+      { label: 'Tuple IN', data: [0.002, 0.004, 0.007, 0.013, 0.031, 0.066], borderColor: '#3b82f6', backgroundColor: 'transparent', borderWidth: 2.5, tension: 0.3, pointRadius: 4 },
+      { label: 'OR 조건', data: [0.003, 0.005, 0.007, 0.014, 0.023, 0.077], borderColor: '#22c55e', backgroundColor: 'transparent', borderWidth: 2.5, tension: 0.3, pointRadius: 4 },
+      { label: 'UNION ALL', data: [0.002, 0.005, 0.007, 0.018, 0.036, 0.096], borderColor: '#f97316', backgroundColor: 'transparent', borderWidth: 2.5, tension: 0.3, pointRadius: 4 }
+    ]
+  }}
+  options={{
+    scales: {
+      y: { title: { display: true, text: '실행 시간 (ms)' }, beginAtZero: true }
+    }
+  }}
+/>
+
+| 쌍 수 (n) | Tuple IN | OR 조건 | UNION ALL | Plan |
+|:---------:|:--------:|:-------:|:---------:|:-----|
+| 1 | 0.002 ms | 0.003 ms | 0.002 ms | Index Scan |
+| 3 | 0.004 | 0.005 | 0.005 | BitmapOr / Append |
+| 5 | 0.007 | 0.007 | 0.007 | BitmapOr / Append |
+| 10 | 0.013 | 0.014 | 0.018 | BitmapOr / Append |
+| 20 | 0.031 | 0.023 | 0.036 | BitmapOr / Append |
+| 50 | 0.066 | 0.077 | 0.096 | BitmapOr / Append |
+
+> [!NOTE]
+> 모든 수치가 **0.1ms 이하**. 변형 간 차이는 stddev 범위 내에 있어 유의미하지 않다.
+
+---
+
+### MySQL: UNION ALL 압승, IN/OR는 Full Table Scan
+
+<ChartJs
+  client:visible
+  type="line"
+  title="MySQL 8.4 — 실행 시간 (p50, log scale)"
+  caption="UNION ALL(주황)만 인덱스 사용. IN/OR는 쌍 2개부터 Full Scan으로 수백배 느림."
+  height="280px"
+  data={{
+    labels: ['n=1', 'n=3', 'n=5', 'n=10', 'n=20', 'n=50'],
+    datasets: [
+      { label: 'Tuple IN', data: [0.002, 40.35, 45.1, 56.05, 77.5, 148.0], borderColor: '#3b82f6', backgroundColor: 'transparent', borderWidth: 2.5, tension: 0.3, pointRadius: 4 },
+      { label: 'OR 조건', data: [0.002, 40.35, 44.55, 56.15, 80.5, 147.0], borderColor: '#22c55e', backgroundColor: 'transparent', borderWidth: 2.5, tension: 0.3, pointRadius: 4 },
+      { label: 'UNION ALL', data: [0.002, 0.006, 0.013, 0.028, 0.055, 0.158], borderColor: '#f97316', backgroundColor: 'transparent', borderWidth: 2.5, tension: 0.3, pointRadius: 4 }
+    ]
+  }}
+  options={{
+    scales: {
+      y: { type: 'logarithmic', title: { display: true, text: '실행 시간 (ms, log)' } }
+    }
+  }}
+/>
+
+| 쌍 수 (n) | Tuple IN | OR 조건 | UNION ALL | IN/OR Plan | UNION Plan |
+|:---------:|:--------:|:-------:|:---------:|:-----------|:-----------|
+| 1 | 0.002 | 0.002 | 0.002 | ref (인덱스) | ref |
+| 3 | 40.35 | 40.35 | 0.006 | **ALL (풀스캔)** | ref |
+| 5 | 45.10 | 44.55 | 0.013 | **ALL** | ref |
+| 10 | 56.05 | 56.15 | 0.028 | **ALL** | ref |
+| 20 | 77.50 | 80.50 | 0.055 | **ALL** | ref |
+| 50 | 148.0 | 147.0 | 0.158 | **ALL** | ref |
+
+> [!CAUTION]
+> 쌍이 **2개 이상**이면 IN/OR 모두 Full Table Scan으로 퇴화. n=50에서 UNION ALL 대비 **약 900배** 느리다.
+
+---
+
+### MySQL 버전별 비교: 5.7 → 8.0 → 8.4
+
+<ChartJs
+  client:visible
+  type="bar"
+  title="MySQL 전 버전 — OR 조건 n=10 (p50)"
+  caption="세 버전 모두 Full Scan. 8.0+가 빠른 건 순수 InnoDB 스캔 속도 차이일 뿐, Plan은 동일하게 ALL."
+  height="200px"
+  data={{
+    labels: ['MySQL 5.7', 'MySQL 8.0', 'MySQL 8.4'],
+    datasets: [{
+      label: 'OR 조건 n=10 (ms)',
+      data: [619.4, 51.8, 56.1],
+      backgroundColor: ['#fca5a5', '#fb923c', '#f59e0b'],
+      borderRadius: 6
+    }]
+  }}
+  options={{
+    indexAxis: 'y',
+    plugins: { legend: { display: false } },
+    scales: { x: { title: { display: true, text: '실행 시간 (ms)' } } }
+  }}
+/>
+
+버전 업으로 해결되지 않는다. 5.7/8.0/8.4 모두 동일하게 Full Table Scan을 선택한다.
+
+---
+
+### I/O 블록 비교
+
+<ChartJs
+  client:visible
+  type="bar"
+  title="n=50 기준 I/O 블록 수"
+  caption="MySQL IN/OR은 전체 테이블(170만 블록)을 읽는다. PG와 MySQL UNION은 인덱스 페이지만."
+  height="220px"
+  data={{
+    labels: ['PG17 IN', 'PG17 OR', 'PG17 UNION', 'MySQL84 UNION', 'MySQL84 IN', 'MySQL84 OR'],
+    datasets: [{
+      label: 'I/O 블록',
+      data: [140, 140, 142, 1768, 1700255, 1700255],
+      backgroundColor: ['#3b82f6', '#22c55e', '#f97316', '#f97316', '#3b82f6', '#22c55e'],
+      borderRadius: 4
+    }]
+  }}
+  options={{
+    scales: { y: { type: 'logarithmic', title: { display: true, text: 'I/O 블록 (log)' } } },
+    plugins: { legend: { display: false } }
+  }}
+/>
+
+---
+
+## 의외의 발견: IN과 OR의 성능이 같다
+
+실험 전에는 "OR은 느리고 IN은 빠를 것"이라고 예상했다. 튜플 IN이 옵티마이저에게 더 구조화된 정보를 줄 거라 생각했기 때문이다.
+
+하지만 결과는:
+
+- **PostgreSQL**: IN과 OR 모두 동일한 BitmapOr 플랜. 플래너가 내부적으로 같은 형태로 변환.
+- **MySQL**: IN과 OR 모두 동일하게 Full Table Scan. 둘 다 "여러 컬럼에 걸친 OR"로 인식됨.
+
+`(col_a, col_b) IN ((v1, v2))` 는 결국 `col_a = v1 AND col_b = v2`로 해석되므로, 최종적으로 OR로 연결된 것과 동일하게 처리된다. **"IN이 OR보다 빠르다"는 통념은 이 패턴에서는 맞지 않는다.**
+
+> [!TIP]
+> "IN이 OR보다 빠르다"가 유효한 경우는 **같은 컬럼에 대한 여러 값** (`WHERE id IN (1,2,3)` vs `WHERE id=1 OR id=2 OR id=3`)일 때다. 서로 다른 컬럼에 걸친 OR과는 완전히 다른 시나리오.
+
+---
+
+## 실무 적용
+
+| 상황 | PostgreSQL | MySQL |
+|:-----|:-----------|:------|
+| 1개 쌍 조회 | 아무 방식 OK | 아무 방식 OK |
+| 2개+ 서로 다른 컬럼 쌍 | 아무 방식 OK | **반드시 UNION ALL** |
+| 50개 쌍 조회 | 0.07~0.10 ms | UNION: 0.16 ms / IN·OR: **148 ms** |
+
+> [!IMPORTANT]
+> MySQL 사용자라면 서로 다른 컬럼에 걸친 OR/IN 조건이 2개 이상일 때 **반드시 UNION ALL로 분리**해야 한다. ORM이 자동으로 OR을 생성한다면 raw query로 UNION을 직접 작성하자.
+
+---
+
+## 벤치마크 코드: 쿼리 생성기
+
+실험의 핵심인 쿼리 생성 로직을 공유한다. 세 변형을 동일한 조건에서 생성하는 Python 코드:
+
+```python
+class QueryGenerator:
+    """각 쌍에 대해 세 가지 SQL 변형을 생성."""
+    TABLE = "bench_target"
+
+    def generate_conditions(self, count: int) -> list[tuple[int, str]]:
+        """count개의 서로 다른 쌍 인덱스와 날짜를 결정론적으로 생성."""
+        available_pairs = list(range(1, 51))
+        self._rng.shuffle(available_pairs)
+        pairs = available_pairs[:count]
+        conditions = []
+        for pair_idx in pairs:
+            days_offset = self._rng.randint(0, DATE_RANGE_DAYS - 1)
+            d = BASE_DATE + timedelta(days=days_offset)
+            conditions.append((pair_idx, d.isoformat()))
+        return conditions
+
+    def _build_or(self, conditions, engine):
+        """OR 방식: (date_N='X' AND bool_N=TRUE) OR ..."""
+        bool_val = "TRUE" if engine == "postgres" else "1"
+        clauses = " OR ".join(
+            f"(date_{idx} = '{dt}' AND bool_{idx} = {bool_val})"
+            for idx, dt in conditions
+        )
+        return f"SELECT id, payload FROM {self.TABLE} WHERE {clauses}"
+
+    def _build_union(self, conditions, engine):
+        """UNION ALL 방식: 각 조건을 독립 SELECT로."""
+        bool_val = "TRUE" if engine == "postgres" else "1"
+        queries = [
+            f"SELECT id, payload FROM {self.TABLE} "
+            f"WHERE date_{idx} = '{dt}' AND bool_{idx} = {bool_val}"
+            for idx, dt in conditions
+        ]
+        return " UNION ALL ".join(queries)
+
+    def _build_tuple_in(self, conditions, engine):
+        """Tuple IN 방식: (date_N, bool_N) IN (('X', TRUE)) OR ..."""
+        bool_val = "TRUE" if engine == "postgres" else "1"
+        clauses = " OR ".join(
+            f"(date_{idx}, bool_{idx}) IN (('{dt}', {bool_val}))"
+            for idx, dt in conditions
+        )
+        return f"SELECT id, payload FROM {self.TABLE} WHERE {clauses}"
+```
+
+핵심 포인트:
+- **동일한 `conditions`** 를 세 변형에 모두 전달하여, 정확히 같은 데이터를 조회
+- 시드 고정(`seed=42`)으로 재현성 보장
+- 50개 쌍 중 랜덤하게 n개를 선택하여 각각에 대한 날짜 조건 생성
+
+---
+
+## 다음 글에서
+
+결과는 확인했다. 그런데 **왜** 이런 차이가 발생하는 걸까?
+
+PostgreSQL에서 세 변형이 모두 빠른 이유는 **Bitmap Scan**이라는 고유한 메커니즘 때문이다. 다음 글에서는 BitmapOr가 어떻게 여러 인덱스를 하나로 합치는지, TID Bitmap의 내부 구조는 어떤지, 그리고 MySQL은 왜 이를 할 수 없는지를 깊이 다룬다.
+
+---
+
+## 참고
+
+- 벤치마크 코드: Docker Compose + FastAPI + SQLite 결과 저장 (전체 코드는 [GitHub](https://github.com/kokoa-study-room/db-union-query-benchmark))
+- 측정: EXPLAIN ANALYZE actual time, warmup 3회 + 10회 반복, p50/p95/p99/stddev

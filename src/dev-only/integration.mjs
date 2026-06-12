@@ -19,6 +19,10 @@ export default function devEditor() {
           entrypoint: path.join(here, 'studio.astro'),
         });
         injectRoute({
+          pattern: '/_chart-editor',
+          entrypoint: path.join(here, 'chart-editor.astro'),
+        });
+        injectRoute({
           pattern: '/_studio/api/animations',
           entrypoint: path.join(here, 'api-animations.ts'),
         });
