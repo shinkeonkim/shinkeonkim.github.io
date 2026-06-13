@@ -16,6 +16,7 @@ import {
   resolveLineCoords,
   resolveArrowCoords,
 } from './canvas-utils';
+import { getAnchorPoints } from './anchor-system';
 
 type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
@@ -73,6 +74,7 @@ export function renderResizeHandles(
 }
 
 export function renderRotationHandle(
+  canvasEl: SVGSVGElement | null,
   elId: string,
   snap: SnapshotMap,
   byId: Map<string, AnimationElement>,
@@ -83,8 +85,20 @@ export function renderRotationHandle(
   const center = centerOfElement(baseEl, state);
   if (!center) return null;
   let topY: number | null = null;
-  if (baseEl.type === 'rect' || baseEl.type === 'image') topY = (state.y as number) - 24;
-  else if (baseEl.type === 'circle') topY = (state.cy as number) - (state.r as number) - 24;
+  if (baseEl.type === 'rect' || baseEl.type === 'image') {
+    topY = (state.y as number) - 24;
+  } else if (baseEl.type === 'circle') {
+    topY = (state.cy as number) - (state.r as number) - 24;
+  } else if (baseEl.type === 'text') {
+    const bbox = textBBoxOnCanvas(canvasEl, elId);
+    if (bbox) topY = bbox.y - 24;
+  } else if (baseEl.type === 'polygon') {
+    const bbox = polygonBoundingBox(String(state.points ?? ''));
+    if (bbox) topY = bbox.y - 24;
+  } else if (baseEl.type === 'path') {
+    const bbox = pathBBoxOnCanvas(canvasEl, elId);
+    if (bbox) topY = bbox.y - 24;
+  }
   if (topY === null) return null;
 
   const g = document.createElementNS(SVG_NS, 'g');
@@ -198,18 +212,24 @@ export function renderSnapTargets(
   let html = '';
   for (const baseEl of byId.values()) {
     if (baseEl.id === draggingElementId) continue;
-    if (baseEl.type !== 'rect' && baseEl.type !== 'circle' && baseEl.type !== 'image') continue;
+    // Skip lines/arrows — only show snap targets on shapes
+    if (baseEl.type === 'line' || baseEl.type === 'arrow') continue;
     const state = snap.get(baseEl.id);
     if (!state || !state.visible) continue;
-    const points = anchorPointsOf(baseEl, state);
+    const points = getAnchorPoints(baseEl, state as Record<string, unknown>);
     for (const p of points) {
       const isActive =
         activeSnapTarget?.elementId === baseEl.id &&
         activeSnapTarget?.anchor === p.anchor;
-      const fill = isActive ? 'var(--color-accent)' : 'white';
-      const stroke = isActive ? 'white' : 'var(--color-accent)';
-      const r = isActive ? 8 : 5;
-      html += `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2" opacity="${isActive ? 1 : 0.7}" pointer-events="none" />`;
+      if (isActive) {
+        // Prominent snap indicator: larger circle with accent fill
+        html += `<circle cx="${p.x}" cy="${p.y}" r="6" fill="var(--color-accent)" stroke="white" stroke-width="2" opacity="0.85" pointer-events="none" />`;
+        // Outer pulse ring for visual emphasis
+        html += `<circle cx="${p.x}" cy="${p.y}" r="12" fill="none" stroke="var(--color-accent)" stroke-width="1.5" opacity="0.4" pointer-events="none" />`;
+      } else {
+        // Small dot for available snap points
+        html += `<circle cx="${p.x}" cy="${p.y}" r="3" fill="white" stroke="var(--color-accent)" stroke-width="1.5" opacity="0.5" pointer-events="none" />`;
+      }
     }
   }
   g.innerHTML = html;

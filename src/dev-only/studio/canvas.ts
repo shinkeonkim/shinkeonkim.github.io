@@ -29,13 +29,15 @@ import {
   SVG_NS,
   escapeXml,
   centerOfElement,
-  anchorPointsOf,
   firstPolygonPoint,
   shiftPolygonPoints,
   textBBoxOnCanvas,
   resolveArrowCoords,
   resolveLineCoords,
+  polygonBoundingBox,
+  pathBBoxOnCanvas,
 } from './canvas-utils';
+import { getAnchorPoints, findNearestAnchor } from './anchor-system';
 import {
   renderResizeHandles,
   renderRotationHandle,
@@ -88,7 +90,7 @@ interface EndpointDragState {
   snapTarget: { elementId: string; anchor: Anchor; x: number; y: number } | null;
 }
 
-const SNAP_RADIUS = 28;
+const SNAP_RADIUS = 12;
 
 const HEAD_MARKER_DEFS = `
   <marker id="studio-h-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
@@ -165,12 +167,21 @@ interface ResizeState {
   aspect: number;
 }
 
+interface MarqueeState {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+}
+
 let dragState: DragState | null = null;
 let rotateState: RotateState | null = null;
 let connectState: ConnectState | null = null;
 let endpointDragState: EndpointDragState | null = null;
 let vertexDragState: VertexDragState | null = null;
 let resizeState: ResizeState | null = null;
+let marqueeState: MarqueeState | null = null;
+let marqueeJustFinished = false;
 let canvasEl: SVGSVGElement | null = null;
 let hoveredElementId: string | null = null;
 let canvasZoom = 1;
@@ -275,6 +286,10 @@ function findElementId(target: EventTarget | null): string | null {
 
 function onCanvasClick(e: MouseEvent): void {
   if (dragState || rotateState || connectState) return;
+  if (marqueeJustFinished) {
+    marqueeJustFinished = false;
+    return;
+  }
   const target = e.target as Element | null;
   const addVertexHandle = target?.closest<SVGElement>('[data-vertex-add]');
   if (addVertexHandle) {
@@ -468,7 +483,16 @@ function onMouseDown(e: MouseEvent): void {
   }
 
   const rawId = findElementId(e.target);
-  if (!rawId) return;
+  if (!rawId) {
+    // No element hit — start marquee if no shift key
+    if (!e.shiftKey && e.target === canvasEl) {
+      const pt = svgPoint(e.clientX, e.clientY);
+      if (pt) {
+        marqueeState = { startX: pt.x, startY: pt.y, currentX: pt.x, currentY: pt.y };
+      }
+    }
+    return;
+  }
   const id = e.altKey ? rawId : (findContainingGroup(rawId)?.id ?? rawId);
   const snap = getCurrentSnapshot();
   const elState = snap.get(id);
@@ -586,6 +610,14 @@ function onMouseMove(e: MouseEvent): void {
     render();
     return;
   }
+  if (marqueeState) {
+    const pt = svgPoint(e.clientX, e.clientY);
+    if (!pt) return;
+    marqueeState.currentX = pt.x;
+    marqueeState.currentY = pt.y;
+    render();
+    return;
+  }
   if (!dragState || !canvasEl) return;
   const def = getDef();
   if (!def) return;
@@ -652,6 +684,40 @@ function onMouseUp(e: MouseEvent): void {
     connectState = null;
     render();
   }
+  if (marqueeState) {
+    const mx = Math.min(marqueeState.startX, marqueeState.currentX);
+    const my = Math.min(marqueeState.startY, marqueeState.currentY);
+    const mw = Math.abs(marqueeState.currentX - marqueeState.startX);
+    const mh = Math.abs(marqueeState.currentY - marqueeState.startY);
+    marqueeState = null;
+    marqueeJustFinished = true;
+
+    // Skip selection change if marquee area is zero
+    if (mw > 0 && mh > 0) {
+      const def = getDef();
+      if (def) {
+        const snap = getCurrentSnapshot();
+        const marqueeBbox = { x: mx, y: my, w: mw, h: mh };
+        const matchedIds: string[] = [];
+        for (const el of def.elements) {
+          const state = snap.get(el.id);
+          if (!state) continue;
+          const bbox = elementBBox(el, state);
+          if (bbox && intersectsMarquee(bbox, marqueeBbox)) {
+            matchedIds.push(el.id);
+          }
+        }
+        if (matchedIds.length === 1) {
+          setSelection({ kind: 'element', elementId: matchedIds[0] });
+        } else if (matchedIds.length > 1) {
+          setSelection({ kind: 'elements', elementIds: matchedIds });
+        } else {
+          setSelection({ kind: 'none' });
+        }
+      }
+    }
+    render();
+  }
   dragState = null;
   rotateState = null;
 }
@@ -714,6 +780,62 @@ function readPositionAnchor(
     return { x: baseEl.x, y: baseEl.y };
   }
   return null;
+}
+
+/** Compute the bounding box of an element (no padding) for marquee intersection. */
+function elementBBox(
+  baseEl: AnimationElement,
+  state: Record<string, unknown>,
+): { x: number; y: number; w: number; h: number } | null {
+  if (baseEl.type === 'rect' || baseEl.type === 'image') {
+    return { x: state.x as number, y: state.y as number, w: state.width as number, h: state.height as number };
+  }
+  if (baseEl.type === 'circle') {
+    const r = state.r as number;
+    return { x: (state.cx as number) - r, y: (state.cy as number) - r, w: r * 2, h: r * 2 };
+  }
+  if (baseEl.type === 'text') {
+    const bbox = textBBoxOnCanvas(canvasEl, baseEl.id);
+    if (bbox) return bbox;
+    // fallback: approximate
+    return { x: state.x as number, y: state.y as number, w: 100, h: (state.fontSize as number) ?? 16 };
+  }
+  if (baseEl.type === 'line' || baseEl.type === 'arrow') {
+    const coords =
+      baseEl.type === 'line'
+        ? resolveLineCoords(state as unknown as LineElement, getCurrentSnapshot(), new Map())
+        : resolveArrowCoords(state as unknown as ArrowElement, getCurrentSnapshot(), new Map());
+    if (!coords) return null;
+    return {
+      x: Math.min(coords.x1, coords.x2),
+      y: Math.min(coords.y1, coords.y2),
+      w: Math.abs(coords.x2 - coords.x1),
+      h: Math.abs(coords.y2 - coords.y1),
+    };
+  }
+  if (baseEl.type === 'polygon') {
+    return polygonBoundingBox(String(state.points ?? ''));
+  }
+  if (baseEl.type === 'path') {
+    return pathBBoxOnCanvas(canvasEl, baseEl.id);
+  }
+  return null;
+}
+
+/**
+ * Test whether an element bounding box intersects a marquee rectangle.
+ * Both arguments use `{ x, y, w, h }` format (top-left corner + dimensions).
+ */
+export function intersectsMarquee(
+  elBbox: { x: number; y: number; w: number; h: number },
+  marquee: { x: number; y: number; w: number; h: number },
+): boolean {
+  return !(
+    elBbox.x + elBbox.w < marquee.x ||
+    elBbox.x > marquee.x + marquee.w ||
+    elBbox.y + elBbox.h < marquee.y ||
+    elBbox.y > marquee.y + marquee.h
+  );
 }
 
 function handleResizeMove(e: MouseEvent): void {
@@ -833,7 +955,7 @@ function render(): void {
     } else {
       const outline = renderSelectionOutline(canvasEl, selection.elementId, snap, elementsById);
       if (outline) canvasEl.appendChild(outline);
-      const handle = renderRotationHandle(selection.elementId, snap, elementsById);
+      const handle = renderRotationHandle(canvasEl, selection.elementId, snap, elementsById);
       if (handle) canvasEl.appendChild(handle);
       const endpoints = renderLineEndpointHandles(selection.elementId, snap, elementsById);
       if (endpoints) canvasEl.appendChild(endpoints);
@@ -881,6 +1003,26 @@ function render(): void {
     tempLine.style.pointerEvents = 'none';
     canvasEl.appendChild(tempLine);
   }
+
+  if (marqueeState) {
+    const mx = Math.min(marqueeState.startX, marqueeState.currentX);
+    const my = Math.min(marqueeState.startY, marqueeState.currentY);
+    const mw = Math.abs(marqueeState.currentX - marqueeState.startX);
+    const mh = Math.abs(marqueeState.currentY - marqueeState.startY);
+    if (mw > 0 || mh > 0) {
+      const marqueeRect = document.createElementNS(SVG_NS, 'rect');
+      marqueeRect.setAttribute('x', String(mx));
+      marqueeRect.setAttribute('y', String(my));
+      marqueeRect.setAttribute('width', String(mw));
+      marqueeRect.setAttribute('height', String(mh));
+      marqueeRect.setAttribute('fill', 'rgba(99, 102, 241, 0.08)');
+      marqueeRect.setAttribute('stroke', '#6366f1');
+      marqueeRect.setAttribute('stroke-width', '1');
+      marqueeRect.setAttribute('stroke-dasharray', '4 3');
+      marqueeRect.style.pointerEvents = 'none';
+      canvasEl.appendChild(marqueeRect);
+    }
+  }
 }
 
 function findSnapTarget(
@@ -891,23 +1033,22 @@ function findSnapTarget(
   const def = getDef();
   if (!def) return null;
   const snap = getCurrentSnapshot();
-  let best: { elementId: string; anchor: Anchor; x: number; y: number; dist: number } | null = null;
+
+  // Collect anchor points from all elements except the arrow being dragged
+  const allAnchors = [];
   for (const baseEl of def.elements) {
     if (baseEl.id === excludeElementId) continue;
-    if (baseEl.type !== 'rect' && baseEl.type !== 'circle' && baseEl.type !== 'image') continue;
+    // Skip other lines/arrows — only snap to shapes
+    if (baseEl.type === 'line' || baseEl.type === 'arrow') continue;
     const state = snap.get(baseEl.id);
     if (!state || !state.visible) continue;
-    const points = anchorPointsOf(baseEl, state);
-    for (const p of points) {
-      const d = Math.hypot(p.x - x, p.y - y);
-      if (d > SNAP_RADIUS) continue;
-      if (!best || d < best.dist) {
-        best = { elementId: baseEl.id, anchor: p.anchor, x: p.x, y: p.y, dist: d };
-      }
-    }
+    const points = getAnchorPoints(baseEl, state as Record<string, unknown>);
+    allAnchors.push(...points);
   }
-  if (!best) return null;
-  return { elementId: best.elementId, anchor: best.anchor, x: best.x, y: best.y };
+
+  const nearest = findNearestAnchor({ x, y }, allAnchors, SNAP_RADIUS);
+  if (!nearest) return null;
+  return { elementId: nearest.elementId, anchor: nearest.anchor, x: nearest.x, y: nearest.y };
 }
 
 function renderGroupOutline(groupId: string): SVGElement | null {

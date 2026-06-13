@@ -28,6 +28,16 @@ export function centerOfElement(
   }
   if (baseEl.type === 'circle') return { x: state.cx as number, y: state.cy as number };
   if (baseEl.type === 'text') return { x: state.x as number, y: state.y as number };
+  if (baseEl.type === 'polygon') {
+    const bbox = polygonBoundingBox(String(state.points ?? ''));
+    if (bbox) return { x: bbox.x + bbox.w / 2, y: bbox.y + bbox.h / 2 };
+  }
+  if (baseEl.type === 'path') {
+    // Use x,y position as center for paths
+    const x = state.x as number;
+    const y = state.y as number;
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  }
   return null;
 }
 
