@@ -59,4 +59,5 @@ export const EXTERNAL_NAV_ITEMS = [
 export const DEV_NAV_ITEMS = [
   { href: '/_editor', label: '에디터', icon: '✎' },
   { href: '/_studio', label: '스튜디오', icon: '🎬' },
+  { href: '/_chart-editor', label: '차트', icon: '📊' },
 ] as const;
