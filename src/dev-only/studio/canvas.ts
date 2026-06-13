@@ -825,16 +825,21 @@ function elementBBox(
 /**
  * Test whether an element bounding box intersects a marquee rectangle.
  * Both arguments use `{ x, y, w, h }` format (top-left corner + dimensions).
+ *
+ * Uses strict AABB overlap (positive intersection area). Edges that only
+ * touch (e.g. element.right === marquee.left) are NOT considered intersecting
+ * — this matches the standard mathematical definition and the property test
+ * `correctly identifies AABB intersection` in `multi-select.test.ts`.
  */
 export function intersectsMarquee(
   elBbox: { x: number; y: number; w: number; h: number },
   marquee: { x: number; y: number; w: number; h: number },
 ): boolean {
-  return !(
-    elBbox.x + elBbox.w < marquee.x ||
-    elBbox.x > marquee.x + marquee.w ||
-    elBbox.y + elBbox.h < marquee.y ||
-    elBbox.y > marquee.y + marquee.h
+  return (
+    elBbox.x < marquee.x + marquee.w &&
+    elBbox.x + elBbox.w > marquee.x &&
+    elBbox.y < marquee.y + marquee.h &&
+    elBbox.y + elBbox.h > marquee.y
   );
 }
 
