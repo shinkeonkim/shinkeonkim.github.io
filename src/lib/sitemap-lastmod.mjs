@@ -158,12 +158,6 @@ const COLLECTIONS = [
     extPattern: /\.mdx?$/,
   },
   {
-    dir: 'projects',
-    urlPrefix: '/projects/',
-    dateFields: ['end', 'start'],
-    extPattern: /\.mdx?$/,
-  },
-  {
     dir: 'notes',
     urlPrefix: '/notes/',
     dateFields: ['date'],
@@ -247,7 +241,6 @@ export async function buildLastmodMap(siteUrl) {
   // Aggregate URLs.
   setIfLater('/posts/', collectionLatest.get('posts'));
   setIfLater('/wiki/', collectionLatest.get('wiki'));
-  setIfLater('/projects/', collectionLatest.get('projects'));
   setIfLater('/notes/', collectionLatest.get('notes'));
 
   for (const [category, date] of categoryLatest) {
@@ -268,7 +261,6 @@ export async function buildLastmodMap(siteUrl) {
   const overallLatest = [
     collectionLatest.get('posts'),
     collectionLatest.get('wiki'),
-    collectionLatest.get('projects'),
     collectionLatest.get('notes'),
   ].reduce((a, b) => maxDate(a, b), null);
   setIfLater('/', overallLatest);

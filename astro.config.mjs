@@ -97,9 +97,6 @@ export default defineConfig({
         } else if (path.startsWith('/posts/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.8;
-        } else if (path === '/projects/' || path.startsWith('/projects/')) {
-          item.changefreq = EnumChangefreq.MONTHLY;
-          item.priority = 0.8;
         } else if (path === '/wiki/' || path.startsWith('/wiki/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.7;

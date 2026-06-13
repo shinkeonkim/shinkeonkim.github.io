@@ -20,7 +20,6 @@ const CONTENT_ROOT = resolveContentRoot();
 const COLLECTIONS = [
   { dir: 'posts', urlPrefix: '/posts/' },
   { dir: 'wiki', urlPrefix: '/wiki/' },
-  { dir: 'projects', urlPrefix: '/projects/' },
 ];
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;

@@ -44,7 +44,6 @@ export const WIKILINK_AUTOCOMPLETE_MAX = 12;
 export const NAV_ITEMS = [
   { href: '/', label: '홈' },
   { href: '/posts/', label: '글' },
-  { href: '/projects/', label: '프로젝트' },
   { href: '/notes/', label: '노트' },
   { href: '/wiki/', label: '위키' },
   { href: '/graph/', label: '그래프' },

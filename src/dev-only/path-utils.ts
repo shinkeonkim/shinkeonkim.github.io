@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 
 export const CONTENT_ROOT = path.resolve(process.cwd(), 'src/content');
-export const COLLECTIONS = ['posts', 'notes', 'wiki', 'sources', 'projects'] as const;
+export const COLLECTIONS = ['posts', 'notes', 'wiki', 'sources'] as const;
 export type Collection = (typeof COLLECTIONS)[number];
 
 export interface FileEntry {

@@ -14,10 +14,6 @@ export function getPublishedNotes(): Promise<CollectionEntry<'notes'>[]> {
   return getCollection('notes');
 }
 
-export function getPublishedProjects(): Promise<CollectionEntry<'projects'>[]> {
-  return getCollection('projects', ({ data }) => !data.draft);
-}
-
 export function getPublishedSources(): Promise<CollectionEntry<'sources'>[]> {
   return getCollection('sources');
 }

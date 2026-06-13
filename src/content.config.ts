@@ -83,45 +83,4 @@ const sources = defineCollection({
   }),
 });
 
-const projects = defineCollection({
-  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/projects' }),
-  schema: z.object({
-    title: z.string(),
-    summary: z.string(),
-    description: z.string().optional(),
-    start: z.coerce.date(),
-    end: z.coerce.date().optional(),
-    teamSize: z.number().min(1).default(1),
-    role: z.string().optional(),
-    thumbnail: z.string().optional(),
-    cover: z.string().optional(),
-    repos: z
-      .array(
-        z.preprocess(
-          (v) => (typeof v === 'string' ? { url: v } : v),
-          z.object({
-            url: z.url(),
-            label: z.string().optional(),
-            track: z.boolean().default(true),
-          }),
-        ),
-      )
-      .default([]),
-    stack: z.array(z.string()).default([]),
-    links: z
-      .array(
-        z.object({
-          url: z.url(),
-          label: z.string(),
-        }),
-      )
-      .default([]),
-    status: z.enum(['ongoing', 'completed', 'archived']).default('completed'),
-    featured: z.boolean().default(false),
-    draft: z.boolean().default(false),
-    tags: z.array(z.string()).default([]),
-    references: z.array(referenceItem).default([]),
-  }),
-});
-
-export const collections = { posts, notes, wiki, sources, projects };
+export const collections = { posts, notes, wiki, sources };

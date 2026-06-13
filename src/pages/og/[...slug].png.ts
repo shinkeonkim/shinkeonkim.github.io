@@ -1,10 +1,6 @@
 import type { APIRoute } from 'astro';
 import { renderOgPng, type OgImageProps } from '../../lib/og-image';
-import {
-  getPublishedPosts,
-  getPublishedWiki,
-  getPublishedProjects,
-} from '../../lib/content-queries';
+import { getPublishedPosts, getPublishedWiki } from '../../lib/content-queries';
 import { SITE_TITLE, SITE_DESCRIPTION } from '../../consts';
 
 interface SerializedProps {
@@ -13,15 +9,11 @@ interface SerializedProps {
   dateIso?: string;
   tags?: string[];
   category?: string;
-  kind: 'post' | 'wiki' | 'project' | 'site';
+  kind: 'post' | 'wiki' | 'site';
 }
 
 export async function getStaticPaths() {
-  const [posts, wiki, projects] = await Promise.all([
-    getPublishedPosts(),
-    getPublishedWiki(),
-    getPublishedProjects(),
-  ]);
+  const [posts, wiki] = await Promise.all([getPublishedPosts(), getPublishedWiki()]);
 
   const paths: { params: { slug: string }; props: SerializedProps }[] = [];
 
@@ -48,19 +40,6 @@ export async function getStaticPaths() {
         category: w.data.category,
         dateIso: w.data.updated?.toISOString(),
         kind: 'wiki',
-      },
-    });
-  }
-
-  for (const pr of projects) {
-    paths.push({
-      params: { slug: `projects/${pr.id}` },
-      props: {
-        title: pr.data.title,
-        description: pr.data.summary,
-        dateIso: pr.data.start.toISOString(),
-        tags: pr.data.tags,
-        kind: 'project',
       },
     });
   }

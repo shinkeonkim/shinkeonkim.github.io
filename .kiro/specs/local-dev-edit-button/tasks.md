@@ -21,11 +21,6 @@ Add a floating "Edit" button (FAB) visible only in dev mode on content pages. Th
     - Add `<DevEditButton collection={collection} slug={slug} />` inside the BaseLayout slot, after the closing `</div>` of `.post-shell`
     - _Requirements: 3.2, 3.3, 5.1, 5.3_
 
-  - [ ] 2.2 Add DevEditButton to `src/layouts/ProjectLayout.astro`
-    - Import `DevEditButton` from `'../components/DevEditButton.astro'`
-    - Add `<DevEditButton collection="projects" slug={id} />` inside the BaseLayout slot, after the `</article>` element
-    - _Requirements: 3.2, 3.3, 5.2, 5.3_
-
 - [ ] 3. Extend editor init to handle URL query params
   - [ ] 3.1 Modify `src/dev-only/editor/main.ts` to parse URL params and open file before session restore
     - In `initEditor()`, replace the existing session-restore IIFE with new logic that first checks `URLSearchParams` for `collection` and `slug`
@@ -43,7 +38,7 @@ Add a floating "Edit" button (FAB) visible only in dev mode on content pages. Th
     - **Property 1: FAB href construction is correct for all valid collection/slug pairs**
     - **Validates: Requirements 3.1, 3.2, 3.3**
     - Create `src/components/__tests__/DevEditButton.test.ts`
-    - Use fast-check to generate arbitrary collection names from `['posts', 'wiki', 'notes', 'projects']` and arbitrary slug strings
+    - Use fast-check to generate arbitrary collection names from `['posts', 'wiki', 'notes']` and arbitrary slug strings
     - Extract the href construction logic into a pure helper (or inline-test it) and assert the output equals `/_editor?collection=${encodeURIComponent(collection)}&slug=${encodeURIComponent(slug)}`
 
   - [ ]* 5.2 Write property test for URL param round-trip (Property 2)
@@ -83,7 +78,7 @@ Add a floating "Edit" button (FAB) visible only in dev mode on content pages. Th
 {
   "waves": [
     { "id": 0, "tasks": ["1.1"] },
-    { "id": 1, "tasks": ["2.1", "2.2", "3.1"] },
+    { "id": 1, "tasks": ["2.1", "3.1"] },
     { "id": 2, "tasks": ["5.1", "5.2", "5.3", "5.4"] }
   ]
 }

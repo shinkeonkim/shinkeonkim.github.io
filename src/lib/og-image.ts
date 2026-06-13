@@ -34,7 +34,7 @@ export interface OgImageProps {
   date?: Date;
   tags?: string[];
   category?: string;
-  kind?: 'post' | 'wiki' | 'project' | 'site';
+  kind?: 'post' | 'wiki' | 'site';
 }
 
 const COLORS = {
@@ -60,7 +60,7 @@ function formatDate(d?: Date): string {
 function buildJsx(props: OgImageProps): React.ReactElement {
   const { title, description, date, tags = [], category, kind = 'post' } = props;
   const tagsTrimmed = tags.slice(0, 4);
-  const kindLabel = kind === 'wiki' ? 'WIKI' : kind === 'project' ? 'PROJECT' : kind === 'site' ? 'SITE' : 'POST';
+  const kindLabel = kind === 'wiki' ? 'WIKI' : kind === 'site' ? 'SITE' : 'POST';
 
   return {
     type: 'div',

@@ -115,16 +115,6 @@ import DevEditButton from '../components/DevEditButton.astro';
 <DevEditButton collection={collection} slug={slug} />
 ```
 
-**ProjectLayout.astro** — receives `id` as the slug equivalent:
-```astro
----
-import DevEditButton from '../components/DevEditButton.astro';
-// ... existing imports
----
-<!-- at end of BaseLayout slot content -->
-<DevEditButton collection="projects" slug={id} />
-```
-
 ### 3. Editor Init Extension (main.ts)
 
 The `initEditor()` function is modified to check `window.location.search` for `collection` and `slug` parameters before falling back to the existing sessionStorage restoration logic.
@@ -170,7 +160,7 @@ This feature introduces no new persistent data models. It operates on existing d
 
 - **Props interface (DevEditButton):** `{ collection: string; slug: string }` — passed from layout to FAB
 - **URL Query Params:** `collection` (string) and `slug` (string) — transient, encoded in the navigation URL
-- **CollectionName type:** `'posts' | 'notes' | 'wiki' | 'sources' | 'projects'` — existing type from `src/dev-only/editor/state.ts`
+- **CollectionName type:** `'posts' | 'notes' | 'wiki' | 'sources'` — existing type from `src/dev-only/editor/state.ts`
 
 The only new "data" is the URL query string, which is ephemeral and derived at render time from existing layout props.
 
@@ -206,7 +196,6 @@ Examples:
 |------|-----------|------|---------------|
 | /posts/hello-world/ | posts | hello-world | /_editor?collection=posts&slug=hello-world |
 | /wiki/typescript/generics/ | wiki | typescript/generics | /_editor?collection=wiki&slug=typescript%2Fgenerics |
-| /projects/my-app/ | projects | my-app | /_editor?collection=projects&slug=my-app |
 | /notes/2024-01-15/ | notes | 2024-01-15 | /_editor?collection=notes&slug=2024-01-15 |
 
 ## Error Handling
@@ -235,7 +224,7 @@ This is the same pattern used by `src/dev-only/editor.astro` which guards its sc
 - Verify DevEditButton renders in dev mode with correct href
 - Verify DevEditButton does not render when `import.meta.env.DEV` is false
 - Verify fixed positioning CSS is applied (44px+ touch target)
-- Verify PostLayout and ProjectLayout include the component with correct props
+- Verify PostLayout includes the component with correct props
 - Verify editor shows error status for invalid collection/slug in URL params
 - Verify URL params take precedence over sessionStorage state
 
@@ -253,7 +242,7 @@ This is the same pattern used by `src/dev-only/editor.astro` which guards its sc
 
 ### Property 1: FAB href construction is correct for all valid collection/slug pairs
 
-*For any* valid collection name (one of "posts", "wiki", "notes", "projects") and *for any* slug string, the DevEditButton's generated `href` attribute SHALL equal `/_editor?collection={encodeURIComponent(collection)}&slug={encodeURIComponent(slug)}`.
+*For any* valid collection name (one of "posts", "wiki", "notes") and *for any* slug string, the DevEditButton's generated `href` attribute SHALL equal `/_editor?collection={encodeURIComponent(collection)}&slug={encodeURIComponent(slug)}`.
 
 **Validates: Requirements 3.1, 3.2, 3.3**
 

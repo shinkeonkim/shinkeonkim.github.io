@@ -6,7 +6,7 @@ import { parseFrontmatter } from '@astrojs/markdown-remark';
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const CONTENT_DIR = path.join(REPO_ROOT, 'src/content');
 const PUBLIC_DIR = path.join(REPO_ROOT, 'public');
-const COLLECTIONS = ['posts', 'notes', 'wiki', 'projects', 'sources'];
+const COLLECTIONS = ['posts', 'notes', 'wiki', 'sources'];
 const WIKILINK_RE = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
 
 const args = new Set(process.argv.slice(2));
