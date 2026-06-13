@@ -1,19 +1,17 @@
 /**
- * ChartJs — MDX에서 Chart.js 차트를 인라인으로 렌더링하는 React 컴포넌트
+ * ChartJs — MDX에서 Chart.js 차트를 인라인으로 렌더링하는 React 컴포넌트.
  *
- * 사용법 (MDX 내부):
- *   <ChartJs client:visible type="bar" data={...} options={...} />
+ * MDX 사용 예:
+ *   <ChartJs client:visible type="bar" data={...} options={...} title="..." caption="..." />
  *
- * Props:
- *   type: 'bar' | 'line' | 'pie' | 'doughnut' | 'radar' | 'polarArea' | 'scatter' | 'bubble'
- *   data: Chart.js data object
- *   options: Chart.js options object (optional)
- *   height: CSS height string (default: '320px')
- *   title: chart title shown above (optional)
- *   caption: chart caption shown below (optional)
+ * MDX 의 `data={{...}}` / `options={{...}}` 는 매 렌더마다 새 object reference
+ * 가 되므로 JSON.stringify 로 dependency key 를 안정화하고, type 이 바뀌지
+ * 않는 한 chart instance 를 유지한 채 `chart.update()` 로만 갱신한다.
+ * (Chart.js 는 type 변경 시 instance 재생성을 요구한다.) 테마 토글도
+ * destroy 하지 않고 색만 다시 입힌다.
  */
-import { useEffect, useRef } from 'react';
-import type { ChartData, ChartOptions } from 'chart.js';
+import { useEffect, useMemo, useRef } from 'react';
+import type { ChartData, ChartOptions, ChartType } from 'chart.js';
 import {
   Chart,
   CategoryScale,
@@ -61,13 +59,84 @@ Chart.register(
   RadialLinearScale,
 );
 
+type SupportedType = 'bar' | 'line' | 'pie' | 'doughnut' | 'radar' | 'polarArea' | 'scatter' | 'bubble';
+
 interface ChartJsProps {
-  type: 'bar' | 'line' | 'pie' | 'doughnut' | 'radar' | 'polarArea' | 'scatter' | 'bubble';
+  type: SupportedType;
   data: unknown;
   options?: unknown;
   height?: string;
   title?: string;
   caption?: string;
+}
+
+const RADIAL_TYPES: ReadonlySet<SupportedType> = new Set(['pie', 'doughnut', 'radar', 'polarArea']);
+
+function readThemeColors(): { text: string; grid: string } {
+  const isDark =
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
+  return {
+    text: isDark ? '#e2e8f0' : '#1e293b',
+    grid: isDark ? '#334155' : '#f1f5f9',
+  };
+}
+
+function buildOptions(
+  type: SupportedType,
+  userOptions: Record<string, unknown> | undefined,
+  colors: { text: string; grid: string },
+): ChartOptions {
+  const user = userOptions ?? {};
+  const userPlugins = (user.plugins as Record<string, unknown> | undefined) ?? {};
+  const userLegend = (userPlugins.legend as Record<string, unknown> | undefined) ?? {};
+  const userLegendLabels = (userLegend.labels as Record<string, unknown> | undefined) ?? {};
+  const userTooltip = (userPlugins.tooltip as Record<string, unknown> | undefined) ?? {};
+
+  const merged: Record<string, unknown> = {
+    responsive: true,
+    maintainAspectRatio: false,
+    ...user,
+    plugins: {
+      ...userPlugins,
+      legend: {
+        position: 'bottom',
+        ...userLegend,
+        labels: {
+          usePointStyle: true,
+          font: { size: 11 },
+          ...userLegendLabels,
+          color: colors.text,
+        },
+      },
+      tooltip: { enabled: true, ...userTooltip },
+    },
+  };
+
+  if (!RADIAL_TYPES.has(type)) {
+    const userScales = (user.scales as Record<string, Record<string, unknown>> | undefined) ?? {};
+    const userX = userScales.x ?? {};
+    const userY = userScales.y ?? {};
+    const userXGrid = (userX.grid as Record<string, unknown> | undefined) ?? {};
+    const userXTicks = (userX.ticks as Record<string, unknown> | undefined) ?? {};
+    const userYGrid = (userY.grid as Record<string, unknown> | undefined) ?? {};
+    const userYTicks = (userY.ticks as Record<string, unknown> | undefined) ?? {};
+
+    merged.scales = {
+      ...userScales,
+      x: {
+        ...userX,
+        grid: { ...userXGrid, color: colors.grid },
+        ticks: { ...userXTicks, color: colors.text },
+      },
+      y: {
+        ...userY,
+        grid: { ...userYGrid, color: colors.grid },
+        ticks: { ...userYTicks, color: colors.text },
+      },
+    };
+  }
+
+  return merged as ChartOptions;
 }
 
 export default function ChartJs({
@@ -81,75 +150,58 @@ export default function ChartJs({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<Chart | null>(null);
 
+  const dataKey = useMemo(() => JSON.stringify(data ?? null), [data]);
+  const optionsKey = useMemo(() => JSON.stringify(options ?? null), [options]);
+
   useEffect(() => {
     if (!canvasRef.current) return;
 
-    // Detect dark mode
-    const isDark = document.documentElement.classList.contains('dark');
-    const textColor = isDark ? '#e2e8f0' : '#1e293b';
-    const gridColor = isDark ? '#334155' : '#f1f5f9';
-
-    const defaultOptions = {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: 'bottom' as const,
-          labels: { color: textColor, usePointStyle: true, font: { size: 11 } },
-        },
-        tooltip: { enabled: true },
-      },
-      scales:
-        type === 'pie' || type === 'doughnut' || type === 'radar' || type === 'polarArea'
-          ? undefined
-          : {
-              x: { grid: { color: gridColor }, ticks: { color: textColor } },
-              y: { grid: { color: gridColor }, ticks: { color: textColor }, beginAtZero: true },
-            },
-    };
-
-    const merged = deepMerge(defaultOptions, (options as Record<string, unknown>) ?? {});
+    const colors = readThemeColors();
+    const parsedData = JSON.parse(dataKey) as ChartData;
+    const parsedOptions = JSON.parse(optionsKey) as Record<string, unknown> | null;
+    const builtOptions = buildOptions(type, parsedOptions ?? undefined, colors);
 
     chartRef.current = new Chart(canvasRef.current, {
-      type,
-      data: data as unknown as ChartData,
-      options: merged as unknown as ChartOptions,
+      type: type as ChartType,
+      data: parsedData,
+      options: builtOptions,
     });
-
-    // Theme toggle 감지
-    const observer = new MutationObserver(() => {
-      if (chartRef.current) {
-        chartRef.current.destroy();
-        const nowDark = document.documentElement.classList.contains('dark');
-        const tc = nowDark ? '#e2e8f0' : '#1e293b';
-        const gc = nowDark ? '#334155' : '#f1f5f9';
-        const opts = deepMerge(defaultOptions, (options as Record<string, unknown>) ?? {});
-        const scales = opts.scales as Record<string, Record<string, Record<string, unknown>>> | undefined;
-        const plugins = opts.plugins as Record<string, Record<string, Record<string, unknown>>> | undefined;
-        if (plugins?.legend?.labels) plugins.legend.labels.color = tc;
-        if (scales?.x?.ticks) scales.x.ticks.color = tc;
-        if (scales?.x?.grid) scales.x.grid.color = gc;
-        if (scales?.y?.ticks) scales.y.ticks.color = tc;
-        if (scales?.y?.grid) scales.y.grid.color = gc;
-        chartRef.current = new Chart(canvasRef.current!, {
-          type,
-          data: data as unknown as ChartData,
-          options: opts as unknown as ChartOptions,
-        });
-      }
-    });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
 
     return () => {
-      observer.disconnect();
       chartRef.current?.destroy();
+      chartRef.current = null;
     };
-  }, [type, data, options]);
+  }, [type]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const colors = readThemeColors();
+    const parsedData = JSON.parse(dataKey) as ChartData;
+    const parsedOptions = JSON.parse(optionsKey) as Record<string, unknown> | null;
+    const builtOptions = buildOptions(type, parsedOptions ?? undefined, colors);
+    chart.data = parsedData;
+    chart.options = builtOptions;
+    chart.update();
+  }, [dataKey, optionsKey, type]);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const chart = chartRef.current;
+      if (!chart) return;
+      const colors = readThemeColors();
+      const parsedOptions = JSON.parse(optionsKey) as Record<string, unknown> | null;
+      chart.options = buildOptions(type, parsedOptions ?? undefined, colors);
+      chart.update('none');
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, [type, optionsKey]);
 
   return (
     <div className="my-6 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800/50">
       {title && <div className="mb-1 text-sm font-bold text-gray-900 dark:text-gray-100">{title}</div>}
-      <div style={{ height, position: 'relative' }}>
+      <div style={{ height, position: 'relative', width: '100%' }}>
         <canvas ref={canvasRef} />
       </div>
       {caption && (
@@ -159,22 +211,4 @@ export default function ChartJs({
       )}
     </div>
   );
-}
-
-function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...target };
-  for (const key of Object.keys(source)) {
-    if (
-      source[key] &&
-      typeof source[key] === 'object' &&
-      !Array.isArray(source[key]) &&
-      target[key] &&
-      typeof target[key] === 'object'
-    ) {
-      result[key] = deepMerge(target[key] as Record<string, unknown>, source[key] as Record<string, unknown>);
-    } else {
-      result[key] = source[key];
-    }
-  }
-  return result;
 }
