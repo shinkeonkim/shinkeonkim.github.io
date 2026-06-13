@@ -23,6 +23,7 @@ const SKIP_REGEXES = [
   /instagram\.com/i,
   /^mailto:/,
   /^tel:/,
+  /^https?:\/\/shinkeonkim\.com\//i,
 ];
 
 const cliArgs = [
