@@ -46,6 +46,7 @@ export const NAV_ITEMS = [
   { href: '/posts/', label: '글' },
   { href: '/notes/', label: '노트' },
   { href: '/wiki/', label: '위키' },
+  { href: '/animations/', label: '애니메이션' },
   { href: '/graph/', label: '그래프' },
   { href: '/about/', label: '소개' },
 ] as const;
