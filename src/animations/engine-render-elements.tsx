@@ -122,6 +122,18 @@ function anchorOffset(el: AnimationElement, state: Record<string, unknown>, anch
     if (el.type === 'rect' || el.type === 'image') return { x: (state.x as number) + (state.width as number), y: center.y };
     if (el.type === 'circle') return { x: (state.cx as number) + (state.r as number), y: center.y };
   }
+  if (anchor === 'top-left') {
+    if (el.type === 'rect' || el.type === 'image') return { x: state.x as number, y: state.y as number };
+  }
+  if (anchor === 'top-right') {
+    if (el.type === 'rect' || el.type === 'image') return { x: (state.x as number) + (state.width as number), y: state.y as number };
+  }
+  if (anchor === 'bottom-left') {
+    if (el.type === 'rect' || el.type === 'image') return { x: state.x as number, y: (state.y as number) + (state.height as number) };
+  }
+  if (anchor === 'bottom-right') {
+    if (el.type === 'rect' || el.type === 'image') return { x: (state.x as number) + (state.width as number), y: (state.y as number) + (state.height as number) };
+  }
   return center;
 }
 
@@ -250,12 +262,15 @@ function RenderImage({ state }: { state: Record<string, unknown> }): React.React
 }
 
 function RenderPath({ state }: { state: Record<string, unknown> }): React.ReactElement {
-  const p = state as unknown as { x: number; y: number; d: string; fill: string; stroke: string; strokeWidth: number; strokeDasharray?: string; opacity: number };
-  const transform = p.x === 0 && p.y === 0 ? undefined : `translate(${p.x} ${p.y})`;
+  const p = state as unknown as { x: number; y: number; d: string; fill: string; stroke: string; strokeWidth: number; strokeDasharray?: string; opacity: number; rotation: number };
+  const transform = [
+    p.x !== 0 || p.y !== 0 ? `translate(${p.x} ${p.y})` : '',
+    p.rotation ? `rotate(${p.rotation})` : '',
+  ].filter(Boolean).join(' ');
   return (
     <path
       d={p.d}
-      transform={transform}
+      transform={transform || undefined}
       fill={p.fill}
       stroke={p.stroke}
       strokeWidth={p.strokeWidth}
@@ -265,9 +280,21 @@ function RenderPath({ state }: { state: Record<string, unknown> }): React.ReactE
   );
 }
 
+function computePolygonCentroid(points: string): { x: number; y: number } {
+  const pts = points.trim().split(/\s+/).map(pair => {
+    const [x, y] = pair.split(',').map(Number);
+    return { x, y };
+  });
+  if (pts.length === 0) return { x: 0, y: 0 };
+  const sum = pts.reduce((acc, pt) => ({ x: acc.x + pt.x, y: acc.y + pt.y }), { x: 0, y: 0 });
+  return { x: sum.x / pts.length, y: sum.y / pts.length };
+}
+
 function RenderPolygon({ state }: { state: Record<string, unknown> }): React.ReactElement {
-  const p = state as unknown as { points: string; fill: string; stroke: string; strokeWidth: number; opacity: number };
-  return <polygon points={p.points} fill={p.fill} stroke={p.stroke} strokeWidth={p.strokeWidth} opacity={p.opacity} />;
+  const p = state as unknown as { points: string; fill: string; stroke: string; strokeWidth: number; opacity: number; rotation: number };
+  const centroid = computePolygonCentroid(p.points);
+  const transform = p.rotation ? `rotate(${p.rotation} ${centroid.x} ${centroid.y})` : undefined;
+  return <polygon points={p.points} fill={p.fill} stroke={p.stroke} strokeWidth={p.strokeWidth} opacity={p.opacity} transform={transform} />;
 }
 
 export function FlowParticle({

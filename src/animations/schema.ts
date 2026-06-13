@@ -9,7 +9,8 @@ const easeSchema = z
   .default('easeInOut');
 
 export const anchorSchema = z
-  .enum(['auto', 'top', 'right', 'bottom', 'left', 'center'])
+  .enum(['auto', 'top', 'right', 'bottom', 'left', 'center',
+         'top-left', 'top-right', 'bottom-left', 'bottom-right'])
   .default('auto');
 
 export const entryModeSchema = z
@@ -305,6 +306,12 @@ export function isColorKey(key: string): boolean {
   return COLOR_KEYS.has(key);
 }
 
+const TEXT_KEYS = new Set(['label', 'subtitle', 'content', 'src']);
+
+export function isTextKey(key: string): boolean {
+  return TEXT_KEYS.has(key);
+}
+
 export type ElementVisualState = Record<string, unknown> & {
   visible: boolean;
   __entryProgress?: number;
@@ -366,7 +373,12 @@ function lerpValue(prev: unknown, target: unknown, t: number, key: string): unkn
     if (!a || !b) return t < 0.5 ? prev : target;
     return rgbaToHex(lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t));
   }
-  return t < 0.999 ? prev : target;
+  // Text properties: crossover at 50%
+  if (typeof prev === 'string' && typeof target === 'string' && TEXT_KEYS.has(key)) {
+    return t < 0.5 ? prev : target;
+  }
+  // Generic fallback also uses 0.5 for consistency
+  return t < 0.5 ? prev : target;
 }
 
 function trackValueAt(track: PropertyTrack, time: number): unknown {
