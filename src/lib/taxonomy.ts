@@ -19,7 +19,7 @@ export interface SeriesInfo {
 const SLUG_RE = /[^\p{L}\p{N}_-]+/gu;
 
 export function slugify(value: string): string {
-  return value.normalize('NFKD').toLowerCase().replace(SLUG_RE, '-').replace(/^-|-$/g, '');
+  return value.normalize('NFC').toLowerCase().replace(SLUG_RE, '-').replace(/^-|-$/g, '');
 }
 
 export function categoryOf<C extends CategorizedCollection>(

@@ -31,17 +31,13 @@ function resolveContentRoot() {
 
 const CONTENT_ROOT = resolveContentRoot();
 
-// Same intent as src/lib/taxonomy.ts slugify, with one deliberate
-// difference: we DO NOT NFKD-decompose. taxonomy.ts feeds its slug to
-// Astro's `paginate({ params: { ... } })`, where Astro's
-// sanitizeParams() runs `.normalize()` (NFC) on the value before it
-// becomes a URL segment. So taxonomy's NFKD output gets re-composed to
-// NFC by Astro. Our map keys are full URLs (NFC), so we must match NFC
-// directly — without going through Astro.
+// Mirrors src/lib/taxonomy.ts slugify: lowercase, replace non-word runs
+// with '-', NFC-normalize so Korean Hangul stays composed (NFC) — that's
+// the form the dist filesystem and sitemap URLs use.
 const SLUG_RE = /[^\p{L}\p{N}_-]+/gu;
 
 export function slugify(value) {
-  return value.toLowerCase().replace(SLUG_RE, '-').replace(/^-|-$/g, '');
+  return value.normalize('NFC').toLowerCase().replace(SLUG_RE, '-').replace(/^-|-$/g, '');
 }
 
 // Mirrors src/pages/tags/[tag].astro: just lowercase. The sitemap URL
