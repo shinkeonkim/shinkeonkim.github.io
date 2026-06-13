@@ -4,6 +4,7 @@ import {
   getDef,
   getSelection,
   getSelectedElementIds,
+  getCurrentTime,
   isDirty,
   isDraft,
   setDef,
@@ -26,7 +27,6 @@ import { initElementList } from './element-list';
 import { initProperties } from './properties';
 import { initTimeline } from './timeline';
 import { IconLibraryDialog } from './icon-library';
-import { AssetLibraryDialog, saveSelectionAsAsset } from './asset-library';
 import { initGrid, isGridEnabled, setGridEnabled, getGridSize, subscribeGrid } from './grid';
 import { updateCanvas } from './state';
 import {
@@ -52,6 +52,8 @@ import {
 import { initPalette, openPalette, registerCommands } from './studio-palette';
 import { groupElements, ungroupElement, isGroup } from './studio-groups';
 import { initHistoryPanel, openHistoryPanel } from './studio-history';
+import { activeAppearance } from '../../animations/schema';
+import type { AnimationDef } from '../../animations/schema';
 
 function queryUi(): StudioUi | null {
   const app = document.getElementById('studio-app');
@@ -175,8 +177,12 @@ function startInlineTextEdit(canvas: SVGSVGElement, el: { id: string; x: number;
     settled = true;
     fo.remove();
   };
+  let isComposingFallback = false;
+  input.addEventListener('compositionstart', () => { isComposingFallback = true; });
+  input.addEventListener('compositionend', () => { isComposingFallback = false; });
   input.addEventListener('blur', commit);
   input.addEventListener('keydown', (e) => {
+    if (e.isComposing || isComposingFallback) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       commit();
@@ -201,6 +207,31 @@ function selectAdjacentElement(direction: 1 | -1): boolean {
   const nextIdx = (idx + direction + def.elements.length) % def.elements.length;
   setSelection({ kind: 'element', elementId: def.elements[nextIdx].id });
   return true;
+}
+
+/**
+ * Returns the IDs of elements visible at the given time.
+ * Elements with no appearances are always visible.
+ * Elements with appearances are visible only if activeAppearance returns non-null.
+ */
+export function getVisibleElementIds(def: AnimationDef, time: number): string[] {
+  return def.elements
+    .filter((el) => el.appearances.length === 0 || activeAppearance(el, time) !== null)
+    .map((el) => el.id);
+}
+
+function handleSelectAll(e: KeyboardEvent): void {
+  if (!(e.metaKey || e.ctrlKey) || e.key !== 'a') return;
+  e.preventDefault();
+  const def = getDef();
+  if (!def) return;
+  const visibleIds = getVisibleElementIds(def, getCurrentTime());
+  if (visibleIds.length === 0) return;
+  if (visibleIds.length === 1) {
+    setSelection({ kind: 'element', elementId: visibleIds[0] });
+  } else {
+    setSelection({ kind: 'elements', elementIds: visibleIds });
+  }
 }
 
 declare global {
@@ -237,12 +268,6 @@ export function initStudio(): void {
 
   const iconDialog = IconLibraryDialog.mount();
   document.getElementById('studio-open-icons')?.addEventListener('click', () => iconDialog?.open());
-
-  const assetDialog = AssetLibraryDialog.mount();
-  document.getElementById('studio-assets')?.addEventListener('click', () => assetDialog?.open());
-  document.body.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).closest('[data-save-as-asset]')) saveSelectionAsAsset();
-  });
 
   ui.toolsRoot.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-canvas-preset]');
@@ -449,6 +474,10 @@ export function initStudio(): void {
 
     if (!mod) return;
     const key = e.key.toLowerCase();
+    if (key === 'a' && !inText) {
+      handleSelectAll(e);
+      return;
+    }
     if (key === 'k') {
       e.preventDefault();
       openPalette();

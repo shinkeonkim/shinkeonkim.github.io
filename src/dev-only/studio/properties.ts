@@ -39,6 +39,7 @@ import { ungroupElement } from './studio-groups';
 
 let panelEl: HTMLElement | null = null;
 const closedSections = new Set<string>();
+let isComposingFallback = false;
 
 export function initProperties(root: HTMLElement): void {
   panelEl = root;
@@ -46,9 +47,30 @@ export function initProperties(root: HTMLElement): void {
   root.addEventListener('input', onInput);
   root.addEventListener('change', onChange);
   root.addEventListener('click', onClick);
+  root.addEventListener('keydown', onKeydown);
+  root.addEventListener('compositionstart', onCompositionStart);
+  root.addEventListener('compositionend', onCompositionEnd);
   root.addEventListener('toggle', onSectionToggle, true);
   root.addEventListener('wheel', onNumberWheel, { passive: false });
   render();
+}
+
+function onCompositionStart(): void {
+  isComposingFallback = true;
+}
+
+function onCompositionEnd(): void {
+  isComposingFallback = false;
+}
+
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Enter') return;
+  if (e.isComposing || isComposingFallback) return;
+  const target = e.target as HTMLElement;
+  if (!(target instanceof HTMLInputElement)) return;
+  if (target.type === 'text' || target.type === 'number') {
+    target.blur();
+  }
 }
 
 function onSectionToggle(e: Event): void {
@@ -206,7 +228,6 @@ function renderInner(): void {
           <button type="button" class="studio-btn studio-align-btn" data-distribute="vertical" title="세로 균등 분포" ${distributeDisabled}>↕</button>
         </div>
       </div>
-      <button type="button" class="studio-btn" data-save-as-asset style="margin-top:0.6rem">📦 자산으로 저장</button>
       <ul style="font-family:var(--font-mono);font-size:0.72rem;color:var(--color-fg-muted);padding-left:1rem;margin:0.6rem 0 0">
         ${sel.elementIds.map((id) => `<li>${escapeHtml(id)}</li>`).join('')}
       </ul>
@@ -438,6 +459,9 @@ function onInput(e: Event): void {
   const target = e.target as HTMLInputElement;
   const key = target.dataset.propKey;
   if (!key) return;
+  // Guard: skip text input events during IME composition
+  if (target.type === 'text' && (e as InputEvent).isComposing) return;
+  if (target.type === 'text' && isComposingFallback) return;
   let value: string | number | boolean = target.value;
   if (target.type === 'number') value = Number(target.value);
   else if (target.type === 'checkbox') value = target.checked;
