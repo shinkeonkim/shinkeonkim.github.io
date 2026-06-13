@@ -20,7 +20,7 @@ import {
 } from './persistence';
 import { PreviewPane } from './preview';
 import { ReferencesPicker } from './references-picker';
-import { state } from './state';
+import { state, COLLECTION_NAMES } from './state';
 import { initStatus, setStatus } from './status';
 import { FileTree } from './tree';
 import { MarkdownToolbar } from './toolbar';
@@ -556,6 +556,20 @@ export function initEditor(): void {
   saveBtn.disabled = true;
 
   void (async () => {
+    // URL query params take priority over session restore (from Edit button)
+    const urlParams = new URLSearchParams(window.location.search);
+    const qCollection = urlParams.get('collection');
+    const qSlug = urlParams.get('slug');
+
+    if (qCollection && qSlug && COLLECTION_NAMES.includes(qCollection as CollectionName)) {
+      try {
+        await loadFile(qCollection as CollectionName, qSlug);
+      } catch {
+        setStatus(`파일을 찾을 수 없습니다: ${qCollection}/${qSlug}`, 'error');
+      }
+      return;
+    }
+
     const snapshot = loadUiState();
     if (!snapshot) {
       setStatus('준비됨', 'ok');
