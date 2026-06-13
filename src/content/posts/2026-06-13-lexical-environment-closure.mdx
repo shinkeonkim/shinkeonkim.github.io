@@ -1,0 +1,509 @@
+---
+title: '함수는 끝났는데 변수가 살아있다 — Lexical Environment와 클로저의 메커니즘'
+description: '스코프와 Environment 개념부터 차근차근 쌓아 naturals 이터레이터 예제의 세 가지 질문에 답해본다. n은 어디에 사는가, 왜 GC되지 않는가, 외부 변수와 어떻게 격리되는가.'
+date: 2026-06-13
+tags: [javascript, typescript, closure, lexical-environment, ecmascript, internals]
+---
+
+## 시작 의문
+
+다음과 같은 무한 자연수 이터레이터를 만든다고 하자.
+
+```typescript
+function naturals(end = Infinity): Iterator<number> {
+  let n = 1; // ← 어디에 사는 변수?
+  return {
+    next(): IteratorResult<number> {
+      return n <= end
+        ? { value: n++, done: false }
+        : { value: undefined, done: true };
+    },
+  };
+}
+
+const it = naturals(5);
+it.next(); // { value: 1, done: false }
+it.next(); // { value: 2, done: false }
+it.next(); // { value: 3, done: false }
+```
+
+`naturals(5)` 함수 호출은 첫 줄에서 끝났다. 그런데 `it.next()`를 호출하면 `n`이 살아있고, 호출할 때마다 1씩 증가한다.
+
+세 가지 질문이 떠오른다.
+
+1. **`n`은 정확히 어느 메모리 영역에 사는가?**
+2. **함수가 종료됐는데 왜 GC되지 않는가?**
+3. **외부에 `let n = 100`이 있으면 어느 쪽이 이긴다고 보장할 수 있는가?**
+
+답을 바로 던지면 "클로저 때문이다" 한 줄로 끝난다. 하지만 그게 *어떻게* 가능한지를 이해하려면 한 단계 더 들어가야 한다. 이 글은 **스코프**·**Environment**·**참조 사슬**·**스코프 체인 워킹** 네 개념을 차례로 쌓아 세 질문 모두에 답하는 것을 목표로 한다.
+
+먼저 가장 기초적인 곳부터.
+
+---
+
+## 한 단계 뒤로 — 스코프와 Environment 가 왜 필요한가
+
+### 코드는 명령어, 데이터는 값
+
+JavaScript 엔진이 `let x = 5`를 만나는 순간 두 가지 일이 동시에 일어난다.
+
+1. **이름** `x` 라는 식별자가 등록된다.
+2. **값** `5` 가 어딘가 메모리에 자리잡고, `x` 와 묶인다(binding).
+
+이 "이름 → 값" 묶음이 **binding**이다. 함수 코드 자체는 그저 명령어 덩어리지만, 함수가 실행되는 동안 만들어지는 binding 들은 **어딘가 별도의 저장소**에 보관되어야 한다. 그 저장소를 ECMAScript 명세는 **Environment Record** 라고 부른다.
+
+### 같은 이름이 여러 곳에 있을 때 — 스코프
+
+다음 코드를 보자.
+
+```javascript
+let x = 10;
+
+function outer() {
+  let x = 20;
+  function inner() {
+    let x = 30;
+    console.log(x); // 어느 x?
+  }
+  inner();
+}
+
+outer();
+```
+
+세 군데에 `x` 가 있다. `inner()` 안의 `console.log(x)` 는 어떤 `x` 를 가리키는가? 인간이 보기엔 "가장 가까운 30"이 답이지만, 엔진은 어떻게 이 규칙을 구현하는가?
+
+답은 **스코프(scope)** 라는 개념이다. 코드의 각 함수·블록은 자기만의 스코프를 가지고, 안쪽 스코프에서 변수를 찾다가 못 찾으면 바깥 스코프를 본다. 스코프들이 부모-자식 관계로 사슬을 이루고, 이 사슬을 **스코프 체인** 이라 한다.
+
+여기서 한 가지 결정이 필요하다 — *어떤 함수가 "바깥"인가?* 정의 시점의 위치인가, 호출 시점의 위치인가?
+
+- **Lexical(어휘적) 스코프**: 정의 시점 기준. 코드를 쓴 자리가 바깥을 결정한다.
+- **Dynamic(동적) 스코프**: 호출 시점 기준. 어디서 호출됐는지가 바깥을 결정한다.
+
+JavaScript는 Lexical 스코프를 선택했다. 그래서 정확한 명세 이름이 "**Lexical** Environment"다. 호출 위치가 어디든, 정의 위치의 바깥 스코프가 영원히 바깥이 된다.
+
+### 호출마다 새 영역이 필요한 이유
+
+마지막 기초 한 조각. 같은 함수가 여러 번 호출되면 어떻게 되는가?
+
+```javascript
+function counter() {
+  let n = 0;
+  n++;
+  console.log(n);
+}
+
+counter(); // 1
+counter(); // 1 (1이 또!)
+```
+
+`counter()` 두 호출은 각자 자기 `n` 을 가져야 한다. 만약 같은 `n` 을 공유했다면 두 번째 호출은 `2` 를 출력했을 것이다.
+
+재귀 호출은 더 명확하다.
+
+```javascript
+function factorial(n) {
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
+}
+
+factorial(3);
+// factorial(3) 의 n = 3
+// factorial(2) 의 n = 2  ← 동시에 살아 있어야 함
+// factorial(1) 의 n = 1
+```
+
+세 호출의 `n` 은 동시에 메모리에 살아 있어야 한다. **함수 호출 한 번당, 그 호출만을 위한 독립된 변수 저장소가 만들어진다.** 이게 Lexical Environment 가 "호출마다 새로 생성"되는 이유다.
+
+### 종합 — Lexical Environment 가 답하는 것
+
+지금까지 본 것을 한 줄로 묶으면:
+
+> **Lexical Environment 는 "이 호출의 변수들이 어디 살고, 바깥 스코프가 어디인지" 를 기록하는 객체다.**
+
+이게 우리가 곧 만나게 될 LE의 두 필드 — 변수 저장소(Environment Record) + 외부 Environment 링크 — 의 의미다.
+
+---
+
+## 왜 클로저가 필요한가
+
+기초 한 가지가 더 남았다. 위 이야기까지는 "함수가 실행되는 동안 변수가 살아있어야 한다"였다. 그런데 우리의 시작 질문은 그 반대다 — *함수가 끝났는데 변수가 살아있다.* 이건 왜 필요한가?
+
+다음 패턴들을 보자.
+
+```javascript
+// (1) 이터레이터/제너레이터
+function naturals() {
+  let n = 1;
+  return { next: () => n++ };
+}
+
+// (2) 카운터/누적기
+function makeCounter() {
+  let count = 0;
+  return () => ++count;
+}
+
+// (3) 사적 상태(private state)
+const account = (() => {
+  let balance = 0;
+  return {
+    deposit: (amt) => (balance += amt),
+    balance: () => balance,
+  };
+})();
+
+// (4) 콜백이 외부 컨텍스트를 기억
+function attachLogger(label) {
+  return (event) => console.log(`[${label}]`, event);
+}
+const log = attachLogger('user');
+button.onclick = log; // log는 호출 시 label='user' 를 기억
+```
+
+이 네 패턴 모두 **"바깥 함수가 끝난 뒤에도 안쪽 함수가 바깥 변수를 기억"** 해야 동작한다. 이게 안 되면 JavaScript에서:
+
+- 이터레이터 같은 상태 보존 패턴이 불가능
+- 사적 상태(`#private` 필드의 정신적 조상)가 불가능
+- 콜백 함수가 자기 컨텍스트를 들고 다닐 수 없음
+- 고차 함수(Higher-order Function) 표현력의 큰 손실
+
+이 능력 — 함수가 자기 정의 시점의 외부 변수들을 계속 참조할 수 있는 성질 — 이 바로 **클로저** 다. 즉 클로저는 "있어서 좋은 기능"이 아니라 **JavaScript의 표현력의 절반을 떠받치는 토대**다.
+
+이제 진짜 메커니즘으로 들어가자.
+
+---
+
+## 결과적 정의 — 클로저
+
+흔히 쓰는 한 줄 정의:
+
+> **클로저(Closure)**: 함수가 자신이 정의된 시점의 외부 변수들을 계속 참조할 수 있는 성질.
+
+`naturals` 의 `next()` 함수는 자신을 감싸고 있던 `naturals` 의 변수 `n`, `end` 를 "닫아서 들고 다닌다(close over)". 그래서 `naturals` 가 반환된 후에도 `n` 이 유효하다.
+
+여기까지가 흔한 설명이다. 이제 세 질문을 차례로 풀어가자.
+
+---
+
+## Q1. `n`은 어디 사는가? — Lexical Environment 의 구조
+
+앞 절에서 우리는 Lexical Environment 가 "변수 저장소 + 외부 스코프 링크" 두 가지를 담는다고 말했다. 이걸 명세 수준에서 더 정확하게 보자.
+
+### LE 의 두 필드
+
+ECMAScript는 함수가 호출될 때마다 Lexical Environment 객체를 하나 만든다. 그 LE는 단 두 개의 필드를 가진다.
+
+| 필드 | 역할 |
+|:---|:---|
+| **Environment Record** | 이 스코프에서 선언된 식별자(`n`, `end`, 함수 이름 등)의 실제 binding 저장소 |
+| **외부 Environment 참조** (Outer) | 자기를 감싸는 바깥 LE 에 대한 참조. 없으면 `null` |
+
+이 단순한 구조가 스코프 체인 자체다. LE들이 outer 포인터로 연결되어 사슬을 이룬다.
+
+```anim:lexical-environment
+{}
+```
+
+### Environment Record 의 5 가지 종류
+
+스펙 ([ECMA-262 §9.1](https://tc39.es/ecma262/#sec-environment-records))은 Environment Record 를 다섯 가지로 분류한다.
+
+- **Declarative**: 일반 함수 스코프, 블록 스코프. `let`/`const`/함수 선언이 여기 산다.
+- **Function**: Declarative 의 특수화. `this`, `super`, `new.target` 을 추가로 갖는다.
+- **Object**: `with` 문 같은 곳에서 객체를 스코프 대상으로 쓸 때.
+- **Global**: 가장 바깥. 전역 객체(`globalThis`)와 묶여 있다.
+- **Module**: 모듈 최상위. `import` 바인딩이 여기 산다.
+
+`naturals(5)` 를 호출하면 **Function Environment Record** 가 만들어진다. 그 안에:
+
+```text
+Environment Record:
+  n        → 1
+  end      → 5
+  this     → undefined  (strict)
+
+외부 Environment 참조: → Module/Global Environment
+```
+
+### 함수 객체에 박힌 Environment 슬롯
+
+여기가 클로저의 진짜 정체다.
+
+ECMAScript에서 **함수 객체** 자체가 내부 슬롯으로 "Environment 슬롯" (스펙 정식 이름은 `[[Environment]]` 슬롯이지만, 그냥 Environment 슬롯이라 부르자) 을 가진다. 이 슬롯은 **그 함수가 정의된 시점**의 LE 를 가리킨다.
+
+```typescript
+function naturals(end = Infinity) {
+  let n = 1;
+  return {
+    next() {          // ← 이 함수 객체가 만들어질 때
+      return n++      //   .Environment 슬롯 = naturals 의 LE
+    }
+  };
+}
+```
+
+`next` 함수 객체는 생성될 때 자기를 감싼 LE(`naturals` 의 LE)를 자기 Environment 슬롯에 박제한다. 이후 `next` 가 어디서 어떻게 호출되든, **호출 시 만들어지는 next 자신의 새 LE 의 outer 참조는 항상 박제된 Environment 슬롯이 된다.**
+
+이게 "**Lexical** Environment" 라고 부르는 이유다. **호출 위치가 아니라 정의 위치**가 외부 스코프를 결정한다.
+
+### Q1 의 답
+
+`n` 은 **콜 스택의 Execution Context 가 아니라, 힙(heap) 에 만들어진 Function Environment Record 의 binding** 으로 산다. 처음부터 끝까지 힙에 있다. 함수 호출이 끝나는 순간이 아니라, 그 LE 를 더 이상 누구도 참조하지 않을 때까지 산다.
+
+---
+
+## Q2. 함수가 끝났는데 왜 GC되지 않는가? — 참조 사슬
+
+### 가장 흔한 오해를 먼저 깬다
+
+많은 글이 이렇게 말한다 — "함수의 로컬 변수는 함수가 끝나면 사라진다, 단 클로저로 잡힌 것은 예외." 정확하지 않다.
+
+정확한 그림은 이렇다.
+
+> 함수가 종료되면 **콜 스택에 있던 Execution Context 만 사라진다.** 변수가 실제로 사는 LE 는 처음부터 **힙에 있는 객체** 다. 누군가 참조하고 있는 한 끝까지 살아남는다.
+
+```anim:closure-gc-survival
+{}
+```
+
+### 참조 사슬 추적
+
+`naturals(5)` 가 반환된 시점에서 일어나는 일을 추적해 보자.
+
+1. `naturals` 의 Execution Context 가 콜 스택에서 pop 된다.
+2. 그러나 그 Execution Context 가 사용하던 **Lexical Environment 자체** 는 콜 스택에 없었다. 처음부터 힙에 있는 객체다.
+3. 힙에는 다음 객체들이 남는다: **naturals LE**, **반환된 객체** `{ next: ... }`, **next 함수 객체**.
+4. 사용자 코드에는 `const it = naturals(5)` — 변수 `it` 이 GC Root 다.
+
+이제 GC 가 Root 부터 도달 가능한 객체를 마킹한다.
+
+```text
+it (Root)
+  ↓
+반환 객체 { next: <fn> }
+  ↓ .next
+next 함수 객체
+  ↓ Environment 슬롯
+naturals 의 LE
+  ↓ Environment Record
+n: 1, end: 5
+```
+
+체인 끝의 LE 까지 도달 가능 → **회수 불가**. 따라서 `n`, `end` 도 살아남는다.
+
+### 변수의 수명 = 클로저 함수의 수명
+
+이 사슬이 끊어지면 어떻게 될까?
+
+```typescript
+{
+  const it = naturals(5);
+  it.next();
+}
+// 블록 종료 → it 사라짐 → 반환 객체 사라짐
+//           → next 사라짐 → LE 사라짐 → n, end 회수됨
+```
+
+이때서야 비로소 GC가 LE 까지 회수한다. **클로저로 잡혀 있던 변수의 수명은 클로저 함수의 수명과 일치한다** 는 게 핵심 규칙이다.
+
+### Q2 의 답
+
+GC는 마법이 아니다. **`it → 반환 객체 → next → Environment 슬롯 → LE → n, end`** 라는 도달 가능 경로가 살아있는 한, GC는 LE 를 회수하지 않는다.
+
+---
+
+## Q3. 외부에 `let n = 100`이 있어도 안전한가? — 스코프 체인 워킹
+
+### 그림
+
+```typescript
+let n = 100; // 전역
+
+function naturals(end = Infinity) {
+  let n = 1; // 로컬 (전역 n과 완전히 별개)
+  return {
+    next() {
+      return { value: n++, done: false };
+    },
+  };
+}
+
+const it = naturals(5);
+it.next();      // { value: 1, done: false }
+console.log(n); // 100 — 영향 없음
+```
+
+직관과 일치한다. 그런데 **왜 그렇게 동작하는지** 를 메커니즘으로 보면 클로저 이해가 단단해진다.
+
+```anim:closure-scope-chain
+{}
+```
+
+### 한 단계씩 따라가기
+
+`it.next()` 안에서 `n` 을 만나는 순간 엔진은 다음을 수행한다 (스펙 함수: [`ResolveBinding`](https://tc39.es/ecma262/#sec-resolvebinding)).
+
+1. **next 자신의 LE 의 Environment Record** 에서 `n` 찾기 → 없음.
+2. next 자신의 LE 의 **외부 Environment 참조** 로 이동 → 이게 `next` 의 Environment 슬롯이 가리키던 `naturals` 의 LE.
+3. 그 LE 의 Environment Record 에서 `n` 찾기 → **있음! 값 1.** 여기서 멈춤.
+4. 발견한 binding 으로 읽기/쓰기 수행.
+
+전역의 `n = 100` 은 4단계까지 가지도 못한다. **가장 가까운 binding 이 이긴다 (lexical shadowing).**
+
+### 정의 위치 기준이라는 게 강력한 보장이다
+
+> [!IMPORTANT]
+> `next` 의 Environment 슬롯은 **정의 위치** 에 박제된다. `next()` 를 다른 모듈로 옮겨 거기서 호출해도, 호출 위치의 변수들이 끼어들 수 없다. **외부 격리가 어휘적으로 보장된다.**
+
+### Q3 의 답
+
+안전하다. 변수 조회는 항상 **정의 시점에 박제된 Environment 슬롯부터 시작하여 외부 참조를 따라 바깥으로 진행** 한다. 전역의 `n=100` 은 가장 가까운 `n=1` 이 가려버리기 때문에 닿을 수 없다.
+
+만약 로컬 `let n = 1` 이 없었다면 한 단계 더 올라가서 Global Environment 의 `n=100` 을 썼을 것이다. 이 케이스가 가장 흔한 클로저 버그다.
+
+---
+
+## 한 그림으로 — 세 질문, 세 메커니즘
+
+| 질문 | 답 | 메커니즘 |
+|:---|:---|:---|
+| **Q1**. `n` 은 어디 사는가? | **힙** 에 있는 Function Environment Record 의 binding | LE = Environment Record + 외부 Environment 참조 |
+| **Q2**. 왜 GC 되지 않는가? | `it → 객체 → next → Environment 슬롯 → LE` 사슬이 살아있어서 | 함수 객체의 Environment 슬롯 |
+| **Q3**. 외부 `n=100` 이 있어도 왜 안전한가? | 정의 시점에 박제된 Environment 슬롯부터 외부 참조를 따라가니까 | ResolveBinding 의 스코프 체인 워킹 |
+
+JavaScript 의 클로저는 마법이 아니다. **함수 객체에 박힌 Environment 슬롯, 힙에 떠 있는 Lexical Environment, 외부 Environment 참조로 이어지는 체인** — 이 세 가지의 조합이다.
+
+이 그림을 한 번 머릿속에 새겨두면 `this`, 화살표 함수, 모듈, 이터레이터, async/await 의 동작이 모두 같은 언어로 설명된다.
+
+---
+
+## 더 들어가기 — 흔한 패턴과 함정
+
+### 각 호출은 독립된 클로저를 만든다
+
+```typescript
+const a = naturals(3);
+const b = naturals(3);
+
+a.next(); // { value: 1, done: false }
+a.next(); // { value: 2, done: false }
+b.next(); // { value: 1, done: false } — b의 n은 별개!
+```
+
+왜? `naturals(3)` 을 호출할 때마다 **새로운 Function Environment Record** 가 힙에 만들어진다. 같은 함수 코드가 실행되더라도, 호출 한 번당 LE 하나. 두 LE 는 메모리상 완전히 별개의 객체이며 서로 간섭하지 않는다.
+
+함수형 모듈 패턴의 기반이기도 하다. 같은 팩토리를 여러 번 호출하면 매번 독립된 "private state" 가 만들어진다.
+
+### `for` 루프와 `var` 의 악연
+
+```javascript
+const fns = [];
+for (var i = 0; i < 3; i++) {
+  fns.push(() => console.log(i));
+}
+fns[0](); // 3
+fns[1](); // 3
+fns[2](); // 3
+```
+
+`var i` 는 함수 스코프이므로 LE 가 **루프 전체에 단 하나** 만 존재한다. 세 콜백 모두 같은 LE 를 Environment 슬롯으로 가진다. 루프가 끝났을 때 그 LE 의 `i` 는 3.
+
+`let` 은 이를 해결한다.
+
+```javascript
+const fns = [];
+for (let i = 0; i < 3; i++) {
+  fns.push(() => console.log(i));
+}
+fns[0](); // 0
+fns[1](); // 1
+fns[2](); // 2
+```
+
+스펙 ([ECMA-262 §14.7.4.3](https://tc39.es/ecma262/#sec-for-statement-runtime-semantics-labelledevaluation)) 상 `for` 문은 `let` 변수의 경우 **매 iteration 마다 별도 Lexical Environment** 를 만들어 직전 값을 복사한 뒤 진입한다. 그래서 세 콜백이 가리키는 LE 가 셋 다 다르고, 각자 0, 1, 2 를 가진다.
+
+`let` 이 단순히 "블록 스코프" 라는 것 이상의 의미를 갖는 지점.
+
+### 클로저 메모리 누수
+
+DOM 이벤트 핸들러나 setTimeout 콜백에 클로저를 넣을 때 흔히 발생한다.
+
+```javascript
+function attachHandler() {
+  const hugeData = new Array(1_000_000).fill('x');
+
+  document.getElementById('btn').addEventListener('click', () => {
+    console.log('clicked'); // hugeData를 직접 쓰지 않음
+  });
+}
+```
+
+`hugeData` 를 콜백 본문에서 쓰지 않으므로 GC 된다고 생각하기 쉽다. 실제 엔진 동작은 다음과 같다.
+
+- V8 등 대부분의 모던 엔진: **escape analysis** 로 클로저가 실제로 참조하는 변수만 보관 → `hugeData` 는 회수됨.
+- 그러나 같은 LE 안에서 `eval()` 이나 `new Function()` 이 가능할 가능성이 있으면 엔진은 안전을 위해 **LE 전체를 통째로 보존** 한다.
+
+큰 객체는 명시적으로 끊자.
+
+```javascript
+function attachHandler() {
+  let hugeData = new Array(1_000_000).fill('x');
+  process(hugeData);
+  hugeData = null; // 명시적 해제
+
+  document.getElementById('btn').addEventListener('click', () => {
+    console.log('clicked');
+  });
+}
+```
+
+### 모듈 패턴 — JS 의 진짜 private
+
+ES Modules 이전에 "사적 변수" 를 만드는 정통 패턴이었고, 지금도 유효하다.
+
+```javascript
+const counter = (function () {
+  let count = 0; // ← 외부에서 절대 접근 불가
+  return {
+    inc: () => ++count,
+    get: () => count,
+    reset: () => (count = 0),
+  };
+})();
+
+counter.inc();  // 1
+counter.inc();  // 2
+counter.get();  // 2
+counter.count;  // undefined — 직접 접근 불가
+```
+
+`count` 는 IIFE 호출 시 만들어진 LE 의 Environment Record 에만 존재한다. 반환된 객체의 메서드들이 그 LE 를 Environment 슬롯으로 가지므로 동작은 하지만, 외부에는 노출되지 않는다. **타입스크립트의 `#private` 필드가 등장하기 전부터 JavaScript 는 이미 진짜 사적 상태를 가지고 있었다.**
+
+---
+
+## 정리
+
+기초 개념부터 쌓아 다시 보면, 세 질문은 결국 클로저의 세 면이었다.
+
+- **`n` 이 어디 사는가** 는 *Lexical Environment 의 구조* 문제다. 호출마다 새로 만들어지는 변수 저장소 + 외부 링크.
+- **왜 GC 되지 않는가** 는 *함수 객체의 Environment 슬롯* 과 *힙 참조 사슬* 의 문제다. 콜 스택 pop ≠ 객체 회수.
+- **외부 변수와 어떻게 격리되는가** 는 *ResolveBinding 의 스코프 체인 워킹* 이 *정의 위치* 에 박제된 외부 Environment 참조를 따라가는 메커니즘이다.
+
+세 메커니즘을 한 그림으로 머릿속에 두면, "this 가 왜 이렇게 동작하는지", "화살표 함수와 일반 함수의 차이", "async 함수 안에서 await 후에 변수가 어떻게 보존되는지" 같은 후속 질문에도 같은 언어로 답할 수 있게 된다.
+
+---
+
+> ℹ️ 이 글은 ECMAScript 명세(ECMA-262 §9.1, §10.2, §14.7) 및 MDN 자료를 참조하여 **AI(Claude)와 함께 작성** 되었습니다. 핵심 메커니즘 설명은 명세 기준이며, V8 의 escape analysis 동작은 엔진 구현 디테일이므로 버전에 따라 다를 수 있습니다.
+
+---
+
+## 참고 자료
+
+- ECMA-262 §9.1 [Environment Records](https://tc39.es/ecma262/#sec-environment-records)
+- ECMA-262 §10.2 [ECMAScript Function Objects](https://tc39.es/ecma262/#sec-ecmascript-function-objects)
+- ECMA-262 §9.4 [Execution Contexts](https://tc39.es/ecma262/#sec-execution-contexts)
+- ECMA-262 §14.7.4.3 [for statement — per-iteration bindings for `let`](https://tc39.es/ecma262/#sec-for-statement-runtime-semantics-labelledevaluation)
+- MDN — [Closures](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Closures)
+- MDN — [Scope](https://developer.mozilla.org/en-US/docs/Glossary/Scope)
+- V8 Blog — [JavaScript engine internals](https://v8.dev/blog)

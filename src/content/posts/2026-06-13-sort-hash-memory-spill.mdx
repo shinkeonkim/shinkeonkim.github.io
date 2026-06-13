@@ -1,6 +1,6 @@
 ---
 title: '정렬·해시는 메모리가 부족하면 어디로 새는가 — PGA, work_mem, Workspace Memory'
-description: '"SQL 레벨업"에서 한 문장으로 압축된 정렬·해시의 메모리 spill을, Oracle PGA / PostgreSQL work_mem / SQL Server Workspace Memory가 실제로 어떻게 처리하는지 단계별로 들여다본다.'
+description: '"SQL 레벨업"이 한 문장으로 압축한 정렬·해시의 메모리 spill을, 알고리즘부터 Oracle·PostgreSQL·SQL Server의 실제 동작까지 단계별로 풀어본다.'
 date: 2026-06-13
 tags: [oracle, postgresql, sqlserver, sort, hash, memory, internals]
 references:
@@ -15,125 +15,245 @@ references:
 >
 > 저자주: PostgreSQL에서는 work_mem, Microsoft SQL Server에서는 Workspace Memory라는 메모리 영역이 정렬 또는 해시에 사용됩니다. 모두 메모리 영역이 부족해지면 부족한 만큼 보충하고자 일시 영역(물리적으로는 저장소의 파일)을 사용합니다.
 
-세 개의 DBMS, 세 개의 다른 이름. 책은 "부족한 만큼 채운다"는 결과만 말하고 **그 사이에 무슨 일이 일어나는지**는 다루지 않는다.
+세 개의 DBMS, 세 개의 다른 이름. 책은 "부족한 만큼 채운다"는 결과만 말하고 그 사이의 메커니즘은 다루지 않는다.
 
-- 메모리가 정확히 얼마나 부족할 때, 무엇이 디스크로 흘러가는가?
-- 흘러간 데이터는 언제 다시 메모리로 돌아오는가?
-- 세 DBMS의 메커니즘은 정말 같은가, 아니면 표면적으로만 닮았는가?
+이 글에서는 다음을 차례로 풀어본다.
 
-이 글은 세 DBMS의 정렬·해시 spill을 실제 동작 단위로 들여다본다.
+1. 정렬·해시는 **왜** 그렇게 메모리에 욕심을 부리나? → 알고리즘
+2. 메모리가 부족할 때 정확히 **무엇이** 어떻게 디스크로 흘러가나? → 3-tier 모델
+3. Oracle·PostgreSQL·SQL Server는 이 문제를 **각각 어떻게** 다르게 다루나? → 구현 비교
 
----
-
-## 왜 정렬과 해시만 메모리에 욕심을 부리는가
-
-대부분의 SQL 연산은 **스트리밍**이다. `WHERE` 필터, 단순 Index Scan, Nested Loop Join은 한 번에 한 행씩 흘려보내며 처리한다. 한 행에 필요한 메모리만 있으면 된다.
-
-정렬과 해시는 다르다. 두 연산 모두 **입력 한 쪽 또는 양쪽 전체를 미리 모아야** 한다.
-
-- **정렬(Sort)**: `ORDER BY`, `DISTINCT`, sort-based `GROUP BY`, Merge Join의 정렬 단계, Window Function — 모든 행을 본 뒤에야 첫 출력 행의 순서가 결정된다.
-- **해시(Hash)**: Hash Join, Hash Aggregate, hashed subquery, hashed `IN` — 빌드 사이드 전체를 메모리 해시 테이블로 적재한 뒤 프로브한다.
-
-따라서 두 연산은 입력 크기에 비례하는 메모리를 요구한다. 메모리가 부족하면 "조금 느려진다"가 아니라 **알고리즘 자체가 다른 모드로 전환된다**.
-
-- Quicksort → **External Merge Sort** (디스크에 정렬된 run을 만든 뒤 머지)
-- In-memory Hash → **Grace Hash Join / Hybrid Hash Join** (빌드를 디스크 파티션으로 spill)
-
-이 전환의 시작점이 바로 **work area / work_mem / memory grant**의 한계다.
+한 층씩 내려가자.
 
 ---
 
-## 보편 모델: Optimal · One-pass · Multi-pass
+## 정렬·해시·Spill의 알고리즘적 본질
 
-Oracle은 이 단계 전환에 명확한 이름을 붙여놓았다. 다른 DBMS도 동일한 패턴이 존재하므로, Oracle의 용어를 보편 모델로 빌려 쓰겠다.
+대부분의 SQL 연산은 **스트리밍**으로 동작한다. `WHERE` 필터, 단순 Index Scan, Nested Loop Join은 한 번에 한 행씩 흘려보내며 처리한다. 입력이 1억 건이든 한 행씩만 메모리에 두면 끝난다.
+
+정렬과 해시는 다르다. **블로킹(blocking) 연산자**라고 부른다. 입력 한 쪽(또는 양쪽)을 **전부 모은 뒤에야** 첫 출력을 낼 수 있다.
+
+왜 그런지 직관적으로 보자.
+
+- `ORDER BY value` — 마지막 행이 들어오기 전까진 어떤 행이 첫 번째인지 알 수 없다.
+- `GROUP BY user_id` — 같은 `user_id`가 흩어져 있을 수 있어 다 모아야 그룹이 완성된다.
+- `Hash Join`의 빌드 쪽 — 작은 테이블 전체를 해시 테이블로 만들어둬야 큰 테이블 행이 들어올 때 즉시 매칭 검색이 된다.
+
+이 "전체를 모아야 한다"는 요구가 메모리 압박의 근원이다. 그리고 메모리가 부족할 때 두 알고리즘이 어떻게 변신하는지가 이 글의 핵심 주제다.
+
+### 정렬: Quicksort → External Merge Sort
+
+메모리에 다 들어가는 작은 데이터라면 RDBMS는 **Quicksort**(또는 `LIMIT N` 최적화 시 Heapsort)를 쓴다. O(n log n) 시간, 디스크 I/O 0.
+
+문제는 메모리에 안 들어가는 큰 데이터다. 이때 **External Merge Sort**가 등장한다. 직역하면 "외부(=디스크) 머지 정렬"이다.
+
+```anim:external-merge-sort
+{}
+```
+
+알고리즘은 두 단계다.
+
+**1단계 — Run 생성(Run Generation)**: 데이터를 메모리 크기만큼 청크로 잘라 각 청크를 메모리에서 Quicksort한 뒤 디스크에 "Run"이라는 이름의 정렬된 파일로 쓴다. 메모리는 비우고 다음 청크를 받는다.
+
+**2단계 — K-way Merge**: 모든 Run이 만들어지면, 각 Run의 첫 행만 메모리에 둔 채(이게 핵심이다) 가장 작은 값을 골라 출력한다. 출력한 Run의 다음 행을 가져와서 다시 비교. 입력 Run이 K개라면 K개의 작은 "head 버퍼"만 메모리에 두면 된다.
+
+이 두 단계가 외부 정렬의 정체다. 메모리는 청크 정렬용으로 한 번, 머지 head 버퍼용으로 또 한 번 재사용된다.
+
+### 해시: In-memory Hash → Grace Hash → Hybrid Hash
+
+Hash Join도 비슷하다. 메모리에 들어가는 작은 빌드 테이블이면 그냥 메모리 해시 테이블 하나 만들고 끝. 큰 빌드 테이블이면 어떻게 할까?
+
+답이 **Grace Hash Join**이다.
+
+```anim:grace-hash-join
+{}
+```
+
+핵심 아이디어: **두 테이블을 같은 해시 함수로 N개 파티션으로 나눠 디스크에 쓴다.** 같은 키는 같은 번호의 파티션에 들어간다. 그러면 R의 i번째 파티션은 S의 i번째 파티션과만 조인해야 한다. **R의 i번째 파티션이 메모리에 들어가는 크기가 되도록 N을 정한다.** 그 뒤 i=1,2,…,N에 대해 (Ri, Si) 쌍을 메모리에서 in-memory Hash Join한다.
+
+큰 빌드 전체를 메모리에 못 올려도, N등분된 조각은 메모리에 올라간다.
+
+**Hybrid Hash Join**은 한 가지 최적화다. 첫 번째 파티션(R1)을 디스크에 쓰지 않고 메모리에 그대로 보관한다. S 행이 들어올 때 첫 번째 파티션이면 메모리의 R1과 즉시 조인, 나머지 파티션이면 디스크로 spill. 빌드가 메모리에 살짝만 초과하는 경우 디스크 I/O를 절반 가까이 절약한다. PostgreSQL과 SQL Server가 모두 이 방식을 쓴다.
+
+### 두 알고리즘의 공통 메시지
+
+| 연산 | 충분할 때 | 약간 부족할 때 | 심하게 부족할 때 |
+|:---|:---|:---|:---|
+| **Sort** | Quicksort (I/O 0) | External Merge Sort, 1 머지 패스 | External Merge Sort, 다중 머지 패스 |
+| **Hash** | 단일 메모리 해시 | Hybrid Hash (일부만 spill) | Hash Recursion (파티션을 또 분할) |
+
+핵심: **메모리가 부족하면 단순히 느려지는 게 아니라 알고리즘이 통째로 바뀐다.** 이 표가 다음 절의 3-tier 비용 모델의 본질이다.
+
+---
+
+## 3-tier 모델: Optimal · One-pass · Multi-pass
+
+알고리즘 본 절 뒤끝에 본 세 단계 — "충분/약간 부족/심하게 부족" — 에 이름을 붙여보자. Oracle은 명세적으로 이 세 모드를 정의했고, 우리는 그 용어를 보편 모델로 빌려 쓸 수 있다.
 
 ```anim:sort-spill
 {}
 ```
 
-| 모드 | 조건 | 디스크 I/O | 응답 시간 |
-|:---|:---|:---:|:---:|
-| **Optimal** | 메모리 ≥ 입력 + auxiliary | 없음 | 빠름 |
-| **One-pass** | 메모리 < 데이터, 1회만 spill 후 머지 | 1회 왕복 | 약간 느려짐 |
-| **Multi-pass** | 메모리가 너무 작아 머지 단계도 분할 | N회 왕복 | 기하급수적 |
+### Optimal — "그냥 메모리에 들어간다"
 
-Oracle 공식 문서가 든 구체적 예시:
+가장 빠른 모드. 디스크 I/O가 **0**이다.
 
-> 10 GB를 정렬하려면 **Optimal로는 10 GB 이상**, **One-pass로는 약 40 MB**가 필요하다. 그 미만이면 Multi-pass로 떨어진다.
->
-> 1 GB를 One-pass로 정렬하는 데는 **22 MB로 충분**하다.
+- 정렬: Quicksort, O(n log n) CPU만 사용
+- 해시: 단일 해시 테이블, Probe는 평균 O(1)
+- 요건: Work Area ≥ 입력 데이터 + 보조 구조(해시 버킷 헤더, 정렬 비교 버퍼 등)
+
+OLTP의 거의 모든 쿼리가 여기 해당한다.
+
+### One-pass — "한 번만 디스크 왕복"
+
+이 모드의 비용을 정확히 따져보면 왜 "꽤 저렴하다"는 평이 가능한지 보인다.
+
+- 정렬: 청크를 메모리에서 정렬해 Run으로 디스크에 쓴다(데이터 1× write). 마지막에 모든 Run을 한 번의 머지 패스로 읽어 출력한다(데이터 1× read). **추가 I/O = 2 × 데이터 크기**.
+- 해시: Hybrid Hash로 빌드와 프로브를 한 번씩 디스크 왕복한다.
+
+이게 One-pass라는 이름의 의미다 — "한 번의 머지 패스로 끝남".
+
+### 그런데 왜 1 GB 정렬이 22 MB 메모리로 충분한가
+
+Oracle 공식 문서가 든 예시가 처음 보면 비현실적으로 들린다. **1 GB 정렬에 22 MB 메모리만 있어도 One-pass로 처리 가능하다**고 말한다. 1/45 크기로 어떻게? 외부 정렬의 머지 단계가 무엇을 필요로 하는지 한 번 더 들여다보면 답이 나온다.
+
+K-way Merge 단계의 메모리 요구를 식으로 적어보자.
+
+```text
+입력 데이터 크기 = D
+가용 메모리 = M
+1단계에서 만들어지는 Run 개수 = K = D / M (각 Run 크기는 M)
+
+2단계 머지 시 필요한 메모리:
+  각 Run 당 한 페이지 분량의 "head 버퍼" + 출력 버퍼 1개
+  머지 메모리 = (K + 1) × 페이지 크기
+              ≈ (D / M) × 8 KB
+```
+
+One-pass 가능 조건은 "이 머지 메모리가 가용 메모리 M에 들어맞아야 한다"이다.
+
+```text
+(D / M) × 8 KB  ≤  M
+→ M² ≥ D × 8 KB
+→ M  ≥ √(D × 8 KB)
+```
+
+D = 1 GB로 넣으면 M ≥ √(1 GB × 8 KB) = √(8 × 10¹²) ≈ **약 2.8 MB**. 수학적 하한은 3 MB도 안 된다.
+
+Oracle이 보수적으로 22 MB라고 말하는 건 보조 구조와 안전 마진을 합친 실용값일 뿐이다. 같은 식에 D = 10 GB를 넣으면 √(10 GB × 8 KB) ≈ 9 MB → Oracle은 40 MB를 권장한다.
 
 > [!TIP]
-> **One-pass 비용은 의외로 작다.** 1 GB 데이터에 1 GB 메모리를 주려는 것은 과욕이고, 22 MB만 있어도 충분히 안정적이다. 진짜 적은 Multi-pass다.
+> **K-way Merge의 메모리는 데이터 크기에 비례하지 않는다.** 데이터 크기 D, 페이지 크기 P일 때 √(D × P)에 비례한다. 그래서 한 자릿수 GB의 정렬도 수십 MB로 충분히 처리된다. 외부 머지 정렬의 가장 우아한 성질.
+
+### Multi-pass — "여러 번 디스크 왕복"
+
+메모리가 너무 작아 머지 단계조차 한 번에 못 끝낼 때다.
+
+- 정렬: Run의 일부만 머지해 더 큰 중간 Run을 만들고 다시 디스크에 → 그걸 또 머지 → … 패스 수 K번.
+  - 추가 I/O = **K × 2 × 데이터 크기**
+- 해시: Hash Recursion. 파티션 하나가 여전히 메모리에 안 들어가면 그 파티션을 더 잘게 나눠 다시 spill.
+
+10 GB를 5 MB 메모리로 정렬한다고 가정해보자. Run은 √(D × P) 식에서 벗어나 머지 패스가 둘 이상 필요해진다. 패스 수가 K일 때 비용은 K × 2 × 데이터 크기 — 즉 K가 2만 돼도 디스크 I/O가 4배다. K=3이면 6배. **응답 시간이 메모리 부족량에 대해 거의 지수적으로 증가**한다.
+
+### 그래서 왜 "Optimal > 90%, One-pass < 10%, Multi-pass = 0%"인가
+
+비용 비대칭을 보면 답이 나온다.
+
+| 모드 | 추가 디스크 I/O | 운영 정책 |
+|:---|:---|:---|
+| Optimal | 0 | **표준 케이스로 만들어야 함** |
+| One-pass | 2 × 데이터 | 가끔(대용량 보고서 등) 허용 가능 |
+| Multi-pass | K × 2 × 데이터 (K ≥ 2) | **거의 모든 경우 SLO 파괴 — 절대 피해야 함** |
+
+One-pass는 평소 0이던 디스크 I/O가 2배로 갑자기 늘어나니까 한 자릿수 초로 끝날 쿼리가 두 자릿수 초로 늘어난다. 가끔이라면 수용 가능하다. Multi-pass는 K가 늘어날 때마다 2배씩 곱해진다. 응답 시간 SLO를 즉시 깨뜨린다.
+
+운영의 안전 목표 "Optimal > 90%, One-pass < 10%, Multi-pass = 0%"는 이 비용 함수에서 자연스럽게 도출된 임계값이다. **가끔 비싼 건 받아들이고, 통제 불능으로 비싼 건 금지한다.**
 
 ---
 
-## 1. Oracle — PGA와 Work Area
+## 세 DBMS는 같은 문제를 다르게 푼다
 
-### PGA의 위치와 구성
+여기까지가 보편 이론이다. 이제 각 DBMS가 이 보편 모델을 어떻게 구체화했는지 본다. 세 가지 결정 축이 있다.
 
-PGA(Program Global Area)는 **서버 프로세스마다 독립적으로** 갖는 비공유 메모리다. 인스턴스 전체가 공유하는 SGA(System Global Area)와는 다른 영역.
+1. **메모리 할당 단위**: 연산자당? 노드당? 쿼리당?
+2. **예약 시점**: 실행 중 동적으로? 컴파일 시점에 정적으로?
+3. **모니터링 인터페이스**: 전용 뷰? 실행 계획 출력? 이벤트?
 
-복잡한 쿼리(특히 DSS)에서는 PGA 중 상당 부분이 **Work Area**에 할당된다. Work Area에는 다음이 포함된다:
+Oracle, PostgreSQL, SQL Server는 이 세 축에서 모두 다른 답을 선택했다. 그 차이가 실무에서 만나는 함정의 차이로 이어진다.
 
-- Sort-based 연산자(`ORDER BY`, `GROUP BY`, `ROLLUP`, 윈도우 함수) → **Sort Area**
-- Hash Join → **Hash Area**
-- Bitmap Merge / Bitmap Create
-- Bulk Load Write Buffer
+먼저 가장 성숙한 자동 관리를 가진 Oracle부터.
 
-### Optimal / One-pass / Multi-pass의 정의
+---
 
-Oracle 공식 문서가 그대로 정의한다:
+## Oracle — PGA와 자동 관리
 
-- **Optimal**: 작업 영역이 입력 데이터 + 보조 메모리 구조 전체를 수용.
-- **One-pass**: Optimal 미만이지만 **입력의 일부에 대해 한 번의 추가 패스**만 수행.
-- **Multi-pass**: One-pass 한계 미만. **여러 패스**가 필요하며 응답 시간이 극적으로 증가.
+### 왜 SGA가 아니라 PGA인가
 
-좋은 시스템의 목표: **Optimal > 90%, One-pass < 10%, Multi-pass = 0%**.
+Oracle의 메모리는 두 영역으로 깔끔하게 나뉜다.
 
-### Spill이 일어나는 물리적 위치
+- **SGA (System Global Area)**: 인스턴스 시작 시 잡히는 **공유 메모리**. Buffer Cache, Shared Pool, Redo Log Buffer 등.
+- **PGA (Program Global Area)**: 사용자가 접속할 때마다 spawn되는 **서버 프로세스마다 사적인 메모리**.
 
-Spill 데이터는 **TEMP 테이블스페이스의 sort segment**로 간다. Sort segment는 임시 표공간 내에 자동으로 만들어지고 세션 종료 시 회수된다.
-
-### Auto PGA Management
-
-Oracle 10g 이후 `PGA_AGGREGATE_TARGET` 파라미터 하나로 자동 관리된다. 옵티마이저가:
-
-1. 활성 Work Area의 메모리 수요를 추적
-2. `global memory bound`(개별 Work Area 최대치)를 동적으로 조정
-3. 가능한 한 많은 작업을 Optimal로 실행
-
-레거시 `SORT_AREA_SIZE`, `HASH_AREA_SIZE`는 `PGA_AGGREGATE_TARGET = 0`으로 두지 않는 한 무시된다.
-
-### 모니터링: V$ 뷰들
-
-**V$PGASTAT — 인스턴스 전체**
-
-```sql
-SELECT * FROM V$PGASTAT;
+```anim:pga-architecture
+{}
 ```
 
-핵심 지표:
+정렬·해시 같은 메모리 집약 연산이 SGA를 쓰지 않는 이유는 단순하다. SGA는 모든 세션이 공유하는 자원이라 한 세션이 거대한 정렬을 돌리면 나머지 모든 세션에 영향이 간다. PGA는 사적이라 한 세션이 욕심을 부려도 격리된다. 가격 — 더 정확히는 메모리 할당량 관리 — 을 분리하기에 자연스럽다.
+
+### Work Area의 4개 영역
+
+PGA 안의 Work Area는 메모리 집약 연산자별로 다음 하위 영역을 가진다.
+
+| 영역 | 사용 연산자 |
+|:---|:---|
+| **Sort Area** | `ORDER BY`, `DISTINCT`, sort-based `GROUP BY`, `ROLLUP`, 윈도우 함수 |
+| **Hash Area** | Hash Join |
+| **Bitmap Merge Area** | 여러 비트맵 인덱스 결합 (`BitmapAnd`, `BitmapOr`) |
+| **Bulk Load Buffer** | `INSERT /*+ APPEND */` 같은 Direct Path Load |
+
+각 영역이 **독립적으로** Optimal/One-pass/Multi-pass 상태를 가진다는 점이 중요하다. 같은 쿼리 안에서 Hash Join은 One-pass인데 Sort는 Optimal일 수 있다.
+
+### Auto PGA Management — 옛 SORT_AREA_SIZE의 졸업
+
+Oracle 10g 이전엔 `SORT_AREA_SIZE`, `HASH_AREA_SIZE`를 DBA가 직접 잡았다. 너무 크게 잡으면 동시 세션이 많을 때 OS 메모리 고갈, 너무 작게 잡으면 모든 쿼리가 Multi-pass.
+
+10g 이후 `PGA_AGGREGATE_TARGET` 파라미터 하나로 자동 관리된다. 옵티마이저가:
+
+1. 활성 Work Area의 메모리 수요를 추적
+2. 개별 Work Area 최대치(`global memory bound`)를 실행 중 동적으로 조정
+3. 가능한 한 많은 작업을 Optimal로 실행
+
+DBA의 일은 이제 "PGA에 얼마를 줄 것인지" 하나로 축소됐다. 이게 Oracle이 가장 성숙한 자동 관리라고 평가받는 이유다.
+
+### Spill의 물리적 위치
+
+Optimal을 못 맞춰 spill이 발생하면 데이터는 **TEMP 테이블스페이스의 sort segment**로 간다. Sort segment는 임시 표공간 안에 자동으로 만들어지고 세션이 끝나면 자동으로 회수된다. DBA가 별도로 정리할 필요가 없다.
+
+### 그래서 실제로 확인하려면 — V$ 뷰
+
+자동 관리는 좋지만 "지금 잘 동작하는지"는 별도로 확인해야 한다. Oracle은 풍부한 동적 성능 뷰를 제공한다.
+
+**V$PGASTAT** — 인스턴스 전체의 PGA 상황:
 
 | 지표 | 의미 |
 |:---|:---|
 | `aggregate PGA target parameter` | `PGA_AGGREGATE_TARGET` 현재 값 |
 | `global memory bound` | 개별 Work Area 최대 크기 — **< 1 MB이면 적신호** |
-| `over allocation count` | PGA가 target을 초과 할당한 횟수 |
+| `over allocation count` | PGA가 target을 초과 할당한 횟수 (target 부족 신호) |
 | `cache hit percentage` | Optimal 비율의 종합 지표 |
 
-`cache hit percentage`의 계산식이 흥미롭다:
+`cache hit percentage`의 계산식이 흥미롭다.
 
-```
+```text
 BP  = 처리한 전체 바이트
 EBP = 추가 패스에서 다시 읽고 쓴 바이트 (One-pass + Multi-pass의 extra I/O)
 
 cache hit % = BP × 100 / (BP + EBP)
 ```
 
-100%면 모든 Work Area가 Optimal. Multi-pass가 많아지면 EBP가 BP를 압도하면서 비율이 급락한다.
+100%면 모든 Work Area가 Optimal. Multi-pass가 많아지면 EBP가 BP를 압도하면서 비율이 급락한다. **앞 절의 비용 모델이 그대로 메트릭에 박혀있다.**
 
-**V$WORKAREA_ACTIVE — 지금 실행 중인 Work Area**
+**V$WORKAREA_ACTIVE** — 지금 실행 중인 Work Area들:
 
 <CodeWithOutput
   language="sql"
@@ -157,86 +277,94 @@ ORDER BY sid;`}
   8  HASH-JOIN           2995    2377      2430   1     20000  ← One-pass
   9  GROUP BY (SORT)    34300   22688     22688   0
  11  HASH-JOIN          18044   54482     54482   0
- 12  HASH-JOIN          18044   11406     21406   1    120000  ← One-pass, 120MB`}
+ 12  HASH-JOIN          18044   11406     21406   1    120000  ← One-pass, 120MB temp seg`}
 />
 
-`PASS` 컬럼이 핵심이다: `0`은 Optimal, `1`은 One-pass, `≥ 2`는 Multi-pass. `TSIZE`는 temp segment 사용량.
+`PASS` 컬럼이 3-tier 모델 그 자체다: `0`이면 Optimal, `1`이면 One-pass, `≥ 2`면 Multi-pass. `TSIZE`는 temp segment 사용량.
 
-**V$SQL_WORKAREA_HISTOGRAM — 누적 분포**
-
-`LOW_OPTIMAL_SIZE`/`HIGH_OPTIMAL_SIZE`로 메모리 구간을 나누어 `optimal_executions`, `onepass_executions`, `multipasses_executions` 누적치를 보여준다. **Multi-pass 카운트가 0이 아닌 구간이 있으면 즉시 조사 대상**.
+운영 룰: **PASS ≥ 2가 하나라도 보이면 PGA_AGGREGATE_TARGET을 다시 보자.**
 
 ---
 
-## 2. PostgreSQL — work_mem과 그 함정
+## PostgreSQL — work_mem과 단위의 함정
 
-### work_mem은 "쿼리당"이 아니다
+Oracle은 자동 관리가 매력이었다. PostgreSQL은 정반대 철학이다 — **단순하고 예측 가능하지만, 단위가 작아서 위험하다.**
 
-PostgreSQL 공식 문서가 강조하는 한 줄:
+### "쿼리당"이 아니라 "노드당"이다
+
+PostgreSQL 공식 문서의 한 문장:
 
 > Sets the base maximum amount of memory to be used by **a query operation** (such as a sort or hash table) **before writing to temporary disk files**.
 
-"per query operation" — 즉 쿼리 하나가 아니라 **연산 노드 하나**가 사용할 수 있는 양이다. 한 쿼리에 `Sort` 3개 + `HashJoin` 2개가 들어가면 이론상 **5 × work_mem**까지 쓸 수 있다. 거기에 parallel worker마다 다시 곱해진다.
+"per query operation" — 쿼리 하나가 아니라 **실행 계획의 연산 노드 하나**가 사용할 수 있는 양이다.
 
-기본값은 4 MB. 별것 아닌 듯해도, `max_connections = 100`인 서버에서 모두 동시에 5개 연산이 돌면 총 2 GB까지 갈 수 있다.
+예를 들어 다음 쿼리:
 
-### hash_mem_multiplier (PG 13+)
+```sql
+SELECT u.name, COUNT(*) FROM users u
+JOIN orders o ON u.id = o.user_id
+JOIN payments p ON o.id = p.order_id
+WHERE u.region = 'KR'
+GROUP BY u.name
+ORDER BY 2 DESC;
+```
 
-해시는 보통 정렬보다 메모리에 더 민감하다. 한 번 한도를 넘으면 partitioning + 다중 패스로 비용이 급증하기 때문이다. PostgreSQL 13부터 별도 곱셈을 도입했다:
+실행 계획에는 보통 `Sort` 1개 + `HashAggregate` 1개 + `Hash Join` 2개 = 노드 4개가 등장한다. **각각이 따로 work_mem을 받아 쓸 수 있다.** 즉 한 쿼리가 최대 4 × work_mem까지 메모리를 차지한다. 거기에 parallel worker마다 같은 양이 곱해진다.
 
-> The memory limit for a hash table is computed by multiplying `work_mem` by `hash_mem_multiplier`.
+기본값 work_mem = 4 MB. 별것 아닌 듯하지만 동시 세션 100개 × 노드 4개 = 1.6 GB. parallel worker 4개라면 **6.4 GB**가 정렬·해시에만 잡힌다.
 
-기본 `hash_mem_multiplier = 2.0` → 해시는 work_mem의 2배까지 사용 가능. 공식 문서는 spill이 빈번한 환경에서 2.0 ~ 8.0 범위로 올리는 것을 권장한다.
+> [!CAUTION]
+> 흔한 실수: "쿼리가 느리니 work_mem을 256 MB로 올리자." 동시 세션 100 × 노드 4 × parallel 4 = **400 GB**. OOM 직행.
 
-### 어떤 연산이 work_mem을 쓰나
+Oracle이 PGA 총량 하나만 잡으면 옵티마이저가 알아서 분배하는 방식이라면, PostgreSQL은 노드 하나 노드 하나에 정적인 상한을 거는 방식이다. 그래서 work_mem 값 자체보다 **"동시에 얼마나 많은 노드가 활성화되는가"**가 실제 메모리 압력을 결정한다.
 
-| 연산 | 메모리 한도 |
-|:---|:---|
-| `Sort` (ORDER BY, DISTINCT, Merge Join 정렬, Window) | `work_mem` |
-| `Hash Join`의 빌드 | `work_mem × hash_mem_multiplier` |
-| `Hash Aggregate` | `work_mem × hash_mem_multiplier` |
-| `Memoize` (PG 14+) | `work_mem × hash_mem_multiplier` |
-| Bitmap Heap Scan의 TID Bitmap | `work_mem` |
-| Hashed `IN` subquery | `work_mem × hash_mem_multiplier` |
-| `CREATE INDEX`, `VACUUM` | **`maintenance_work_mem`** (별도, 기본 64 MB) |
+### hash_mem_multiplier — 해시만 따로 챙기기
 
-### EXPLAIN ANALYZE에서 spill 읽기
-
-**Sort 노드:**
+해시는 보통 정렬보다 메모리에 더 민감하다. 한 번 한도를 넘으면 Hash Recursion으로 비용이 급증하기 때문이다. PostgreSQL 13부터 별도 곱셈을 도입했다.
 
 ```text
-Sort  (cost=713.05..713.30 rows=100 width=488) (actual ...)
+Sort 한도   = work_mem
+Hash 한도   = work_mem × hash_mem_multiplier  (default 2.0)
+```
+
+해시 한도가 정렬 한도의 2배. 공식 문서는 spill이 빈번하면 multiplier를 2.0 ~ 8.0 범위로 올리라고 권장한다.
+
+### EXPLAIN ANALYZE에서 spill 신호 읽기
+
+Oracle은 별도 뷰가 있었지만, **PostgreSQL은 모든 정보를 `EXPLAIN ANALYZE` 출력에 박아둔다.** 다른 곳을 볼 필요가 없는 대신, 출력을 정확히 읽을 줄 알아야 한다.
+
+Sort 노드:
+
+```text
+Sort  (cost=713.05..713.30 rows=100 width=488)
   Sort Key: t1.fivethous
   Sort Method: quicksort  Memory: 74kB
 ```
 
-`Sort Method`가 핵심:
+`Sort Method`가 3-tier의 어느 모드인지 알려준다.
 
-- `quicksort Memory: NN kB` — 메모리 내 처리 (Optimal)
-- `top-N heapsort Memory: NN kB` — `LIMIT N` 최적화 (메모리 내)
-- `external merge Disk: NN kB` — **Spill 발생!** 디스크에 NN kB 사용
+- `quicksort Memory: NN kB` → **Optimal** (메모리 내 정렬)
+- `top-N heapsort Memory: NN kB` → `LIMIT N` 최적화, 여전히 Optimal
+- `external merge Disk: NN kB` → **Spill 발생!** 디스크에 NN kB 사용 (One-pass 또는 Multi-pass)
 
-**Hash 노드:**
+Hash 노드:
 
 ```text
 Hash  (cost=224.98..224.98 rows=100 width=244)
   Buckets: 1024  Batches: 1  Memory Usage: 35kB
 ```
 
-`Batches`가 핵심:
+`Batches`가 Grace/Hybrid Hash Join의 파티션 개수다.
 
-- `Batches: 1` — 빌드 전체가 메모리에 적재됨 (Optimal)
-- `Batches: 2` 이상 — **빌드를 디스크 파티션으로 spill**
+- `Batches: 1` → 빌드 전체가 메모리 (Optimal)
+- `Batches: 2` 이상 → Hybrid Hash로 spill (One-pass에 해당)
+- 실행 중 `Batches`가 power-of-2로 점점 커지는 EXPLAIN → 빌드 추정이 틀려 runtime에 추가 분할 (Multi-pass의 일종)
 
-PG 공식 문서가 짚는 디테일:
+> [!IMPORTANT]
+> PG 공식 문서가 짚는 디테일: *"If the number of batches exceeds one, there will also be disk space usage involved, but that is not shown."*
+> 즉 디스크 사용량은 EXPLAIN 기본 출력에 안 찍힌다. `EXPLAIN (ANALYZE, BUFFERS)`를 쓰면 `temp read=NN written=MM` 카운터로 간접 확인 가능하다.
 
-> If the number of batches exceeds one, there will also be disk space usage involved, **but that is not shown**.
-
-디스크 사용량을 EXPLAIN이 직접 보여주지 않는다는 점에 주의.
-
-### 임시 파일 위치와 로깅
-
-물리적 spill 파일은 `$PGDATA/base/pgsql_tmp/`에 만들어진다. 추적:
+### 시스템 차원의 spill 추적
 
 ```sql
 -- 모든 임시 파일 생성을 로그에 기록
@@ -248,76 +376,67 @@ FROM pg_stat_database
 WHERE temp_files > 0;
 ```
 
-### temp_file_limit과 PG 13의 변화
+물리적 spill 파일은 `$PGDATA/base/pgsql_tmp/`에 만들어진다. `temp_file_limit`(기본 `-1` = 무제한)으로 프로세스당 한도를 줄 수 있다.
 
-- `temp_file_limit`: 한 프로세스가 사용할 수 있는 총 임시 파일 크기. 기본 `-1`(무제한).
-- **PostgreSQL 13의 핵심 변화**: 이전까지 `Hash Aggregate`는 work_mem을 초과해도 메모리에서 끝까지 처리하려 했고, 종종 OOM을 유발했다. 13부터 **disk-based hash aggregation**이 도입되어 정상적으로 spill한다.
+### PG 13의 결정적 변화
 
-> [!CAUTION]
-> "쿼리가 느리니 work_mem을 256 MB로 올리자" — 동시 세션 100개 × 연산 5개 = 128 GB. OOM 직행.
->
-> "정렬이 메모리에 들어가야 하는데 왜 spill하지?" — Parallel worker 4개가 각자 work_mem을 쓰면서 한도 4배 초과.
+PostgreSQL 13 이전까지 `HashAggregate`는 work_mem을 초과해도 메모리에서 끝까지 처리하려 했고, 종종 OOM을 유발했다. 13부터 **disk-based hash aggregation**이 도입되어 정상적으로 spill한다. 13으로 올린 직후 "메모리 사용량이 줄어든 것 같은데 EXPLAIN에 temp가 보인다"고 놀라는 경우가 많은데, 이게 정상 동작이다.
 
 ---
 
-## 3. SQL Server — Memory Grant와 Workspace Memory
+## SQL Server — 정적 예약과 적응형 학습
 
-### 컴파일 타임 예약이라는 본질적 차이
+Oracle도 PostgreSQL도 **실행 중**에 메모리를 동적으로 할당한다. SQL Server는 이 부분에서 근본적으로 다른 길을 택했다 — **쿼리 시작 전에 필요량을 다 예약한다.**
 
-Oracle/PostgreSQL은 **실행 중**에 work area가 자라거나 줄어든다. SQL Server는 다르다.
+### 컴파일 타임에 모든 메모리를 예약한다
 
-**컴파일 타임**에 옵티마이저가 다음을 추정한다:
+쿼리가 컴파일될 때 옵티마이저가 다음을 추정한다.
 
 - 정렬에 NN MB 필요
 - 해시 빌드에 MM MB 필요
 - → **Memory Grant**(요청 메모리)로 합산
 
-쿼리 실행이 시작되려면 먼저 **Resource Semaphore**에서 grant를 받아야 한다. 못 받으면 `RESOURCE_SEMAPHORE` 대기 상태로 대기열에 줄을 선다.
+쿼리 실행이 시작되려면 먼저 **Resource Semaphore**라는 게이트에서 grant를 받아야 한다. grant가 부족하면 `RESOURCE_SEMAPHORE` 대기 상태로 대기열에 줄을 선다.
 
-### Workspace Memory의 위치
-
-Workspace memory는 buffer pool 내 한 영역이다. `max server memory`로 제어되는 동일한 풀에서 grant가 떼어진다.
+이 메모리는 **buffer pool 내 한 영역 — Workspace Memory**에서 떼어진다. `max server memory`로 제어되는 동일한 풀이다.
 
 ### Row mode vs Batch mode — Spill의 결정적 분기
 
+이 정적 예약이 만든 한 가지 잔혹한 규칙이 있다.
+
 **Row mode (전통적 실행)**
 
-Microsoft 공식 문서가 그대로 못박는다:
+Microsoft 공식 문서:
 
 > For row mode execution, the initial memory grant **can't be exceeded under any condition**. If more memory than the initial grant is needed to execute hash or sort operations, then the operations **spill to disk**.
 
-핵심: **initial grant는 절대 초과할 수 없다.** 컴파일 타임 추정이 틀려서 실행 중 메모리가 부족해지면 **즉시 tempdb로 spill**한다. Oracle/PG처럼 "조금만 더 달라"는 요청이 불가능하다.
-
-이것이 SQL Server에서 통계가 낡았을 때 spill이 폭주하는 이유다.
+**initial grant는 절대 초과할 수 없다.** 컴파일 타임 추정이 틀려서 실행 중 메모리가 모자라도 **즉시 tempdb로 spill**한다. Oracle/PG처럼 "조금만 더"가 불가능하다. SQL Server에서 통계가 낡았을 때 spill이 폭주하는 이유다.
 
 **Batch mode (컬럼스토어 + 2019부터 rowstore도 가능)**
 
 > For batch mode execution, the initial memory grant **can dynamically increase** up to a certain internal threshold by default.
 
-Batch mode에서는 grant가 실행 중 동적으로 확장될 수 있다(내부 임계까지).
+Batch mode에서는 grant가 실행 중 동적으로 확장될 수 있다. Row/Batch mode의 차이가 SQL Server를 다른 두 DBMS와 결정적으로 갈라놓는다.
 
 ### Spill의 두 종류
 
-**Sort Spill — Worktable in tempdb**
+Microsoft는 정렬과 해시의 spill 저장 형태를 따로 부른다.
 
-> A sort operation that spills is supported by a **Worktable** in tempdb.
+- **Sort Spill — Worktable in tempdb** (`Sort Warning` 이벤트)
+- **Hash Spill — Workfile in tempdb** (`Hash Warning` 이벤트)
 
-`Sort Warning` 이벤트로 노출된다. 인덱스 생성 시 정렬은 제외, 쿼리 내 `ORDER BY` 등에 한정.
+Hash spill에는 두 하위 케이스가 있다.
 
-**Hash Spill — Workfile in tempdb**
-
-> A hash operation that spills is supported by a **Workfile** in tempdb.
-
-`Hash Warning` 이벤트로 노출되며 두 하위 케이스가 있다:
-
-- **Hash Recursion**: 빌드가 메모리에 안 들어가서 파티션으로 쪼개고, 그 파티션이 또 안 들어가면 더 잘게 쪼개고… (Multi-pass와 본질적으로 같은 개념)
+- **Hash Recursion**: 빌드가 메모리에 안 들어가서 파티션으로 쪼개고, 그 파티션이 또 안 들어가면 더 잘게 쪼개고… (앞 절의 Hash Recursion과 동일)
 - **Hash Bailout**: 최대 재귀 깊이에 도달했을 때 다른 plan으로 폴백. 이때부터는 거의 sequential 스캔에 가까운 비용으로 떨어진다.
 
-### Memory Grant Feedback (SQL Server 2017+)
+### Memory Grant Feedback — SQL Server만의 적응형 학습 (2017+)
 
-같은 쿼리가 반복 실행될 때 실제 사용량을 plan cache에 기록해서 다음 컴파일 시 grant를 조정해주는 적응형 기능. Row mode(2019+)에도 도입되어, "통계가 틀려서 spill하던 쿼리가 두세 번 실행 후 spill이 사라지는" 자동 학습이 가능해졌다.
+SQL Server는 정적 예약의 약점을 자체 학습 메커니즘으로 보완했다. 같은 쿼리가 반복 실행될 때 실제 사용량을 plan cache에 기록해서 다음 컴파일 시 grant를 조정한다.
 
-### 모니터링: DMV들
+Row mode(2019+)에도 도입되어, "통계가 틀려서 spill하던 쿼리가 두세 번 실행 후 spill이 사라지는" 자동 학습이 가능해졌다. **정적 예약 + 사후 피드백**이라는 하이브리드 전략이다.
+
+### DMV로 grant 추적
 
 ```sql
 -- 진행 중인 grant들
@@ -329,110 +448,64 @@ SELECT session_id,
        wait_time_ms
 FROM sys.dm_exec_query_memory_grants
 ORDER BY requested_memory_kb DESC;
-
--- 세마포어 상태
-SELECT * FROM sys.dm_exec_query_resource_semaphores;
 ```
 
 해석:
 
-- `requested >> used` → grant 과대 추정 (통계 부정확 또는 grant feedback 학습 중)
+- `requested >> used` → grant 과대 추정 (통계 부정확 또는 grant feedback이 학습 중)
 - `granted < requested`로 대기 누적 → 동시성에 비해 grant가 너무 후함
 - `RESOURCE_SEMAPHORE` 대기 비율 상승 → 큰 쿼리들이 grant 가뭄으로 줄 서는 중
+
+Extended Events에서 `sort_warning`, `hash_warning`을 활성화하면 spill이 발생할 때마다 이벤트가 떨어진다.
 
 ---
 
 ## 같은 그림, 다른 이름 — 한 장 비교표
 
+세 DBMS가 같은 3-tier 비용 모델을 어떻게 다르게 구체화했는지 한 표로:
+
 | 측면 | Oracle | PostgreSQL | SQL Server |
 |:---|:---|:---|:---|
 | **메모리 영역 이름** | PGA Work Area | work_mem | Workspace Memory (Memory Grant) |
-| **할당 단위** | per Work Area (연산자) | **per operation** (per node) | **per query** |
-| **컴파일 시 예약** | 동적 (실행 중 조정) | 동적 (실행 중 조정) | **정적 (Row mode)** / 동적 (Batch mode) |
+| **할당 단위** | 연산자당 (Work Area) | **노드당** (per plan node) | **쿼리당** (사전 합산) |
+| **예약 시점** | 동적 (실행 중 조정) | 동적 (실행 중 조정) | **정적 (Row mode)** / 동적 (Batch mode) |
 | **임시 영역 위치** | TEMP의 sort segment | `base/pgsql_tmp/` | tempdb의 **Worktable**(Sort)·**Workfile**(Hash) |
-| **단계 명명** | Optimal / One-pass / Multi-pass | quicksort / external merge / Batches=N | (no name) / Spill / Hash Recursion / Hash Bailout |
+| **3-tier 신호** | `V$WORKAREA_ACTIVE.PASS` (0/1/≥2) | `Sort Method: external merge`, `Batches: N` | Spill 경고, XEvent (`sort_warning`, `hash_warning`) |
 | **적응형 학습** | Auto PGA Management | — | Memory Grant Feedback (2017+) |
-| **EXPLAIN/계획 표시** | `V$WORKAREA_ACTIVE.PASS`, `TSIZE` | `Sort Method: external merge`, `Batches: N` | Spill 경고, XEvent (`sort_warning`, `hash_warning`) |
 | **주요 튜닝 파라미터** | `PGA_AGGREGATE_TARGET`, `PGA_AGGREGATE_LIMIT` | `work_mem`, `hash_mem_multiplier`, `maintenance_work_mem` | `min memory per query`, `max server memory` |
 
-핵심 인사이트:
+세 가지 인사이트:
 
-- **PostgreSQL**은 단위가 작아 (per operation × per worker) 곱이 무서움.
-- **SQL Server**는 컴파일 타임 예약이라 추정 오류가 spill로 직결됨.
+- **PostgreSQL**은 단위가 작아 (per node × per worker) 곱이 무서움. work_mem을 함부로 못 올리는 이유.
+- **SQL Server**는 컴파일 타임 예약이라 통계 부정확이 spill로 직결됨. Grant Feedback이 이 약점을 보완.
 - **Oracle**은 자동 관리가 가장 성숙하지만 `PGA_AGGREGATE_TARGET`이 너무 작으면 multi-pass 전체로 무너짐.
-
----
-
-## 모니터링 일상 루틴
-
-### Oracle
-
-```sql
--- cache hit %가 떨어졌는가?
-SELECT name, value
-FROM V$PGASTAT
-WHERE name IN ('cache hit percentage',
-               'over allocation count',
-               'global memory bound');
-
--- Multi-pass 발생 SQL?
-SELECT sql_id, child_number, operation_type, number_passes
-FROM V$SQL_WORKAREA
-WHERE multipasses_executions > 0;
-```
-
-### PostgreSQL
-
-```sql
--- 임시 파일 누적량
-SELECT datname, temp_files, pg_size_pretty(temp_bytes) AS temp
-FROM pg_stat_database
-WHERE temp_files > 0;
-```
-
-다음 세션에서 디테일 보려면:
-
-```sql
-SET log_temp_files = 0;
-EXPLAIN (ANALYZE, BUFFERS) <쿼리>;
-```
-
-`Sort Method: external merge` 또는 `Batches: ≥ 2`가 보이는 노드를 찾아 `work_mem`(또는 `hash_mem_multiplier`) 인상을 검토.
-
-### SQL Server
-
-```sql
--- 활성 grant
-SELECT session_id,
-       requested_memory_kb,
-       granted_memory_kb,
-       used_memory_kb,
-       ideal_memory_kb,
-       requested_memory_kb - granted_memory_kb AS shortfall
-FROM sys.dm_exec_query_memory_grants
-ORDER BY requested_memory_kb DESC;
-```
-
-추가로 Extended Events에서 `sort_warning`, `hash_warning`을 활성화하면 spill이 발생할 때마다 이벤트가 떨어진다.
 
 ---
 
 ## 정리
 
-책의 한 문장 "메모리가 부족하면 일시 영역을 쓴다"의 안쪽에는 세 단계의 점진적 붕괴가 숨어 있다.
+책의 한 문장 "메모리가 부족하면 일시 영역을 쓴다"의 안쪽에는 알고리즘 차원, 모드 차원, 구현 차원의 세 층이 숨어 있었다.
 
-- **Optimal**: 메모리 내 정렬·해시. 디스크 I/O 0.
-- **One-pass**: 첫 정렬 run만 디스크에 spill, 마지막에 한 번 머지. 비용 작음.
-- **Multi-pass / Hash Bailout**: 머지 자체가 분할되거나 알고리즘이 폴백. 비용 폭증.
+**알고리즘 차원**: 정렬·해시는 본래 메모리 내 알고리즘(Quicksort, In-memory Hash)으로 설계되었지만, 메모리가 부족해지면 External Merge Sort · Hybrid Hash Join 같은 다른 알고리즘으로 통째로 전환된다. 단순히 "조금 느려진다"가 아니라 **다른 알고리즘이 돌아간다**.
 
-세 DBMS는 모두 이 메커니즘을 가지고 있지만, **단위**(query vs operation), **예약 시점**(컴파일 vs 실행), **적응성** 차원에서 결정적으로 다르다.
+**모드 차원**: 그 전환의 비용은 메모리가 얼마나 부족하냐에 따라 단계가 있다. **Optimal → One-pass → Multi-pass**. K-way Merge의 메모리 요구는 √(D × P)에 비례하므로, 1 GB 정렬에 22 MB 정도면 One-pass로 충분히 처리된다. 하지만 Multi-pass에 빠지면 비용이 K배수로 곱해진다.
+
+**구현 차원**: 세 DBMS가 같은 문제를 다른 방식으로 해결한다.
+
+- Oracle: **자동 관리**, V$ 뷰로 명시적 추적, PGA per-process 격리.
+- PostgreSQL: **노드당 메모리**, EXPLAIN ANALYZE에 모든 정보, parallel 곱셈의 함정.
+- SQL Server: **정적 예약 + 적응형 피드백**, Row/Batch mode 분기, tempdb spill.
 
 > [!IMPORTANT]
 > 가장 위험한 실수는 셋 다 공통이다 — **"안 보이니 없는 줄 안다."**
 >
-> EXPLAIN/EXPLAIN ANALYZE에 `external merge Disk`, `Batches: N (N>1)`, `PASS >= 1`, `Sort Warning` 같은 신호가 보이면 메모리 부족이 발생한 것이고, 이건 단순한 느려짐이 아니라 **알고리즘 모드 전환**이라는 점을 기억하자.
+> EXPLAIN / 동적 뷰 / XEvent에 `external merge Disk`, `Batches: N (N>1)`, `PASS >= 1`, `Sort Warning` 같은 신호가 보이면 메모리 부족이 발생한 것이고, 이건 단순한 느려짐이 아니라 **알고리즘 모드 전환**이라는 점을 기억하자.
 
-책이 짧게 던진 한 문단을 따라 들어가 보니, 결국 세 DBMS 모두 동일한 물리적 한계를 마주하고 있었다. 그러나 그 한계를 누구는 동적 자동 관리로, 누구는 작은 단위 곱셈으로, 누구는 정적 예약 + 피드백 학습으로 다르게 해석했다. 익숙한 DB일수록 EXPLAIN 한 줄을 더 자세히 읽을 가치가 있다.
+익숙한 DB일수록 EXPLAIN 한 줄을 더 자세히 읽을 가치가 있다.
+
+---
+
+> ℹ️ 이 글은 "SQL 레벨업"의 한 문단을 출발점으로 삼아, 공식 문서(Oracle Database Performance Tuning Guide, PostgreSQL Docs, Microsoft Learn)를 참조하여 **AI(Claude)와 함께 작성**되었습니다. 알고리즘 설명과 비교표의 사실 관계는 아래 참고 자료 기준으로 검증했으나, 운영 환경에서 적용할 때는 각 DBMS의 해당 버전 문서를 다시 확인하길 권합니다.
 
 ---
 
@@ -442,4 +515,5 @@ ORDER BY requested_memory_kb DESC;
 - [PostgreSQL Docs — 19.4. Resource Consumption (work_mem, hash_mem_multiplier)](https://www.postgresql.org/docs/current/runtime-config-resource.html)
 - [PostgreSQL Docs — 14.1. Using EXPLAIN (Sort Method, Buckets/Batches)](https://www.postgresql.org/docs/current/using-explain.html)
 - [Microsoft Learn — Memory Management Architecture Guide (SQL Server)](https://learn.microsoft.com/en-us/sql/relational-databases/memory-management-architecture-guide)
-- [Microsoft Learn — Memory Grants and Workspace Memory](https://learn.microsoft.com/en-us/sql/relational-databases/memory-management-architecture-guide#memory-grant-considerations)
+- [Microsoft Learn — Memory Grant considerations](https://learn.microsoft.com/en-us/sql/relational-databases/memory-management-architecture-guide#memory-grant-considerations)
+- External Merge Sort, Grace Hash Join, Hybrid Hash Join — Database Systems: The Complete Book (Garcia-Molina, Ullman, Widom) §15
