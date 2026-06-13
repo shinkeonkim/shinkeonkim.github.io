@@ -21,11 +21,38 @@ import rehypeLazyImages from './src/plugins/rehype-lazy-images.mjs';
 import devEditor from './src/dev-only/integration.mjs';
 import modulepreload from './src/lib/modulepreload-integration.mjs';
 import { buildImageMap } from './src/lib/sitemap-images.mjs';
+import { buildLastmodMap, resolveLastmod } from './src/lib/sitemap-lastmod.mjs';
 
 const SITE_URL = 'https://shinkeonkim.com';
-// Pre-build the URL → cover/thumbnail map once, at config-load time.
-// sitemap serialize() is synchronous, so we resolve the map up-front.
-const imageMap = await buildImageMap(SITE_URL);
+// Pre-build URL → cover/thumbnail and URL → lastmod maps once, at
+// config-load time. sitemap serialize() is synchronous, so we resolve
+// these up-front and look them up per item.
+const [imageMap, lastmodMap] = await Promise.all([
+  buildImageMap(SITE_URL),
+  buildLastmodMap(SITE_URL),
+]);
+
+// URLs to exclude from the production sitemap.
+// - `/_editor`, `/_studio`, `/__` — dev-only injected routes (the
+//   integration already guards them on `command !== 'dev'`, but this is
+//   defense in depth).
+// - `/dev/` — the live component showcase page (src/pages/dev/) is
+//   intended for in-progress visual review of internal building blocks,
+//   not for public search indexing.
+// - `/og/` — programmatically generated OG images, not browsable pages.
+/** @param {string} page */
+function isExcludedFromSitemap(page) {
+  return (
+    page.includes('/_editor') ||
+    page.includes('/_studio') ||
+    page.includes('/__') ||
+    page.includes('/dev/') ||
+    page.includes('/og/')
+  );
+}
+
+// Pagination URL segment: trailing `/{integer}/` (e.g. `/posts/2/`).
+const PAGINATION_RE = /\/\d+\/$/;
 
 export default defineConfig({
   site: SITE_URL,
@@ -46,39 +73,65 @@ export default defineConfig({
     mdx(),
     react(),
     sitemap({
-      filter: (page) => !page.includes('/_editor') && !page.includes('/__'),
+      filter: (page) => !isExcludedFromSitemap(page),
       serialize(item) {
         const url = new URL(item.url);
         const path = url.pathname;
+        const isPaginated = PAGINATION_RE.test(path);
+
+        // Priority + changefreq, ordered most-specific → most-generic.
+        // Pagination URLs (e.g. /posts/2/) inherit their parent list
+        // page's classification — they're navigation, not content.
         if (path === '/') {
           item.changefreq = EnumChangefreq.DAILY;
           item.priority = 1.0;
+        } else if (path === '/posts/' || (path.startsWith('/posts/') && isPaginated)) {
+          item.changefreq = EnumChangefreq.DAILY;
+          item.priority = 0.9;
         } else if (
-          path.startsWith('/posts/') &&
-          !path.startsWith('/posts/category/') &&
-          !path.startsWith('/posts/series/') &&
-          path !== '/posts/'
+          path.startsWith('/posts/category/') ||
+          path.startsWith('/posts/series/')
         ) {
           item.changefreq = EnumChangefreq.WEEKLY;
-          item.priority = 0.8;
-        } else if (path === '/posts/' || path.startsWith('/posts/')) {
-          item.changefreq = EnumChangefreq.DAILY;
           item.priority = 0.7;
-        } else if (path.startsWith('/projects/')) {
+        } else if (path.startsWith('/posts/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.8;
+        } else if (path === '/projects/' || path.startsWith('/projects/')) {
           item.changefreq = EnumChangefreq.MONTHLY;
           item.priority = 0.8;
-        } else if (path.startsWith('/wiki/')) {
+        } else if (path === '/wiki/' || path.startsWith('/wiki/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.7;
-        } else if (path.startsWith('/notes/')) {
+        } else if (path === '/notes/' || path.startsWith('/notes/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.6;
+        } else if (path === '/tags/') {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.5;
         } else if (path.startsWith('/tags/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.5;
+        } else if (path === '/animations/' || path.startsWith('/animations/')) {
+          item.changefreq = EnumChangefreq.MONTHLY;
+          item.priority = 0.6;
+        } else if (path === '/sources/' || path.startsWith('/sources/')) {
+          item.changefreq = EnumChangefreq.MONTHLY;
+          item.priority = 0.5;
+        } else if (path === '/about/') {
+          item.changefreq = EnumChangefreq.MONTHLY;
+          item.priority = 0.6;
+        } else if (path === '/graph/') {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.5;
         } else {
           item.changefreq = EnumChangefreq.MONTHLY;
           item.priority = 0.5;
+        }
+
+        const lastmod = resolveLastmod(lastmodMap, item.url);
+        if (lastmod) {
+          /** @type {any} */ (item).lastmod = lastmod;
         }
 
         const img = imageMap.get(item.url);
