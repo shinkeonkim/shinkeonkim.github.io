@@ -33,13 +33,13 @@ const [imageMap, lastmodMap] = await Promise.all([
 ]);
 
 // URLs to exclude from the production sitemap.
-// - `/_editor`, `/_studio`, `/__` — dev-only injected routes (the
+// - `/_editor`, `/_studio`, `/__`, dev-only injected routes (the
 //   integration already guards them on `command !== 'dev'`, but this is
 //   defense in depth).
-// - `/dev/` — the live component showcase page (src/pages/dev/) is
+// - `/dev/`, the live component showcase page (src/pages/dev/) is
 //   intended for in-progress visual review of internal building blocks,
 //   not for public search indexing.
-// - `/og/` — programmatically generated OG images, not browsable pages.
+// - `/og/`, programmatically generated OG images, not browsable pages.
 /** @param {string} page */
 function isExcludedFromSitemap(page) {
   return (
@@ -61,7 +61,7 @@ export default defineConfig({
     inlineStylesheets: 'auto',
   },
   integrations: [
-    // MUST be listed BEFORE mdx() — astro-auto-import injects import
+    // MUST be listed BEFORE mdx(), astro-auto-import injects import
     // statements into MDX files at compile time so writers can use
     // <CodeWithOutput .../> without a per-file import line.
     AutoImport({
@@ -81,13 +81,19 @@ export default defineConfig({
 
         // Priority + changefreq, ordered most-specific → most-generic.
         // Pagination URLs (e.g. /posts/2/) inherit their parent list
-        // page's classification — they're navigation, not content.
+        // page's classification, they're navigation, not content.
         if (path === '/') {
           item.changefreq = EnumChangefreq.DAILY;
           item.priority = 1.0;
         } else if (path === '/posts/' || (path.startsWith('/posts/') && isPaginated)) {
           item.changefreq = EnumChangefreq.DAILY;
           item.priority = 0.9;
+        } else if (
+          path === '/posts/categories/' ||
+          path === '/posts/series/'
+        ) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.75;
         } else if (
           path.startsWith('/posts/category/') ||
           path.startsWith('/posts/series/')
@@ -189,7 +195,7 @@ export default defineConfig({
           // Empty content: the visible "#" comes from a CSS ::after pseudo-
           // element on .heading-anchor (see global.css). A bare text node here
           // would be concatenated into the heading's own text node, so
-          // Astro's getHeadings() returns e.g. "제목#" — which leaks into
+          // Astro's getHeadings() returns e.g. "제목#", which leaks into
           // the TOC, Pagefind search index, RSS, and OG image titles.
           content: () => [],
         },
