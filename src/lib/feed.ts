@@ -75,3 +75,23 @@ export function noteToFeedItem(note: CollectionEntry<'notes'>): FeedItem {
     author: SITE_AUTHOR,
   };
 }
+
+export async function wikiToFeedItem(
+  wiki: CollectionEntry<'wiki'>,
+  options: { fullContent?: boolean } = {},
+): Promise<FeedItem> {
+  const pubDate = wiki.data.updated ?? new Date(0);
+  const item: FeedItem = {
+    title: wiki.data.title,
+    description: '',
+    pubDate,
+    link: `${SITE_URL}/wiki/${wiki.id}/`,
+    categories: wiki.data.tags,
+    author: SITE_AUTHOR,
+  };
+  if (options.fullContent) {
+    const body = (wiki as { body?: string }).body ?? '';
+    item.content = await renderBodyForFeed(body);
+  }
+  return item;
+}
