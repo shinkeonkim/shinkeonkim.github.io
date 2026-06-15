@@ -123,7 +123,7 @@ function reflectGridUi(ui: StudioUi): void {
   const size = getGridSize();
   ui.gridToggleBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
   ui.gridToggleBtn.classList.toggle('is-active', on);
-  ui.gridToggleBtn.title = on ? `격자 켬 (${size}px) — G 로 끔` : '격자 켜기 (G)';
+  ui.gridToggleBtn.title = on ? `격자 켬 (${size}px), G 로 끔` : '격자 켜기 (G)';
   document.body.classList.toggle('studio-grid-on', on);
   ui.app.style.setProperty('--studio-grid-size', `${size}px`);
   const label = document.getElementById('studio-grid-label');
@@ -575,7 +575,7 @@ export function initStudio(): void {
 
   if (!getDef()) {
     startDraft();
-    setStatus(ui, '임시 작업 (Draft) — 저장 시 ID/제목 입력', 'ok');
+    setStatus(ui, '임시 작업 (Draft), 저장 시 ID/제목 입력', 'ok');
   } else {
     setStatus(ui, '준비됨', 'ok');
   }

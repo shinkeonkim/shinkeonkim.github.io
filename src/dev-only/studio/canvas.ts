@@ -484,7 +484,7 @@ function onMouseDown(e: MouseEvent): void {
 
   const rawId = findElementId(e.target);
   if (!rawId) {
-    // No element hit — start marquee if no shift key
+    // No element hit, start marquee if no shift key
     if (!e.shiftKey && e.target === canvasEl) {
       const pt = svgPoint(e.clientX, e.clientY);
       if (pt) {
@@ -676,6 +676,8 @@ function onMouseUp(e: MouseEvent): void {
           strokeWidth: 2,
           curvature: 0,
           labelColor: '#0b0b0f',
+          labelOffsetX: 0,
+          labelOffsetY: 4,
           headStart: 'none',
           headEnd: 'arrow',
         });
@@ -828,7 +830,7 @@ function elementBBox(
  *
  * Uses strict AABB overlap (positive intersection area). Edges that only
  * touch (e.g. element.right === marquee.left) are NOT considered intersecting
- * — this matches the standard mathematical definition and the property test
+ * , this matches the standard mathematical definition and the property test
  * `correctly identifies AABB intersection` in `multi-select.test.ts`.
  */
 export function intersectsMarquee(
@@ -1043,7 +1045,7 @@ function findSnapTarget(
   const allAnchors = [];
   for (const baseEl of def.elements) {
     if (baseEl.id === excludeElementId) continue;
-    // Skip other lines/arrows — only snap to shapes
+    // Skip other lines/arrows, only snap to shapes
     if (baseEl.type === 'line' || baseEl.type === 'arrow') continue;
     const state = snap.get(baseEl.id);
     if (!state || !state.visible) continue;

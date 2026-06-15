@@ -84,6 +84,6 @@ function focusSelectorFor(el: HTMLElement): string | null {
 function cssEscape(s: string): string {
   const fn = (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS?.escape;
   if (typeof fn === 'function') return fn(s);
-  // Fallback escape (sufficient for our keys — alphanumerics + dots + dashes).
+  // Fallback escape (sufficient for our keys, alphanumerics + dots + dashes).
   return s.replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g, '\\$&');
 }

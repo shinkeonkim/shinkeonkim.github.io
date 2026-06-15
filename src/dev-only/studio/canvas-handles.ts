@@ -212,7 +212,7 @@ export function renderSnapTargets(
   let html = '';
   for (const baseEl of byId.values()) {
     if (baseEl.id === draggingElementId) continue;
-    // Skip lines/arrows — only show snap targets on shapes
+    // Skip lines/arrows, only show snap targets on shapes
     if (baseEl.type === 'line' || baseEl.type === 'arrow') continue;
     const state = snap.get(baseEl.id);
     if (!state || !state.visible) continue;

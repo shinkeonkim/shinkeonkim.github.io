@@ -5,7 +5,7 @@
 // pages (e.g. /graph/, posts with KaTeX).
 //
 // Algorithm:
-//   1. Enumerate /_astro/vendor-*.<hash>.js — these are the targets.
+//   1. Enumerate /_astro/vendor-*.<hash>.js, these are the targets.
 //   2. For each .js chunk, scan its source for references to vendor chunks
 //      → build a "chunk → set<vendor>" transitive map.
 //   3. For each HTML file, find chunks it loads (via script src or transitive

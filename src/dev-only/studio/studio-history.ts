@@ -73,7 +73,7 @@ function renderList(): void {
     const entry = future[future.length - 1 - i];
     items.push(renderEntry(entry, 'future', i + 1));
   }
-  items.push('<li class="studio-history-current">— 현재 위치 —</li>');
+  items.push('<li class="studio-history-current">현재 위치</li>');
   for (let i = 0; i < pastReversed.length; i += 1) {
     const entry = pastReversed[i];
     items.push(renderEntry(entry, 'past', i + 1));

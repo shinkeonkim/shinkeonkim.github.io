@@ -3,7 +3,7 @@
 // <lastmod> per URL.
 //
 // Why frontmatter (not git history): keeps the build deterministic and
-// fast — no `git log` per file. Authors control freshness via `updated`
+// fast, no `git log` per file. Authors control freshness via `updated`
 // in frontmatter.
 //
 // Why regex parsing (not full YAML): mirrors src/lib/sitemap-images.mjs.
@@ -32,7 +32,7 @@ function resolveContentRoot() {
 const CONTENT_ROOT = resolveContentRoot();
 
 // Mirrors src/lib/taxonomy.ts slugify: lowercase, replace non-word runs
-// with '-', NFC-normalize so Korean Hangul stays composed (NFC) — that's
+// with '-', NFC-normalize so Korean Hangul stays composed (NFC), that's
 // the form the dist filesystem and sitemap URLs use.
 const SLUG_RE = /[^\p{L}\p{N}_-]+/gu;
 

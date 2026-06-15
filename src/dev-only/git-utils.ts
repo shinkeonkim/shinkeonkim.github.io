@@ -259,7 +259,7 @@ export async function checkoutBranch(name: string): Promise<{ branch: string }> 
   validateBranchName(name);
   const status = await git().status();
   if (!status.isClean()) {
-    throw new Error('working tree is dirty — commit or stash before switching');
+    throw new Error('working tree is dirty, commit or stash before switching');
   }
   await git().checkout(name);
   const after = await git().status();
