@@ -80,7 +80,7 @@ for (const col of ['posts', 'notes', 'wiki'] as const) {
 해결 방향은 단순했다.
 
 1. 전체 컬렉션을 **딱 한 번** 순회하면서 `{nodes, links, backlinks, slugMap}` 인덱스를 만든다.
-2. 그 인덱스를 모듈 레벨 `Promise` 에 캐시한다 — 모든 페이지 렌더가 같은 인덱스를 본다.
+2. 그 인덱스를 모듈 레벨 `Promise` 에 캐시한다, 모든 페이지 렌더가 같은 인덱스를 본다.
 3. 백링크는 Map 조회 한 번으로 끝낸다.
 
 ```ts
@@ -181,7 +181,7 @@ const sortedNodes = truncated
 - **Pagefind 메타데이터**: 본문에만 인덱스가 잡히도록 `data-pagefind-body` 를 글/위키/노트 컨테이너에만 붙이고, 헤더·푸터·페이지네이션·홈·소개·그래프 페이지에는 `data-pagefind-ignore="all"` 을 달았다. 검색이 더 정확해지고 인덱스 크기도 줄었다.
 - **Section 필터**: `data-pagefind-filter="section:posts/notes/wiki"` 로 검색 UI에서 컬렉션별 필터를 쉽게 제공.
 - **3D 그래프 lazy import**: `react-force-graph-3d` 와 `three` 는 무겁다. 2D 가 기본이고, 3D 토글을 누른 순간에만 `React.lazy()` 로 코드를 가져온다.
-- **GitHub 스타일 콜아웃**: `> [!NOTE]` `> [!TIP]` `> [!IMPORTANT]` `> [!WARNING]` `> [!CAUTION]` 5종 — 지금 이 글에 시연되어 있다.
+- **GitHub 스타일 콜아웃**: `> [!NOTE]` `> [!TIP]` `> [!IMPORTANT]` `> [!WARNING]` `> [!CAUTION]` 5종, 지금 이 글에 시연되어 있다.
 - **Shiki dual-theme**: 같은 코드 블록이 `github-light` 와 `github-dark` 모두로 토큰화되고, CSS 변수로 테마를 갈아끼우니 다크 모드 토글이 코드 색까지 자연스럽게 따라온다.
 
 ## 얻은 교훈
@@ -240,4 +240,4 @@ Pagefind 는 빌드된 HTML 을 후처리로 인덱싱한다. 1만 페이지에 
 
 이 규칙 하나가 1만 페이지 빌드를 *못 끝남* 에서 *35 초 안에 끝남* 으로 바꿨다. 같은 규칙이 위키링크 인덱스([`remark-wikilink.mjs`](https://github.com/shinkeonkim/shinkeonkim.github.io/blob/main/src/plugins/remark-wikilink.mjs))에도, 그래프 데이터([`content-graph.ts`](https://github.com/shinkeonkim/shinkeonkim.github.io/blob/main/src/lib/content-graph.ts))에도, 태그 인덱스에도 적용된다.
 
-앞으로 콘텐츠가 늘어나면서 새로운 병목이 또 보이겠지만, 이번 회고로 일단 만 단위까지는 안심하고 글을 쌓을 수 있게 됐다. 늘 그렇듯 — **일단 기록을 하자**.
+앞으로 콘텐츠가 늘어나면서 새로운 병목이 또 보이겠지만, 이번 회고로 일단 만 단위까지는 안심하고 글을 쌓을 수 있게 됐다. 늘 그렇듯, **일단 기록을 하자**.

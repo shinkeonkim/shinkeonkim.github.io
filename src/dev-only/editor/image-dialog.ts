@@ -190,7 +190,7 @@ export class ImageDialogController {
       const purpose = this.currentPurpose();
       const alt = this.altInput.value.trim();
       if (purpose !== 'thumbnail' && !alt) {
-        this.sourceStatus.textContent = '⚠ 대체 텍스트(alt) 는 필수입니다 — 접근성 / SEO';
+        this.sourceStatus.textContent = '⚠ 대체 텍스트(alt) 는 필수입니다, 접근성 / SEO';
         this.altInput.classList.add('editor-image-alt-invalid');
         this.altInput.focus();
         return;
