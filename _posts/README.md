@@ -10,13 +10,15 @@
 
 ```
 _posts/
-├── 2019-10-06-acmicpc-2019.md      # ACM-ICPC 2019 후기 (my-life 회고에 흡수)
-├── 2020-02-23-BOJ-prefix-array.md   # BOJ prefix array 풀이 묶음 (낱개)
-└── algorithm/
-    └── 2023-09-14-algorithm-0001.md
+└── 2020-02-23-BOJ-prefix-array.md   # BOJ silver 문자열 4문제 풀이 묶음
 ```
 
-이 3개는 [`scripts/migrate-jekyll-posts.py`](../scripts/migrate-jekyll-posts.py) 의 화이트리스트(`css-battle`, `TIL`, `mentoring`, `boj`, 그리고 명시된 my-life 회고 파일들)에 포함되지 않아 마이그레이션 대상에서 의도적으로 제외된 항목입니다.
+이 1개는 [`scripts/migrate-jekyll-posts.py`](../scripts/migrate-jekyll-posts.py) 의 화이트리스트(`css-battle`, `TIL`, `mentoring`, `boj`, 그리고 명시된 my-life 회고 파일들)에 포함되지 않아 마이그레이션 대상에서 의도적으로 제외된 항목입니다. 현재 BOJ 시리즈가 "문제 1개당 1글" 패턴인 반면 이 글은 4문제를 한 글에 묶은 형식이라 즉시 통합이 어렵습니다.
+
+## 이전 정리 이력
+
+- 2026-06-15: `2019-10-06-acmicpc-2019.md` 를 `src/content/posts/my-life/2019-10-06-acmicpc-2019.md` 로 이전 (date 2019-10-06 유지, 최신 글 목록 미포함).
+- 2026-06-15: `algorithm/2023-09-14-algorithm-0001.md` 는 미완성 TOC 글로 판단되어 삭제.
 
 ## 정책
 
