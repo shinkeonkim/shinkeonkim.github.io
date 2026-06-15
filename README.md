@@ -20,7 +20,7 @@ src/
 scripts/        # 일회성 유틸 (uv/Python, Node)
 ```
 
-레거시 Jekyll 콘텐츠는 `_posts/`, `_tabs/`, `assets/` 에 보존되어 있으며 빌드에는 포함되지 않습니다. 이후 점진적으로 `src/content/` 로 마이그레이션 합니다.
+레거시 Jekyll 콘텐츠는 `_posts/`, `_tabs/`, `assets/` 에 보존되어 있으며 빌드에는 포함되지 않습니다. 현재 남은 3개 파일은 [`scripts/migrate-jekyll-posts.py`](scripts/migrate-jekyll-posts.py) 화이트리스트에서 의도적으로 제외된 잔재입니다 ([_posts/README.md](_posts/README.md) 참고).
 
 ## 개발
 
@@ -28,18 +28,30 @@ scripts/        # 일회성 유틸 (uv/Python, Node)
 
 ```bash
 bun install
-bun dev          # http://localhost:4321
-bun run build    # ./dist/ 생성
-bun preview      # 빌드 결과 미리보기
-bun run lint     # ESLint 실행
-bun astro check  # 타입 검증
+bun dev               # http://localhost:4321
+bun run build         # ./dist/ 생성
+bun preview           # 빌드 결과 미리보기
+bun run lint          # ESLint 실행
+bun run lint:no-em-dash  # em-dash (U+2014) 사용 금지 검사
+bun astro check       # 타입 검증
 ```
 
 ## 콘텐츠 작성
 
-VSCode 스니펫: `.vscode/snippets/markdown.json` — `post`, `note`, `wiki` prefix.
+VSCode 스니펫: `.vscode/snippets/markdown.json`, `post`, `note`, `wiki` prefix.
 
 위키 링크는 모든 콘텐츠에서 `[[페이지명]]` 또는 `[[페이지명|보여줄 텍스트]]` 형식으로 사용 가능.
+
+### 표기 규칙
+
+**em-dash (`&#x2014;`, U+2014) 는 사용하지 않습니다.** 영문 활자 컨벤션이라 한국어 본문·코드·문서 어디에도 어울리지 않습니다. 맥락에 따라 다음 본연의 기호로 치환합니다.
+
+- 부제목/라벨/부연: `,` 또는 `:`
+- 경로/대안 표기: `/`
+- 표의 빈 칸: `-`
+- 가로 구분선 아이콘: `─` (U+2500, box drawing)
+
+`bun run lint:no-em-dash` 가 전 저장소를 스캔해서 한 건이라도 발견되면 종료 코드 1 을 돌려줍니다. `prebuild` 와 GitHub Actions 두 곳 모두에 묶여 있으니 em-dash 가 들어간 채로는 빌드도 배포도 되지 않습니다.
 
 ## Favicon 재생성
 
