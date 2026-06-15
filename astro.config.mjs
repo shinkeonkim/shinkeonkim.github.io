@@ -12,6 +12,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import rehypeSlug from 'rehype-slug';
 import rehypeAutolinkHeadings from 'rehype-autolink-headings';
+import rehypeExternalLinks from 'rehype-external-links';
 import remarkWikilink from './src/plugins/remark-wikilink.mjs';
 import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 import remarkMathLenient from './src/plugins/remark-math-lenient.mjs';
@@ -195,9 +196,17 @@ export default defineConfig({
           // Empty content: the visible "#" comes from a CSS ::after pseudo-
           // element on .heading-anchor (see global.css). A bare text node here
           // would be concatenated into the heading's own text node, so
-          // Astro's getHeadings() returns e.g. "제목#", which leaks into
+          // Astro's getHeadings() returns e.g. "제목#" - which leaks into
           // the TOC, Pagefind search index, RSS, and OG image titles.
           content: () => [],
+        },
+      ],
+      [
+        rehypeExternalLinks,
+        {
+          target: '_blank',
+          rel: ['noopener', 'noreferrer'],
+          protocols: ['http', 'https'],
         },
       ],
       [rehypeKatex, { output: 'html', strict: 'ignore' }],
