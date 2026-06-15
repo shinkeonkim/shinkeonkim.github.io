@@ -141,7 +141,7 @@ Five incremental enhancements to the animation studio dev tooling: chart-editor 
 - Checkpoints ensure incremental validation
 - Property tests validate universal correctness properties from the design document
 - Task 6 (DFS) depends on Task 2 (asset tracks) since DFS uses the upgraded stack/array assets with tracks
-- The design uses TypeScript throughout — all implementations target `.ts` and `.astro` files
+- The design uses TypeScript throughout, all implementations target `.ts` and `.astro` files
 - The `--navbar-height` CSS custom property is assumed at 56px as per the existing BaseLayout convention
 
 ## Task Dependency Graph

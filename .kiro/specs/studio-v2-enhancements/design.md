@@ -79,7 +79,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
 #### Interface Changes
 
-No schema changes required — `PropertyTrack` and `Appearance` types already exist in `schema.ts`. The `BuiltinAsset.generate()` return type already includes `tracks` and `appearances` fields on each element.
+No schema changes required, `PropertyTrack` and `Appearance` types already exist in `schema.ts`. The `BuiltinAsset.generate()` return type already includes `tracks` and `appearances` fields on each element.
 
 #### Track Generation Strategy
 
@@ -157,7 +157,7 @@ function handleSelectAll(e: KeyboardEvent): void {
 }
 ```
 
-`getVisibleElementIds` filters elements based on their `appearances` at the current time — elements with no appearances are always visible; elements with appearances are visible only if `activeAppearance(el, time)` is non-null.
+`getVisibleElementIds` filters elements based on their `appearances` at the current time, elements with no appearances are always visible; elements with appearances are visible only if `activeAppearance(el, time)` is non-null.
 
 #### 3.2 Marquee Selection
 
@@ -233,14 +233,14 @@ Use existing `toggleSelectionFor(elementId)` from state module on shift+click.
 // Guard pattern for keydown handlers
 function onKeydown(e: KeyboardEvent): void {
   if (e.key === 'Enter') {
-    if (e.isComposing) return; // IME still composing — ignore
+    if (e.isComposing) return; // IME still composing, ignore
     commitValue();
   }
 }
 ```
 
 **Affected locations:**
-1. `startInlineTextEdit()` in `main.ts` — the foreignObject `<input>` keydown handler.
+1. `startInlineTextEdit()` in `main.ts`, the foreignObject `<input>` keydown handler.
 2. All text/number input `keydown` or `change` handlers in `properties.ts`.
 
 **Event listeners to add:**
@@ -345,7 +345,7 @@ No new data types are introduced. All changes use existing types from `schema.ts
 
 | Type | Usage |
 |------|-------|
-| `PropertyTrack` | `{ property: string, keyframes: TrackKeyframe[] }` — used in asset presets |
+| `PropertyTrack` | `{ property: string, keyframes: TrackKeyframe[] }`, used in asset presets |
 | `TrackKeyframe` | `{ time: number, value: string\|number\|boolean, ease?: Ease }` |
 | `Appearance` | `{ start, end, entryMode?, exitMode?, entryDuration?, exitDuration? }` |
 | `Selection` | Extended usage of existing `{ kind: 'elements', elementIds: string[] }` |
@@ -368,7 +368,7 @@ No new data types are introduced. All changes use existing types from `schema.ts
 
 ## Correctness Properties
 
-*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+*A property is a characteristic or behavior that should hold true across all valid executions of a system, essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
 ### Property 1: Asset generation always includes tracks and appearances
 

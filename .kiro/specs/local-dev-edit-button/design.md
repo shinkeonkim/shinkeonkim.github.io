@@ -105,7 +105,7 @@ const editorUrl = `/_editor?collection=${encodeURIComponent(collection)}&slug=${
 
 Both layouts already receive the necessary props. The component is added inside the `<BaseLayout>` wrapper, after the main content section.
 
-**PostLayout.astro** — receives `collection` and `slug` props directly:
+**PostLayout.astro**, receives `collection` and `slug` props directly:
 ```astro
 ---
 import DevEditButton from '../components/DevEditButton.astro';
@@ -148,7 +148,7 @@ void (async () => {
 ```
 
 **Key design decisions:**
-- URL params are checked first, before sessionStorage—this ensures the Edit button always works even if stale state is persisted
+- URL params are checked first, before sessionStorage, this ensures the Edit button always works even if stale state is persisted
 - Invalid collection names are ignored (falls through to normal session restore)
 - `loadFile` already handles 404s by catching the API error and showing an error status, but we add an explicit catch to display a user-friendly "not found" message
 - The `return` after URL-param loading ensures sessionStorage state doesn't interfere
@@ -158,9 +158,9 @@ void (async () => {
 
 This feature introduces no new persistent data models. It operates on existing data:
 
-- **Props interface (DevEditButton):** `{ collection: string; slug: string }` — passed from layout to FAB
-- **URL Query Params:** `collection` (string) and `slug` (string) — transient, encoded in the navigation URL
-- **CollectionName type:** `'posts' | 'notes' | 'wiki' | 'sources'` — existing type from `src/dev-only/editor/state.ts`
+- **Props interface (DevEditButton):** `{ collection: string; slug: string }`, passed from layout to FAB
+- **URL Query Params:** `collection` (string) and `slug` (string), transient, encoded in the navigation URL
+- **CollectionName type:** `'posts' | 'notes' | 'wiki' | 'sources'`, existing type from `src/dev-only/editor/state.ts`
 
 The only new "data" is the URL query string, which is ephemeral and derived at render time from existing layout props.
 
@@ -238,7 +238,7 @@ This is the same pattern used by `src/dev-only/editor.astro` which guards its sc
 
 ## Correctness Properties
 
-*A property is a characteristic or behavior that should hold true across all valid executions of a system—essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+*A property is a characteristic or behavior that should hold true across all valid executions of a system, essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
 ### Property 1: FAB href construction is correct for all valid collection/slug pairs
 

@@ -67,7 +67,7 @@ Add a floating "Edit" button (FAB) visible only in dev mode on content pages. Th
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP
 - The implementation language is TypeScript (Astro components + TS modules), matching the existing codebase
-- The `DevEditButton.astro` component is zero-JS — pure HTML/CSS rendered at build time with Astro's compile-time conditional
+- The `DevEditButton.astro` component is zero-JS, pure HTML/CSS rendered at build time with Astro's compile-time conditional
 - Property tests use `fast-check` (already in devDependencies) and `vitest` (already configured)
 - The editor's `setCurrent()` already handles tree selection/highlighting, so no additional tree integration code is needed
 - `COLLECTION_NAMES` constant from `state.ts` is reused for URL param validation

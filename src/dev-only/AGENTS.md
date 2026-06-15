@@ -1,4 +1,4 @@
-# Dev-only tooling — agent checklist
+# Dev-only tooling, agent checklist
 
 This directory holds the studio (`/_studio`) and editor (`/_editor`) UIs.
 They are dev-only: shipped only when running `bun dev`, never built into the
@@ -9,7 +9,7 @@ production blog.
 ### Input focus loss on subscribe-driven rerender
 
 **Symptom**: user types one character in an input (title, description,
-duration, element x/y/fill/fontSize, etc.) — focus is lost, next keystroke
+duration, element x/y/fill/fontSize, etc.), focus is lost, next keystroke
 goes nowhere. Reported multiple times.
 
 **Cause**: a panel calls `subscribe(render)` (from `state.ts`). User
@@ -49,7 +49,7 @@ the focused input mid-keystroke. Browser is left with no focused element.
 - Switch the panel from synchronous to async/debounced rerender as the
   fix. That just hides the bug; arrow-key navigation, undo/redo and
   programmatic state changes still need an up-to-date panel.
-- Strip the `data-prop-key` attributes — they are the stable identity
+- Strip the `data-prop-key` attributes, they are the stable identity
   used by focus restore.
 
 ## Mandatory verification step before claiming any dev-only UI work done
@@ -61,7 +61,7 @@ touches a `render(...)` function, a `subscribe(...)` callback, or any
 that holds form inputs:
 
 1. Load `/_studio` (or the affected editor page) in a real browser via
-   the `playwright` skill — not just a `curl` HTTP 200 check.
+   the `playwright` skill, not just a `curl` HTTP 200 check.
 2. With **no element selected** so the meta panel is visible:
    - Focus the **title** field in the right-side properties panel.
    - Type at least 3 characters in one keystroke burst (e.g.
@@ -72,7 +72,7 @@ that holds form inputs:
    - Type 3+ characters into **x** (number input).
    - Type 3+ characters into **fill** (color field's text variant).
    - For a text element, type 3+ characters into **content**.
-   - Type 3+ characters into **name (별칭)** — this is the per-element
+   - Type 3+ characters into **name (별칭)**, this is the per-element
      friendly name that the element list / timeline gutter / command
      palette all surface.
 4. In the sidebar:
@@ -130,16 +130,16 @@ regress:
   group dissolves it; children are restored as a multi-select.
   Alt+click on the canvas drills into a child of the selected group.
   The properties panel for a group shows a name field + ungroup
-  button + clickable child id list (no x/y inputs — the group reads
+  button + clickable child id list (no x/y inputs, the group reads
   its position from the children's bbox).
 - **History panel** (Cmd+Shift+H, also reachable from Cmd+K): renders
-  past entries below a `— 현재 위치 —` marker and any future entries
+  past entries below a `현재 위치` marker and any future entries
   above (faded). Each row shows a kind icon + the mutator's label
   (e.g. `이동: client`, `Chapter 추가: ...`). Clicking a past row
   jumps that many undos backward; clicking a future row redoes. The
   panel auto-refreshes on state changes while open. Every mutator in
   `state.ts` should pass a sensible label + kind through
-  `mutateDef(fn, label, kind)` — when adding a new mutator, name your
+  `mutateDef(fn, label, kind)`, when adding a new mutator, name your
   label in the same `domain: target (keys)` style and choose the
   closest HistoryKind, defaulting to 'other' only if nothing fits.
 
@@ -148,7 +148,7 @@ regress:
 - `animationDefSchema.version` is now `z.union([z.literal(3),
   z.literal(4)]).default(4)`. v3 files (the 29 already in
   `public/animations/`) keep loading without change. The `'group'`
-  element type added in v4 is optional — old files have no groups.
+  element type added in v4 is optional, old files have no groups.
   If you add a NEW element type or field that v3 cannot represent,
   bump to v5 inside the union and add a one-time migration helper
   next to the v3 \u2192 v4 pattern in `assets.ts`.
@@ -163,11 +163,11 @@ keep the migration idempotent.
 
 ## Module map (dev-only)
 
-- `studio/` — animation studio. Entry: `studio/main.ts` (`initStudio`).
+- `studio/`, animation studio. Entry: `studio/main.ts` (`initStudio`).
   Subscribe-driven panels: `properties.ts`, `timeline.ts`,
   `element-list.ts`, `canvas.ts`. Only `properties.ts` currently holds
   user-editable text/number inputs; if you add inputs to any of the
   others, wire them through `studio-focus.ts`.
-- `editor/` — markdown editor. Entry: `editor/main.ts` (`initEditor`).
+- `editor/`, markdown editor. Entry: `editor/main.ts` (`initEditor`).
   The textarea is the only persistent input; its content is owned by the
   user and never overwritten on state change.
