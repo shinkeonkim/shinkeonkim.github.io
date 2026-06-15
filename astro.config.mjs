@@ -61,6 +61,11 @@ export default defineConfig({
   build: {
     inlineStylesheets: 'auto',
   },
+  image: {
+    service: { entrypoint: 'astro/assets/services/sharp' },
+    responsiveStyles: true,
+    layout: 'constrained',
+  },
   integrations: [
     // MUST be listed BEFORE mdx(), astro-auto-import injects import
     // statements into MDX files at compile time so writers can use
