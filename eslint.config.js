@@ -21,7 +21,7 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   ...astro.configs.recommended,
-  ...astro.configs['jsx-a11y-recommended'],
+  ...astro.configs['jsx-a11y-strict'],
   {
     languageOptions: {
       globals: { ...globals.browser, ...globals.node },
