@@ -1,9 +1,12 @@
 import type { CollectionEntry } from 'astro:content';
-import { getPublishedPosts, getPublishedWiki } from './content-queries';
+import { getPublishedNotes, getPublishedPosts, getPublishedWiki } from './content-queries';
 import { canonicalId, getContentGraph } from './content-graph';
+import { noteTitle } from './notes';
+
+export type RelatedCollection = 'posts' | 'wiki' | 'notes';
 
 export interface RelatedEntry {
-  collection: 'posts' | 'wiki';
+  collection: RelatedCollection;
   id: string;
   title: string;
   date?: Date;
@@ -18,7 +21,10 @@ export interface RelatedEntry {
   };
 }
 
-type Candidate = CollectionEntry<'posts'> | CollectionEntry<'wiki'>;
+type Candidate =
+  | CollectionEntry<'posts'>
+  | CollectionEntry<'wiki'>
+  | CollectionEntry<'notes'>;
 
 const TAG_NORMALIZE_RE = /\s+/g;
 const TITLE_TOKEN_SPLIT_RE = /[^\p{Script=Hangul}a-z0-9]+/giu;
@@ -75,7 +81,7 @@ function intersection(a: ReadonlySet<string>, b: ReadonlySet<string>): string[] 
 }
 
 interface CandidateInfo {
-  collection: 'posts' | 'wiki';
+  collection: RelatedCollection;
   id: string;
   title: string;
   date?: Date;
@@ -97,9 +103,10 @@ let cache: Promise<RelatedIndex> | null = null;
 async function loadIndex(): Promise<RelatedIndex> {
   if (!cache) {
     cache = (async () => {
-      const [posts, wiki, graph] = await Promise.all([
+      const [posts, wiki, notes, graph] = await Promise.all([
         getPublishedPosts(),
         getPublishedWiki(),
+        getPublishedNotes(),
         getContentGraph(),
       ]);
       const candidates: CandidateInfo[] = [];
@@ -133,6 +140,22 @@ async function loadIndex(): Promise<RelatedIndex> {
         };
         candidates.push(info);
         byCanonicalId.set(canonicalId('wiki', w.id), info);
+      }
+      for (const n of notes as Candidate[]) {
+        if (n.collection !== 'notes') continue;
+        const body = (n as { body?: string }).body ?? '';
+        const title = noteTitle(body) || n.id;
+        const info: CandidateInfo = {
+          collection: 'notes',
+          id: n.id,
+          title,
+          date: n.data.date,
+          tags: new Set((n.data.tags ?? []).map(normalizeTag).filter(Boolean)),
+          titleTokens: tokenizeTitle(title),
+          sources: extractSourceIds((n.data as { references?: unknown }).references),
+        };
+        candidates.push(info);
+        byCanonicalId.set(canonicalId('notes', n.id), info);
       }
 
       const wikilinkNeighbors = new Map<string, Set<string>>();
@@ -185,7 +208,7 @@ function distancesFrom(
 }
 
 export interface ComputeRelatedOptions {
-  collection: 'posts' | 'wiki';
+  collection: RelatedCollection;
   slug: string;
   tags: string[];
   category?: string;
