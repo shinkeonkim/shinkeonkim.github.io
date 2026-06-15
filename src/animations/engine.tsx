@@ -105,7 +105,15 @@ export default function AnimationEngine({
           style={{ width: '100%', height: 'auto', background: def.canvas.background }}
         >
           <defs dangerouslySetInnerHTML={{ __html: ENGINE_MARKER_DEFS }} />
-          {def.elements.map((el) => {
+          {[...def.elements]
+            .sort((a, b) => {
+              const aIsText = a.type === 'text';
+              const bIsText = b.type === 'text';
+              if (aIsText && !bIsText) return 1;
+              if (!aIsText && bIsText) return -1;
+              return 0;
+            })
+            .map((el) => {
             const state = currentSnap.get(el.id);
             if (!state || !state.visible) return null;
             const entryProgress = state.__entryProgress as number | undefined;

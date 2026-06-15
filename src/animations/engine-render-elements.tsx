@@ -73,8 +73,12 @@ function RenderRect({ state, effect, currentTime }: { state: Record<string, unkn
         </text>
       )}
       {r.subtitle && (
-        <text x={cx} y={cy + r.labelSize + 8} textAnchor="middle" fontSize={10} fill={r.labelColor} opacity={0.7}>
-          {r.subtitle}
+        <text x={cx} y={cy + r.labelSize + 8} textAnchor="middle" fontSize={r.subtitleSize ?? 10} fill={r.labelColor} opacity={0.7}>
+          {r.subtitle.split('\n').map((line, i) => (
+            <tspan key={i} x={cx} dy={i === 0 ? 0 : '1.2em'}>
+              {line || '\u00A0'}
+            </tspan>
+          ))}
         </text>
       )}
     </g>
@@ -221,7 +225,7 @@ function RenderArrow({ state, snap, elementMap }: { state: Record<string, unknow
         markerEnd={engineMarkerUrl(a.headEnd, 'end')}
       />
       {a.label && (
-        <text x={midX} y={midY + 4} textAnchor="middle" fontSize="12" fontFamily="ui-monospace, monospace" fill={a.labelColor}>
+        <text x={midX + (a.labelOffsetX ?? 0)} y={midY + (a.labelOffsetY ?? 4)} textAnchor="middle" fontSize="12" fontFamily="ui-monospace, monospace" fill={a.labelColor}>
           {a.label}
         </text>
       )}

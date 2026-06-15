@@ -78,6 +78,7 @@ export const rectElementSchema = z.object({
   labelColor: z.string().default('#0b0b0f'),
   labelSize: z.number().positive().default(14),
   subtitle: z.string().optional(),
+  subtitleSize: z.number().positive().optional(),
 });
 
 export const circleElementSchema = z.object({
@@ -128,6 +129,8 @@ export const arrowElementSchema = z.object({
   strokeDasharray: z.string().optional(),
   label: z.string().optional(),
   labelColor: z.string().default('#0b0b0f'),
+  labelOffsetX: z.number().default(0),
+  labelOffsetY: z.number().default(4),
   curvature: z.number().default(0),
   headStart: arrowHeadSchema.optional(),
   headEnd: arrowHeadSchema.optional(),
@@ -295,7 +298,7 @@ const NUMERIC_KEYS = new Set([
   'x', 'y', 'width', 'height', 'cx', 'cy', 'r',
   'x1', 'y1', 'x2', 'y2',
   'rotation', 'opacity', 'strokeWidth', 'cornerRadius',
-  'fontSize', 'labelSize', 'curvature',
+  'fontSize', 'labelSize', 'subtitleSize', 'curvature',
 ]);
 const COLOR_KEYS = new Set(['fill', 'stroke', 'color', 'labelColor']);
 

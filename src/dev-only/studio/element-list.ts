@@ -182,7 +182,7 @@ function makeDefaultElement(type: string, id: string, cx: number, cy: number): A
     case 'line':
       return { type: 'line', id, rotation: 0, appearances: [], tracks: [], x1: cx - 80, y1: cy, x2: cx + 80, y2: cy, stroke: '#6366f1', strokeWidth: 2, headStart: 'none', headEnd: 'none' };
     case 'arrow':
-      return { type: 'arrow', id, rotation: 0, appearances: [], tracks: [], x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, stroke: '#6366f1', strokeWidth: 2, curvature: 0, labelColor: '#0b0b0f', headStart: 'none', headEnd: 'arrow' };
+      return { type: 'arrow', id, rotation: 0, appearances: [], tracks: [], x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, stroke: '#6366f1', strokeWidth: 2, curvature: 0, labelColor: '#0b0b0f', labelOffsetX: 0, labelOffsetY: 4, headStart: 'none', headEnd: 'arrow' };
     case 'text':
       return { type: 'text', id, rotation: 0, appearances: [], tracks: [], x: cx, y: cy, content: id, fontSize: 18, fontWeight: 400, color: '#18181b', textAnchor: 'middle' };
     case 'image':
