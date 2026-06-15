@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Downloads Pretendard Variable dynamic-subset (92 woff2 files + CSS) into
 // public/fonts/pretendard/ for self-hosted serving. Rewrites the CSS to point
-// at /fonts/pretendard/. Idempotent — skips files that already exist locally
+// at /fonts/pretendard/. Idempotent, skips files that already exist locally
 // unless --force is passed.
 //
 // Usage: bun scripts/download-pretendard.mjs [--force]

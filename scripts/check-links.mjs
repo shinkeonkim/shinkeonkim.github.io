@@ -11,7 +11,7 @@ const internalOnly = args.includes('--internal-only');
 const failOnExternal = args.includes('--fail-on-external');
 
 if (!existsSync(DIST)) {
-  console.error('dist/ not found — run `bun run build` first.');
+  console.error('dist/ not found, run `bun run build` first.');
   process.exit(2);
 }
 
@@ -83,14 +83,14 @@ console.log(
 );
 
 if (internalBroken.length > 0) {
-  console.error('\n[INTERNAL broken links — fail]');
+  console.error('\n[INTERNAL broken links, fail]');
   for (const l of internalBroken.slice(0, 100)) {
     console.error(`  ${l.status ?? '?'} ${l.url} (parent: ${l.parent ?? 'n/a'})`);
   }
   process.exit(1);
 }
 if (externalBroken.length > 0) {
-  console.warn('\n[EXTERNAL broken links — warning only]');
+  console.warn('\n[EXTERNAL broken links, warning only]');
   for (const l of externalBroken.slice(0, 100)) {
     console.warn(`  ${l.status ?? '?'} ${l.url} (parent: ${l.parent ?? 'n/a'})`);
   }

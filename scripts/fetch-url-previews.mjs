@@ -65,7 +65,7 @@ async function collectUrls() {
       urls.add(m[1]);
     }
   } catch {
-    /* no external profiles file — fine */
+    /* no external profiles file, fine */
   }
   return Array.from(urls);
 }

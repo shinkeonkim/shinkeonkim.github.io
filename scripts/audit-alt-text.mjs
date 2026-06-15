@@ -34,11 +34,11 @@ async function walk(dir, exts) {
   return out;
 }
 
-// Markdown image: ![alt](src "title?")  — alt may be empty.
+// Markdown image: ![alt](src "title?"), alt may be empty.
 // Captures: 1=alt, 2=src
 const MD_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 
-// HTML <img …> — broad match, then inspect attributes.
+// HTML <img …>, broad match, then inspect attributes.
 const HTML_IMG_TAG_RE = /<img\b([^>]*?)\/?>/gi;
 const ATTR_ALT_RE = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})/i;
 const ATTR_SRC_RE = /\b(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})/i;

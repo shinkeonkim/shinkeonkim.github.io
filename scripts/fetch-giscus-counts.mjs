@@ -28,7 +28,7 @@ async function writeOut(data) {
 async function main() {
   if (!repo || !categoryId || !token) {
     console.warn(
-      `[giscus-counts] missing env (repo=${!!repo}, categoryId=${!!categoryId}, token=${!!token}) — writing empty map`,
+      `[giscus-counts] missing env (repo=${!!repo}, categoryId=${!!categoryId}, token=${!!token}), writing empty map`,
     );
     await writeOut({ generatedAt: new Date().toISOString(), counts: {} });
     return;

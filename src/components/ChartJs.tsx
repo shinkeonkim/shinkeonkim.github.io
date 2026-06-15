@@ -1,5 +1,5 @@
 /**
- * ChartJs — MDX에서 Chart.js 차트를 인라인으로 렌더링하는 React 컴포넌트.
+ * ChartJs, MDX에서 Chart.js 차트를 인라인으로 렌더링하는 React 컴포넌트.
  *
  * MDX 사용 예:
  *   <ChartJs client:visible type="bar" data={...} options={...} title="..." caption="..." />
