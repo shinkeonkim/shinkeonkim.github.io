@@ -113,3 +113,35 @@ export async function listSeriesInfos(): Promise<SeriesInfo[]> {
     (a, b) => b.count - a.count || a.name.localeCompare(b.name),
   );
 }
+
+export interface AdjacentPosts {
+  older?: CollectionEntry<'posts'>;
+  newer?: CollectionEntry<'posts'>;
+  scope: 'category' | 'uncategorized';
+}
+
+export async function getAdjacentPosts(postId: string): Promise<AdjacentPosts | null> {
+  const taxonomy = await getPostTaxonomy();
+  const cat = taxonomy.postCategory.get(postId) ?? null;
+  let group: CollectionEntry<'posts'>[];
+  let scope: 'category' | 'uncategorized';
+
+  if (cat) {
+    group = taxonomy.categories.get(cat) ?? [];
+    scope = 'category';
+  } else {
+    const all = await getPublishedPosts();
+    group = all
+      .filter((p) => !taxonomy.postCategory.get(p.id))
+      .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
+    scope = 'uncategorized';
+  }
+
+  const idx = group.findIndex((p) => p.id === postId);
+  if (idx === -1) return null;
+  return {
+    newer: idx > 0 ? group[idx - 1] : undefined,
+    older: idx < group.length - 1 ? group[idx + 1] : undefined,
+    scope,
+  };
+}
