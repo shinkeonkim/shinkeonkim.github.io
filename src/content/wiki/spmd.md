@@ -84,7 +84,7 @@ MPI_Finalize();
 
 GPU 의 SPMD 구현. 각 thread 가 자기 인덱스로 작업.
 
-```cuda
+```cpp
 __global__ void add_vectors(float* a, float* b, float* c, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) c[i] = a[i] + b[i];

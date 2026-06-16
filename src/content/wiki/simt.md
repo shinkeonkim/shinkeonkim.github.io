@@ -26,7 +26,7 @@ SIMD (Single Instruction Multiple Data) 와 헷갈리기 쉽다.
 
 CUDA 코드는 마치 각 thread 가 독립적으로 도는 것처럼 작성하지만, 하드웨어는 32 thread (= 1 warp)를 lockstep 으로 함께 실행한다.
 
-```cuda
+```cpp
 __global__ void add(float* a, float* b, float* c, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) c[i] = a[i] + b[i];
@@ -54,7 +54,7 @@ NVIDIA H100 = 132 SM × 64 warp × 32 thread = **약 27만 thread 동시 처리*
 
 SIMT 의 가장 큰 함정.
 
-```cuda
+```cpp
 if (x > 0) {
   result = compute_A();
 } else {
@@ -88,7 +88,7 @@ SIMT 의 또 다른 성능 결정 요인은 **coalesced memory access**.
 
 배열 인덱스를 thread ID 로 만드는 게 정석.
 
-```cuda
+```cpp
 // Good: thread 0 → a[0], thread 1 → a[1], ... → coalesced
 data[threadIdx.x]
 
