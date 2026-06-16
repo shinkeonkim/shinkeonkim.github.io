@@ -3,8 +3,8 @@ import {
   getPublishedNotes,
   getPublishedPosts,
   getPublishedWiki,
-} from '../lib/content-queries';
-import { notePreview, noteTitle } from '../lib/notes';
+} from '@/shared/lib/content/content-queries';
+import { notePreview, noteTitle } from '@/shared/lib/content/notes';
 
 const MAX_PREVIEW = 280;
 

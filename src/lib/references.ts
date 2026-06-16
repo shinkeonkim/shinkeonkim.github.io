@@ -1,5 +1,5 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
-import { getPublishedPosts } from './content-queries';
+import { getPublishedPosts } from '@/shared/lib/content/content-queries';
 
 export type ReferenceCollection = 'posts' | 'wiki';
 

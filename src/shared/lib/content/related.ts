@@ -2,7 +2,7 @@ import type { CollectionEntry } from 'astro:content';
 import { getPublishedNotes, getPublishedPosts, getPublishedWiki } from './content-queries';
 import { canonicalId, getContentGraph } from './content-graph';
 import { noteTitle } from './notes';
-import { canonicalizeTag } from '../data/tags';
+import { canonicalizeTag } from '@/data/tags';
 
 export type RelatedCollection = 'posts' | 'wiki' | 'notes';
 

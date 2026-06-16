@@ -16,7 +16,12 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
-      include: ['src/lib/**/*.ts', 'src/plugins/**/*.mjs', 'src/dev-only/api-utils.ts'],
+      include: [
+        'src/lib/**/*.ts',
+        'src/shared/lib/**/*.ts',
+        'src/plugins/**/*.mjs',
+        'src/dev-only/api-utils.ts',
+      ],
       exclude: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
     },
   },

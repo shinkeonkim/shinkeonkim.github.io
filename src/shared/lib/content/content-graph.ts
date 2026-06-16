@@ -1,7 +1,7 @@
 import { getCollection } from 'astro:content';
-import { loadAllAnimations } from '../animations/loader';
+import { loadAllAnimations } from '@/animations/loader';
 import { getPublishedPosts } from './content-queries';
-import { canonicalizeTag, getTagMeta } from '../data/tags';
+import { canonicalizeTag, getTagMeta } from '@/data/tags';
 
 export type Collection = 'posts' | 'notes' | 'wiki';
 export type NodeKind = 'doc' | 'tag';

@@ -1,8 +1,8 @@
 import rss from '@astrojs/rss';
 import type { APIContext } from 'astro';
 import { SITE_TITLE } from '@/shared/config';
-import { sortByDateDesc } from '../../../../lib/content-queries';
-import { getPostTaxonomy } from '../../../../lib/taxonomy';
+import { sortByDateDesc } from '@/shared/lib/content/content-queries';
+import { getPostTaxonomy } from '@/shared/lib/content/taxonomy';
 import { postToFeedItem } from '../../../../lib/feed';
 
 const FEED_LIMIT = 30;

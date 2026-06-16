@@ -5,7 +5,7 @@ import {
   getPublishedNotes,
   getPublishedPosts,
   getPublishedWiki,
-} from '../../lib/content-queries';
+} from '@/shared/lib/content/content-queries';
 import { noteToFeedItem, postToFeedItem, wikiToFeedItem } from '../../lib/feed';
 
 const FEED_LIMIT = 50;
