@@ -1,0 +1,650 @@
+---
+title: 'CPU vs GPU vs TPU vs NPU, 네 종류 프로세서의 원리와 최근 동향'
+description: '같은 면적의 칩에 코어가 어떻게 다르게 배치되는지부터, 메모리 계층, 양자화, 최신 Trillium/Blackwell/NPU 동향, 그리고 컴퓨터 과학 패러다임에 미치는 영향까지.'
+date: 2026-06-14
+tags: [hardware, cpu, gpu, tpu, npu, ai, processor, architecture]
+---
+
+## 시작, 왜 네 종류의 프로세서가 필요한가
+
+2010년대 중반까지는 단순했다. CPU 가 있고, 게임이나 그래픽이 필요하면 GPU 가 있었다. 그게 다였다.
+
+지금은 다르다. 데이터센터에는 TPU(Tensor Processing Unit), 스마트폰에는 NPU(Neural Processing Unit) 가 들어있다. 같은 회사의 같은 제품군에 네 종류의 프로세서가 동시에 동작하는 경우도 흔하다. 예를 들어 최신 노트북:
+
+- **CPU**: 운영체제, 브라우저, 일반 앱 실행
+- **GPU**: 게임, 비디오 인코딩
+- **NPU**: 화상 회의 배경 흐림, on-device LLM (Copilot+)
+- (TPU 는 데이터센터 쪽)
+
+왜 이렇게 분화되었나? 답은 단순하다. **하나의 프로세서로는 모든 워크로드를 효율적으로 처리할 수 없게 되었다.** 특히 AI 워크로드 (행렬 곱셈 위주) 가 폭증하면서 범용 CPU 의 한계가 명확해졌고, 각 워크로드에 특화된 가속기가 등장한 것이다.
+
+이 글에서는 네 프로세서의 **원리, 메모리 사용 방식, 강약점, 최근 동향, CS 에 미친 영향** 을 차례로 살펴본다. 각 프로세서의 내부 구조는 매우 다르며, 각자 자기 섹션에서 애니메이션과 함께 확인할 수 있다.
+
+먼저 가장 기본적인 질문, "**프로세서가 하는 일은 무엇인가**" 부터.
+
+---
+
+## 기초, 프로세서의 본질
+
+프로세서는 단 두 가지 일을 한다.
+
+1. **명령어 fetch + decode + execute** (Von Neumann 사이클)
+2. **데이터를 메모리에서 가져와서 처리하고 다시 쓰기**
+
+```anim:von-neumann-cycle
+{}
+```
+
+위 4단계가 모든 현대 컴퓨터의 가장 기본적인 동작 단위. CPU 든 GPU 든 모두 이 사이클을 변형해 진화시킨 것이다.
+
+이 두 일을 얼마나 빨리, 어떤 패턴으로 하느냐가 모든 차이를 만든다.
+
+| 축 | 변형 |
+|:---|:---|
+| **명령어 다양성** | 적음 (특화) ↔ 많음 (범용) |
+| **동시 실행 단위 수** | 적음 (직렬) ↔ 많음 (병렬) |
+| **메모리 접근 패턴** | 무작위 (캐시 의존) ↔ 순차/규칙적 |
+| **분기 처리** | 복잡한 분기 잘 ↔ 분기 없는 코드만 |
+| **수치 정밀도** | 64 bit 부동소수 ↔ 4 bit 정수 |
+
+CPU 는 모든 축에서 "왼쪽"에 가깝고, NPU 는 모든 축에서 "오른쪽"에 가깝다. GPU 와 TPU 는 중간의 다른 지점들. 이제 각각을 보자.
+
+---
+
+## CPU, 범용성의 정수
+
+```anim:cpu-internals
+{}
+```
+
+### 동작 원리
+
+CPU 는 어떤 코드든 실행할 수 있는 범용 프로세서다. 그 대가로 한 코어가 매우 복잡하다.
+
+한 CPU 코어 안에는:
+
+- **명령어 디코더**: x86, ARM 등 수백 개 명령어를 해석
+- **분기 예측기**: `if` 의 결과를 미리 추측해 파이프라인 채움
+- **out-of-order 실행 엔진**: 명령어를 의존성 그래프대로 재정렬해 동시 실행
+- **수십 단계 파이프라인**: 하나의 명령어를 fetch → decode → execute → writeback 등으로 쪼개 cycle 마다 다른 명령어가 다른 단계
+- **L1/L2/L3 캐시**: 메모리 지연을 숨기기 위해 최근 데이터 보관
+
+```anim:cpu-pipeline
+{}
+```
+
+위 애니메이션이 5단계 파이프라인의 동작을 보여준다. 매 cycle 다른 명령어가 다른 단계에서 동시 진행되고, 데이터 의존성이 있으면 bubble (idle) 이 삽입된다. 분기 예측이 실패하면 in-flight 명령어가 모두 폐기되는 큰 손실. 현대 CPU 는 이 5단계 모델을 확장해 14~20 단계 파이프라인 + superscalar (cycle 당 4 명령) + OoO 까지 발전.
+
+이 모든 회로가 코어 면적의 큰 비율을 차지한다. 그래서 같은 다이 면적에 **CPU 코어는 8~16개** 정도밖에 들어가지 않는다.
+
+### 메모리 계층
+
+CPU 는 **캐시 위주** 메모리 시스템이다.
+
+```text
+Register: ~0.3 ns (1 cycle)
+L1 Cache: ~1 ns (4 cycles), 32~64 KB/core
+L2 Cache: ~3 ns (12 cycles), 256 KB~1 MB/core
+L3 Cache: ~10 ns (40 cycles), 수십 MB (모든 코어 공유)
+DRAM:    ~100 ns (400 cycles), 16~256 GB
+```
+
+이 계층이 잘 작동하면 평균 메모리 접근 시간이 L1 수준에 가까워진다. CPU 가 "복잡하지만 빠른" 이유.
+
+대역폭은 보통 **50~100 GB/s** (DDR5 듀얼 채널 기준).
+
+### 강점과 약점
+
+| 강점 | 약점 |
+|:---|:---|
+| 어떤 코드든 실행 | 병렬 코어 수 적음 |
+| 복잡한 분기 잘 처리 | 행렬 곱셈 비효율 |
+| 큰 캐시로 낮은 지연 | 메모리 대역폭 한계 (DDR5: ~89 GB/s) |
+| OS, 시스템 콜, 인터럽트 | AI 워크로드 효율 낮음 |
+
+### 최근 동향
+
+- **AMX (Advanced Matrix Extensions)**: Intel Sapphire Rapids 부터 CPU 에 행렬 곱셈 가속 회로 통합 (mini-TPU)
+- **Apple Silicon (M4)**: ARM 기반 + LPDDR5X unified memory (546 GB/s) 로 GPU 메모리 격차 일부 축소
+- **이종 코어**: P-core (성능) + E-core (효율) 조합이 표준화 (Intel 12세대 부터)
+
+CPU 는 죽지 않는다. 다만 AI 워크로드는 다른 프로세서에 위임하고, **시스템 오케스트레이션** 역할로 진화하고 있다.
+
+---
+
+## GPU, 병렬성의 도약
+
+```anim:gpu-internals
+{}
+```
+
+### 그래픽에서 AI 로
+
+GPU 는 원래 게임 그래픽 렌더링용이었다. 픽셀 100만 개를 동시에 계산해야 하는 작업이라 자연스럽게 "**많은 단순한 코어**" 구조가 되었다.
+
+GPU 의 본래 임무는 3D 그래픽 파이프라인이다.
+
+1. **Vertex Shader**: 3D 모델의 꼭짓점 (vertex) 변환, 카메라 시점 적용
+2. **Rasterization**: 삼각형들을 화면의 픽셀로 변환
+3. **Fragment Shader**: 각 픽셀의 색을 결정 (조명, 그림자, 텍스처 등)
+4. **Texture Mapping**: 2D 이미지를 3D 표면에 매핑
+5. **Output Merger**: 최종 픽셀 출력 + 깊이 테스트
+
+각 단계가 **수백만 ~ 수천만 개의 독립적인 픽셀/vertex** 에 대해 같은 연산을 적용해야 한다. 그래서 GPU 는 "같은 연산을 다른 데이터에 동시 적용" 하는 구조로 진화했다.
+
+이 구조가 우연히 딥러닝과 완벽히 맞았다. 신경망의 행렬 곱셈도 결국 **수백만 번의 독립적인 곱셈**이고, GPU 가 이를 동시에 처리할 수 있었다. 2010년대 초 NVIDIA 가 CUDA 를 일반 컴퓨팅에 개방하면서 게임 GPU 가 AI 컴퓨팅의 표준이 된 것.
+
+### SIMT 실행 모델
+
+#### 단계 1, 왜 thread 가 많아야 하는가
+
+GPU 가 "수천 개 코어" 라고 부르는 건 사실 단순한 ALU (산술 연산 회로) 수천 개를 의미한다. CPU 처럼 한 코어가 분기 예측, 캐시, OoO 같은 복잡한 회로를 다 가진 게 아니다.
+
+그렇다면 이 수천 개 ALU 에게 일을 어떻게 시킬까? 각 ALU 한 개 한 개를 "thread" 라고 부르면 5,000 개의 thread 가 동시에 돌아야 한다. 이게 GPU 가 그래픽에서 출발한 이유와 자연스럽게 맞아떨어진다. 1920x1080 화면의 200만 픽셀이 각자 자기 색을 계산해야 하니까.
+
+#### 단계 2, 각 thread 마다 모든 회로를 두면 너무 비싸다
+
+문제는 thread 마다 **명령어 디코더 + Program Counter (PC)** 를 가지면 회로가 너무 커진다. 5,000 개의 thread × 디코더 = 5,000 개의 디코더. 이건 칩 면적의 대부분을 디코더가 차지하는 비효율적 설계.
+
+CPU 가 한 코어에 디코더 1개 두는 것과 정반대.
+
+#### 단계 3, NVIDIA 의 트레이드오프, warp
+
+NVIDIA 의 해결: **32 thread 를 묶어 같은 디코더를 공유**시킨다. 이 묶음이 "warp".
+
+```
+한 SM (Streaming Multiprocessor):
+  - 디코더 1개 (또는 몇개)
+  - 32 thread = 1 warp 가 같은 명령을 동시에 실행
+  - 64 warp 까지 동시 보유 (서로 다른 warp 는 다른 명령 실행 가능)
+  - 한 cycle 마다 어떤 warp 의 명령을 실행할지 warp scheduler 가 선택
+```
+
+비유: 줄 서 있는 32명에게 "왼쪽 발 든다" 한 번 외치면 모두 왼쪽 발을 든다. 한 명 한 명에게 따로 외치지 않아도 됨.
+
+같은 명령을 받지만 **각자 자기 데이터로 처리**. Thread 0 은 픽셀 0, Thread 1 은 픽셀 1을 처리. 같은 "픽셀 색 계산" 명령이지만 결과는 다른 픽셀에 저장.
+
+#### 단계 4, 이게 바로 SIMT
+
+이 모델 이름이 **SIMT (Single Instruction, Multiple Threads)**. 한 명령으로 여러 thread 가 다른 데이터를 처리.
+
+```anim:gpu-simt
+{}
+```
+
+비슷한 개념으로 [[SIMT|SIMD (Single Instruction, Multiple Data)]] 가 있다. CPU 의 AVX-512 같은 벡터 명령. 차이는:
+
+- **SIMD**: 컴파일러가 "한 번에 16개 float 더해" 같은 벡터 명령을 명시적으로 만들어야 함
+- **SIMT**: 프로그래머는 그냥 "thread 마다 a[i] + b[i] 한다" 라고 짜면, 하드웨어가 알아서 32개씩 묶어 같은 명령으로 처리
+
+SIMT 가 프로그래밍이 훨씬 자연스럽다. CUDA 가 인기를 끈 핵심 이유.
+
+#### 단계 5, 분기가 갈리면 어떻게 되나, warp divergence
+
+문제는 같은 명령을 32 thread 가 모두 실행한다는 가정. 그런데 `if (x > 0)` 같은 분기에서 일부 thread 만 if 경로, 나머지가 else 경로를 타면?
+
+```cuda
+if (data[threadIdx.x] > 0) {
+  result = sqrt(data[threadIdx.x]);  // 일부 thread 만
+} else {
+  result = data[threadIdx.x] * 2;    // 나머지 thread 만
+}
+```
+
+해결: **두 경로를 직렬로 실행**.
+
+- Cycle 1: warp 의 (x > 0) thread 만 활성, 나머지는 idle. `sqrt(x)` 실행
+- Cycle 2: warp 의 (x ≤ 0) thread 만 활성, 나머지는 idle. `x * 2` 실행
+- 결과적으로 같은 warp 의 활용률이 50% 로 떨어짐. 이게 **warp divergence**.
+
+GPU 코드 최적화의 핵심은 같은 warp 의 thread 들이 같은 분기를 타도록 데이터를 정렬하는 것. 예) 정수 양수/음수가 섞인 배열이면 미리 정렬해서 warp 안에서 분기가 안 갈리게.
+
+#### 단계 6, 규모
+
+NVIDIA H100:
+- 132 SM × 64 warp × 32 thread = **약 27만 thread 동시 활성** 이론상
+- 실제로는 메모리 대역폭, divergence, warp 간 의존성으로 활용률 일부
+
+이 정도 thread 가 동시에 같은 행렬 곱셈 명령을 실행하면 LLM 학습/추론이 빠를 수밖에 없다.
+
+#### 단계 7, [[SPMD]] 와의 관계
+
+SIMT 모델은 사실 [[SPMD]] (Single Program Multiple Data) 의 GPU 하드웨어 구현이다. MPI 같은 분산 컴퓨팅에서 모든 노드가 같은 프로그램을 실행하되 다른 데이터를 처리하는 패턴. GPU 의 thread = MPI 의 노드, warp = 같은 명령 broadcast 단위.
+
+분산 학습 코드를 작성해본 사람이라면 CUDA 코드가 익숙하게 느껴지는 이유.
+
+### 메모리 계층
+
+CPU 와 결정적으로 다르다.
+
+- **HBM (High Bandwidth Memory)**: 칩 옆에 수직 적층된 DRAM, [[HBM]] 참조
+- L2 cache (40~60 MB) + L1 per SM (128 KB)
+- 캐시는 지연 감소보다 **대역폭 압력 완화** 가 목적
+
+대역폭 비교:
+
+- H100: **HBM3 5 stack = 3,350 GB/s**
+- B200: **HBM3e 8 stack = 8,000 GB/s**
+- (CPU DDR5: 89 GB/s)
+
+GPU 가 CPU 대비 30~90 배 메모리 대역폭. 이게 딥러닝 학습/추론에서의 격차를 만든다.
+
+### 강점과 약점
+
+| 강점 | 약점 |
+|:---|:---|
+| 대규모 병렬 처리 | 분기 많은 코드 (warp divergence) |
+| 행렬/텐서 연산 빠름 | 단일 thread 성능 낮음 |
+| HBM 으로 메모리 대역폭 압도 | 비싼 가격 (H100 ~$30K) |
+| CUDA 생태계 성숙 | 전력 소모 큼 (700W+) |
+
+### 최근 동향 (Blackwell)
+
+NVIDIA Blackwell 아키텍처 (B200, GB200):
+
+- HBM3e 12-stack 으로 4 TB/s 대역폭
+- FP6, FP4 새 수치 포맷 지원 (모델 양자화 가속)
+- 다중 다이 패키지 (multi-chip module)
+- Transformer Engine 2세대, LLM 추론 30 배 가속 주장
+
+CUDA 의 락인 효과는 여전히 강력하지만 AMD ROCm, Intel oneAPI 도 추격 중.
+
+---
+
+## TPU, 행렬 곱셈에 회로를 고정시키다
+
+```anim:tpu-internals
+{}
+```
+
+### 왜 TPU 가 필요한가, GPU 가 있는데도
+
+GPU 가 AI 에 잘 맞는다는 게 알려졌지만, Google 은 이를 자체 데이터센터에 도입하기 어려웠다. 이유 3가지:
+
+1. **그래픽 회로의 낭비**: GPU 면적의 상당 부분 (RT Core, ROP, rasterizer 등) 이 게임용. AI 워크로드에는 죽은 면적
+2. **CUDA 락인**: NVIDIA 의 비싼 가격을 NVIDIA 가 결정. 대안 부재
+3. **워크로드 특화 효율의 한계**: 범용 GPU 의 SIMT 는 행렬 곱셈에 최적은 아님
+
+Google 의 답: **자체 ASIC**. 2015년 첫 TPU. 목표는 단 하나, **행렬 곱셈만, 가장 효율적으로**.
+
+#### TPU 가 GPU 대비 가지는 구체적 강점
+
+| 측면 | GPU (H100) | TPU (v6 Trillium) |
+|:---|:---|:---|
+| **행렬 곱셈 효율** | Tensor Core 가 보조 | **MXU 전용 회로, 한 cycle 65,536 MAC** |
+| **메모리 접근** | SIMT, 매 명령마다 메모리 | **Weight Stationary, 가중치 1번 적재** |
+| **전력 효율** | 700W | **200W (3.5배 효율)** |
+| **그래픽 회로** | 30% 면적 | **0%** |
+| **컴파일러 통합** | CUDA (low-level) | **XLA (high-level)**, Python 그대로 |
+| **확장성** | 8 GPU per node (NVLink) | **256 chip per pod (ICI)**, pod 간 광통신 |
+
+TPU 의 진정한 강점은 **데이터센터 스케일**. 한 pod 에 256 chip, 그 pod 가 수백 개 모인 cluster 가 13 Pbps 데이터센터 네트워크로 연결. **하나의 거대한 컴퓨터처럼** 학습 가능.
+
+### Systolic Array
+
+TPU 의 핵심은 [[Systolic Array]] 다. MXU (Matrix Multiply Unit) 라고 부른다.
+
+```anim:systolic-array
+{}
+```
+
+핵심 아이디어 3가지:
+
+1. **Weight Stationary**: 가중치는 PE 에 미리 적재되어 움직이지 않음
+2. **Activation Flow**: 입력이 격자를 박동(systolic)처럼 흐르며 곱셈+누적
+3. **메모리 접근 최소화**: 한 가중치가 N x N 번의 곱셈에 재사용
+
+256x256 MXU 한 cycle 에 **65,536 번의 MAC** 동시 수행.
+
+### 메모리
+
+GPU 의 HBM 과 유사하지만:
+
+- **Unified Buffer (24~32 MB on-chip SRAM)**: layer 간 활성화 보관 → DRAM 접근 최소화
+- **HBM**: TPU v6 에서 32 GB / 1,640 GB/s
+
+복잡한 캐시 계층 없이 큰 SRAM + HBM 의 단순한 구조. Systolic array 가 메모리 접근을 적게 하니까 가능한 설계.
+
+### TPU 의 진화
+
+| 세대 | 출시 | 주요 변화 |
+|:---|:---:|:---|
+| TPU v1 | 2015 | 추론 전용, 8-bit INT |
+| TPU v2 | 2017 | 학습 지원, bf16 |
+| TPU v3 | 2018 | 액체 냉각 |
+| TPU v4 | 2021 | SparseCore (embedding 가속) |
+| TPU v5e/v5p | 2023 | 비용 최적화, 대규모 학습 |
+| **TPU v6 (Trillium)** | **2024** | **918 TFLOPs bf16, 4.7x v5e** |
+
+Trillium 의 의미: v5e 대비 4.7x 컴퓨트, 67% 에너지 효율 개선, 한 pod 에 256 chip = **234.9 PFLOPs**.
+
+### 강점과 약점
+
+| 강점 | 약점 |
+|:---|:---|
+| 행렬 곱셈 최고 효율 | TensorFlow/JAX 외 생태계 약함 |
+| 전력 효율 우수 (TPU v6 67% 개선) | Google Cloud 외 사용 불가 |
+| HBM + 대용량 SRAM | 행렬이 아닌 워크로드는 느림 |
+| 대규모 pod 확장 (10,000+ chip) | 가격 정보 불투명 |
+
+---
+
+## NPU, 디바이스 위 AI 의 핵심
+
+```anim:npu-internals
+{}
+```
+
+### 왜 NPU 가 필요한가, GPU 가 있는데도
+
+스마트폰에도 GPU 가 있다. Adreno (Qualcomm), Mali (ARM), Apple GPU. 그런데도 별도의 NPU 가 생긴 이유는 명확하다.
+
+#### 모바일에서 GPU 의 한계
+
+1. **전력 예산**: 스마트폰 전체 SoC 가 5~10W 가 한계. GPU 를 켜면 게임/그래픽으로 거의 다 씀
+2. **AI 추론은 게임과 동시에 필요**: 화상 통화 중 배경 흐림 (GPU 가 영상 인코딩 중) + 카메라 객체 인식 + 음성 비서 등 동시 실행 시 GPU 만으론 부족
+3. **양자화 효율**: GPU 는 FP16 위주 회로. INT4 같은 극한 양자화에는 회로 활용률이 떨어짐
+4. **항상 켜진 워크로드**: 음성 비서 ("Hey Siri"), 항상 동작하는 카메라 보호, 손동작 인식 등은 GPU 깨우기엔 전력 낭비
+
+#### NPU 의 구체적 강점
+
+| 측면 | 모바일 GPU | NPU (Hexagon, Apple NE) |
+|:---|:---|:---|
+| **와트당 효율 (INT4)** | ~0.5 TOPS/W | **15+ TOPS/W (30배)** |
+| **수치 정밀도** | FP32/FP16 | **INT4/INT8 native** |
+| **항상 켜진 추론** | 어려움 (전력 큼) | **가능, 마이크로와트** |
+| **메모리** | GPU 전용 일부 | **SoC LPDDR 공유, 작지만 충분** |
+| **부팅 시간** | 수십 ms | **수 ms (인터럽트 응답급)** |
+
+#### 실제 사용 시나리오
+
+- **Hey Siri**: 음성 비서 detection. CPU 를 깨우지 않고 NPU 가 1mW 로 항상 listening
+- **카메라 객체 인식**: 동영상 녹화 중 GPU 는 인코딩, NPU 는 얼굴/물체 인식
+- **on-device LLM**: Apple Intelligence, Snapdragon AI Hub 가 7B~10B 모델을 INT4 로 실행
+- **배경 흐림 (Zoom/Teams)**: 화상 통화 중 NPU 가 segmentation, GPU 는 영상 인코딩
+
+NPU 가 없는 폰에서도 가능하지만, **배터리가 빠르게 닳거나 발열로 throttling** 발생.
+
+### 양자화의 중요성
+
+NPU 의 핵심 특기는 [[양자화]] 다. 데이터센터 TPU 는 bf16 (16 bit) 정밀도가 일반적이지만, NPU 는 더 공격적으로 줄인다.
+
+| 정밀도 | 비트수 | 메모리 절약 | 정확도 손실 |
+|:---|:---:|:---:|:---|
+| FP32 | 32 | 1x | 0 |
+| FP16 / bf16 | 16 | 2x | 거의 없음 |
+| INT8 | 8 | 4x | `<1%` (대부분의 모델) |
+| **INT4** | **4** | **8x** | **2~5% (LLM 정량화 가능)** |
+
+NPU 는 INT8, INT4 연산을 하드웨어 회로로 가속한다. 같은 모델을 4-bit 로 돌리면 메모리 8x 절약 + 처리량 4x.
+
+### 모바일 SoC 의 NPU 경쟁 (2025-2026)
+
+| 제품 | NPU | TOPS | 비고 |
+|:---|:---|:---:|:---|
+| Apple A19 Pro / M4 | Neural Engine | 38 | 16-core, on-device 모델 (Apple Intelligence) |
+| Snapdragon 8 Elite | Hexagon NPU | 75 | INT4 native, on-device LLM |
+| Snapdragon 8 Gen 4 | Hexagon NPU | 80+ | 2025 출시 |
+| MediaTek Dimensity 9500 | APU | 60+ | 2nm 공정 |
+| Samsung Exynos 2400 | NPU | 34.7 | Galaxy S24+ |
+| Intel Lunar Lake | NPU 4 | 48 | Windows Copilot+ 자격 (40 TOPS 이상) |
+| Qualcomm Snapdragon X Elite | Hexagon | 45 | Copilot+ PC |
+
+**Copilot+ PC 인증 = NPU 40 TOPS 이상**이 표준 기준이 되면서 NPU 가 데스크톱/노트북에도 의무화되는 추세.
+
+### 강점과 약점
+
+| 강점 | 약점 |
+|:---|:---|
+| 와트당 효율 최고 (TOPS/W) | 학습 불가, 추론 전용 |
+| SoC 통합으로 추가 칩 불필요 | 메모리 작음 (디바이스 RAM 공유) |
+| INT4/INT8 양자화 우수 | 모델 변환 + 양자화 필요 |
+| 항상 사용 가능, 저전력 | 새 아키텍처 모델 지원 늦음 |
+
+---
+
+## 한 그림 비교
+
+| 측면 | CPU | GPU | TPU | NPU |
+|:---|:---|:---|:---|:---|
+| **코어 수** | 4~64 | 수천~수만 | 수만 PE | 수천 PE |
+| **한 코어 복잡도** | 매우 높음 | 낮음 | 매우 낮음 | 매우 낮음 |
+| **메모리 시스템** | 큰 캐시 + DRAM | HBM + 작은 캐시 | SRAM + HBM | SoC 공유 메모리 |
+| **메모리 대역폭** | 50~100 GB/s | 1~8 TB/s | 1~3 TB/s | ~100 GB/s |
+| **주 워크로드** | 범용 | 그래픽, AI 학습 | AI 학습/추론 | 디바이스 AI 추론 |
+| **수치 정밀도** | FP64/FP32/INT | FP32/FP16/INT8 | bf16/INT8 | INT8/INT4 |
+| **전력** | 15~250W | 300~1000W | 200~500W | 1~10W |
+| **사용처** | 서버, PC, 모바일 | 데이터센터, PC | Google Cloud | 모바일, edge, PC |
+| **가격** | $200~$5,000 | $1,000~$30,000 | (Cloud) | SoC 통합 |
+
+### 메모리 대역폭 시각화
+
+<ChartJs
+  client:visible
+  type="bar"
+  title="프로세서 종류별 메모리 대역폭 (GB/s, log scale)"
+  caption="DDR5 한 채널 대비 HBM3e 8 stack은 약 90배. AI 워크로드 격차의 근본 원인."
+  height="280px"
+  data={{
+    labels: ['DDR5 (CPU)', 'LPDDR5X (모바일 NPU)', 'Apple M4 Max unified', 'NVIDIA H100 (HBM3)', 'TPU v6 Trillium (HBM)', 'NVIDIA B200 (HBM3e)'],
+    datasets: [{
+      label: 'GB/s',
+      data: [89, 100, 546, 3350, 1640, 8000],
+      backgroundColor: ['#3b82f6', '#9333ea', '#6366f1', '#16a34a', '#d97706', '#dc2626'],
+      borderRadius: 6
+    }]
+  }}
+  options={{
+    indexAxis: 'y',
+    plugins: { legend: { display: false } },
+    scales: { x: { type: 'logarithmic', title: { display: true, text: 'GB/s (log)' } } }
+  }}
+/>
+
+### HBM 세대별 대역폭 진화
+
+<ChartJs
+  client:visible
+  type="line"
+  title="HBM 세대별 stack 당 대역폭 (GB/s)"
+  caption="HBM 은 2015년 128 GB/s에서 2024년 1218 GB/s까지 9.5배 증가. HBM4(2026)는 약 2 TB/s 예정."
+  height="260px"
+  data={{
+    labels: ['HBM1 (2015)', 'HBM2 (2016)', 'HBM2e (2019)', 'HBM3 (2022)', 'HBM3e (2024)', 'HBM4 (2026E)'],
+    datasets: [{
+      label: 'Stack 당 GB/s',
+      data: [128, 256, 460, 819, 1218, 2048],
+      borderColor: '#16a34a',
+      backgroundColor: 'rgba(22, 163, 74, 0.1)',
+      borderWidth: 2.5,
+      tension: 0.3,
+      pointRadius: 5,
+      fill: true
+    }]
+  }}
+  options={{
+    scales: { y: { title: { display: true, text: 'GB/s' }, beginAtZero: true } }
+  }}
+/>
+
+### 모바일 NPU TOPS 비교 (2025 플래그십)
+
+<ChartJs
+  client:visible
+  type="bar"
+  title="2025 모바일/PC NPU TOPS 비교"
+  caption="Copilot+ PC 인증 기준 40 TOPS (점선) 이상. Snapdragon 8 Elite가 가장 공격적."
+  height="280px"
+  data={{
+    labels: ['Samsung Exynos 2400', 'Apple A19 / M4', 'Qualcomm SD X Elite', 'Intel Lunar Lake', 'MediaTek D9500', 'Snapdragon 8 Elite'],
+    datasets: [{
+      label: 'TOPS',
+      data: [34.7, 38, 45, 48, 60, 75],
+      backgroundColor: ['#9333ea', '#6366f1', '#3b82f6', '#16a34a', '#d97706', '#dc2626'],
+      borderRadius: 6
+    }]
+  }}
+  options={{
+    plugins: { legend: { display: false } },
+    scales: { y: { title: { display: true, text: 'TOPS' }, beginAtZero: true } }
+  }}
+/>
+
+---
+
+## 최근 동향 (2024 ~ 2026)
+
+### 1. 학습은 GPU 와 TPU, 추론은 NPU 로 분화
+
+대규모 학습 (LLM, 비전 모델) 은 NVIDIA H100/B200 또는 Google TPU 가 거의 독점. 반면 추론 (이미 학습된 모델로 응답 생성) 은:
+
+- **데이터센터 추론**: 여전히 GPU/TPU
+- **on-device 추론**: NPU 가 빠르게 점유 (Apple Intelligence, Snapdragon AI Hub, Windows Copilot+)
+
+이유: 학습은 막대한 메모리/연산이 필요하지만, 추론은 양자화 + 작은 모델 (3B~10B) 이면 NPU 로 충분히 빠름.
+
+### 2. 양자화 포맷의 폭증
+
+전통적 FP32 만 쓰던 시절은 지났다. 2024-2026 에는:
+
+- **FP16, bf16**: 학습 표준
+- **INT8**: 추론 가속, 거의 모든 모델 지원
+- **INT4**: LLM 추론, 메모리 8x 절약
+- **FP8** (NVIDIA H100): 학습 + 추론 양쪽
+- **FP6, FP4** (NVIDIA B200): 새 표준
+- **MXFP4** (Microsoft scaled FP4): 미세 양자화
+
+각 정밀도마다 하드웨어 회로가 필요. NPU 는 INT4 native 지원 (Snapdragon 8 Gen 2+).
+
+### 3. 메모리 대역폭이 진짜 병목
+
+대형 LLM 의 inference 시간은 **모델 가중치를 메모리에서 가져오는 시간**이 dominant. 그래서:
+
+- HBM4 가 2026년 약 2 TB/s 로 등장
+- NVIDIA Rubin (HBM4 기반) 예정
+- SK Hynix HBM 점유율 75%+, AI 메모리 시장 폭증
+
+### 4. heterogeneous computing 의 표준화
+
+한 SoC 안에 CPU + GPU + NPU + 메모리 + 보안 가속기가 모두 통합. 워크로드별로 가장 적합한 코어로 자동 라우팅:
+
+```
+사진 촬영 → ISP + NPU (HDR, 객체 인식)
+브라우저 → CPU + GPU (렌더링)
+화상 회의 → NPU (배경 흐림) + GPU (인코딩)
+게임 → CPU + GPU
+LLM 응답 → NPU (작은 모델) or 클라우드 GPU (큰 모델)
+```
+
+OS 가 작업 스케줄러가 되는 시대. Apple, Qualcomm, Intel 모두 비슷한 방향.
+
+### 5. 새 가속기 카테고리의 등장
+
+- **Cerebras WSE-3**: wafer-scale (한 wafer 가 한 chip), 4 trillion transistor
+- **Groq LPU**: 결정론적 LLM 추론 가속, 초당 수천 토큰
+- **Tenstorrent Wormhole**: 오픈소스 RISC-V 기반 AI 칩
+
+NVIDIA 독점 구도에 균열이 보이는 시점.
+
+---
+
+## CS 에 미치는 영향
+
+네 종류 프로세서의 등장이 컴퓨터 과학 패러다임 자체를 바꿨다.
+
+### 1. 알고리즘 설계의 transformation
+
+전통적 알고리즘 평가 기준은 **시간 복잡도 O(n)**. 이제는 부족하다.
+
+- **메모리 접근 패턴**: 캐시 친화적인가? coalesced 인가?
+- **병렬화 가능성**: 데이터 의존성이 적은가?
+- **수치 정밀도 허용 범위**: 4-bit 로도 충분한가?
+
+같은 O(n) 알고리즘이라도 GPU 에서 30 배 빠를 수 있고, 캐시 미스 패턴에 따라 같은 CPU 에서도 100 배 차이가 난다.
+
+알고리즘 책의 "RAM 모델" (균일한 메모리 접근 가정) 은 이제 거의 허구.
+
+### 2. 모델 [[양자화]] 의 부상
+
+ML 연구에서 새 분야로 자리잡은 **post-training quantization (PTQ), quantization-aware training (QAT)**. 같은 모델을 4-bit 로 만들면서 정확도 손실을 최소화하는 게 활발한 연구 주제.
+
+[[양자화|GPTQ, AWQ, GGUF (llama.cpp), QLoRA]] 같은 기법들이 단 1-2년 사이에 표준이 됨. 양자화 덕분에 ChatGPT 급 모델을 24 GB RTX 4090 한 장 또는 CPU 만으로 실행 가능해졌다.
+
+### 3. 시스템 소프트웨어의 재편
+
+- **컴파일러**: PyTorch 2.0 의 torch.compile, JAX 의 jit, TensorFlow 의 XLA, MLIR 같은 ML 컴파일러 인프라
+- **런타임**: ONNX Runtime, TensorRT, Core ML, Hexagon SDK 같은 디바이스별 추론 런타임
+- **OS 차원의 통합**: Windows Copilot+ Runtime, macOS Apple Intelligence Framework
+
+전통적 OS 의 스케줄러가 CPU thread 만 다뤘다면, 이제는 **NPU 워크로드 라우팅** 까지 책임.
+
+### 4. 데이터센터 설계 변화
+
+NVIDIA DGX, Google TPU Pod 같은 AI 슈퍼컴퓨터가 표준이 됨. 단순한 서버 rack 이 아니라:
+
+- 액체 냉각 (수냉)
+- 50+ kW per rack (일반 서버 5~10 kW 대비)
+- 광 통신 (NVLink, ICI)
+- HBM 의 비싼 가격이 전체 비용의 1/3
+
+데이터센터 건축, 전력 인프라, 네트워크 설계 모두 AI 가속기 중심으로 재편.
+
+### 5. [[분산 학습]] 의 일반화
+
+한 GPU 에 안 들어가는 모델 (LLM 100B+) 을 학습시키는 게 일상화. 그래서 다양한 [[분산 학습|병렬화 전략]] 이 표준이 됨:
+
+- **Data Parallelism (DP)**: 같은 모델 복제, 다른 배치
+- **Tensor Parallelism (TP)**: 한 layer 의 행렬을 여러 GPU 에 분할
+- **Pipeline Parallelism (PP)**: 모델 layer 를 GPU 들에 수직 분배
+- **ZeRO / FSDP**: 모델 parameter/gradient/optimizer state 자체를 sharding
+- **3D / 4D Parallelism**: 위 전략들의 조합 (Megatron-LM 표준)
+
+Llama 3.1 405B 학습에는 TP=8, PP=16, DP=125 조합 16,000 H100 GPU 가 사용됨.
+
+분산 시스템 설계가 ML 연구자의 필수 지식이 되었고, [[SPMD]] (Single Program Multiple Data) 같은 전통 HPC 개념이 ML 영역의 표준이 됨.
+
+### 6. AI-first 사용자 경험
+
+NPU 가 있는 디바이스에서:
+
+- 항상 켜진 음성 비서 (전력 거의 안 씀)
+- 실시간 카메라 객체 인식
+- 오프라인 번역, 음성 인식
+- 개인정보 누출 없는 on-device LLM
+
+클라우드에 의존하지 않는 AI 가 가능해진 게 NPU 덕분.
+
+---
+
+## 정리
+
+네 종류의 프로세서가 공존하는 이유는 단순하다.
+
+| | CPU | GPU | TPU | NPU |
+|:---|:---|:---|:---|:---|
+| **존재 이유** | 범용 명령 실행 | 대규모 병렬 | 행렬 곱셈 회로화 | 디바이스 AI 효율 |
+| **희생한 것** | 병렬성 | 단일 thread 성능 + 분기 | 워크로드 유연성 | 학습 능력 |
+| **얻은 것** | 모든 코드 실행 | 30~90배 대역폭 | 행렬 효율 극대화 | 와트당 효율 |
+
+> [!IMPORTANT]
+> "가장 좋은 프로세서" 는 없다. **워크로드에 맞는 프로세서를 고르는 것**이 중요하다. 그리고 현대 시스템은 거의 모든 경우 **여러 종류를 동시에 사용**한다 (heterogeneous computing).
+
+향후 5~10년 동안은 더 분화될 가능성이 크다. Quantum Processing Unit, Optical Computing, In-Memory Computing 같은 새 카테고리가 실험되고 있고, 일부는 상용화될 것이다. 그러나 핵심 원리, **"같은 일을 다른 방식으로 더 효율적으로"**, 는 그대로다.
+
+---
+
+> ℹ️ 이 글은 Google Cloud TPU v6 문서, NVIDIA Blackwell 발표, Qualcomm Hexagon NPU 백서, EigenState/L-P 의 2026년 AI 하드웨어 가이드, 그리고 2025 플래그십 SoC 비교 논문을 참조하여 **AI(Claude)와 함께 작성**되었습니다.
+
+---
+
+## 참고 자료
+
+- [Google Cloud, TPU v6 (Trillium) 소개](https://cloud.google.com/blog/products/compute/introducing-trillium-6th-gen-tpus)
+- [Google Cloud, TPU v6e 기술 사양](https://cloud.google.com/tpu/docs/v6e)
+- [NVIDIA Blackwell Architecture](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)
+- [Qualcomm Hexagon NPU 백서](https://www.qualcomm.com/content/dam/qcomm-martech/dm-assets/documents/Unlocking-on-device-generative-AI-with-an-NPU-and-heterogeneous-computing.pdf)
+- [EigenState, CPU vs GPU vs TPU vs NPU AI Hardware Architecture Guide 2026](https://www.eigenstate.dev/essay/cpu-vs-gpu-vs-tpu-vs-npu-ai-hardware-architecture-guide-2026)
+- [Apple Neural Engine 정보](https://machinelearning.apple.com/)
+- [Google In-Datacenter Performance Analysis of a TPU (ISCA 2017)](https://arxiv.org/abs/1704.04760)
+- [SK Hynix, HBM Roadmap](https://news.skhynix.com/)
+- [JEDEC HBM3 / HBM4 Standards](https://www.jedec.org/)

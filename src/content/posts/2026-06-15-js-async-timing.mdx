@@ -1,0 +1,1225 @@
+---
+title: '비동기와 타이밍, 콜백부터 async/await까지의 발전사'
+description: '싱글 스레드 JavaScript 가 어떻게 동시에 여러 일을 처리하는지, 이벤트 루프부터 Promise·async/await·AbortController·AsyncIterator 까지 메커니즘으로 풀어본다. setTimeout 0 이 왜 즉시가 아닌지, 마이크로태스크가 왜 먼저인지, 콜백이 왜 지옥이 되는지를 차례로 답한다.'
+date: 2026-06-15
+tags: [javascript, async, promise, async-await, event-loop, settimeout, microtask, fetch, generator]
+---
+
+## 시작 의문
+
+다음 코드의 출력 순서를 맞춰보자.
+
+```javascript
+console.log('A');
+
+setTimeout(() => console.log('B'), 0);
+
+Promise.resolve().then(() => console.log('C'));
+
+console.log('D');
+```
+
+직관적으로는 `A B C D` 일 것 같다. `setTimeout(fn, 0)` 은 "0 밀리초 뒤"라고 했으니 바로 다음 줄로 가야 자연스럽다. 그런데 실제 출력은:
+
+```text
+A
+D
+C
+B
+```
+
+`B` 가 가장 늦게 찍힌다. `Promise.then` 으로 등록한 `C` 가 `setTimeout 0` 으로 등록한 `B` 보다 먼저다. 그리고 동기 코드인 `A`, `D` 는 둘 다 비동기보다 먼저다.
+
+세 가지 질문이 떠오른다.
+
+1. **JavaScript 는 싱글 스레드라는데, 어떻게 setTimeout 과 Promise 가 "동시에" 진행되는가?**
+2. **`setTimeout(fn, 0)` 은 왜 즉시가 아닌가? 0 밀리초인데도 왜 그렇게 느린가?**
+3. **같은 비동기인데 왜 Promise 가 setTimeout 보다 항상 먼저 실행되는가?**
+
+답을 한 줄로 던지면 "이벤트 루프와 두 종류의 큐 때문" 으로 끝난다. 하지만 *어떻게* 그렇게 되는지를 이해하려면 한 단계 더 들어가야 한다. 이 글은 **콜 스택**·**Web API**·**태스크 큐**·**마이크로태스크 큐** 네 개념을 쌓아 세 질문 모두에 답하고, 거기서 자라난 **콜백** → **Promise** → **async/await** 의 발전사와 **fetch + AbortController**, **Generator/AsyncIterator**, **queueMicrotask/requestAnimationFrame** 같은 현대적 도구까지 한 흐름으로 풀어보는 것을 목표로 한다.
+
+먼저 가장 기초적인 곳부터.
+
+---
+
+## 한 단계 뒤로, JavaScript 는 왜 비동기가 필요한가
+
+### 싱글 스레드의 본질
+
+JavaScript 엔진은 한 번에 한 줄씩만 실행한다. 함수 호출 하나가 끝나야 다음 줄이 진행된다. 이를 **싱글 스레드 (single-threaded)** 라고 한다. 이는 V8, SpiderMonkey, JavaScriptCore 모든 주류 엔진의 공통 약속이다.
+
+> 왜 싱글 스레드인가? JavaScript 가 1995 년 Brendan Eich 에 의해 10 일 만에 만들어졌을 때 주된 용도는 "브라우저에서 사용자 클릭에 반응하기" 였다. 화면 갱신과 동시에 두 스크립트가 같은 DOM 노드를 수정한다면 결과가 비결정적 (race condition) 이 된다. 단순함과 안전을 위해 의도적으로 싱글 스레드를 선택했다.
+
+이게 무슨 뜻인지 코드로 보자.
+
+```javascript
+function blocking() {
+  const start = Date.now();
+  while (Date.now() - start < 3000) {
+    // 3초간 CPU 점유
+  }
+  console.log('done');
+}
+
+console.log('A');
+blocking();
+console.log('B'); // 3초 뒤에 찍힘
+```
+
+`blocking()` 이 도는 3 초 동안 그 어떤 코드도 실행되지 않는다. 브라우저 환경이라면 페이지가 얼어붙는다. 클릭, 스크롤, 애니메이션 모두 멈춘다.
+
+### 그런데 우리는 동시에 여러 일을 본다
+
+브라우저를 켜면 다음이 동시에 일어난다.
+
+- 네트워크에서 데이터 받기 (수십~수천 밀리초)
+- 사용자가 스크롤 / 클릭 / 타이핑
+- 매 16ms 마다 화면 다시 그리기 (60fps)
+- 타이머 카운트다운
+- 백그라운드 작업
+
+JavaScript 가 진짜로 한 번에 한 줄만 한다면 이게 가능할 리 없다. *어디서* 이 동시성이 나오는가?
+
+답은 **JavaScript 엔진은 싱글 스레드지만, 그것을 실행하는 호스트 환경 (브라우저, Node.js) 은 멀티 스레드** 라는 것이다. 엔진은 "지금 당장 실행할 코드 한 줄" 만 처리하고, 시간이 걸리는 작업 (네트워크, 타이머, 파일 I/O) 은 호스트 환경이 백그라운드 스레드로 처리한 뒤 결과만 큐에 넣어준다.
+
+엔진은 그 큐를 무한 루프로 감시하다가, 자기가 한가해지면 큐에서 하나씩 꺼내 실행한다. 이 무한 루프가 곧 [[이벤트 루프]] (Event Loop) 다.
+
+### 차근차근 그림으로
+
+이게 우리가 곧 만나게 될 그림이다. 익숙해질 때까지 머릿속에 두자.
+
+```anim:event-loop-basic
+{}
+```
+
+네 개의 구성요소가 있다.
+
+| 구성요소 | 역할 | 누가 관리? |
+|:---|:---|:---|
+| **Call Stack** (콜 스택) | 지금 실행 중인 함수들 | JavaScript 엔진 |
+| **Web API** (또는 Node.js API) | 타이머, fetch, DOM 이벤트 등 | 호스트 환경 (브라우저 / Node) |
+| **Task Queue** (매크로태스크 큐) | `setTimeout`, DOM 이벤트, `setInterval` 콜백 | 호스트 + 이벤트 루프 |
+| **Microtask Queue** (마이크로태스크 큐) | `Promise.then`, `queueMicrotask`, `MutationObserver` | JS 엔진 (ECMAScript 명세) |
+
+이벤트 루프의 알고리즘은 단순하다.
+
+```text
+while (true) {
+  if (콜 스택이 비어있으면) {
+    마이크로태스크 큐를 비울 때까지 전부 실행
+    태스크 큐에서 한 개 꺼내서 실행
+    (필요하면 렌더링)
+  }
+}
+```
+
+이 5 줄짜리 루프가 JavaScript 의 모든 비동기 동작을 떠받친다. 세 질문의 답도 여기서 자라난다.
+
+---
+
+## 타이밍의 시작, setTimeout 과 setInterval
+
+비동기를 가장 먼저 만나는 곳은 **타이머 API** 다. [[setTimeout]], [[setInterval]] 두 함수를 보자. (문법과 함정에 대한 상세는 각 위키 페이지 참고.)
+
+### setTimeout, 한 번만 실행
+
+`setTimeout(callback, delay)` 은 "최소 `delay` 밀리초 뒤에 `callback` 을 태스크 큐에 넣어달라" 는 요청이다.
+
+<CodeWithOutput
+  title="setTimeout 기본 동작"
+  language="javascript"
+  label="브라우저 콘솔"
+  outputLabel="출력"
+  code={`console.log('A');
+
+setTimeout(() => {
+  console.log('B');
+}, 1000);
+
+console.log('C');`}
+  output={`A
+C
+B   // 약 1초 뒤`}
+/>
+
+```anim:settimeout-basic
+{}
+```
+
+세 가지 포인트:
+
+- **"최소" 다.** 정확히 `delay` 밀리초가 아니라 "**최소** 그만큼 뒤" 다. 콜 스택이 비어있어야만 실행된다. 콜 스택에 무거운 작업이 있으면 5초 지연으로 등록한 타이머도 10 초 뒤에야 실행될 수 있다.
+- **반환값은 타이머 ID.** `clearTimeout(id)` 로 취소 가능.
+- **콜백은 그 자체가 [[클로저]].** 등록 시점의 변수를 들고 다닌다.
+
+### setTimeout(fn, 0) 은 즉시가 아니다
+
+```anim:settimeout-zero
+{}
+```
+
+가장 헷갈리는 부분이다.
+
+<CodeWithOutput
+  title="setTimeout 0 의 진실"
+  language="javascript"
+  code={`console.log('1');
+setTimeout(() => console.log('2'), 0);
+console.log('3');
+
+// 동기 코드를 무겁게 만들면?
+const start = Date.now();
+while (Date.now() - start < 100) {}
+
+console.log('4');`}
+  output={`1
+3
+4
+2   // 100ms+ 뒤에 출력`}
+/>
+
+`setTimeout(fn, 0)` 의 `fn` 은 **즉시가 아니라, 현재 동기 코드가 모두 끝나고, 마이크로태스크 큐도 다 비고, 그 다음 태스크 큐 차례가 와야** 실행된다.
+
+여기에 더해 HTML 명세는 **중첩 5회 이상의 setTimeout 에 대해 최소 4ms 지연** 을 강제한다 ([WHATWG HTML §8.1.7.4](https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timers)). 즉 `setTimeout(() => setTimeout(() => setTimeout(...))) ` 처럼 깊게 중첩되면 자동으로 4ms 가 깔린다.
+
+> [!IMPORTANT]
+> **`setTimeout(fn, 0)` 의 진짜 의미는 "다음 이벤트 루프 틱에 양보하라" 다.** 즉시 실행이 아니라 "동기 작업을 먼저 끝내고 큐에 다시 들어가라" 라는 스케줄링 힌트.
+
+이 트릭은 무거운 동기 작업을 잘게 쪼개 UI 가 응답하게 만드는 데 자주 쓰인다.
+
+```javascript
+// 1억 번 루프, 한 번에 돌리면 UI 멈춤
+function processInChunks(items, processor) {
+  let i = 0;
+  function next() {
+    const start = Date.now();
+    while (i < items.length && Date.now() - start < 50) {
+      processor(items[i++]);
+    }
+    if (i < items.length) {
+      setTimeout(next, 0); // 50ms 마다 UI 에 양보
+    }
+  }
+  next();
+}
+```
+
+### setInterval, 반복 실행
+
+`setInterval(callback, delay)` 은 "**매** `delay` 밀리초마다 `callback` 을 태스크 큐에 넣어달라" 는 요청이다.
+
+<CodeWithOutput
+  title="setInterval 기본"
+  language="javascript"
+  code={`let count = 0;
+const id = setInterval(() => {
+  console.log(\`tick \${++count}\`);
+  if (count === 3) clearInterval(id);
+}, 1000);`}
+  output={`tick 1   // 1초 뒤
+tick 2   // 2초 뒤
+tick 3   // 3초 뒤 (이후 멈춤)`}
+/>
+
+문제는 **콜백 실행 시간이 interval 보다 길어지면 큐에 쌓인다는 점** 이다.
+
+```javascript
+setInterval(() => {
+  // 1500ms 걸리는 작업
+  const start = Date.now();
+  while (Date.now() - start < 1500) {}
+  console.log('done');
+}, 1000);
+// → 1초마다 큐에 등록되지만 한 번에 1.5초 걸림
+// → 큐가 무한히 쌓이거나, 브라우저가 자동으로 누락
+```
+
+```anim:setinterval-overlap
+{}
+```
+
+이를 피하려면 `setTimeout` 으로 자기 자신을 재호출하는 패턴이 더 안전하다.
+
+```javascript
+function poll() {
+  doWork();
+  setTimeout(poll, 1000); // 작업 끝난 뒤 다음 호출 예약
+}
+poll();
+```
+
+이 패턴은 [[Polling]] 의 기본 형태이기도 하다.
+
+### 정리, 타이머가 던지는 두 가지 메시지
+
+- **"즉시" 라는 단어는 존재하지 않는다.** 모든 비동기 콜백은 큐를 거쳐 콜 스택이 빌 때까지 기다린다.
+- **타이머는 정확한 시각을 보장하지 않는다.** 최소 지연을 보장할 뿐.
+
+이 두 메시지가 비동기의 모든 함정의 출발점이다.
+
+---
+
+## 콜백, 첫 번째 시도
+
+타이머처럼 비동기 결과를 받는 가장 원시적인 방법은 **콜백 함수 (callback)** 다.
+
+### 콜백이 뭐다?
+
+함수를 다른 함수의 인자로 넘기면, 받은 쪽이 "내가 끝나면 너를 호출할게" 라고 약속한다. 이때 넘긴 함수가 [[콜백]] 이다. 일급 함수 ([[일급 함수]]) 가 JS 의 기본이라 자연스럽게 가능한 패턴.
+
+```javascript
+// 비동기 작업: 1초 뒤에 데이터 전달
+function loadUser(userId, callback) {
+  setTimeout(() => {
+    const user = { id: userId, name: 'Alice' };
+    callback(null, user); // (error, result) 관행
+  }, 1000);
+}
+
+loadUser(42, (err, user) => {
+  if (err) {
+    console.error(err);
+    return;
+  }
+  console.log(user.name); // 'Alice'
+});
+```
+
+```anim:callback-flow
+{}
+```
+
+Node.js 가 채택한 **"에러 우선 콜백 (error-first callback)"** 규칙은 첫 인자가 에러, 두 번째가 결과. 같은 약속을 모두가 지키면 코드를 읽을 수 있다.
+
+### 그런데 두 개를 순서대로 하려면?
+
+사용자를 받아오고, 그 사용자의 게시물을 받아오고, 게시물에 달린 댓글을 받아오고, 댓글 작성자 프로필을 받아오고…
+
+<CodeWithOutput
+  title="콜백 지옥 (callback hell)"
+  language="javascript"
+  code={`loadUser(42, (err, user) => {
+  if (err) return console.error(err);
+  loadPosts(user.id, (err, posts) => {
+    if (err) return console.error(err);
+    loadComments(posts[0].id, (err, comments) => {
+      if (err) return console.error(err);
+      loadProfile(comments[0].authorId, (err, profile) => {
+        if (err) return console.error(err);
+        console.log(profile.name);
+      });
+    });
+  });
+});`}
+  output={`(4단계 모두 성공 시 profile.name 출력)`}
+/>
+
+```anim:callback-hell
+{}
+```
+
+들여쓰기가 오른쪽 끝까지 밀려난다. [[콜백 지옥]] 으로 불리는 이 문제는 단순히 가독성만의 문제가 아니다.
+
+> [!CAUTION]
+> 콜백 지옥의 진짜 문제는 **에러 처리** 다. 매 단계마다 `if (err) return` 을 빠뜨리면 그대로 무시된다. `try/catch` 도 통하지 않는다, 콜백이 호출되는 시점에는 등록한 콜 스택이 이미 사라졌기 때문이다.
+
+### 콜백이 가진 또 다른 함정, 인버전 오브 컨트롤
+
+콜백을 넘기는 순간, 호출자는 **제어권을 상대 함수에게 넘긴다**.
+
+```javascript
+thirdPartyApi.fetch(url, (data) => {
+  saveToDb(data);
+});
+```
+
+`thirdPartyApi.fetch` 는 콜백을:
+- **호출하지 않을 수도** (조용히 실패)
+- **여러 번 호출할 수도** (`saveToDb` 가 두 번 실행됨)
+- **즉시 동기로 호출할 수도** (콜 스택 상태가 호출자 기대와 다름)
+- **너무 늦게 호출할 수도**
+
+이 모든 불확실성을 호출자가 흡수해야 한다. **약속 (promise) 이 더 강한 보장을 줄 수 있다면 좋을 텐데**, 라는 갈증이 다음 발전의 동기가 된다.
+
+---
+
+## resolve 와 reject, 봐도 봐도 헷갈리는 그것
+
+Promise 본격 도입 전에, 가장 헷갈리는 부분을 먼저 정리하자. **resolve, reject 가 누구 손에 있는가** 의 문제다.
+
+velog 의 한 글 ([봐도 봐도 헷갈리는 resolve, reject](https://velog.io/@rejoelve/봐도-봐도-헷갈리는-resolve-reject)) 이 잘 표현한 것처럼, 비동기 코드에는 두 입장이 공존한다.
+
+### 두 입장
+
+1. **요청하는 쪽**: 비동기 결과를 *기다리는* 입장. `loadUser(42, callback)` 의 callback 을 쓰는 쪽.
+2. **처리하는 쪽**: 비동기 작업을 *수행하고 결과를 알려주는* 입장. `loadUser` 내부 구현.
+
+콜백 패턴에서는 이 두 입장이 *같은 함수 인자* (`callback(err, data)`) 로 표현된다. 위치가 곧 의미였다, 1번 자리는 에러, 2번 자리는 데이터.
+
+Promise 는 이 둘을 **명시적으로 분리** 한다.
+
+```javascript
+function loadUser(userId) {
+  // 처리하는 쪽
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      if (!userId) {
+        reject(new Error('userId 필수'));    // 실패
+      } else {
+        resolve({ id: userId, name: 'Alice' }); // 성공
+      }
+    }, 1000);
+  });
+}
+
+// 요청하는 쪽
+loadUser(42)
+  .then((user) => console.log(user.name))
+  .catch((err) => console.error(err));
+```
+
+```anim:resolve-reject-flow
+{}
+```
+
+처리하는 쪽이 보는 것: `resolve` / `reject` 두 함수. 둘 중 하나를 호출하면 자기 일은 끝.
+
+요청하는 쪽이 보는 것: `.then` / `.catch` 두 메서드. 결과가 오면 이 두 곳 중 하나로 흘러온다.
+
+> [!TIP]
+> **resolve = "이게 결과야"**, **reject = "이게 사유야"**.
+> 둘 중 하나만 호출하면 된다. 둘 다 호출해도 두 번째 호출은 **조용히 무시** 된다 (한 번 정착된 Promise 는 상태가 바뀌지 않는다).
+
+### 처리하는 쪽 / 요청하는 쪽 분리의 가치
+
+콜백에서는 *호출자* 가 "에러 위치를 첫 번째 인자로 받겠다" 같은 관행을 기억해야 했다. Promise 에서는 **언어 차원에서 두 경로가 분리** 된다. 잘못 쓸 수가 없다.
+
+이게 Promise 가 단순히 콜백 지옥을 푸는 도구를 넘어, **에러 처리의 기본 구조를 바꾼** 진짜 이유다.
+
+---
+
+## Promise, 상태 기반 처리
+
+이제 Promise 자체를 들여다보자.
+
+### Promise 의 세 가지 상태
+
+```anim:promise-states
+{}
+```
+
+[[Promise]] 객체는 단 세 가지 상태 중 하나에 있다.
+
+| 상태 | 의미 | 어떻게 들어가는가 |
+|:---|:---|:---|
+| **pending** | 대기 | `new Promise(...)` 직후 |
+| **fulfilled** | 이행 (성공) | executor 가 `resolve(value)` 호출 |
+| **rejected** | 거부 (실패) | executor 가 `reject(reason)` 호출, 또는 예외 throw |
+
+핵심 규칙: **한 번 fulfilled 또는 rejected 가 되면 다시는 바뀌지 않는다.** 이 불변성을 [[settled]] 라고 부른다. Promise 가 콜백보다 안전한 핵심 이유다, 한 번 정착하면 끝, 두 번 호출되거나 호출 안 되는 일이 없다.
+
+### 직접 만들어보기
+
+<CodeWithOutput
+  title="Promise 생성과 사용"
+  language="javascript"
+  code={`function loadUser(userId) {
+  return new Promise((resolve, reject) => {
+    console.log('Promise 생성, 상태: pending');
+    setTimeout(() => {
+      if (userId > 0) {
+        resolve({ id: userId, name: 'Alice' });
+      } else {
+        reject(new Error('Invalid ID'));
+      }
+    }, 500);
+  });
+}
+
+const p = loadUser(42);
+console.log('p =', p);
+
+p.then((user) => {
+  console.log('상태: fulfilled, value =', user);
+});`}
+  output={`Promise 생성, 상태: pending
+p = Promise { <pending> }
+상태: fulfilled, value = { id: 42, name: 'Alice' }`}
+/>
+
+`new Promise(executor)` 의 **executor 는 동기적으로 즉시 실행** 된다. 그 안에서 `setTimeout` 같은 비동기 작업을 시작하고, 결과가 나오면 `resolve` / `reject` 를 호출한다.
+
+> [!IMPORTANT]
+> `.then` 의 콜백은 **결코 동기적으로 실행되지 않는다.** 이미 fulfilled 된 Promise 에 `.then` 을 붙여도, 그 콜백은 **마이크로태스크 큐를 거쳐** 다음 틱에 실행된다. 이 보장 덕에 "어떨 땐 동기, 어떨 땐 비동기" 같은 인버전 오브 컨트롤이 사라진다.
+
+### .then, .catch, .finally 세 가족
+
+| 메서드 | 받는 콜백 | 반환 | 언제 호출? |
+|:---|:---|:---|:---|
+| `.then(onFulfilled, onRejected?)` | 두 개 (선택적) | 새 Promise | fulfilled 시 1번, rejected 시 2번 (있다면) |
+| `.catch(onRejected)` | 한 개 | 새 Promise | rejected 시 (사실은 `.then(undefined, fn)` 의 별칭) |
+| `.finally(onFinally)` | 한 개 (인자 없음) | 새 Promise | fulfilled/rejected 모두 |
+
+`.then` 이 *항상 새 Promise 를 반환* 하기 때문에 체이닝이 가능하다.
+
+```javascript
+loadUser(42)
+  .then((user) => user.id)         // 다음 then 에 42 전달
+  .then((id) => fetchPosts(id))    // Promise 반환 → 자동 unwrap
+  .then((posts) => posts.length)
+  .then((count) => console.log(count))
+  .catch((err) => console.error(err))
+  .finally(() => console.log('done'));
+```
+
+```anim:promise-chaining
+{}
+```
+
+콜백 지옥의 들여쓰기가 사라지고 **평탄한 (flat) 흐름** 으로 바뀐다.
+
+### catch vs then 의 두 번째 인자
+
+`.then` 은 두 번째 인자로도 에러 핸들러를 받지만, 함정이 있다.
+
+<CodeWithOutput
+  title=".then(onFulfilled, onRejected) 의 함정"
+  language="javascript"
+  code={`Promise.resolve('hi')
+  .then(
+    (value) => {
+      console.log(value);
+      throw new Error('oops');
+    },
+    (err) => {
+      console.log('잡힘?', err); // ← 잡힐까?
+    }
+  );`}
+  output={`hi
+(Uncaught Promise Error: oops)
+// 두 번째 인자는 같은 then 의 onFulfilled 에서 던진 에러를 못 잡는다`}
+/>
+
+`onRejected` 는 **이전 단계** 의 에러만 잡는다. 자기 자신과 짝지어진 `onFulfilled` 에서 던진 에러는 못 잡는다.
+
+`.catch` 는 별도 단계이므로 이전 모든 `.then` 의 에러를 모두 잡는다.
+
+> [!TIP]
+> **`.catch` 가 권장된다.** 자기 단계의 에러도, 이전 모든 단계의 에러도 잡을 수 있다. 캡틴판교 ([Promise 쉽게 이해하기](https://joshua1988.github.io/web-development/javascript/promise-for-beginners/)) 의 결론도 같다.
+
+### 체이닝의 진짜 메커니즘
+
+`.then` 의 콜백이 반환하는 값에 따라 다음 단계에 들어가는 값이 결정된다.
+
+| 반환 | 다음 then 의 입력 |
+|:---|:---|
+| 일반 값 `x` | `x` 를 fulfilled value 로 가진 새 Promise |
+| Promise `p` | `p` 가 정착할 때까지 기다린 뒤 그 값으로 |
+| Thenable 객체 | Promise 처럼 풀어서 처리 |
+| 예외 throw | rejected Promise |
+
+이게 인파님이 정리한 ["프로미스 체이닝"](https://inpa.tistory.com/entry/JS-📚-비동기처리-Promise) 의 핵심 메커니즘이다, **`.then` 의 반환값은 자동으로 Promise 로 감싸진다.** 그래서 `.then().then().then()` 이 평탄하게 이어진다.
+
+### Promise 도 지옥이 될 수 있다
+
+장점만 있을 리 없다.
+
+```javascript
+fetch('/api/users')
+  .then((r) => r.json())
+  .then((users) => {
+    return fetch(`/api/posts?user=${users[0].id}`)
+      .then((r) => r.json())
+      .then((posts) => {
+        return fetch(`/api/comments?post=${posts[0].id}`)
+          .then((r) => r.json())
+          .then((comments) => {
+            console.log(comments);
+          });
+      });
+  });
+```
+
+`.then` 안에서 또 `.then` 을 중첩하면 결국 콜백 지옥의 사촌인 **Promise 지옥** 이 된다. 평탄하게 펴는 게 핵심.
+
+```javascript
+fetch('/api/users')
+  .then((r) => r.json())
+  .then((users) => fetch(`/api/posts?user=${users[0].id}`))
+  .then((r) => r.json())
+  .then((posts) => fetch(`/api/comments?post=${posts[0].id}`))
+  .then((r) => r.json())
+  .then((comments) => console.log(comments));
+```
+
+그래도 가독성이 100% 만족스럽진 않다. 이 마지막 한 걸음이 **async/await** 이다.
+
+---
+
+## async/await, Promise 의 문법 설탕
+
+### 한 키워드로 동기처럼
+
+ES2017 이 도입한 `async`, `await` 키워드는 Promise 기반 코드를 **마치 동기 코드처럼** 쓸 수 있게 해준다. 본질은 동일한 Promise, 문법만 다르다.
+
+<CodeWithOutput
+  title="Promise vs async/await"
+  variants={[
+    {
+      language: 'javascript',
+      label: 'Promise 체이닝',
+      code: `fetch('/api/users')
+  .then((r) => r.json())
+  .then((users) => fetch(\`/api/posts?u=\${users[0].id}\`))
+  .then((r) => r.json())
+  .then((posts) => console.log(posts))
+  .catch((err) => console.error(err));`
+    },
+    {
+      language: 'javascript',
+      label: 'async / await',
+      code: `async function loadData() {
+  try {
+    const userRes = await fetch('/api/users');
+    const users = await userRes.json();
+    const postRes = await fetch(\`/api/posts?u=\${users[0].id}\`);
+    const posts = await postRes.json();
+    console.log(posts);
+  } catch (err) {
+    console.error(err);
+  }
+}
+loadData();`
+    }
+  ]}
+  outputLabel="동작"
+  output={`(둘 다 동일하게 동작, 에러는 catch 에서 잡힘)`}
+/>
+
+```anim:async-await-transform
+{}
+```
+
+세 가지 규칙:
+
+1. **`async` 함수는 항상 Promise 를 반환.** 명시적으로 `return` 한 값이 `resolve` 된다.
+2. **`await` 는 오른쪽 Promise 가 정착할 때까지 함수 실행을 *일시정지*.** 단, 함수 밖의 동기 코드는 계속 실행된다.
+3. **에러는 `try/catch` 로.** Promise 의 `.catch` 와 정확히 같은 의미.
+
+### await 의 진짜 동작
+
+`await` 는 사실 `.then` 의 문법 설탕이다. 다음 두 코드는 동치.
+
+```javascript
+// async/await
+async function foo() {
+  const a = await loadA();
+  const b = await loadB(a);
+  return b;
+}
+
+// Promise 로 풀어보면
+function foo() {
+  return loadA().then((a) => {
+    return loadB(a).then((b) => {
+      return b;
+    });
+  });
+}
+```
+
+엔진 안에서 `await` 는 이렇게 동작한다.
+
+1. 오른쪽 표현식을 평가, Promise 가 아니면 `Promise.resolve` 로 감싼다.
+2. 함수 상태 (지역 변수, 다음 실행 위치) 를 [[Lexical Environment]] 에 저장.
+3. Promise 가 정착하면 마이크로태스크 큐에 "함수 재개" 를 등록.
+4. 이벤트 루프가 그 마이크로태스크를 꺼내 함수를 이어 실행.
+
+> [!IMPORTANT]
+> **`await` 는 "Promise 의 마이크로태스크 등록 + 함수 일시정지" 다.** 그래서 `await` 이후 코드는 *항상 다음 마이크로태스크 틱에 실행* 된다. 동기 코드보다 늦고, setTimeout 보다 빠르다.
+
+### async 함수도 항상 Promise
+
+```javascript
+async function answer() {
+  return 42;
+}
+
+const p = answer();
+console.log(p);          // Promise { 42 }
+console.log(await p);    // 42
+```
+
+이 보장이 좋은 점은 **모든 async 함수가 동일한 타입을 반환** 한다는 것이다. 호출자는 "이게 Promise 일까 값일까" 를 고민하지 않아도 된다.
+
+### 한 가지 함정, 순차 vs 병렬
+
+```javascript
+// 순차, 총 2초
+const a = await fetch('/a'); // 1초
+const b = await fetch('/b'); // 1초
+
+// 병렬, 총 1초
+const [a, b] = await Promise.all([
+  fetch('/a'),
+  fetch('/b'),
+]);
+```
+
+`await` 를 무지성으로 줄 세우면 **병렬로 할 수 있는 일도 순차** 가 된다. 의존성이 없는 작업은 `Promise.all` 로 묶자.
+
+---
+
+## 동시성 제어, Promise 의 정적 메서드 네 형제
+
+여러 Promise 를 한꺼번에 다룰 때 쓰는 네 메서드를 차례로 보자.
+
+### Promise.all, 모두 성공해야 성공
+
+배열의 모든 Promise 가 fulfilled 되면 그 값들의 배열로 fulfilled. **하나라도** rejected 되면 즉시 rejected.
+
+<CodeWithOutput
+  title="Promise.all"
+  language="javascript"
+  code={`const results = await Promise.all([
+  fetch('/api/users').then(r => r.json()),
+  fetch('/api/posts').then(r => r.json()),
+  fetch('/api/comments').then(r => r.json()),
+]);
+// results = [users, posts, comments]
+console.log(results[0].length);`}
+  outputLabel="동작"
+  output={`(3개 fetch 가 병렬로 시작, 모두 끝나면 결과 배열)
+(하나라도 실패하면 즉시 throw)`}
+/>
+
+```anim:promise-all
+{}
+```
+
+> [!CAUTION]
+> **Promise.all 은 일찍 끝난 성공을 버린다.** 두 번째 fetch 가 실패하면 첫 번째와 세 번째가 성공했어도 결과를 받을 수 없다. "전부 또는 무" 의미가 필요할 때만 쓰자.
+
+### Promise.allSettled, 결과를 다 보고 싶을 때
+
+ES2020 에 추가된 신상. 모든 Promise 가 정착할 때까지 기다린 뒤, 각 결과의 **상태와 값** 을 담은 배열을 반환.
+
+<CodeWithOutput
+  title="Promise.allSettled"
+  language="javascript"
+  code={`const results = await Promise.allSettled([
+  fetch('/api/users'),
+  fetch('/api/posts'),
+  fetch('/broken-url'),
+]);
+
+results.forEach((r, i) => {
+  if (r.status === 'fulfilled') {
+    console.log(\`\${i}: ok\`);
+  } else {
+    console.log(\`\${i}: failed -\`, r.reason.message);
+  }
+});`}
+  outputLabel="출력"
+  output={`0: ok
+1: ok
+2: failed - fetch failed`}
+/>
+
+각 항목은 `{ status: 'fulfilled', value }` 또는 `{ status: 'rejected', reason }` 형태. 부분 실패가 자연스러운 작업 (배치 알림 발송, 여러 API 동시 시도) 에 적합.
+
+### Promise.race, 가장 먼저 정착한 것
+
+성공/실패 무관하게 **가장 먼저 정착한** Promise 의 결과를 그대로 반환.
+
+```javascript
+// 타임아웃 패턴
+function timeout(ms) {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('timeout')), ms);
+  });
+}
+
+const result = await Promise.race([
+  fetch('/api/slow'),
+  timeout(3000),
+]);
+// 3초 안에 fetch 가 끝나면 result, 아니면 throw
+```
+
+```anim:promise-race
+{}
+```
+
+### Promise.any, 하나만 성공하면 OK
+
+ES2021. **하나라도** fulfilled 되면 그 값으로 fulfilled. **모두** rejected 되면 `AggregateError` 로 rejected.
+
+```javascript
+// 여러 CDN 미러 중 하나라도 응답하면 OK
+const data = await Promise.any([
+  fetch('https://mirror1/data'),
+  fetch('https://mirror2/data'),
+  fetch('https://mirror3/data'),
+]);
+```
+
+```anim:promise-any
+{}
+```
+
+### 네 형제 비교
+
+| 메서드 | 언제 fulfilled | 언제 rejected | 결과 |
+|:---|:---|:---|:---|
+| **`Promise.all`** | 모두 fulfilled | 하나라도 rejected | 값 배열 / 첫 rejection |
+| **`Promise.allSettled`** | 모두 정착 (성공/실패 무관) | 절대 안 됨 | `{ status, value/reason }` 배열 |
+| **`Promise.race`** | 가장 먼저 fulfilled | 가장 먼저 rejected | 가장 먼저 정착한 값/사유 |
+| **`Promise.any`** | 하나라도 fulfilled | 모두 rejected | 첫 fulfilled / AggregateError |
+
+> [!TIP]
+> 실무에서 가장 자주 잘못 쓰는 게 `Promise.all` 이다. **일부 실패를 허용해야 한다면 `allSettled`**, **응답이 빠른 쪽이 중요하다면 `race` 또는 `any`** 를 떠올리자.
+
+---
+
+## 마이크로태스크 vs 매크로태스크, 우선순위의 비밀
+
+이제 글머리의 첫 질문으로 돌아갈 차례. **왜 Promise.then 이 setTimeout 0 보다 항상 먼저** 인가?
+
+```anim:microtask-vs-macrotask
+{}
+```
+
+### 이벤트 루프의 한 틱
+
+이벤트 루프가 한 사이클 (틱) 을 도는 알고리즘을 좀 더 정확하게 보자.
+
+```text
+한 틱:
+  1. 태스크 큐에서 한 개 꺼내 실행 (예: setTimeout 콜백)
+     - 콜 스택이 빌 때까지 계속
+  2. 마이크로태스크 큐를 비울 때까지 *전부* 실행
+     - 마이크로태스크 안에서 새 마이크로태스크를 등록해도 같은 틱 안에서 실행
+  3. 필요하면 렌더링 (브라우저)
+  4. 다음 틱으로
+```
+
+**핵심**: 한 틱에 태스크 큐는 *한 개* 만 처리하지만, 마이크로태스크 큐는 *완전히 비울 때까지* 처리한다. 그래서 마이크로태스크가 항상 다음 매크로태스크보다 먼저다.
+
+### 실제로 분석해보기
+
+처음의 코드를 다시 보자.
+
+<CodeWithOutput
+  title="시작 의문의 코드, 다시"
+  language="javascript"
+  code={`console.log('A');
+setTimeout(() => console.log('B'), 0);
+Promise.resolve().then(() => console.log('C'));
+console.log('D');`}
+  output={`A
+D
+C
+B`}
+/>
+
+이벤트 루프의 눈으로 한 줄씩 따라가보자.
+
+| 단계 | 상태 | 출력 |
+|:---|:---|:---|
+| 1. `console.log('A')` | 콜 스택, 동기 실행 | A |
+| 2. `setTimeout(B, 0)` 등록 | Web API → 0ms 뒤 태스크 큐에 B | |
+| 3. `Promise.resolve().then(C)` 등록 | 즉시 마이크로태스크 큐에 C | |
+| 4. `console.log('D')` | 콜 스택, 동기 실행 | D |
+| 5. 동기 코드 종료, 콜 스택 빔 |, | |
+| 6. 마이크로태스크 큐 비우기 | C 실행 | C |
+| 7. 태스크 큐에서 한 개 꺼냄 | B 실행 | B |
+
+> [!IMPORTANT]
+> **마이크로태스크는 "이번 동기 작업이 끝나자마자 즉시", 매크로태스크는 "다음 이벤트 루프 틱에 한 개씩".** 그래서 Promise.then 이 setTimeout 0 보다 항상 빠르다.
+
+### await 도 마이크로태스크다
+
+```javascript
+async function chain() {
+  console.log('1');
+  await Promise.resolve();
+  console.log('2'); // 마이크로태스크
+  await Promise.resolve();
+  console.log('3'); // 또 마이크로태스크
+}
+
+console.log('start');
+chain();
+console.log('end');
+// → start, 1, end, 2, 3
+```
+
+`await` 가 만나면 함수 실행이 일시정지되고, "재개" 가 마이크로태스크 큐에 들어간다. 그래서 `end` 가 먼저, 그 다음 `2`, `3` 이 차례로 찍힌다.
+
+### 마이크로태스크의 폭주 함정
+
+마이크로태스크는 "큐를 *완전히* 비울 때까지" 처리하기 때문에, **마이크로태스크 안에서 또 마이크로태스크를 무한히 등록하면 렌더링과 매크로태스크가 영원히 못 돈다**.
+
+<CodeWithOutput
+  title="마이크로태스크 폭주, 브라우저 멈춤"
+  language="javascript"
+  code={`function loop() {
+  Promise.resolve().then(loop); // 끝없이 마이크로태스크 등록
+}
+loop();
+// → 페이지 영구 freeze, setTimeout 콜백도 실행 안 됨`}
+  output={`(브라우저 응답 없음, 렌더링 정지)`}
+/>
+
+매크로태스크로 같은 일을 하면 매 틱마다 한 번씩만 실행되므로 렌더링이 끼어들 수 있다.
+
+```javascript
+function loop() {
+  setTimeout(loop, 0); // 매 틱마다 한 번씩
+}
+loop();
+// → CPU 는 바쁘지만 렌더링과 이벤트는 동작
+```
+
+```anim:microtask-runaway
+{}
+```
+
+이게 무거운 작업을 잘게 쪼갤 때 `setTimeout` 을 쓰는 이유이기도 하다.
+
+### queueMicrotask, 직접 등록하기
+
+ES2020 에 추가된 `queueMicrotask(fn)` 은 Promise 없이 마이크로태스크를 등록할 수 있게 해준다.
+
+```javascript
+queueMicrotask(() => console.log('이번 동기 작업 끝나면 즉시'));
+```
+
+`Promise.resolve().then(fn)` 보다 의도가 명확하고, Promise 객체 생성 비용도 없다. 라이브러리 내부에서 "다음 마이크로태스크에 실행" 을 명시할 때 쓴다.
+
+---
+
+## fetch 와 AbortController, 비동기 작업의 취소
+
+Promise 와 async/await 가 자리 잡으면서 자연스럽게 마주치는 다음 문제는 **취소** 다. 사용자가 검색어를 빠르게 입력하면 이전 fetch 요청은 더 이상 필요 없다. 어떻게 멈출까?
+
+### AbortController 의 기본
+
+ES2017 (DOM 표준) 에 도입된 [[AbortController]] 는 비동기 작업에 *취소 신호 (signal)* 를 전달하는 표준 메커니즘이다.
+
+<CodeWithOutput
+  title="fetch + AbortController"
+  language="javascript"
+  code={`const controller = new AbortController();
+const signal = controller.signal;
+
+// 5초 뒤 자동 취소
+setTimeout(() => controller.abort(), 5000);
+
+try {
+  const res = await fetch('/api/slow', { signal });
+  const data = await res.json();
+  console.log(data);
+} catch (err) {
+  if (err.name === 'AbortError') {
+    console.log('취소됨');
+  } else {
+    console.error(err);
+  }
+}`}
+  outputLabel="시나리오별"
+  cases={[
+    { label: '5초 내 응답 옴', output: `(data 출력)` },
+    { label: '5초 넘김', output: `취소됨` },
+  ]}
+/>
+
+```anim:abort-controller
+{}
+```
+
+**구조** 는 단순하다.
+
+1. `new AbortController()` 로 컨트롤러 생성.
+2. `controller.signal` 을 비동기 함수에 전달.
+3. 취소가 필요하면 `controller.abort()` 호출.
+4. 받는 쪽은 `AbortError` (혹은 `DOMException`) 로 reject.
+
+### 검색 자동완성에 적용
+
+가장 흔한 사용 사례. 사용자가 타이핑할 때마다 이전 요청을 취소.
+
+```javascript
+let currentController = null;
+
+async function search(query) {
+  // 이전 요청 취소
+  if (currentController) currentController.abort();
+
+  currentController = new AbortController();
+  try {
+    const res = await fetch(`/api/search?q=${query}`, {
+      signal: currentController.signal,
+    });
+    showResults(await res.json());
+  } catch (err) {
+    if (err.name !== 'AbortError') throw err;
+    // AbortError 는 정상, 더 새로운 요청이 있다는 뜻
+  }
+}
+
+input.addEventListener('input', (e) => search(e.target.value));
+```
+
+> [!TIP]
+> `AbortController` 는 fetch 전용이 아니다. **모든 비동기 API 가 받을 수 있는 표준** 이다. Node.js 의 `fs/promises`, `setTimeout` (Node 16+), `EventTarget.addEventListener` 등 점점 더 많은 곳에서 `{ signal }` 을 받는다.
+
+### setTimeout 도 취소할 수 있다 (Node 16+)
+
+```javascript
+import { setTimeout } from 'node:timers/promises';
+
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 1000);
+
+try {
+  await setTimeout(5000, undefined, { signal: controller.signal });
+  console.log('5초 후 도착');
+} catch (err) {
+  if (err.name === 'AbortError') console.log('1초 뒤 취소됨');
+}
+```
+
+타이머도 Promise 기반 + 취소 가능한 시대.
+
+---
+
+## Generator 와 AsyncIterator, 흐름을 일시정지하는 또 다른 길
+
+Promise 와 async/await 외에도 JS 에는 비동기 흐름을 다루는 다른 도구가 있다. **Generator** 와 **AsyncIterator** 다.
+
+### Generator, 한 번에 한 값씩
+
+`function*` 으로 선언한 함수 ([[function]] 의 확장 문법) 는 호출 시 즉시 실행되지 않고, **이터레이터** 를 반환한다. `yield` 키워드로 실행을 일시정지하고 값을 흘려보낸다.
+
+> 일반 [[function]] 과 [[arrow function]] 의 본질적 차이 (특히 `this` 바인딩) 는 비동기 콜백에서 자주 함정이 된다. 두 형태의 정확한 차이는 각 위키 참고.
+
+<CodeWithOutput
+  title="Generator 기본"
+  language="javascript"
+  code={`function* counter() {
+  yield 1;
+  yield 2;
+  yield 3;
+}
+
+const it = counter();
+console.log(it.next()); // { value: 1, done: false }
+console.log(it.next()); // { value: 2, done: false }
+console.log(it.next()); // { value: 3, done: false }
+console.log(it.next()); // { value: undefined, done: true }`}
+  output={`{ value: 1, done: false }
+{ value: 2, done: false }
+{ value: 3, done: false }
+{ value: undefined, done: true }`}
+/>
+
+Generator 가 흥미로운 점은 **무한 시퀀스를 메모리 효율적으로** 표현할 수 있다는 것.
+
+```javascript
+function* naturals() {
+  let n = 1;
+  while (true) yield n++;
+}
+
+const g = naturals();
+g.next().value; // 1
+g.next().value; // 2
+// ... 무한히 가능
+```
+
+(자세한 메커니즘은 [[Lexical Environment 와 클로저]] 글의 `naturals` 예제 참고)
+
+### AsyncIterator, 비동기 버전
+
+ES2018 이 도입한 `async function*` 은 **비동기 결과를 차례로** 흘려보낸다.
+
+<CodeWithOutput
+  title="AsyncIterator"
+  language="javascript"
+  code={`async function* fetchPages(baseUrl) {
+  let page = 1;
+  while (true) {
+    const res = await fetch(\`\${baseUrl}?page=\${page}\`);
+    const data = await res.json();
+    if (data.items.length === 0) return;
+    yield data.items;
+    page++;
+  }
+}
+
+// for-await-of 로 소비
+for await (const items of fetchPages('/api/posts')) {
+  console.log(\`페이지 받음: \${items.length}개\`);
+}`}
+  output={`페이지 받음: 20개
+페이지 받음: 20개
+페이지 받음: 7개
+(끝)`}
+/>
+
+```anim:async-iterator
+{}
+```
+
+**페이지네이션 API**, **스트림 처리**, **WebSocket 메시지 순차 처리** 같은 곳에서 빛난다. `Promise.all` 로 한 번에 받을 수 없는 "차례로만 알 수 있는 비동기 시퀀스" 를 표현하는 정통 도구.
+
+### Node.js ReadableStream 과의 조합
+
+Node.js 에서 파일을 한 줄씩 읽는 모던한 방법.
+
+```javascript
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+
+async function* lines(path) {
+  const rl = createInterface({
+    input: createReadStream(path),
+  });
+  for await (const line of rl) yield line;
+}
+
+for await (const line of lines('huge.log')) {
+  if (line.includes('ERROR')) console.log(line);
+}
+// → 메모리에 전체 파일을 올리지 않고 한 줄씩
+```
+
+`for await...of` 와 `async function*` 의 조합이 **백프레셔 (backpressure)** 를 자연스럽게 처리한다. 소비가 느리면 생산도 멈춘다.
+
+---
+
+## requestAnimationFrame, 화면 갱신과 발 맞추기
+
+타이머와 Promise 외에 브라우저가 제공하는 또 하나의 비동기 스케줄링이 [[requestAnimationFrame]] (rAF) 이다.
+
+### 매 프레임마다 실행
+
+`requestAnimationFrame(callback)` 은 "다음 화면 다시 그리기 직전에 콜백을 실행" 한다. 60fps 환경에서 약 16.67ms 마다 호출된다.
+
+```javascript
+let lastTime = performance.now();
+function animate(now) {
+  const dt = now - lastTime;
+  lastTime = now;
+
+  // dt 만큼 위치 갱신
+  ball.x += velocity * dt / 1000;
+  render();
+
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+```
+
+`setInterval(animate, 16)` 과의 차이가 결정적이다.
+
+| 항목 | `setInterval(fn, 16)` | `requestAnimationFrame(fn)` |
+|:---|:---|:---|
+| 호출 시점 | 16ms 마다 (큐가 비어있을 때) | 다음 paint 직전 |
+| 브라우저 탭이 백그라운드일 때 | 계속 호출 (~1Hz 로 throttle) | 호출 안 됨 |
+| 모니터 주사율 | 무시 | 적응 (60Hz, 120Hz 등) |
+| 프레임 누락 | 자주 | 드묾 |
+
+rAF 는 **렌더링 사이클과 동기화** 되므로 같은 CPU 비용에서 훨씬 부드러운 결과를 낸다.
+
+### 이벤트 루프와의 관계
+
+rAF 콜백은 **마이크로태스크도 매크로태스크도 아니다**. 이벤트 루프 한 틱의 마지막 단계, "렌더링" 단계에 끼어든다.
+
+```text
+한 틱:
+  1. 매크로태스크 1개 실행
+  2. 마이크로태스크 전부 실행
+  3. 렌더링 단계:
+     - requestAnimationFrame 콜백 실행
+     - 스타일 계산 → 레이아웃 → 페인트
+  4. 다음 틱으로
+```
+
+이 위치 덕분에 rAF 콜백 안에서 DOM 을 수정하면 **같은 프레임에 반영** 된다. 매크로태스크에서 수정하면 다음 프레임이 되어야 보인다.
+
+---
+
+## 정리, 비동기 스케줄링의 위계
+
+다섯 개의 큐 / 단계를 시간 순으로 정리하면.
+
+| 우선순위 | 종류 | 예시 | 언제 |
+|:---:|:---|:---|:---|
+| 1 | 동기 코드 | `console.log`, 함수 호출 | 지금 |
+| 2 | 마이크로태스크 | `Promise.then`, `await`, `queueMicrotask` | 동기 끝나자마자, 전부 |
+| 3 | 렌더링 단계 | `requestAnimationFrame` | paint 직전 |
+| 4 | 매크로태스크 | `setTimeout`, `setInterval`, DOM 이벤트 | 다음 틱에 한 개씩 |
+| 5 | I/O (Node.js) | `fs`, `net` 콜백 | poll 단계 |
+
+이 위계는 **암기보다 메커니즘 이해가 더 안전** 하다. "마이크로태스크 큐가 비어야 다음 매크로로 간다" 는 원칙 하나만 잡으면 어떤 코드 출력도 추론 가능하다.
+
+### 콜백 → Promise → async/await, 한 줄로 보면
+
+| 시대 | 도구 | 해결한 것 | 남긴 문제 |
+|:---|:---|:---|:---|
+| ~ES5 | 콜백 | 일급 함수로 단순 비동기 | 콜백 지옥, 인버전 오브 컨트롤, 에러 처리 |
+| ES6 (2015) | Promise | 상태 불변성, 평탄한 체이닝, 에러 통합 | `.then().then()` 의 가독성 |
+| ES2017 | async / await | 동기처럼 읽히는 비동기 | 순차/병렬 구분 의식 필요 |
+| ES2018 | AsyncIterator | 비동기 시퀀스 표현 | 학습 곡선 |
+| ES2020 | `queueMicrotask`, `Promise.allSettled` | 명시적 스케줄링, 부분 실패 |, |
+| ES2021 | `Promise.any`, `AggregateError` | 첫 성공만 필요한 패턴 |, |
+
+각 단계는 직전 단계가 남긴 문제를 한 걸음씩 푼 결과다. **콜백은 사라지지 않았다.** 이벤트 리스너, DOM API, 일부 Node.js API 는 여전히 콜백 기반이다. 다만 *비동기 흐름의 주축* 이 Promise / async-await 로 옮겨갔을 뿐.
+
+### 실무 선택 가이드
+
+| 상황 | 추천 |
+|:---|:---|
+| HTTP 한 번 호출 | `await fetch()` |
+| 여러 호출, 전부 필요 | `Promise.all` |
+| 여러 호출, 부분 실패 OK | `Promise.allSettled` |
+| 타임아웃 / 가장 빠른 응답 | `Promise.race` 또는 `Promise.any` |
+| 페이지네이션 / 스트림 | `for await...of` + `async function*` |
+| 사용자 입력에 반응하는 fetch | `AbortController` |
+| 무거운 작업 잘게 쪼개기 | `setTimeout(fn, 0)` 또는 `queueMicrotask` |
+| 부드러운 애니메이션 | `requestAnimationFrame` |
+| 한 번만 미루기 | `queueMicrotask` (Promise 객체 생성 비용 ↓) |
+
+세 질문의 답을 한 줄로 정리하면:
+
+- **Q1**. 어떻게 동시에 처리되나? → **호스트가 백그라운드 처리, 엔진은 이벤트 루프로 큐를 처리.**
+- **Q2**. `setTimeout(fn, 0)` 이 왜 즉시가 아닌가? → **모든 비동기는 큐를 거쳐야 하며, 4ms 최소 지연이 누적 가능.**
+- **Q3**. 왜 Promise 가 setTimeout 보다 먼저인가? → **마이크로태스크 큐가 매크로태스크 큐보다 먼저 비워진다.**
+
+비동기는 마법이 아니다. **싱글 스레드 + 호스트의 백그라운드 처리 + 두 종류의 큐 + 이벤트 루프**, 이 네 가지 조합이 만들어내는 결정론적 시스템이다.
+
+이 그림을 한 번 머릿속에 두면 React 의 `useEffect` 가 왜 그 시점에 호출되는지, Vue 의 `nextTick` 이 정확히 무엇을 미루는지, Express 의 미들웨어 체인이 어떻게 흐르는지가 모두 같은 언어로 설명된다.
+
+---
+
+> ℹ️ 이 글은 ECMAScript 명세 (ECMA-262), MDN Web Docs, HTML 명세 (WHATWG), 그리고 캡틴판교·인파·rejoelve 의 한국어 자료를 참조하여 **AI(Claude)와 함께 작성** 되었습니다. 마이크로태스크 정확한 처리 순서는 V8 / SpiderMonkey 등 엔진별로 미세한 차이가 있을 수 있으나, 명세 동작은 모두 동일합니다.
+
+---
+
+## 참고 자료
+
+- ECMA-262, [Jobs and Host Operations](https://tc39.es/ecma262/#sec-jobs)
+- ECMA-262, [Promise Objects](https://tc39.es/ecma262/#sec-promise-objects)
+- WHATWG HTML, [Event loop](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop)
+- WHATWG HTML, [Timers (§8.1.7.4)](https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timers)
+- MDN, [Promise](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Global_Objects/Promise)
+- MDN, [async function](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Statements/async_function)
+- MDN, [AbortController](https://developer.mozilla.org/ko/docs/Web/API/AbortController)
+- MDN, [for await...of](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Statements/for-await...of)
+- Philip Roberts, [What the heck is the event loop anyway? (JSConf EU 2014)](https://www.youtube.com/watch?v=8aGhZQkoFbQ)
+- 캡틴판교, [자바스크립트 Promise 쉽게 이해하기](https://joshua1988.github.io/web-development/javascript/promise-for-beginners/)
+- 인파, [자바스크립트 Promise 개념 & 문법 정복하기](https://inpa.tistory.com/entry/JS-📚-비동기처리-Promise)
+- rejoelve, [봐도 봐도 헷갈리는 resolve, reject](https://velog.io/@rejoelve/봐도-봐도-헷갈리는-resolve-reject)
