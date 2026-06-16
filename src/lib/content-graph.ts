@@ -1,5 +1,7 @@
 import { getCollection } from 'astro:content';
+import { loadAllAnimations } from '../animations/loader';
 import { getPublishedPosts } from './content-queries';
+import { canonicalizeTag, getTagMeta } from '../data/tags';
 
 export type Collection = 'posts' | 'notes' | 'wiki';
 export type NodeKind = 'doc' | 'tag';
@@ -25,17 +27,23 @@ export interface ContentGraph {
   links: ContentLink[];
   backlinks: Map<string, ContentNode[]>;
   slugMap: Map<string, ContentNode>;
+  animationBacklinks: Map<string, ContentNode[]>;
 }
 
 export function tagId(tag: string): string {
-  return `tag:${tag.toLowerCase()}`;
+  return `tag:${canonicalizeTag(tag)}`;
 }
 
 export function tagUrl(tag: string): string {
-  return `/tags/${encodeURIComponent(tag.toLowerCase())}/`;
+  return `/tags/${encodeURIComponent(canonicalizeTag(tag))}/`;
 }
 
 const WIKILINK_RE = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
+
+// Matches a CommonMark fenced code block whose info string is `anim:<id>`.
+// Mirrors the lang pattern enforced by src/plugins/remark-animation.mjs so the
+// backlink scanner stays consistent with what actually renders as an animation.
+const ANIM_FENCE_RE = /^[ \t]{0,3}(?:`{3,}|~{3,})anim:([a-z0-9][a-z0-9_-]*)[ \t]*$/gim;
 
 let cache: Promise<ContentGraph> | null = null;
 
@@ -111,11 +119,14 @@ interface TaggedEntry {
 }
 
 async function build(): Promise<ContentGraph> {
-  const [posts, notes, wiki] = await Promise.all([
+  const [posts, notes, wiki, animations] = await Promise.all([
     getPublishedPosts(),
     getCollection('notes'),
     getCollection('wiki'),
+    loadAllAnimations(),
   ]);
+
+  const validAnimIds = new Set(animations.map((a) => a.id.toLowerCase()));
 
   const nodes: ContentNode[] = [];
   const slugMap = new Map<string, ContentNode>();
@@ -151,37 +162,64 @@ async function build(): Promise<ContentGraph> {
   const linkSeen = new Set<string>();
   const backlinks = new Map<string, ContentNode[]>();
   const backlinkSeen = new Map<string, Set<string>>();
+  const animationBacklinks = new Map<string, ContentNode[]>();
+  const animationBacklinkSeen = new Map<string, Set<string>>();
 
   function scan(entry: { id: string; body?: string }) {
     const body = entry.body ?? '';
-    if (!body || !body.includes('[[')) return;
+    if (!body) return;
     const sourceNode = slugMap.get(entry.id.toLowerCase());
     if (!sourceNode) return;
 
-    const re = new RegExp(WIKILINK_RE.source, WIKILINK_RE.flags);
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(body)) !== null) {
-      const targetText = m[1].trim().toLowerCase();
-      const targetNode = slugMap.get(targetText);
-      if (!targetNode || targetNode.id === sourceNode.id) continue;
+    if (body.includes('[[')) {
+      const re = new RegExp(WIKILINK_RE.source, WIKILINK_RE.flags);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        const targetText = m[1].trim().toLowerCase();
+        const targetNode = slugMap.get(targetText);
+        if (!targetNode || targetNode.id === sourceNode.id) continue;
 
-      const linkKey = `${sourceNode.id}->${targetNode.id}`;
-      if (!linkSeen.has(linkKey)) {
-        linkSeen.add(linkKey);
-        links.push({ source: sourceNode.id, target: targetNode.id, kind: 'wikilink' });
-      }
+        const linkKey = `${sourceNode.id}->${targetNode.id}`;
+        if (!linkSeen.has(linkKey)) {
+          linkSeen.add(linkKey);
+          links.push({ source: sourceNode.id, target: targetNode.id, kind: 'wikilink' });
+        }
 
-      let bset = backlinkSeen.get(targetNode.id);
-      if (!bset) {
-        bset = new Set();
-        backlinkSeen.set(targetNode.id, bset);
+        let bset = backlinkSeen.get(targetNode.id);
+        if (!bset) {
+          bset = new Set();
+          backlinkSeen.set(targetNode.id, bset);
+        }
+        if (!bset.has(sourceNode.id)) {
+          bset.add(sourceNode.id);
+          let list = backlinks.get(targetNode.id);
+          if (!list) {
+            list = [];
+            backlinks.set(targetNode.id, list);
+          }
+          list.push(sourceNode);
+        }
       }
-      if (!bset.has(sourceNode.id)) {
-        bset.add(sourceNode.id);
-        let list = backlinks.get(targetNode.id);
+    }
+
+    if (body.includes('anim:')) {
+      const re = new RegExp(ANIM_FENCE_RE.source, ANIM_FENCE_RE.flags);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        const animId = m[1].toLowerCase();
+        if (!validAnimIds.has(animId)) continue;
+
+        let aset = animationBacklinkSeen.get(animId);
+        if (!aset) {
+          aset = new Set();
+          animationBacklinkSeen.set(animId, aset);
+        }
+        if (aset.has(sourceNode.id)) continue;
+        aset.add(sourceNode.id);
+        let list = animationBacklinks.get(animId);
         if (!list) {
           list = [];
-          backlinks.set(targetNode.id, list);
+          animationBacklinks.set(animId, list);
         }
         list.push(sourceNode);
       }
@@ -192,7 +230,10 @@ async function build(): Promise<ContentGraph> {
   for (const e of wiki) scan(e as { id: string; body?: string });
   for (const e of notes) scan(e as { id: string; body?: string });
 
+  // Aliases collapse into one canonical tag node. tagFirstRaw keeps the first
+  // raw spelling for display fallback when no TagMeta is registered.
   const tagMembers = new Map<string, Set<string>>();
+  const tagFirstRaw = new Map<string, string>();
   function collectTags(collection: Collection, entry: TaggedEntry) {
     const tags = entry.data?.tags;
     if (!Array.isArray(tags) || tags.length === 0) return;
@@ -200,26 +241,29 @@ async function build(): Promise<ContentGraph> {
     for (const raw of tags) {
       const tag = String(raw ?? '').trim();
       if (!tag) continue;
-      const key = tag.toLowerCase();
+      const key = canonicalizeTag(tag);
       let set = tagMembers.get(key);
       if (!set) {
         set = new Set();
         tagMembers.set(key, set);
       }
       set.add(docId);
+      if (!tagFirstRaw.has(key)) tagFirstRaw.set(key, tag);
     }
   }
   for (const e of posts) collectTags('posts', e as TaggedEntry);
   for (const e of wiki) collectTags('wiki', e as TaggedEntry);
 
-  for (const [tag, members] of tagMembers) {
+  for (const [canonical, members] of tagMembers) {
     if (members.size < 1) continue;
+    const meta = getTagMeta(canonical);
+    const displayLabel = meta?.canonical ?? tagFirstRaw.get(canonical) ?? canonical;
     const node: ContentNode = {
-      id: tagId(tag),
+      id: tagId(canonical),
       kind: 'tag',
-      slug: tag,
-      title: `#${tag}`,
-      url: tagUrl(tag),
+      slug: canonical,
+      title: `#${displayLabel}`,
+      url: tagUrl(canonical),
       degree: members.size,
     };
     nodes.push(node);
@@ -228,5 +272,5 @@ async function build(): Promise<ContentGraph> {
     }
   }
 
-  return { nodes, links, backlinks, slugMap };
+  return { nodes, links, backlinks, slugMap, animationBacklinks };
 }

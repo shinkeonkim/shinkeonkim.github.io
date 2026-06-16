@@ -2,6 +2,7 @@ import type { CollectionEntry } from 'astro:content';
 import { getPublishedNotes, getPublishedPosts, getPublishedWiki } from './content-queries';
 import { canonicalId, getContentGraph } from './content-graph';
 import { noteTitle } from './notes';
+import { canonicalizeTag } from '../data/tags';
 
 export type RelatedCollection = 'posts' | 'wiki' | 'notes';
 
@@ -40,7 +41,7 @@ const BONUS_CATEGORY = 0.15;
 const BONUS_SERIES = 0.1;
 
 function normalizeTag(tag: string): string {
-  return tag.replace(TAG_NORMALIZE_RE, '').toLowerCase();
+  return canonicalizeTag(tag.replace(TAG_NORMALIZE_RE, ''));
 }
 
 function tokenizeTitle(text: string | undefined): Set<string> {

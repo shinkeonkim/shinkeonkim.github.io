@@ -1,6 +1,7 @@
 ---
 import PagefindConfig from 'astro-pagefind/components/PagefindConfig.astro';
 import { getPublishedNotes, getPublishedPosts, getPublishedWiki } from '../lib/content-queries';
+import { canonicalizeTag, getTagMeta } from '../data/tags';
 
 const [posts, notes, wiki] = await Promise.all([
   getPublishedPosts(),
@@ -9,13 +10,26 @@ const [posts, notes, wiki] = await Promise.all([
 ]);
 
 const tagCounts = new Map<string, number>();
-for (const p of posts) for (const t of p.data.tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
-for (const w of wiki) for (const t of w.data.tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
-for (const n of notes) for (const t of n.data.tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
+const tagLabels = new Map<string, string>();
+const bumpTag = (raw: string): void => {
+  const canonical = canonicalizeTag(raw);
+  tagCounts.set(canonical, (tagCounts.get(canonical) ?? 0) + 1);
+  if (!tagLabels.has(canonical)) {
+    const meta = getTagMeta(canonical);
+    tagLabels.set(canonical, meta?.canonical ?? raw);
+  }
+};
+for (const p of posts) for (const t of p.data.tags) bumpTag(t);
+for (const w of wiki) for (const t of w.data.tags) bumpTag(t);
+for (const n of notes) for (const t of n.data.tags) bumpTag(t);
 
 const tagList = Array.from(tagCounts.entries())
   .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-  .map(([name, count]) => ({ name, count }));
+  .map(([canonical, count]) => ({
+    name: tagLabels.get(canonical) ?? canonical,
+    slug: canonical,
+    count,
+  }));
 
 interface CommandEntry {
   id: string;
@@ -263,7 +277,7 @@ const commandList: CommandEntry[] = [
       const top = filtered.slice(0, 30);
       currentItems = top.map((t) => ({
         kind: 'tag',
-        href: `/tags/${encodeURIComponent(t.name.toLowerCase())}/`,
+        href: `/tags/${encodeURIComponent(t.slug)}/`,
       }));
       stats.textContent = `${filtered.length}개 태그`;
       container.innerHTML = top.length === 0
@@ -271,7 +285,7 @@ const commandList: CommandEntry[] = [
         : top
             .map(
               (t, i) => `
-              <a href="/tags/${encodeURIComponent(t.name.toLowerCase())}/" class="search-modal-hit" data-index="${i}">
+              <a href="/tags/${encodeURIComponent(t.slug)}/" class="search-modal-hit" data-index="${i}">
                 <span class="search-modal-hit-badge">#${escapeHtml(t.name)}</span>
                 <span class="search-modal-hit-body">
                   <span class="search-modal-hit-title">${escapeHtml(t.name)} (${t.count})</span>

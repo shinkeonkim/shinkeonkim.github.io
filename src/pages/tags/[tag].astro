@@ -4,37 +4,72 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
 import { SITE_LOCALE, SITE_URL } from '../../consts';
 import { breadcrumbSchema, collectionPageSchema, absoluteUrl } from '../../lib/schema';
 import { getPublishedNotes, getPublishedPosts, getPublishedWiki } from '../../lib/content-queries';
-import { getTagMeta } from '../../data/tags';
+import { canonicalizeTag, getTagMeta, tagToSlug } from '../../data/tags';
 
-// Routes use lowercase tag slugs so URLs like /tags/leetcode/ resolve
-// regardless of whether the source frontmatter wrote "Leetcode" or "leetcode".
-// The display label preserves the first-seen original casing.
+// Tag routes are keyed by canonical slug (NFC + lowercase, alias-resolved).
+// Alias slugs (e.g. /tags/ps/, /tags/문제풀이/) also render the same canonical
+// content; their <link rel="canonical"> points to the canonical URL so search
+// engines consolidate duplicates. See manual-docs/tag-meta-guide.md.
 export async function getStaticPaths() {
   const [posts, wiki, notes] = await Promise.all([
     getPublishedPosts(),
     getPublishedWiki(),
     getPublishedNotes(),
   ]);
-  const slugToLabel = new Map<string, string>();
+
+  // canonical slug → first-seen display label.
+  // Meta-registered canonicals prefer the canonical itself as the label
+  // (e.g. javascript, postgresql) for consistency; others use the first raw spelling.
+  const canonicalToLabel = new Map<string, string>();
   const addTag = (raw: string): void => {
-    const slug = raw.toLowerCase();
-    if (!slugToLabel.has(slug)) slugToLabel.set(slug, raw);
+    const canonical = canonicalizeTag(raw);
+    if (!canonicalToLabel.has(canonical)) {
+      const meta = getTagMeta(canonical);
+      canonicalToLabel.set(canonical, meta?.canonical ?? raw);
+    }
   };
   for (const p of posts) p.data.tags.forEach(addTag);
   for (const w of wiki) w.data.tags.forEach(addTag);
   for (const n of notes) n.data.tags.forEach(addTag);
-  return Array.from(slugToLabel.entries()).map(([slug, label]) => ({
-    params: { tag: slug },
-    props: { tagLabel: label },
-  }));
+
+  // Emit canonical slug entries + one entry per registered alias.
+  // All alias entries share the same props as the canonical so the rendered
+  // content is identical; only `isAlias` differs to drive <link rel="canonical">.
+  const entries: {
+    params: { tag: string };
+    props: { canonicalSlug: string; displayLabel: string; isAlias: boolean };
+  }[] = [];
+  const seenSlugs = new Set<string>();
+  // Raw alias slug preserves the original casing ('PS', 'JavaScript') so direct
+  // links like /tags/PS/ resolve. Only strips URL-unsafe characters; no lowercase.
+  const rawAliasSlug = (alias: string): string =>
+    alias.normalize('NFC').replace(/[\\/?#%]+/g, '-').replace(/^-+|-+$/g, '');
+
+  const pushEntry = (slug: string, canonicalSlug: string, displayLabel: string, isAlias: boolean) => {
+    if (!slug || seenSlugs.has(slug)) return;
+    seenSlugs.add(slug);
+    entries.push({ params: { tag: slug }, props: { canonicalSlug, displayLabel, isAlias } });
+  };
+
+  for (const [canonicalSlug, displayLabel] of canonicalToLabel) {
+    pushEntry(canonicalSlug, canonicalSlug, displayLabel, false);
+    const meta = getTagMeta(canonicalSlug);
+    for (const alias of meta?.aliases ?? []) {
+      pushEntry(tagToSlug(alias), canonicalSlug, displayLabel, true);
+      pushEntry(rawAliasSlug(alias), canonicalSlug, displayLabel, true);
+    }
+  }
+
+  return entries;
 }
 
 interface Props {
-  tagLabel: string;
+  canonicalSlug: string;
+  displayLabel: string;
+  isAlias: boolean;
 }
-const { tagLabel } = Astro.props as Props;
-const tagSlug = Astro.params.tag!;
-const matchesTag = (t: string): boolean => t.toLowerCase() === tagSlug;
+const { canonicalSlug, displayLabel, isAlias } = Astro.props as Props;
+const matchesTag = (raw: string): boolean => canonicalizeTag(raw) === canonicalSlug;
 
 const [posts, wiki, notes] = await Promise.all([
   getCollection('posts', ({ data }) => !data.draft && data.tags.some(matchesTag)),
@@ -42,7 +77,7 @@ const [posts, wiki, notes] = await Promise.all([
   getCollection('notes', ({ data }) => data.tags.some(matchesTag)),
 ]);
 
-const tag = tagLabel;
+const tag = displayLabel;
 
 const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
   year: 'numeric',
@@ -54,11 +89,12 @@ posts.sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
 wiki.sort((a, b) => a.data.title.localeCompare(b.data.title));
 notes.sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
 
-const tagMeta = getTagMeta(tagSlug);
+const tagMeta = getTagMeta(canonicalSlug);
 const tagDescription = tagMeta?.description;
 const relatedTags = tagMeta?.related ?? [];
 
-const tagUrl = absoluteUrl(`/tags/${encodeURIComponent(tagSlug)}/`);
+const canonicalPath = `/tags/${encodeURIComponent(canonicalSlug)}/`;
+const tagUrl = absoluteUrl(canonicalPath);
 const totalCount = posts.length + wiki.length + notes.length;
 const pageTitle = `#${tag}`;
 const pageDescription =
@@ -85,6 +121,7 @@ void SITE_URL;
   description={pageDescription}
   jsonLd={jsonLd}
   keywords={[tag!, '태그', '아카이브']}
+  canonicalUrl={isAlias ? canonicalPath : undefined}
 >
   <section class="mx-auto max-w-3xl px-5" data-pagefind-ignore="all">
     <nav class="mb-3 text-xs text-[color:var(--color-fg-muted)]">

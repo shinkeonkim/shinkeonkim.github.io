@@ -2,6 +2,7 @@
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import { absoluteUrl, breadcrumbSchema, collectionPageSchema } from '../../lib/schema';
 import { getPublishedNotes, getPublishedPosts, getPublishedWiki } from '../../lib/content-queries';
+import { canonicalizeTag, getTagMeta, listTagMetadata } from '../../data/tags';
 
 const [posts, wiki, notes] = await Promise.all([
   getPublishedPosts(),
@@ -9,10 +10,24 @@ const [posts, wiki, notes] = await Promise.all([
   getPublishedNotes(),
 ]);
 
+// counts keyed by canonical tag (PS + 문제풀이 → ps, JavaScript + js → javascript).
+// labels: canonical → display label. Meta-registered tags display their canonical
+// (e.g. javascript, postgresql); unregistered ones use the first raw spelling seen.
 const counts = new Map<string, number>();
-for (const p of posts) for (const t of p.data.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
-for (const w of wiki) for (const t of w.data.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
-for (const n of notes) for (const t of n.data.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+const labels = new Map<string, string>();
+
+function bump(raw: string): void {
+  const canonical = canonicalizeTag(raw);
+  counts.set(canonical, (counts.get(canonical) ?? 0) + 1);
+  if (!labels.has(canonical)) {
+    const meta = getTagMeta(canonical);
+    labels.set(canonical, meta?.canonical ?? raw);
+  }
+}
+
+for (const p of posts) for (const t of p.data.tags) bump(t);
+for (const w of wiki) for (const t of w.data.tags) bump(t);
+for (const n of notes) for (const t of n.data.tags) bump(t);
 
 const tags = Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 const totalTags = tags.length;
@@ -24,6 +39,21 @@ function tagSize(count: number): string {
   if (ratio > 0.33) return 'text-sm font-medium';
   return 'text-xs';
 }
+
+// 주제별 메타 카드: description 이 등록된 메타만 노출. count 0 인 메타는 숨김.
+const featuredMeta = listTagMetadata()
+  .filter((m) => m.description && (counts.get(canonicalizeTag(m.canonical)) ?? 0) > 0)
+  .map((m) => {
+    const canonical = canonicalizeTag(m.canonical);
+    return {
+      canonical,
+      label: labels.get(canonical) ?? m.canonical,
+      description: m.description!,
+      related: m.related ?? [],
+      count: counts.get(canonical) ?? 0,
+    };
+  })
+  .sort((a, b) => b.count - a.count || a.canonical.localeCompare(b.canonical));
 
 const pageDescription = `김신건의 로그에서 사용된 ${totalTags}개의 태그, Python, 알고리즘, Django, Astro, 웹 개발 등 주제별로 글·노트·위키를 모아봅니다.`;
 
@@ -52,20 +82,58 @@ const jsonLd = [
     </p>
 
     {
+      featuredMeta.length > 0 && (
+        <section class="mb-10">
+          <h2 class="mb-3 text-lg font-semibold">주제별 태그</h2>
+          <ul class="grid gap-3 sm:grid-cols-2">
+            {featuredMeta.map((m) => (
+              <li class="rounded-lg border border-[color:var(--color-border)] p-3 hover:border-[color:var(--color-accent)]">
+                <a
+                  href={`/tags/${encodeURIComponent(m.canonical)}/`}
+                  class="block no-underline"
+                >
+                  <span class="mb-1 flex items-baseline justify-between gap-2">
+                    <span class="text-base font-medium">#{m.label}</span>
+                    <span class="text-xs text-[color:var(--color-fg-muted)]">{m.count}</span>
+                  </span>
+                  <span class="block text-sm text-[color:var(--color-fg-muted)]">
+                    {m.description}
+                  </span>
+                </a>
+                {m.related.length > 0 && (
+                  <p class="mt-2 flex flex-wrap items-baseline gap-1 text-xs text-[color:var(--color-fg-muted)]">
+                    {m.related.map((r) => (
+                      <a
+                        href={`/tags/${encodeURIComponent(r.toLowerCase())}/`}
+                        class="inline-flex items-center rounded-full border border-[color:var(--color-border)] px-2 py-0.5 no-underline hover:border-[color:var(--color-accent)] hover:text-[color:var(--color-accent)]"
+                      >
+                        #{r}
+                      </a>
+                    ))}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )
+    }
+
+    {
       tags.length === 0 ? (
         <p class="text-sm text-[color:var(--color-fg-muted)]">아직 태그가 없습니다.</p>
       ) : (
         <ul class="flex flex-wrap items-baseline gap-x-3 gap-y-2">
-          {tags.map(([tag, count]) => (
+          {tags.map(([canonical, count]) => (
             <li>
               <a
-                href={`/tags/${encodeURIComponent(tag.toLowerCase())}/`}
+                href={`/tags/${encodeURIComponent(canonical)}/`}
                 class:list={[
                   'inline-flex items-baseline gap-1 rounded-md px-2 py-1 no-underline hover:bg-[color:var(--color-surface-elevated)] hover:text-[color:var(--color-accent)]',
                   tagSize(count),
                 ]}
               >
-                <span>#{tag}</span>
+                <span>#{labels.get(canonical) ?? canonical}</span>
                 <span class="text-xs opacity-60">{count}</span>
               </a>
             </li>

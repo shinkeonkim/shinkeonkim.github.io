@@ -1,3 +1,5 @@
+// Tag metadata registry. See manual-docs/tag-meta-guide.md for the policy
+// (canonical = NFC + lowercase key, alias normalization, display label rules).
 export interface TagMeta {
   canonical: string;
   aliases?: string[];
@@ -81,4 +83,13 @@ export function getTagMeta(tag: string): TagMeta | undefined {
 
 export function listTagMetadata(): readonly TagMeta[] {
   return TAG_METADATA;
+}
+
+// URL slug for a tag (canonical or alias). Replaces URL path-unsafe characters
+// (e.g. '/' in 'async/await') so Astro's [tag] dynamic param stays a single segment.
+// Mirror this rule in src/lib/sitemap-lastmod.mjs (tagSlug) when changed.
+export function tagToSlug(tag: string): string {
+  return normKey(tag)
+    .replace(/[\\/?#%]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
