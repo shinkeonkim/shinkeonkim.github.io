@@ -1,0 +1,202 @@
+---
+title: "분산 학습"
+aliases: ["Distributed Training", "distributed training", "분산 훈련", "model parallelism", "tensor parallelism", "pipeline parallelism", "data parallelism"]
+tags: [ai, training, parallelism, scaling]
+updated: 2026-06-14
+---
+
+## 정의
+
+**분산 학습 (Distributed Training)** 은 한 [[GPU]] 또는 [[TPU]] 에 들어가지 않는 큰 모델을 **여러 가속기에 나눠서** 학습시키는 기법.
+
+현대 LLM (Llama 405B, GPT-4, Gemini Ultra 등) 은 **수천 ~ 수만 개의 GPU 로 동시에 학습**된다. 한 GPU 가 메모리, 컴퓨트, 통신 등 어느 한 자원이 부족할 때 다양한 방식으로 분할한다.
+
+```anim:distributed-training
+{}
+```
+
+## 핵심 4가지 병렬화 전략
+
+대규모 모델 학습은 보통 **4가지 (이상의) parallelism 을 조합**해서 사용한다.
+
+### 1. Data Parallelism (DP), 가장 단순
+
+```text
+GPU 0: 전체 모델 + 데이터 batch 의 1/N
+GPU 1: 전체 모델 + 데이터 batch 의 1/N
+...
+GPU N: 전체 모델 + 데이터 batch 의 1/N
+
+→ 각자 forward + backward
+→ all-reduce 로 gradient 동기화
+→ 같은 step 후 모델이 동일해짐
+```
+
+- **장점**: 구현 가장 단순 (PyTorch DDP 한 줄)
+- **단점**: 각 GPU 에 전체 모델이 들어가야 함 (메모리 부족 시 사용 불가)
+- **통신**: 매 step backward 후 all-reduce (전체 모델 gradient 동기화)
+
+### 2. Tensor Parallelism (TP), 한 layer 를 쪼개기
+
+큰 행렬 곱셈을 가로/세로로 분할.
+
+```text
+Original: Y = X @ W  (W: [hidden, ff] = [4096, 16384])
+
+Tensor Parallel (4-way):
+  GPU 0: W_0 = W[:, 0:4096]
+  GPU 1: W_1 = W[:, 4096:8192]
+  GPU 2: W_2 = W[:, 8192:12288]
+  GPU 3: W_3 = W[:, 12288:16384]
+
+  각 GPU: Y_i = X @ W_i
+  결합: Y = concat([Y_0, Y_1, Y_2, Y_3])  # all-gather
+```
+
+- **장점**: 큰 layer 도 분할 가능
+- **단점**: forward 마다 통신 (all-reduce/all-gather) 필요, 노드 내 NVLink 같은 빠른 연결 필수
+- **대표**: Megatron-LM 의 TP 구현
+
+### 3. Pipeline Parallelism (PP), layer 를 분할
+
+모델의 layer 를 GPU 들에 수직 분배.
+
+```text
+GPU 0: Layer 1-10
+GPU 1: Layer 11-20
+GPU 2: Layer 21-30
+GPU 3: Layer 31-40
+
+→ 입력 → GPU 0 → GPU 1 → GPU 2 → GPU 3 → 출력
+```
+
+순차적이라 idle 시간 발생. **micro-batching** 으로 pipeline 채움 (GPipe, PipeDream).
+
+```text
+시간 →
+GPU 0: [B1] [B2] [B3] [B4] [bw4][bw3][bw2][bw1]
+GPU 1:      [B1] [B2] [B3] [B4] [bw4][bw3][bw2][bw1]
+GPU 2:           [B1] [B2] [B3] [B4] [bw4][bw3][bw2][bw1]
+GPU 3:                [B1] [B2] [B3] [B4] [bw4][bw3][bw2][bw1]
+```
+
+- **장점**: 통신 비용 작음 (인접 GPU 만), 매우 깊은 모델에 효과적
+- **단점**: bubble (idle 시간) 발생, 정확한 schedule 필요
+
+### 4. ZeRO / FSDP, 메모리 sharding
+
+Microsoft DeepSpeed 의 ZeRO ([arXiv:1910.02054](https://arxiv.org/abs/1910.02054)), PyTorch FSDP 가 대표.
+
+데이터 병렬의 메모리 비효율을 해결. 각 GPU 가 모델 일부만 저장.
+
+| Stage | shard 대상 | 메모리 절약 |
+|:---|:---|:---|
+| ZeRO-1 | Optimizer state | 4x |
+| ZeRO-2 | + Gradient | 8x |
+| **ZeRO-3 (FSDP)** | + Parameter | **N x** (GPU 수에 비례) |
+
+ZeRO-3 / FSDP 동작:
+- 평소: parameter 도 shard 되어 있음
+- forward 시: 필요한 layer 의 parameter 를 all-gather 로 모음
+- backward 시: gradient 계산 후 reduce-scatter 로 다시 분산
+
+- **장점**: Data Parallelism + 메모리 효율
+- **단점**: gather/scatter 통신 비용 추가
+
+## 5. Context Parallelism (CP), 시퀀스 차원 분할
+
+긴 컨텍스트 (32K, 100K+ token) 학습 시 시퀀스 자체를 GPU 에 분할.
+
+```text
+GPU 0: token 0~8K
+GPU 1: token 8K~16K
+GPU 2: token 16K~24K
+GPU 3: token 24K~32K
+
+→ attention 시 ring exchange 로 통신
+```
+
+Google Gemini 1.5 Pro (1M context), Llama 3 (128K context) 학습에 사용.
+
+## 6. Expert Parallelism (EP), MoE 모델
+
+Mixture of Experts (MoE) 모델에서 각 expert 를 다른 GPU 에 배치. 라우팅으로 활성 expert 만 통신.
+
+- Mixtral 8x7B
+- DeepSeek V3 (671B parameter, 활성 37B)
+
+## 조합: 3D / 4D / 5D Parallelism
+
+대규모 학습은 보통 여러 차원을 조합:
+
+```text
+Total GPUs = TP × PP × DP × CP × EP
+
+예: Llama 3.1 405B 학습 (16,000 H100):
+  TP: 8 (노드 내, NVLink)
+  PP: 16 (노드 간, InfiniBand)
+  DP: 125 (전체 batch 분산)
+  Total: 8 × 16 × 125 = 16,000
+```
+
+각 차원의 통신 패턴:
+
+- **TP**: forward 마다 all-reduce/all-gather → **고대역폭 필수** (NVLink)
+- **PP**: layer 경계에서 1회 → **저대역폭 OK** (InfiniBand)
+- **DP**: backward 후 all-reduce → 중간 대역폭
+- **CP**: ring exchange → 노드 내 추천
+- **EP**: 라우팅 통신 → all-to-all
+
+## 동기화 패턴 (Collective Communication)
+
+분산 학습의 핵심은 **collective operation** 들.
+
+```
+all-reduce:  [a,b,c,d] → 각 노드에 sum=a+b+c+d
+all-gather:  [a,b,c,d] → 각 노드에 [a,b,c,d]
+reduce-scatter: [a,b,c,d] → 각 노드에 일부 sum
+broadcast:   [a,...,...,...] → [a,a,a,a]
+all-to-all:  matrix transpose 같은 전체 재분배
+```
+
+이 연산들이 분산 학습의 통신 비용. 효율적인 구현이 NVIDIA NCCL, AMD RCCL, Google CC 라이브러리.
+
+## 프레임워크
+
+| 프레임워크 | 주력 | 비고 |
+|:---|:---|:---|
+| **PyTorch DDP** | DP | 가장 단순, 한 줄로 사용 |
+| **PyTorch FSDP** | DP + ZeRO-3 | 메모리 효율 DP |
+| **Megatron-LM** (NVIDIA) | TP + PP + CP + DP + EP | LLM 학습 표준 |
+| **DeepSpeed** (Microsoft) | ZeRO 1/2/3 + PP | MoE 지원 |
+| **Colossal-AI** | 모든 전략 통합 | 학습 + 추론 통합 |
+| **JAX/Flax + pmap/pjit** | SPMD 스타일 분할 | Google TPU 표준 |
+
+## 어디서 사용?
+
+| 모델 | 학습에 쓴 전략 |
+|:---|:---|
+| Llama 2/3 (70B+) | DP + TP + PP + FSDP |
+| Mixtral 8x7B (MoE) | DP + EP + TP |
+| GPT-4 (추정) | DP + TP + PP + EP |
+| Gemini 1.5 Pro (1M context) | DP + TP + CP |
+| DeepSeek V3 (671B MoE) | DP + EP + TP |
+
+## CS 에 미친 영향
+
+분산 학습은 단순한 엔지니어링 기법을 넘어 ML 연구 전체를 바꿨다.
+
+- **모델 크기 폭증**: 1B → 7B → 70B → 405B → 1T (3년에 1000배)
+- **데이터센터 설계 변화**: NVLink, InfiniBand, 광 통신이 핵심 인프라
+- **새로운 연구 분야**: scaling law, parallelism 자동 탐색 (Alpa, GSPMD)
+- **분산 시스템 지식 필수**: ML 엔지니어가 통신, 동기화, 장애 복구를 알아야
+
+## 참고
+
+- [Megatron Core Parallelism Guide](https://docs.nvidia.com/megatron-core/developer-guide/0.17.0/user-guide/parallelism-guide.html)
+- [DeepSpeed ZeRO](https://www.deepspeed.ai/tutorials/zero/)
+- [JAX, How to Parallelize Transformers](https://jax-ml.github.io/scaling-book/training/)
+- [Megatron-LM (arXiv:1909.08053)](https://arxiv.org/abs/1909.08053)
+- [GPipe (arXiv:1811.06965)](https://arxiv.org/abs/1811.06965)
+- [[SPMD]] - 분산 학습의 프로그래밍 모델
+- [[양자화]] - 학습된 모델 압축

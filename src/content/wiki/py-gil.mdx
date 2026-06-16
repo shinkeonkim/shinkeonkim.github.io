@@ -1,0 +1,347 @@
+---
+title: "[Python] GIL, multiprocessing 그리고 free-threaded (3.14)"
+aliases: ["GIL", "Python GIL", "Global Interpreter Lock", "free-threaded", "no-gil", "PEP 703", "PEP 779", "PEP 734", "concurrent.interpreters", "Python free threading"]
+tags: [python, gil, concurrency, multiprocessing, pep-703, pep-779, pep-734]
+updated: 2026-06-14
+references:
+  - title: "Python 3.14 What's New"
+    url: "https://docs.python.org/3.14/whatsnew/3.14.html"
+  - title: "PEP 779 – Criteria for supported status for free-threaded Python"
+    url: "https://peps.python.org/pep-0779/"
+  - title: "PEP 734 – Multiple Interpreters in the Stdlib"
+    url: "https://peps.python.org/pep-0734/"
+  - title: "PEP 703 – Making the Global Interpreter Lock Optional in CPython"
+    url: "https://peps.python.org/pep-0703/"
+---
+
+## 정의
+
+**GIL (Global Interpreter Lock)** 은 CPython 인터프리터가 **한 번에 하나의 OS 스레드만** 파이썬 바이트코드를 실행할 수 있도록 보장하는 뮤텍스. 1990 년대부터 CPython 의 메모리 관리 (특히 reference counting) 를 단순하고 안전하게 만든 핵심 메커니즘.
+
+대가는 분명하다. **CPU-bound 멀티스레딩이 사실상 불가능**. `threading.Thread` 를 N 개 띄워도 CPU 코어가 N 개 있어도 한 번에 한 스레드만 도는 효과. 그래서 파이썬은 오랫동안 CPU-bound 병렬화에 [multiprocessing](#multiprocessing-과-그-함정-ipc-오버헤드) 을 써왔고, 그 결과는 **IPC 오버헤드** 라는 다른 비용으로 옮겨졌다.
+
+Python 3.13 (실험적) 과 **3.14 (정식 지원)** 에서 이 문제에 두 가지 답을 함께 내놓는다.
+
+1. **PEP 703 + PEP 779**: free-threaded CPython 빌드 (GIL 없음). 진짜 멀티스레딩
+2. **PEP 734**: `concurrent.interpreters` 표준 모듈. 프로세스 비용 없이 인터프리터 단위 격리
+
+## GIL 이 왜 있는가
+
+CPython 의 모든 객체는 **참조 카운트** 로 메모리 관리된다.
+
+```python
+x = []          # refcount = 1
+y = x           # refcount = 2
+del y           # refcount = 1
+del x           # refcount = 0 → 해제
+```
+
+여러 스레드가 동시에 `x` 의 refcount 를 증감하면 race condition 으로 누수 / double-free 가 발생. 매 refcount 연산마다 atomic CAS 를 쓰면 단일 스레드 성능이 박살 (1990 년대 기준).
+
+**가장 단순한 해결**: 인터프리터 전체에 큰 락 하나 (= GIL). 모든 객체 접근이 자동으로 직렬화됨.
+
+| 장점 | 단점 |
+|:---|:---|
+| 구현 단순 | CPU-bound 멀티스레딩 불가 |
+| C 확장 작성 쉬움 (자동 동기화) | 멀티코어 활용 못함 |
+| 단일 스레드 성능 좋음 | 동시성 ≠ 병렬성 |
+
+`asyncio`, `threading` 도 GIL 안에서 도므로 **I/O-bound** 작업은 빠르다 (대기 중에 GIL 양보). 그러나 **CPU-bound** (수치 계산, 이미지 처리, 압축 등) 는 1 코어로 묶인다.
+
+## multiprocessing 과 그 함정, IPC 오버헤드
+
+표준 우회법: **별도 프로세스** 를 띄워 각 프로세스가 자기 GIL 을 가진다. 이게 `multiprocessing` 모듈.
+
+```python
+from multiprocessing import Pool
+
+def heavy(n):
+    return sum(i*i for i in range(n))
+
+with Pool(8) as p:
+    results = p.map(heavy, [10**6] * 8)
+```
+
+8 코어 모두 활용 → CPU-bound 가 진짜로 8 배 빨라진다.
+
+### 그런데 IPC 오버헤드가 발목
+
+프로세스 간에 데이터를 주고받으려면 **직렬화 → 파이프 → 역직렬화** 가 필요하다.
+
+```python
+from multiprocessing import Pool
+import numpy as np
+
+def transform(arr):
+    return arr * 2
+
+big = np.random.rand(10_000_000)  # 80 MB
+with Pool(4) as p:
+    result = p.map(transform, [big] * 4)
+# → big 을 4 회 pickle, 4 프로세스에 복사, 결과를 다시 pickle 후 모음
+# → 진짜 계산 시간보다 IPC 시간이 더 길 수 있다
+```
+
+비용 항목:
+
+| 비용 | 내용 |
+|:---|:---|
+| **pickle** | 객체를 바이트로 직렬화. 큰 numpy 배열은 GB 단위 가능 |
+| **파이프 전송** | OS pipe 또는 shared memory. 직렬화 데이터 통과 |
+| **unpickle** | 받는 쪽에서 객체 재구성 |
+| **프로세스 시작** | fork (Linux) 또는 spawn (macOS/Windows). 후자는 인터프리터를 새로 띄움 |
+| **중복 메모리** | 같은 데이터가 각 프로세스에 복사됨 |
+
+> [!CAUTION]
+> 작은 데이터에 CPU-bound 계산은 `multiprocessing` 이 빠르다. **큰 데이터에 가벼운 계산은 IPC 비용이 계산 비용을 초과** 한다. 그래서 `numpy.einsum`, `pandas.apply` 등은 보통 단일 프로세스가 더 빠르다.
+
+### 부분 해결: shared_memory (Python 3.8+)
+
+```python
+from multiprocessing import shared_memory
+import numpy as np
+
+shm = shared_memory.SharedMemory(create=True, size=80_000_000)
+shared = np.ndarray((10_000_000,), dtype=np.float64, buffer=shm.buf)
+shared[:] = big[:]  # 한 번만 복사
+
+# 자식 프로세스는 같은 shm 을 이름으로 attach → 0-copy 접근
+```
+
+pickle 없이 메모리를 공유. 그러나:
+- 직접 `numpy` 객체를 공유 못 함 (raw buffer + shape 정보를 따로 전달)
+- 명시적 동기화 필요 (Lock 도 inter-process)
+- 정리 (unlink) 가 까다로움
+
+[`multiprocessing.Manager`](https://docs.python.org/3/library/multiprocessing.html#managers) 같은 high-level API 도 있지만, 결국 매 호출마다 IPC 가 발생.
+
+## PEP 703 + PEP 779, GIL 없는 빌드 (free-threaded)
+
+**Sam Gross (Meta)** 가 2022 년 제안한 [PEP 703](https://peps.python.org/pep-0703/). reference counting 을 **biased reference counting + atomic ops** 로 바꾸고, dict / list 등 컨테이너에 **lockless 자료구조** 를 채택. GIL 없이도 안전한 메모리 관리 가능.
+
+도입 단계:
+- **Phase I (Python 3.13, 2024)**: experimental 빌드. `--disable-gil` 컴파일 옵션.
+- **Phase II (Python 3.14, 2025-10-07)**: **공식 지원** ([PEP 779](https://peps.python.org/pep-0779/)). 더 이상 experimental 아님.
+- **Phase III (미정)**: free-threaded 가 default 가 됨. 시점 미확정.
+
+### 3.14 의 성능 특성
+
+| 항목 | with-GIL 빌드 대비 |
+|:---|:---|
+| 단일 스레드 CPU 성능 | **~10% 느림** (Linux/Windows), ~3% 느림 (macOS) |
+| 메모리 사용량 | **~15-20% 증가** |
+| CPU-bound 멀티스레딩 | **N 코어 만큼 빠름** (스케일링 가능) |
+
+> [!IMPORTANT]
+> 3.13 에서 단일 스레드 페널티가 ~30% 였는데, **3.14 에서 specializing adaptive interpreter (PEP 659) 가 free-threaded 모드에서 활성화** 되며 10% 수준까지 줄었다. 3.14 가 실용 임계점.
+
+### 사용법
+
+빌드:
+
+```bash
+./configure --disable-gil --enable-optimizations
+make
+```
+
+또는 공식 binary 설치 후 GIL 끄기:
+
+```bash
+PYTHON_GIL=0 python script.py
+```
+
+런타임 확인:
+
+```python
+import sys
+print(sys.flags.gil)  # 0 = disabled
+```
+
+### 실제 코드 예시
+
+```python
+import threading
+import time
+
+def cpu_bound(n):
+    total = 0
+    for i in range(n):
+        total += i * i
+    return total
+
+start = time.time()
+threads = [threading.Thread(target=cpu_bound, args=(10**8,)) for _ in range(8)]
+for t in threads: t.start()
+for t in threads: t.join()
+print(f"{time.time() - start:.2f}s")
+
+# with-GIL 빌드: ~12s (8 스레드가 직렬)
+# free-threaded:  ~1.6s (8 코어 활용, 거의 8 배)
+```
+
+### 호환성 함정
+
+> [!CAUTION]
+> 모든 C 확장이 자동으로 동작하는 건 아니다. **`Py_GIL_DISABLED` 모듈은 모듈 import 시 명시적으로 free-threaded 호환을 선언** 해야 한다. 미선언 모듈을 import 하면 런타임이 GIL 을 다시 활성화 (fallback) 한다.
+
+| 라이브러리 | 3.14 시점 호환성 |
+|:---|:---|
+| NumPy | ✓ 2.1+ (2024-10) |
+| PyTorch | ✓ 2.5+ |
+| Pandas | ✓ 2.3+ (실험적) |
+| Cython, pybind11, nanobind, PyO3 | 진행 중 |
+| 대부분 순수 파이썬 패키지 | 자동 호환 |
+
+추적: [py-free-threading.github.io/tracking](https://py-free-threading.github.io/tracking/)
+
+## PEP 734, `concurrent.interpreters` — 또 다른 길
+
+free-threaded 가 부담스럽다면 (호환성, 메모리, 단일 스레드 페널티) **3.14 의 두 번째 답**: **서브인터프리터를 표준 라이브러리로**.
+
+### 배경: per-interpreter GIL (PEP 684, 3.12)
+
+CPython 은 한 프로세스 안에 **여러 인터프리터** 를 만들 수 있다 (`Py_NewInterpreter()`). 3.12 부터 각 인터프리터가 **자기 GIL** 을 가진다. 즉:
+
+```
+프로세스 1개
+├── 인터프리터 A (자기 GIL)  → CPU 코어 1
+├── 인터프리터 B (자기 GIL)  → CPU 코어 2
+└── 인터프리터 C (자기 GIL)  → CPU 코어 3
+```
+
+같은 프로세스 안에서 **진짜 병렬** 가능. 그러나 3.13 까지는 C API 로만 접근.
+
+### 3.14: 표준 모듈로
+
+```python
+from concurrent import interpreters
+
+def heavy():
+    return sum(i*i for i in range(10**7))
+
+interp = interpreters.create()
+interp.call(heavy)  # 별도 인터프리터에서 실행, 진짜 병렬
+```
+
+또는 `concurrent.futures.InterpreterPoolExecutor`:
+
+```python
+from concurrent.futures import InterpreterPoolExecutor
+
+with InterpreterPoolExecutor(max_workers=8) as pool:
+    results = list(pool.map(heavy, [10**7] * 8))
+```
+
+### multiprocessing 과의 비교
+
+| 항목 | multiprocessing | concurrent.interpreters |
+|:---|:---|:---|
+| 격리 단위 | OS 프로세스 | 인터프리터 (프로세스 안) |
+| 시작 비용 | 큰 (수십~수백 ms) | 작은 (수 ms, 향후 더 줄어듦) |
+| 메모리 | 프로세스마다 인터프리터 통째로 | 인터프리터마다 격리, **공유 모듈 코드** |
+| 데이터 공유 | pickle / shared_memory | `Queue` (pickle) / `memoryview` (zero-copy) |
+| C 확장 호환 | 모두 호환 | **isolated extension 만** (3.14 시점 stdlib 만 보장) |
+| GIL | 없음 (프로세스마다 자기 GIL) | 없음 (인터프리터마다 자기 GIL) |
+
+> [!IMPORTANT]
+> `concurrent.interpreters` 는 **multiprocessing 의 격리** + **threading 의 효율** 의 중간점. memoryview zero-copy 공유로 큰 numpy 배열도 IPC 비용 없이 다룰 수 있다.
+
+### memoryview 공유 예시
+
+```python
+from concurrent import interpreters
+import threading
+
+# 80 MB 데이터를 인터프리터들이 공유
+data = bytearray(80_000_000)
+buf = memoryview(data)
+
+tasks = interpreters.create_queue()
+
+def worker():
+    interp = interpreters.create()
+    interp.prepare_main(buf=buf, tasks=tasks)  # buf 는 zero-copy 공유
+    interp.exec("""
+        from mymodule import reduce_chunk
+        while True:
+            req = tasks.get()
+            if req is None: break
+            start, end = req
+            chunk = buf[start:end]
+            reduce_chunk(chunk)  # 같은 메모리 직접 접근
+    """)
+
+threads = [threading.Thread(target=worker) for _ in range(8)]
+for t in threads: t.start()
+```
+
+multiprocessing 의 `shared_memory` 와 비슷하지만 **셋업이 한 줄**.
+
+### 한계 (3.14 시점)
+
+- 인터프리터 시작 비용이 아직 큼 (각 인터프리터가 자체 모듈 캐시 유지)
+- C 확장 호환성: stdlib 만 공식 보장. PyPI 의 인기 패키지 (NumPy 등) 는 부분적
+- 디버깅 / 프로파일링 도구가 아직 미성숙
+- 인터프리터 간 객체 공유는 pickle 또는 buffer protocol 만
+
+## 선택 가이드 (3.14 기준)
+
+| 워크로드 | 추천 |
+|:---|:---|
+| **I/O-bound (네트워크, 디스크)** | `asyncio` 또는 `threading` (기존 그대로) |
+| **CPU-bound, 데이터 적음** | `concurrent.interpreters` (가벼움, 격리) |
+| **CPU-bound, 데이터 큼 (numpy)** | **free-threaded build** (zero-copy, 같은 메모리) |
+| **CPU-bound, C 확장 의존 많음** | `multiprocessing` (가장 호환성 좋음, 여전히 유효) |
+| **C 확장 자체 작성** | `Py_GIL_DISABLED` 선언 후 free-threaded 지원 |
+
+## asyncio 의 위치
+
+GIL 이 있든 없든 `asyncio` 는 **단일 스레드 동시성** 도구. I/O 대기 중 다른 코루틴에 양보. CPU-bound 에는 도움 안 됨.
+
+```python
+# 변하지 않는 진리
+async def main():
+    await asyncio.gather(
+        fetch('http://a'),  # I/O-bound, 동시 진행
+        fetch('http://b'),
+        fetch('http://c'),
+    )
+```
+
+3.14 의 [asyncio introspection](https://docs.python.org/3.14/whatsnew/3.14.html#whatsnew314-asyncio-introspection) 으로 디버깅이 크게 개선됨 (`python -m asyncio ps PID`, `pstree PID`).
+
+## 정리
+
+```text
+~Python 3.12:
+  threading: 1 코어. GIL 때문.
+  multiprocessing: N 코어. IPC 오버헤드.
+
+Python 3.13 (실험):
+  free-threaded build: 단일 스레드 ~30% 느림. 호환성 부족.
+
+Python 3.14 (정식):
+  ① free-threaded build (PEP 779): 단일 ~10% 느림, 멀티 N 배 빠름
+  ② concurrent.interpreters (PEP 734): 가벼운 격리 + 진짜 병렬
+  ③ multiprocessing: 여전히 가장 안전하고 호환성 좋음 (fallback)
+
+→ 워크로드에 맞춰 골라 쓰는 시대로
+```
+
+GIL 의 25 년 시대가 끝나가고 있다. 다만 hard switch 가 아니라 **점진적 이행**: 3.14 는 free-threaded 를 **선택 가능한 정식 옵션** 으로 만들었고, 다음 5 년 안에 default 로 가는 게 목표 (Phase III).
+
+당장의 실용적 시사:
+- 새 프로젝트라면 `concurrent.interpreters` + `InterpreterPoolExecutor` 를 한 번 검토할 가치
+- 큰 numpy / 텐서 워크로드면 free-threaded 시도 → 측정 → 도입
+- 안정성 우선이면 `multiprocessing` 유지. 여전히 유효한 선택
+
+## 참고
+
+- [Python 3.14 What's New](https://docs.python.org/3.14/whatsnew/3.14.html)
+- [PEP 703 — Making the GIL Optional](https://peps.python.org/pep-0703/) (Sam Gross, 2022)
+- [PEP 779 — Criteria for supported status for free-threaded Python](https://peps.python.org/pep-0779/) (Thomas Wouters 외, 2025)
+- [PEP 734 — Multiple Interpreters in the Stdlib](https://peps.python.org/pep-0734/) (Eric Snow, 2023)
+- [PEP 684 — A Per-Interpreter GIL](https://peps.python.org/pep-0684/) (Eric Snow, 2020)
+- [py-free-threading tracking](https://py-free-threading.github.io/tracking/) (라이브러리 호환성 현황)
+- [`concurrent.interpreters` 공식 문서](https://docs.python.org/3.14/library/concurrent.interpreters.html)
+- [Free-threading Community Guide](https://py-free-threading.github.io/)

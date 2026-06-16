@@ -1,0 +1,121 @@
+---
+title: "[Javascript] Microtask Queue"
+aliases: ["Microtask Queue", "microtask queue", "마이크로태스크 큐", "microtask", "마이크로태스크", "JavaScript Microtask Queue", "JS microtask queue"]
+tags: [javascript, async, runtime, event-loop]
+updated: 2026-06-14
+---
+
+## 정의
+
+**Microtask Queue (마이크로태스크 큐)** 는 JavaScript [[이벤트 루프]] 가 매 틱마다 **완전히 비울 때까지** 처리하는 우선순위 큐다. 매크로태스크 큐보다 항상 먼저 비워진다.
+
+ECMAScript 명세는 이를 "PromiseJobs" 라는 Job 큐로 정의 ([§9.5](https://tc39.es/ecma262/#sec-jobs)). WHATWG HTML 명세는 별도의 "microtask queue" 로 통합 ([§8.1.4](https://html.spec.whatwg.org/multipage/webappapis.html#microtask-queue)).
+
+## 핵심 특성
+
+| 측면 | 동작 |
+|:---|:---|
+| **처리량** | 한 틱에 큐가 빌 때까지 **전부** |
+| **우선순위** | 매크로태스크보다 **항상** 먼저 |
+| **추가 시점** | 마이크로태스크 안에서 등록해도 같은 틱 안에서 처리 |
+| **렌더링** | 마이크로태스크 비우는 동안 렌더링 못 함 |
+
+## 들어가는 콜백
+
+| 출처 | 예시 |
+|:---|:---|
+| Promise | `.then`, `.catch`, `.finally` 의 콜백 |
+| async/await | `await` 이후의 함수 재개 |
+| 직접 등록 | `queueMicrotask(fn)` |
+| DOM 변경 관찰 | `MutationObserver` 콜백 |
+| Node.js 전용 | `queueMicrotask`, (그보다 앞: `process.nextTick`) |
+
+## 매크로태스크와의 차이
+
+```javascript
+console.log('start');
+
+setTimeout(() => console.log('macro'), 0); // 매크로
+Promise.resolve().then(() => console.log('micro')); // 마이크로
+
+console.log('end');
+
+// 출력 순서: start, end, micro, macro
+```
+
+이유:
+1. 동기 코드 (`start`, `end`) 가 콜 스택에서 즉시 실행.
+2. 마이크로태스크 큐 비우기 → `micro` 출력.
+3. 매크로태스크 큐에서 1개 꺼냄 → `macro` 출력.
+
+## 마이크로태스크의 폭주
+
+마이크로태스크 안에서 또 마이크로태스크를 등록하면, 같은 틱 안에서 계속 처리된다. 무한 등록 시 렌더링과 매크로태스크가 영원히 못 돈다.
+
+```javascript
+function loop() {
+  Promise.resolve().then(loop);
+}
+loop();
+// 페이지 freeze: setTimeout 콜백, paint, 사용자 이벤트 모두 멈춤
+```
+
+> [!CAUTION]
+> 같은 작업을 매크로태스크 (`setTimeout`) 로 하면 매 틱 1개씩만 실행되므로 렌더링이 끼어든다. **잘게 쪼개야 하는 작업은 매크로 / 즉시 양보해야 할 작업은 마이크로**.
+
+## queueMicrotask, 직접 등록
+
+ES2020. Promise 객체 생성 없이 마이크로태스크 등록.
+
+```javascript
+queueMicrotask(() => {
+  console.log('동기 작업 끝나면 즉시');
+});
+```
+
+`Promise.resolve().then(fn)` 과 효과는 같지만:
+- 의도가 명확 (스케줄링이 목적임을 표현)
+- Promise 인스턴스 생성 비용 없음
+
+라이브러리 내부에서 "이 작업 끝나면 옵저버에게 알리고 싶은데, 동기로는 호출자 콜 스택을 더럽히고 싶지 않을 때" 쓴다.
+
+## await 도 마이크로태스크다
+
+```javascript
+async function f() {
+  console.log('1');
+  await Promise.resolve();
+  console.log('2'); // 마이크로태스크로 재개
+}
+
+console.log('start');
+f();
+console.log('end');
+// → start, 1, end, 2
+```
+
+`await` 는 함수를 일시정지하고, "재개" 를 마이크로태스크 큐에 등록한다.
+
+## Node.js: process.nextTick 의 위치
+
+Node.js 는 마이크로태스크보다도 **더 우선순위 높은** `process.nextTick` 큐를 따로 갖는다.
+
+```javascript
+setImmediate(() => console.log('immediate')); // 매크로
+Promise.resolve().then(() => console.log('promise')); // 마이크로
+process.nextTick(() => console.log('nextTick')); // nextTick
+
+// 출력: nextTick, promise, immediate
+```
+
+> [!CAUTION]
+> `process.nextTick` 도 무한 등록 시 I/O 가 영원히 못 돈다. 라이브러리 작성 시 외부에 노출되는 API 는 `queueMicrotask` 또는 `setImmediate` 가 더 안전.
+
+## 참고
+
+- [[이벤트 루프]]
+- [[Promise]]
+- [[async/await]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- WHATWG HTML, [Microtask queuing](https://html.spec.whatwg.org/multipage/webappapis.html#queue-a-microtask)
+- MDN, [queueMicrotask](https://developer.mozilla.org/ko/docs/Web/API/queueMicrotask)

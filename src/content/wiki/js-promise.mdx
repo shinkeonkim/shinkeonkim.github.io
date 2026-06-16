@@ -1,0 +1,191 @@
+---
+title: "[Javascript] Promise"
+aliases: ["Promise", "promise", "프로미스", "JavaScript Promise", "JS Promise"]
+tags: [javascript, async, ecmascript]
+updated: 2026-06-14
+references:
+  - title: "MDN, Promise"
+    url: "https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Global_Objects/Promise"
+---
+
+## 정의
+
+**Promise** 는 미래의 어떤 시점에 결정될 값을 나타내는 객체다. ECMAScript 2015 (ES6) 에 도입되어 [[콜백]] 기반 비동기의 가독성과 에러 처리 문제를 해결했다.
+
+> "프로미스는 자바스크립트 비동기 처리에 사용되는 객체", [MDN](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Global_Objects/Promise)
+
+전체 메커니즘과 발전사는 [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]] 글 참조.
+
+## 세 가지 상태
+
+```anim:promise-states
+{}
+```
+
+| 상태 | 의미 | 들어가는 방법 |
+|:---|:---|:---|
+| **pending** | 대기, 아직 결정되지 않음 | `new Promise(...)` 직후 |
+| **fulfilled** | 이행 (성공) | executor 가 `resolve(value)` 호출 |
+| **rejected** | 거부 (실패) | executor 가 `reject(reason)` 호출 또는 throw |
+
+핵심: **한 번 fulfilled/rejected 되면 다시 바뀌지 않는다** (settled 상태). 이 불변성이 콜백 대비 가장 큰 안전성 이점.
+
+## 기본 사용
+
+```javascript
+const p = new Promise((resolve, reject) => {
+  setTimeout(() => {
+    Math.random() > 0.5
+      ? resolve('성공')
+      : reject(new Error('실패'));
+  }, 1000);
+});
+
+p
+  .then((value) => console.log(value))
+  .catch((err) => console.error(err))
+  .finally(() => console.log('done'));
+```
+
+**executor 함수는 동기적으로 즉시 실행** 된다. `resolve` / `reject` 는 비동기 작업 완료 시 호출되는 콜백.
+
+## 인스턴스 메서드
+
+| 메서드 | 시그니처 | 언제 호출? |
+|:---|:---|:---|
+| `.then(onFulfilled, onRejected?)` | 두 콜백 | fulfilled 시 1번, rejected 시 2번 |
+| `.catch(onRejected)` | 한 콜백 | rejected 시 |
+| `.finally(onFinally)` | 인자 없는 콜백 | 정착 시 무조건 |
+
+모두 **새 Promise 를 반환** 하여 체이닝 가능.
+
+## 정적 메서드, 동시성 네 형제
+
+| 메서드 | fulfilled 시 | rejected 시 | 결과 |
+|:---|:---|:---|:---|
+| `Promise.all(iter)` | 모두 fulfilled | 하나라도 rejected | 값 배열 / 첫 사유 |
+| `Promise.allSettled(iter)` | 모두 정착 | 절대 안 됨 | `{status, value/reason}` 배열 |
+| `Promise.race(iter)` | 가장 먼저 fulfilled | 가장 먼저 rejected | 가장 먼저 정착한 값/사유 |
+| `Promise.any(iter)` | 하나라도 fulfilled | 모두 rejected | 첫 fulfilled / AggregateError |
+
+### 사용 예시
+
+```javascript
+// 모두 필요
+const [users, posts] = await Promise.all([
+  fetch('/users').then(r => r.json()),
+  fetch('/posts').then(r => r.json()),
+]);
+
+// 부분 실패 OK
+const results = await Promise.allSettled([f1(), f2(), f3()]);
+results.filter(r => r.status === 'fulfilled').forEach(/* ... */);
+
+// 타임아웃
+await Promise.race([
+  fetch('/slow'),
+  new Promise((_, rj) => setTimeout(() => rj('timeout'), 3000)),
+]);
+
+// 미러 중 하나라도
+await Promise.any([
+  fetch('https://mirror1/x'),
+  fetch('https://mirror2/x'),
+]);
+```
+
+## 체이닝 메커니즘
+
+`.then` 의 콜백이 반환하는 값에 따라 다음 단계의 입력이 결정된다.
+
+| 반환 | 다음 then 입력 |
+|:---|:---|
+| 일반 값 | 그 값 |
+| Promise | 그 Promise 가 정착할 때 값 |
+| Thenable | Promise 처럼 풀어서 처리 |
+| 예외 throw | rejected Promise |
+
+이 자동 unwrap 이 `.then().then().then()` 의 평탄한 흐름을 가능하게 한다.
+
+## 함정과 한계
+
+### .then 두 번째 인자 vs .catch
+
+```javascript
+Promise.resolve('hi').then(
+  (v) => { throw new Error('oops'); },
+  (err) => console.log('이건 잡힐까?'), // ❌ 안 잡힘
+);
+```
+
+`onRejected` 는 **이전 단계** 의 에러만 잡는다. 자기 짝 `onFulfilled` 에서 던진 에러는 못 잡는다.
+
+> [!TIP]
+> **`.catch` 가 안전.** 이전 모든 단계의 에러를 한 번에 잡는다.
+
+### Promise 도 지옥이 될 수 있다
+
+`.then` 안에서 또 `.then` 을 중첩하면 콜백 지옥의 사촌. 항상 평탄하게 펴자. 또는 [[async/await]] 사용.
+
+### unhandled rejection
+
+`.catch` 없이 rejected 된 Promise 는 Node.js 에서 `unhandledRejection` 이벤트로, 브라우저에선 콘솔 경고로 노출. 운영 환경에서 누수의 신호.
+
+```javascript
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('처리 안 된 rejection:', reason);
+});
+```
+
+### resolve 가 Promise 면 자동 추적
+
+```javascript
+new Promise((resolveOuter) => {
+  resolveOuter(
+    new Promise((resolveInner) => setTimeout(resolveInner, 1000))
+  );
+});
+// 외부 Promise 는 즉시 resolveOuter 호출됐지만,
+// 그 안의 내부 Promise 가 정착할 때까지 fulfilled 되지 않음.
+```
+
+## 실무 예시
+
+### 콜백 API 를 Promise 화
+
+```javascript
+function promisify(fn) {
+  return (...args) => new Promise((resolve, reject) => {
+    fn(...args, (err, result) => {
+      err ? reject(err) : resolve(result);
+    });
+  });
+}
+
+// Node.js 의 callback 스타일 fs.readFile 을 Promise 로
+const readFile = promisify(fs.readFile);
+const data = await readFile('config.json');
+```
+
+Node.js 는 빌트인 `util.promisify`, `fs/promises` 모듈로 표준 제공.
+
+### Promise.withResolvers (ES2024)
+
+executor 밖에서 resolve / reject 를 노출하고 싶을 때.
+
+```javascript
+const { promise, resolve, reject } = Promise.withResolvers();
+externalEmitter.once('data', resolve);
+externalEmitter.once('error', reject);
+return promise;
+```
+
+## 참고
+
+- [[이벤트 루프]]
+- [[Microtask Queue]]
+- [[콜백]]
+- [[async/await]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- MDN, [Promise](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Global_Objects/Promise)
+- ECMA-262, [Promise Objects](https://tc39.es/ecma262/#sec-promise-objects)

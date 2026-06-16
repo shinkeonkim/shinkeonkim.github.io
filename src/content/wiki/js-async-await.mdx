@@ -1,0 +1,119 @@
+---
+title: "[Javascript] async/await"
+aliases: ["async/await", "async await", "async-await", "async function", "비동기 함수", "JavaScript async/await", "JS async/await"]
+tags: [javascript, async, ecmascript, syntax-sugar]
+updated: 2026-06-14
+---
+
+## 정의
+
+**`async` / `await`** 는 [[Promise]] 기반 비동기 코드를 마치 동기 코드처럼 쓸 수 있게 해주는 ES2017 의 문법 설탕. 본질은 Promise 그 자체, 문법만 다르다.
+
+전체 동작 메커니즘은 [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]] 글 참조.
+
+## 세 가지 규칙
+
+1. **`async` 함수는 항상 Promise 를 반환.** `return value` 는 `Promise.resolve(value)` 와 같다.
+2. **`await expr` 은 `expr` 이 정착할 때까지 함수 실행을 일시정지.** 함수 밖 동기 코드는 계속 진행.
+3. **에러는 `try/catch` 로.** Promise 의 `.catch` 와 동등.
+
+```javascript
+async function loadProfile(userId) {
+  try {
+    const userRes = await fetch(`/users/${userId}`);
+    const user = await userRes.json();
+    const postsRes = await fetch(`/posts?u=${user.id}`);
+    return { user, posts: await postsRes.json() };
+  } catch (err) {
+    console.error(err);
+    throw err;
+  }
+}
+```
+
+## await 의 실제 동작
+
+`await` 는 `.then` 의 문법 설탕이다.
+
+```javascript
+// async/await
+async function f() {
+  const a = await loadA();
+  return a + 1;
+}
+
+// 동치
+function f() {
+  return loadA().then((a) => a + 1);
+}
+```
+
+엔진 안에서:
+1. 오른쪽 표현식을 평가, Promise 가 아니면 `Promise.resolve` 로 감쌈.
+2. 함수 상태를 [[Lexical Environment]] 에 저장.
+3. Promise 정착 시 [[Microtask Queue]] 에 "함수 재개" 등록.
+4. 마이크로태스크 차례가 오면 함수 이어 실행.
+
+> [!IMPORTANT]
+> `await` 이후 코드는 **항상 다음 마이크로태스크 틱에 실행**. 동기 코드보다 늦고, `setTimeout` 보다 빠르다.
+
+## 함정
+
+### 순차 vs 병렬
+
+```javascript
+// 순차 (총 2초)
+const a = await fetch('/a'); // 1초
+const b = await fetch('/b'); // 1초
+
+// 병렬 (총 1초)
+const [a, b] = await Promise.all([fetch('/a'), fetch('/b')]);
+```
+
+의존성 없는 작업은 `Promise.all` 로 묶자.
+
+### 반복문 안의 await
+
+```javascript
+// 순차 처리 (의도적이라면 OK)
+for (const id of ids) {
+  await process(id);
+}
+
+// 병렬 처리
+await Promise.all(ids.map(process));
+```
+
+### forEach 안의 await 는 동작 안 함
+
+```javascript
+// ❌ forEach 는 async 콜백을 기다리지 않음
+ids.forEach(async (id) => await process(id));
+console.log('done'); // 아직 process 들이 도는 중에 출력
+
+// ✅ for-of 또는 Promise.all
+for (const id of ids) await process(id);
+// 또는
+await Promise.all(ids.map(process));
+```
+
+### Top-level await
+
+ES2022 부터 ES Module 최상위에서 `await` 가능.
+
+```javascript
+// app.mjs
+const config = await fetch('/config.json').then(r => r.json());
+// 이후 코드는 config 가 로드된 후 실행
+```
+
+CommonJS 모듈에서는 불가.
+
+## 참고
+
+- [[Promise]]
+- [[Microtask Queue]]
+- [[이벤트 루프]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- MDN, [async function](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Statements/async_function)
+- MDN, [await](https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Operators/await)

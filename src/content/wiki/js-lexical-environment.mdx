@@ -1,0 +1,138 @@
+---
+title: "[Javascript] Lexical Environment"
+aliases: ["Lexical Environment", "lexical environment", "어휘적 환경", "어휘 환경", "LE", "JavaScript Lexical Environment", "JS Lexical Environment"]
+tags: [javascript, scope, ecmascript, internals, closure]
+updated: 2026-06-14
+---
+
+## 정의
+
+**Lexical Environment (어휘적 환경)** 는 ECMAScript 명세 ([§9.1](https://tc39.es/ecma262/#sec-environment-records)) 가 정의한 내부 객체. 함수가 호출될 때마다 새로 만들어지며, **이 호출의 변수들이 어디 살고, 바깥 스코프가 어디인지** 를 기록한다.
+
+자세한 메커니즘과 시각화는 [[함수는 끝났는데 변수가 살아있다, Lexical Environment와 클로저의 메커니즘]] 글 참고.
+
+## 핵심 구조
+
+LE 는 단 **두 개의 필드** 를 가진다.
+
+| 필드 | 역할 |
+|:---|:---|
+| **Environment Record** | 이 스코프에서 선언된 식별자 (`let`, `const`, `var`, 함수 선언) 의 실제 binding 저장소 |
+| **외부 Environment 참조** (Outer) | 자기를 감싸는 바깥 LE 에 대한 참조. 없으면 `null` |
+
+이 단순한 구조가 **스코프 체인** 그 자체다. LE 들이 outer 포인터로 연결되어 사슬을 이루고, 변수 조회는 안쪽 LE 부터 시작해 outer 를 따라 바깥으로 진행한다.
+
+## Environment Record 의 5 가지 종류
+
+ECMAScript 는 Environment Record 를 다섯 가지로 분류한다.
+
+| 종류 | 어디에 산다? |
+|:---|:---|
+| **Declarative** | 일반 함수 스코프, 블록 스코프. `let` / `const` / 함수 선언이 여기 |
+| **Function** | Declarative 의 특수화. `this`, `super`, `new.target` 추가 |
+| **Object** | `with` 문 같은 곳에서 객체를 스코프로 쓸 때 |
+| **Global** | 가장 바깥. `globalThis`, `console`, `Math` 등 |
+| **Module** | 모듈 최상위. `import` 바인딩이 여기 |
+
+## Lexical 인 이유
+
+"Lexical" 은 **정의 시점의 위치** 를 뜻한다. 호출 시점이 아니다.
+
+```javascript
+let x = 1;
+
+function outer() {
+  let x = 100;
+  return inner; // inner 의 외부 LE 는 정의 위치인 outer
+}
+
+function inner() {
+  return x; // 어느 x?
+}
+
+const fn = outer();
+fn(); // 1, 100 이 아니다!
+```
+
+`inner` 는 `outer` 안에서 호출되는 게 아니라 *전역에서 정의* 되었기 때문에 외부 LE 가 전역 LE 다. 그래서 `x = 1` 을 본다.
+
+만약 JavaScript 가 **dynamic scope** 였다면 `fn()` 의 결과가 호출 시점의 LE (`outer` 의 LE) 를 따라 `100` 이 되었을 것이다.
+
+## 함수 객체의 `[[Environment]]` 슬롯
+
+LE 와 함수 객체의 관계는 이렇다.
+
+> 함수 객체는 내부 슬롯 `[[Environment]]` 를 가진다. 이 슬롯은 **그 함수가 정의된 시점의 LE** 를 가리킨다.
+
+함수가 어디서 어떻게 호출되든, **호출 시 만들어지는 새 LE 의 outer 참조** 는 항상 이 박제된 `[[Environment]]` 슬롯이 된다.
+
+이게 [[클로저]] 의 진짜 정체다. 함수가 끝나도 변수가 살아있는 이유:
+
+1. 변수는 콜 스택이 아니라 **힙에 있는 LE 객체** 에 산다
+2. 함수 객체의 `[[Environment]]` 가 그 LE 를 참조한다
+3. 함수 객체가 살아있는 한 LE 도 살아있다 (GC 가 회수 못함)
+
+## let 과 var 의 LE 차이
+
+`for + var + 클로저` 의 악명 높은 함정이 LE 메커니즘으로 정확히 설명된다.
+
+```javascript
+const fns = [];
+for (var i = 0; i < 3; i++) {
+  fns.push(() => console.log(i));
+}
+fns[0](); fns[1](); fns[2](); // 3, 3, 3
+```
+
+`var i` 는 함수 스코프 → **LE 가 루프 전체에 단 하나**. 세 콜백 모두 같은 LE 를 outer 로 가진다.
+
+```javascript
+for (let i = 0; i < 3; i++) {
+  fns.push(() => console.log(i));
+}
+fns[0](); fns[1](); fns[2](); // 0, 1, 2
+```
+
+스펙 ([ECMA-262 §14.7.4.3](https://tc39.es/ecma262/#sec-for-statement-runtime-semantics-labelledevaluation)) 상 `for + let` 은 **매 iteration 마다 별도 LE** 를 만든다. 그래서 세 콜백의 outer 가 셋 다 다른 LE 다.
+
+## 호출마다 새 LE
+
+```javascript
+function makeCounter() {
+  let count = 0;
+  return () => ++count;
+}
+
+const a = makeCounter();
+const b = makeCounter();
+a(); // 1
+a(); // 2
+b(); // 1, b 의 count 는 별개
+```
+
+`makeCounter()` 를 두 번 호출하면 **두 개의 독립된 LE** 가 힙에 만들어진다. 반환된 두 함수의 `[[Environment]]` 는 서로 다른 LE 를 가리키므로 count 도 독립적이다.
+
+## ResolveBinding, 변수 조회 알고리즘
+
+`x` 라는 식별자를 만나면 엔진은 다음 알고리즘 (`ResolveBinding`) 으로 실제 binding 을 찾는다.
+
+```text
+function ResolveBinding(name, lexEnv):
+  while lexEnv != null:
+    record = lexEnv.EnvironmentRecord
+    if record has binding for name:
+      return record.GetBindingValue(name)
+    lexEnv = lexEnv.OuterEnv
+  throw ReferenceError
+```
+
+가장 가까운 binding 이 이긴다 (**lexical shadowing**). 못 찾으면 ReferenceError.
+
+## 참고
+
+- [[클로저]]
+- [[일급 함수]]
+- [[함수는 끝났는데 변수가 살아있다, Lexical Environment와 클로저의 메커니즘]]
+- ECMA-262 §9.1, [Environment Records](https://tc39.es/ecma262/#sec-environment-records)
+- ECMA-262 §10.2, [ECMAScript Function Objects](https://tc39.es/ecma262/#sec-ecmascript-function-objects)
+- MDN, [Closures](https://developer.mozilla.org/ko/docs/Web/JavaScript/Closures)

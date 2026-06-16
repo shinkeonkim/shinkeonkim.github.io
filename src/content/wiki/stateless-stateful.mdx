@@ -1,0 +1,271 @@
+---
+title: "Stateless vs Stateful"
+aliases: ["Stateless vs Stateful", "stateless-vs-stateful", "무상태와 상태유지"]
+tags: [architecture, network, scaling]
+updated: 2026-06-13
+---
+
+## 정의
+
+**Stateless (무상태)**: 서버가 클라이언트 요청 간 상태를 기억하지 않음. 각 요청은 완전히 독립적이며 필요한 모든 정보는 요청에 담겨 있다.
+
+**Stateful (상태유지)**: 서버가 클라이언트와의 세션 정보를 메모리에 유지. 후속 요청은 이 컨텍스트를 활용해 처리된다.
+
+```anim:stateless-vs-stateful
+{}
+```
+
+위 애니메이션이 같은 인프라(Client + LB + 3 서버)에서 두 모드가 어떻게 다르게 동작하는지, 그리고 장애 시 어떤 차이가 나는지를 한눈에 보여준다.
+
+## 기본 비교
+
+| 측면 | Stateless | Stateful |
+|:---|:---|:---|
+| 서버 메모리 | 요청 처리에만 필요 | **활성 세션마다 메모리** |
+| 수평 확장 | 매우 쉬움, 어느 서버든 OK | 어려움, [[Sticky Session]] 필요 |
+| 장애 복원 | 서버 교체 무영향 | 세션 손실 (외부 store 시 완화) |
+| 로드밸런서 | 단순 round-robin | client → server 일관 라우팅 필요 |
+| 캐싱 | URL 기반 캐시 효율적 | 캐시 효율 낮음 |
+| 인증 정보 | 매 요청마다 보냄 (JWT, API key) | 세션 ID 1회 → 서버가 검증 |
+
+---
+
+## 네트워크 계층의 stateless / stateful
+
+각 프로토콜이 명세상 어떤 상태성을 가지는지.
+
+| 프로토콜 | 상태성 | 비고 |
+|:---|:---|:---|
+| IP | Stateless | 패킷 단위 라우팅, 연결 개념 없음 |
+| [[UDP]] | Stateless | 비연결 |
+| [[TCP]] | **Stateful** | 연결, sequence number, window 등 모두 상태 |
+| [[TLS]] | Stateful | 세션 키, sequence number, certificate 검증 결과 |
+| HTTP/1.0 | Stateless | 매 요청마다 새 TCP |
+| HTTP/1.1 (keep-alive) | Stateless (HTTP 의미) | TCP 자체는 stateful |
+| HTTP/2 | Stateless (HTTP 의미) | TCP + HPACK 동적 테이블은 stateful |
+| HTTP/3 ([[QUIC]]) | Stateless (HTTP 의미) | QUIC connection 자체는 stateful |
+| WebSocket | **Stateful** | 지속 연결 + 컨텍스트 |
+| Server-Sent Events | **Stateful** | 지속 연결, 단방향 |
+| WebRTC | **Stateful** | P2P 세션, DTLS 키 |
+
+**"HTTP 는 stateless 다"** 라는 익숙한 말은 *HTTP 메시지 의미* 차원의 진실이다. 하부의 TCP·TLS·HPACK 동적 테이블은 모두 stateful 이지만, **응용 계층의 HTTP 가 세션 상태를 기억하지 않는다**는 게 핵심 의미.
+
+---
+
+## 서버에서 상태를 어떻게 관리하나
+
+### Stateless 서버의 구조
+
+```
+요청 도착
+  ↓
+요청 헤더 검증 (인증 토큰 등)
+  ↓
+필요시 외부 store 조회 (DB, Redis)
+  ↓
+응답 생성 → 송신
+  ↓
+모든 메모리 즉시 해제
+```
+
+서버 프로세스가 가진 상태:
+- TCP 연결 풀 (네트워크 계층, 응용은 무관)
+- 캐시 (선택)
+- 설정 정보
+
+세션·사용자 데이터 같은 **응용 상태는 0**. 어떤 인스턴스도 동일하게 동작한다.
+
+### Stateful 서버의 구조
+
+```
+연결 수립 (WebSocket / SSE / 로그인)
+  ↓
+세션 객체 생성 (메모리)
+  - user_id, permissions, last_active
+  - WebSocket 연결 핸들
+  - 미발신 메시지 큐
+  ↓
+이후 요청·이벤트마다 세션 컨텍스트 조회 (메모리 lookup)
+  ↓
+연결 종료 시까지 객체 유지
+```
+
+서버 메모리에 활성 세션 수만큼의 객체.
+
+### 활성 세션 객체의 일반적 크기
+
+| 종류 | 일반적 크기 | 비고 |
+|:---|:---|:---|
+| HTTP 인메모리 세션 | 1~5 KB | user_id, role, 일부 캐시 |
+| WebSocket 세션 (raw `ws`) | ~3.5 KB | frame buffer + state |
+| WebSocket 세션 (Socket.IO) | ~60~90 KB | 룸, 어댑터, ACK 추적 |
+| SSE 세션 | ~1.2 KB | HTTP response stream |
+| WebRTC 세션 | 큼, 미디어 코덱 상태 포함 | 수 백 KB ~ MB |
+
+(출처: Ark Protocol 2026, Wolf-tech 2026 측정값)
+
+### Stateful 서버의 수평 확장 전략
+
+1. **[[Sticky Session]]**: LB 가 같은 클라이언트를 같은 서버로
+2. **외부 세션 store**: Redis 등에 위임 → 사실상 Stateless 화
+3. **Pub/Sub bus**: 서버 간 메시지 라우팅 (Socket.IO + Redis Adapter)
+
+```
+WebSocket 클러스터 + Redis Adapter:
+  Server A 가 Client X 보유
+  Server B 가 Client Y 보유
+  → Client X 에게 'B 로 가야할 메시지' 가 오면
+    Server A → Redis publish "for-Y" → Server B subscribe → Client Y 에게 전달
+```
+
+---
+
+## 브라우저(클라이언트)에서 상태를 어떻게 관리하나
+
+서버가 stateless 면 누군가 상태를 보관해야 한다. 보통 클라이언트.
+
+### 1. Cookies
+
+서버가 `Set-Cookie` 헤더로 발급, 브라우저가 자동으로 후속 요청에 첨부.
+
+```http
+Set-Cookie: session=abc123; HttpOnly; Secure; SameSite=Strict; Max-Age=86400
+```
+
+- **장점**: 자동 첨부, HttpOnly 로 JS 접근 차단 가능
+- **단점**: 매 요청에 헤더 추가 (페이로드 오버헤드), CSRF 위험
+
+### 2. LocalStorage / SessionStorage
+
+JavaScript 가 명시적으로 읽고 쓰는 클라이언트 측 키-값 저장소.
+
+```javascript
+localStorage.setItem('token', 'abc123');  // 영구
+sessionStorage.setItem('temp', 'xyz');    // 탭 닫으면 사라짐
+```
+
+- **장점**: 5~10 MB 까지 저장, JS 자유 접근
+- **단점**: XSS 에 취약, 자동 첨부 안 됨 (직접 헤더 추가 필요)
+
+### 3. IndexedDB
+
+본격적인 클라이언트 DB. 큰 데이터, 인덱싱, 트랜잭션 지원.
+
+- 오프라인 PWA, 캐싱 라이브러리 (Apollo cache 등)에 사용
+
+### 4. JWT (JSON Web Token)
+
+서명된 토큰에 사용자 정보를 담아 클라이언트가 들고 다님. 서버는 토큰만 검증.
+
+```
+header.payload.signature
+eyJhbGciOiJI...  .eyJzdWIiOiI...  .Tjw7XYZ...
+```
+
+- **장점**: 완벽한 stateless 서버, 어느 인스턴스도 같은 검증 가능
+- **단점**: 토큰 즉시 취소 어려움 (블랙리스트 필요), 토큰 크기
+
+### 5. WebSocket Open Connection 자체
+
+WebSocket / SSE 가 열려 있는 동안은 **TCP 연결 자체가 상태 컨텍스트**.
+
+- 연결 ID 가 곧 사용자 식별자
+- 끊기면 재인증 필요
+
+### 클라이언트 상태 보관 비교
+
+| 방법 | 자동 첨부 | XSS 안전 | 만료 제어 | 크기 |
+|:---|:---:|:---:|:---:|:---:|
+| Cookie (HttpOnly) | ✓ | ✓ | 서버 제어 | ~4KB |
+| LocalStorage | ✗ | ✗ | 영구 | 5-10MB |
+| SessionStorage | ✗ | ✗ | 탭 단위 | 5-10MB |
+| IndexedDB | ✗ | ✗ (XSS 영향) | 영구 | GB 단위 |
+| JWT in Cookie | ✓ | ✓ | exp 클레임 | ~1-2KB |
+| JWT in localStorage | ✗ | ✗ | exp 클레임 | ~1-2KB |
+
+---
+
+## 실제 예시
+
+### 예시 1: 인증
+
+**Stateless (JWT)**:
+```
+1. POST /login { user, pass }
+2. Server: 검증 후 JWT 발급
+3. Response: { token: "eyJ..." }
+4. Client: LocalStorage 저장
+5. 이후 요청마다: Authorization: Bearer eyJ...
+6. Server: 토큰 서명 검증만으로 사용자 식별, 메모리에 세션 X
+```
+
+**Stateful (Server Session)**:
+```
+1. POST /login { user, pass }
+2. Server: 검증 후 메모리에 세션 생성, { sid: "abc123" → user_data }
+3. Response: Set-Cookie: session=abc123
+4. Client: 쿠키 자동 보관
+5. 이후 요청마다: Cookie: session=abc123
+6. Server: 메모리에서 sid 로 세션 조회, 서버에 데이터 있음
+```
+
+### 예시 2: 채팅, 두 가지 설계
+
+**Stateful 만으로 (Socket.IO)**:
+```
+- Server 가 모든 활성 연결 보유
+- "user-1 이 user-2 에게" 메시지: 서버가 메모리에서 user-2 의 socket 찾아 전달
+- 수평 확장 시: Redis Adapter 로 서버 간 라우팅
+```
+
+**Stateless + Stateful 혼합 (메시지 큐)**:
+```
+- Stateless 서버가 메시지 수신 → DB 저장 + 큐에 발행
+- 별도 Push 서버 (Stateful) 가 활성 연결 보유 → 큐 구독 → 사용자에게 전달
+- 메시지 영속화는 Stateless 쪽이 책임, 전달은 Stateful 쪽이 책임
+```
+
+### 예시 3: 장바구니
+
+**Stateless (LocalStorage)**:
+```
+const cart = JSON.parse(localStorage.getItem('cart') || '[]');
+cart.push({ productId: 42, qty: 1 });
+localStorage.setItem('cart', JSON.stringify(cart));
+// 서버는 결제 시점에만 알면 됨
+```
+
+**Stateful (Server Session)**:
+```
+POST /cart/add { productId: 42, qty: 1 }
+// 서버: 메모리의 사용자 세션에 cart 추가
+// 다른 디바이스에서 로그인해도 같은 cart 표시됨 (장점)
+// 비로그인 시 작동 안 함, sticky session 필요 (단점)
+```
+
+---
+
+## "Stateless vs Stateful" 의 결정 트리
+
+```
+질문 1: 서버가 클라이언트 간 사이에 기억해야 할 데이터가 있나?
+  ├─ NO  → Stateless (REST API)
+  └─ YES → 질문 2
+
+질문 2: 그 데이터를 서버 메모리에 두는 게 본질적인가?
+  ├─ NO  → Stateless + 외부 store (Redis, DB)
+  └─ YES → 질문 3
+
+질문 3: 지속 연결(WebSocket 등) 이 본질적인가?
+  ├─ NO  → 재고 (외부 store 로 더 단순해질 수 있음)
+  └─ YES → Stateful 수용 + Sticky Session 또는 Pub/Sub bus
+```
+
+> [!IMPORTANT]
+> "Stateful 이 필요하다" 라는 판단은 신중해야 한다. **외부 store + Stateless 의 조합이 거의 항상 가능**하고 운영이 단순하다. WebSocket 같은 지속 연결이 정말 본질적인 경우만 진짜 Stateful 을 받아들이는 게 좋다.
+
+## 참고
+
+- [Roy Fielding, REST 박사 학위 논문](https://www.ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm) (Stateless 가 REST 의 핵심 제약)
+- [MDN, Stateless](https://developer.mozilla.org/en-US/docs/Glossary/Stateless)
+- [AWS, Stateless and Stateful applications](https://aws.amazon.com/builders-library/)

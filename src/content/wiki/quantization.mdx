@@ -1,0 +1,341 @@
+---
+title: "모델 양자화"
+aliases: ["Quantization", "양자화", "Model Quantization", "model quantization", "quantization"]
+tags: [ai, model-compression, inference, machine-learning]
+updated: 2026-06-14
+---
+
+## 정의
+
+**양자화 (Quantization)** 는 신경망 모델의 가중치/활성화를 **높은 정밀도 (FP32, FP16) 에서 낮은 정밀도 (INT8, INT4 등) 로 변환**하여 메모리와 연산량을 줄이는 기법.
+
+```anim:quantization-process
+{}
+```
+
+원래 신호 처리 용어. 연속적인 신호 (continuous signal) 를 이산적인 (discrete) 양자 (quantum) 레벨로 변환한다는 뜻에서 "양자(量子)화"라 부른다. 실수 값을 정수 격자에 맞춰 떨어뜨리는 과정.
+
+```
+FP32 가중치: 0.327891, -1.42876, 0.00123, ...
+                ↓ 양자화 (4-bit, 16 levels)
+INT4 가중치: 3, -6, 0, ...  (scale 곱해서 복원)
+```
+
+## 왜 "양자" 인가
+
+물리학의 양자(quantum) 개념에서 유래. 연속체를 이산적인 단위로 쪼개는 것.
+
+- FP32: 약 2^32 가지 값 표현 가능 (사실상 연속)
+- INT8: 256 가지 값만 (이산)
+- INT4: 16 가지 값만 (매우 이산)
+
+비유: 아날로그 회전 다이얼 vs 디지털 16 단계 클릭. 16 단계로 "양자화" 된다.
+
+## 왜 필요한가
+
+LLM (Large Language Model) 은 메모리와 메모리 대역폭이 가장 큰 병목.
+
+| 모델 | FP16 | INT8 | INT4 |
+|:---|:---:|:---:|:---:|
+| Llama 2 7B | 13 GB | 7 GB | 4 GB |
+| Llama 2 70B | 140 GB | 70 GB | 40 GB |
+| GPT-3 175B | 350 GB | 175 GB | 90 GB |
+
+INT4 로 양자화하면:
+- **메모리 4~8 배 절약**
+- **메모리 대역폭 4~8 배 절약** (가장 중요, 추론 속도 결정)
+- **연산 2~4 배 빠름** (INT 연산이 FP 보다 회로가 작음)
+
+24 GB RTX 4090 한 장에 70B 모델 INT4 로 돌릴 수 있게 됨.
+
+## 양자화의 수학
+
+스칼라 양자화의 기본 공식:
+
+```
+quantize(x) = round(x / scale) + zero_point
+dequantize(q) = (q - zero_point) * scale
+
+여기서
+  scale = (x_max - x_min) / (q_max - q_min)
+  zero_point = q_min - round(x_min / scale)
+```
+
+예) FP32 가중치 범위 `[-2.5, 3.0]` 을 INT8 (`[-128, 127]`) 로:
+- `scale = 5.5 / 255 ≈ 0.0216`
+- `zero_point = -128 - round(-2.5 / 0.0216) ≈ -12`
+- `0.327 → round(0.327/0.0216) + (-12) = 15 - 12 = 3`
+- 복원: `3 * 0.0216 - (-12 * 0.0216) ≈ 0.324` (오차 0.003)
+
+이 오차가 누적되면 모델 품질이 떨어진다. 어떻게 오차를 최소화할지가 양자화 기법의 핵심 차이.
+
+## 양자화 방법론
+
+### 1. Post-Training Quantization (PTQ)
+
+이미 학습된 모델을 그대로 양자화. 재학습 필요 없음.
+
+```python
+# PyTorch 의사 코드
+model_fp32 = load_model()
+calibration_data = small_dataset_sample()
+model_int8 = quantize_ptq(model_fp32, calibration_data)
+```
+
+- **장점**: 빠름 (수십 분), 학습 데이터 불필요
+- **단점**: 정확도 손실 가능
+
+가장 실용적, 가장 널리 사용.
+
+### 2. Quantization-Aware Training (QAT)
+
+학습 중에 양자화 효과를 시뮬레이션. 모델이 양자화 오차에 적응.
+
+```python
+# fake quantize 삽입
+y = forward_pass(x)
+y_quantized = fake_quantize(y)  # 양자화 + 즉시 역양자화
+# backward 에서는 Straight-Through Estimator (STE) 로 gradient 통과
+```
+
+- **장점**: 가장 정확도 좋음
+- **단점**: 재학습 비용 (full training 의 5~30%)
+
+극한 압축 (4-bit 미만) 시 필수.
+
+### 3. GPTQ (Generative Pre-trained Transformer Quantization)
+
+2022년 발표 ([arXiv:2210.17323](https://arxiv.org/abs/2210.17323)). LLM 특화 PTQ.
+
+#### 동기
+
+기본적인 RTN (Round-To-Nearest) 양자화는 단순하지만 오차가 크다. 한 가중치를 양자화하면 발생한 오차가 이후 출력에 그대로 전파됨. GPTQ 는 **이미 양자화한 가중치의 오차를, 아직 양자화 안 한 가중치들로 보정**한다.
+
+#### 핵심 알고리즘 (OBQ 기반)
+
+OBQ (Optimal Brain Quantization) 의 LLM-scale 확장. 가중치 행렬 `W` 한 행씩 처리:
+
+```text
+1. 입력 데이터로 Hessian 행렬 H = 2·X·X^T 계산
+2. 각 column (가중치) 을 순서대로 양자화:
+   a. quant(w_j) 로 양자화
+   b. 양자화 오차 e_j = (w_j - quant(w_j)) / [H^-1]_jj
+   c. 아직 양자화 안 한 가중치들을 e_j · H^-1_j,k 만큼 조정 (오차 보정)
+3. 모든 column 끝나면 다음 행으로
+```
+
+핵심 통찰: Hessian 의 역행렬 정보 (`H^-1`) 가 각 가중치를 얼마나 흔들어야 출력 오차가 최소화되는지 알려준다.
+
+#### Cholesky 분해 최적화
+
+원래 OBQ 는 매 column 마다 Hessian 역행렬 갱신이 필요해 매우 느렸다 (175B 모델에 수개월). GPTQ 는 **Cholesky 분해**로 미리 `H^-1` 의 윗삼각 형태를 한 번에 계산하고, blockwise update 로 메모리/시간 최적화. **175B 모델을 4시간** 으로 단축.
+
+#### 옵션: act-order
+
+활성화 크기가 큰 column 순으로 양자화하면 7B 모델에서 PPL 7.15 → 6.09 로 개선. 큰 활성화 → 작은 오차 우선 보정 → 후속 column 영향 최소화.
+
+- **장점**: INT4 에서도 정확도 손실 매우 작음
+- **단점**: 처리 시간 (1~4시간), 보정용 데이터 128+ 샘플 필요
+- **품질**: LLaMA-7B 기준 FP16 PPL 5.68 vs GPTQ-INT4 6.09 (0.4 차이)
+
+### 4. AWQ (Activation-aware Weight Quantization)
+
+2023년 발표 ([arXiv:2306.00978](https://arxiv.org/abs/2306.00978)). GPTQ 와 같은 목표지만 완전히 다른 접근.
+
+#### 동기
+
+GPTQ 의 Hessian 기반 보정은 수학적으로 우아하지만 비싸다. AWQ 의 관찰: **출력 오차의 대부분은 "outlier channels" 가 만든다**. 일부 채널의 활성화 크기가 매우 크고, 이 채널의 가중치 양자화 오차가 출력 전체를 망친다.
+
+#### 핵심 아이디어, Activation-aware Scaling
+
+수학적 항등식 활용:
+
+```text
+Y = (W · diag(s)^-1) · (diag(s) · X)
+  = W_scaled · X_scaled
+
+여기서 s = per-channel scaling factor
+```
+
+- `W_scaled` 에서 salient channels 의 가중치는 `s^-1` 배 작아짐 → INT4 격자에서 더 정밀하게 표현
+- `X_scaled` 에서 같은 채널의 활성화는 `s` 배 커짐 → 출력 동일
+
+#### 알고리즘
+
+```text
+1. 캘리브레이션 데이터로 각 채널의 평균 활성화 크기 |X|_c 계산
+2. s_c = |X|_c^α 형태로 parametrize (α 는 grid search 변수)
+3. α 를 20개 정도 grid 에서 탐색:
+   for α in [0, 0.05, 0.1, ..., 1.0]:
+     계산 layer 출력 오차
+4. 가장 작은 오차의 α 채택, W_scaled 를 단순 INT4 RTN 으로 양자화
+```
+
+#### 비교
+
+| | GPTQ | AWQ |
+|:---|:---|:---|
+| 접근 | Hessian-weighted 가중치 보정 | Pre-quantization 채널 스케일링 |
+| 계산 | Cholesky 분해 + sequential update | Grid search (20 forward pass/layer) |
+| 시간 | 1~4 시간 | 10분~30분 (**5~10배 빠름**) |
+| 품질 | LLaMA-7B INT4: PPL 6.09 | LLaMA-7B INT4: PPL 6.08 (거의 동일) |
+
+GPTQ vs AWQ: GPTQ 는 "weight 별로 더 열심히 보정", AWQ 는 "문제를 회전시켜서 weight 별 보정이 쉬워지게". 실용적으로는 AWQ 가 더 인기.
+
+### 5. GGUF / GGML (llama.cpp)
+
+CPU + Apple Silicon 친화 양자화 포맷. 여러 비트수 동시 지원.
+
+| 포맷 | bit | 7B 메모리 | 품질 |
+|:---|:---:|:---:|:---|
+| Q2_K | 2.6 | 2.8 GB | 극한 압축 (품질 손실 큼) |
+| Q4_K_M | 4.1 | 4.1 GB | **권장**, FP16 대비 96~98% |
+| Q5_K_M | 5.1 | 4.8 GB | 고품질 |
+| Q8_0 | 8.0 | 7.2 GB | FP16 거의 무손실 |
+
+K_M = Mixed precision (중요 레이어는 더 높은 비트). 로컬 LLM 실행의 사실상 표준.
+
+### 6. QLoRA (NF4)
+
+2023년 5월 발표 ([arXiv:2305.14314](https://arxiv.org/abs/2305.14314)). Tim Dettmers 외. **24 GB GPU 1대로 65B 모델 fine-tuning** 을 가능하게 만든 기법. 단순한 양자화를 넘어 3가지 혁신을 조합.
+
+#### 1. NF4 (4-bit NormalFloat)
+
+가장 중요한 혁신. 신경망 가중치는 보통 **정규분포 N(0, σ²) 를 따른다** 는 관찰에서 시작.
+
+기존 INT4 / FP4 는 균등 간격으로 16개 값을 잡지만, 정규분포 데이터에서는 0 근처에 값이 몰려 있다. 균등 간격은 비효율.
+
+NF4 는 **각 양자화 구간이 표준정규분포 N(0, 1) 아래 같은 면적** 을 가지도록 16개 값을 설계.
+
+```text
+표준정규분포 N(0, 1) 를 16등분 (각 구간 확률 1/16):
+  q_i = quantile((i + 0.5) / 16)  for i = 0..15
+
+결과 NF4 값들 (대략):
+  -1.0,  -0.69, -0.52, -0.40, -0.30, -0.21, -0.13, -0.06,
+   0.06,  0.16,  0.25,  0.34,  0.44,  0.56,  0.72,  1.0
+```
+
+0 근처에 값이 빽빽하고 양 끝에 듬성. 정규분포 데이터에 최적.
+
+**정보이론 관점**: NF4 는 "정규분포 데이터를 4-bit 로 표현하는 information-theoretically optimal" 양자화. 균등 INT4 대비 같은 비트로 더 적은 정보 손실.
+
+#### 2. Double Quantization
+
+블록 양자화 (blocksize 64) 에서는 각 블록마다 scale (FP32, 4 bytes) 이 필요. 큰 모델에선 이 scale 자체가 메모리를 차지.
+
+```text
+65B 모델, blocksize 64:
+  parameter 수: 65 × 10^9
+  block 수: ~10^9
+  block 당 FP32 scale: 4 bytes
+  scale 총량: 4 GB (! 가중치 압축한 의미가 무색)
+```
+
+Double Quantization: **scale 자체를 다시 양자화**.
+
+```text
+원본:     W (FP16) → blockwise quant → W_NF4 + c_1 (FP32 per 64 weights)
+Double:   W (FP16) → quant 1 → W_NF4 + c_1_quantized + c_2 (FP32 per 256 c_1)
+
+c_1 은 8-bit 로 양자화 (c_2 가 c_1 의 scale)
+```
+
+평균 **0.37 bits/parameter 절약** (65B 모델에서 ~3 GB).
+
+#### 3. Paged Optimizer
+
+QLoRA 의 또 다른 혁신. LoRA adapter 의 optimizer state (Adam 의 momentum + variance, FP32) 가 메모리 spike 의 원인.
+
+긴 시퀀스 처리 중 일시적으로 메모리가 부족해지면 OOM. Paged Optimizer 는 **NVIDIA Unified Memory** 를 활용해 optimizer state 를 자동으로 GPU ↔ CPU RAM 사이에 페이지 단위로 교환. OS 의 가상 메모리 paging 과 동일 개념.
+
+#### 전체 QLoRA 수식
+
+```text
+Y_BF16 = X_BF16 · doubleDequant(c_1, c_2, W_NF4) + X_BF16 · L_1 · L_2
+
+  W_NF4: 4-bit 양자화된 frozen base model 가중치
+  c_1, c_2: double quantized scales
+  L_1, L_2: LoRA adapters (low-rank decomposition, trainable, BF16)
+```
+
+doubleDequant 가 NF4 → BF16 복원, 그 후 일반 LoRA forward.
+
+#### 결과
+
+- LLaMA 65B 를 **단일 48 GB A6000 1장**으로 fine-tuning
+- Guanaco 모델 (QLoRA 로 fine-tuned LLaMA 65B) 가 ChatGPT-3.5 와 비교 가능한 품질 달성
+- HuggingFace `bitsandbytes` 라이브러리로 한 줄 적용 가능
+
+#### bitsandbytes 사용 예
+
+```python
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+import torch
+
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type='nf4',          # NF4 사용
+    bnb_4bit_use_double_quant=True,     # Double Quantization
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    'meta-llama/Llama-2-70b-hf',
+    quantization_config=quant_config,
+)
+# 이제 LoRA 추가 후 학습
+```
+
+### 7. FP8, FP4 (Hardware native)
+
+NVIDIA H100 부터 FP8 (e4m3, e5m2) 하드웨어 지원. B200 부터 FP4 추가.
+
+- **FP8**: 학습 + 추론. INT8 대비 동적 범위 넓음
+- **FP4**: 4-bit 부동소수, INT4 대비 정확도 우위
+
+INT4 같은 정수 양자화는 별도 calibration 이 필요하지만, FP8/FP4 는 하드웨어가 직접 처리.
+
+## 정확도 vs 압축 트레이드오프
+
+| 포맷 | 압축률 | 품질 (FP16 대비) |
+|:---|:---:|:---:|
+| FP16 / bf16 | 1x | 기준 |
+| FP8 (H100) | 2x | ~99.7% |
+| INT8 | 4x | ~99% |
+| FP4 (B200) | 4x | ~99.0% |
+| AWQ 4-bit | 4x | ~98~99% |
+| GPTQ 4-bit | 4x | ~97~99% |
+| Q4_K_M GGUF | 4x | ~96~98% |
+| NF4 (QLoRA) | 4x | ~95~97% |
+| 단순 INT4 | 4x | ~85~93% |
+| INT2 | 16x | 큰 손실 |
+
+## 시나리오별 권장
+
+| 환경 | 권장 |
+|:---|:---|
+| NVIDIA H100/H200/B200 | FP8 (vLLM, TensorRT-LLM) |
+| NVIDIA B100/B200 frontier | FP4 |
+| NVIDIA A100/4090 | AWQ 4-bit |
+| Apple Silicon (Mac) | MLX 4-bit 또는 GGUF Q4_K_M |
+| CPU 전용 | GGUF Q4_K_M (llama.cpp) |
+| Fine-tuning, 메모리 제약 | QLoRA NF4 |
+
+## CS 에 미친 영향
+
+양자화는 단순한 최적화 기법을 넘어 **모델 배포의 전체 패러다임**을 바꿨다.
+
+- **로컬 LLM**: ChatGPT 급 모델을 노트북에서 실행 (llama.cpp + GGUF Q4)
+- **edge AI**: 스마트폰 [[NPU]] 가 INT4 회로로 LLM 추론
+- **GPU 비용**: 같은 모델을 1/4 메모리로 → 클라우드 비용 4 배 절감
+- **연구 방향**: "더 큰 모델" 만큼 "더 효율적인 양자화" 가 활발한 연구 분야
+
+## 참고
+
+- [NVIDIA, Model Quantization Guide](https://developer.nvidia.com/blog/model-quantization-concepts-methods-and-why-it-matters/)
+- [GPTQ Paper (arXiv:2210.17323)](https://arxiv.org/abs/2210.17323)
+- [AWQ Paper (arXiv:2306.00978)](https://arxiv.org/abs/2306.00978)
+- [QLoRA Paper (arXiv:2305.14314)](https://arxiv.org/abs/2305.14314)
+- [llama.cpp / GGUF](https://github.com/ggerganov/llama.cpp)
+- [Quantization Format Comparison 2026](https://presenc.ai/research/quantization-format-comparison-2026)

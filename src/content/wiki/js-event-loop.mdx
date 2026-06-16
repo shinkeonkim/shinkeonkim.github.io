@@ -1,0 +1,224 @@
+---
+title: "[Javascript] 이벤트 루프"
+aliases: ["이벤트 루프", "event loop", "event-loop", "이벤트루프", "JavaScript 이벤트 루프", "JS 이벤트 루프", "JavaScript event loop"]
+tags: [javascript, async, runtime, browser, nodejs]
+updated: 2026-06-14
+---
+
+## 정의
+
+**이벤트 루프 (Event Loop)** 는 싱글 스레드 JavaScript 엔진이 비동기 작업을 처리하기 위해 돌리는 무한 루프다. 콜 스택이 비어있을 때마다 마이크로태스크 큐와 매크로태스크 큐를 정해진 규칙으로 비워가며 실행한다.
+
+ECMAScript 명세 ([§9.5 Jobs](https://tc39.es/ecma262/#sec-jobs)) 는 "Job 큐" 로, WHATWG HTML 명세 ([§8.1 Event loop](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop)) 는 "task queue" 와 "microtask queue" 로 정의한다.
+
+자세한 흐름은 [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]] 글 참조.
+
+## 핵심 특성
+
+| 측면 | 동작 |
+|:---|:---|
+| **실행 모델** | 싱글 스레드, 한 번에 한 줄 |
+| **블로킹 처리** | 호스트 (브라우저 / Node.js) 가 백그라운드 스레드로 |
+| **결과 전달** | 콜백을 두 큐 중 하나에 넣음 |
+| **우선순위** | 마이크로태스크 > 렌더링 > 매크로태스크 |
+| **실행 단위** | "한 틱" 동안 매크로 1개 + 마이크로 전부 + 렌더링 |
+
+## 네 가지 구성요소
+
+### 1. Call Stack (콜 스택)
+
+지금 실행 중인 함수들의 **LIFO 스택**. 함수 호출 시 push, 반환 시 pop. 가장 늦게 들어온 것이 가장 먼저 나간다.
+
+```anim:call-stack-detail
+{}
+```
+
+```javascript
+function main() { a(); }
+function a()    { b(); }
+function b()    { console.log('hi'); }
+main();
+// 콜 스택 변화:
+// [main] → [main, a] → [main, a, b] → [main, a, b, log]
+//        → [main, a, b] → [main, a] → [main] → []
+```
+
+**핵심 규칙**: 콜 스택이 **비어있어야만** 이벤트 루프가 다음 작업을 큐에서 꺼낼 수 있다. 무거운 동기 작업이 콜 스택을 점유하면 비동기 콜백도, 사용자 이벤트도 모두 막힌다.
+
+각 스택 프레임은 함수의 **Execution Context** 를 담는다, 지역 변수, `this`, 외부 [[Lexical Environment]] 참조 등.
+
+### 2. Web API / Node.js API
+
+호스트 환경이 제공하는 **백그라운드 처리**. JS 엔진과 **별도 스레드** 다. 엔진은 싱글 스레드지만 호스트는 멀티 스레드.
+
+```anim:web-api-detail
+{}
+```
+
+| 호스트 | 제공 API |
+|:---|:---|
+| 브라우저 | `setTimeout`/`setInterval`, `fetch`/XHR, DOM 이벤트, `IndexedDB`, Geolocation, WebSocket … |
+| Node.js | `fs`, `net`, `crypto`, `setImmediate`, `process.nextTick` … |
+
+JS 코드가 `setTimeout(cb, 1000)` 을 호출하면:
+
+1. 엔진은 콜백을 호스트에 **위임** 한 뒤 즉시 다음 줄로 진행
+2. 호스트의 별도 스레드가 1초를 카운트다운
+3. 만료되면 콜백을 **태스크 큐** 에 등록 (엔진과의 소통 창구)
+4. 엔진은 콜 스택이 비면 큐에서 콜백을 꺼낸다
+
+이게 싱글 스레드 JS 가 "동시에 여러 일" 을 처리할 수 있는 이유다, **호스트가 멀티 스레드로 백그라운드 처리** 를 해주기 때문.
+
+### 3. Task Queue (매크로태스크 큐)
+
+WHATWG HTML 명세상 "task queue". **FIFO**, 한 틱에 **한 개** 만 꺼낸다.
+
+```anim:task-queue-detail
+{}
+```
+
+**들어오는 콜백 (출처별)**:
+
+| 출처 | 예시 |
+|:---|:---|
+| 타이머 | `setTimeout`, `setInterval` 콜백 |
+| DOM 이벤트 | `click`, `input`, `scroll`, `keydown` 핸들러 |
+| 네트워크 | `fetch` 응답 도착 시점의 콜백 |
+| Node.js 전용 | `setImmediate` |
+| 메시지 | `MessageChannel`, `postMessage` |
+
+**핵심 규칙**: 한 틱에 정확히 **한 개** 만 꺼낸다. 꺼낸 작업은 콜 스택에서 끝까지 실행되고, 끝난 후 **마이크로태스크 큐가 전부 비워진** 뒤에야 다음 매크로태스크가 시작된다.
+
+그래서 setTimeout 콜백들끼리는 항상 한 박자씩 떨어져 있고, 그 사이 사이에 Promise.then 들이 끼어든다.
+
+### 4. [[Microtask Queue]] (마이크로태스크 큐)
+
+ECMAScript "PromiseJobs" + WHATWG "microtask queue". **FIFO**, 한 틱에 **전부** 비울 때까지 처리한다.
+
+```anim:microtask-queue-detail
+{}
+```
+
+**들어오는 콜백 (출처별)**:
+
+| 출처 | 예시 |
+|:---|:---|
+| Promise | `.then`, `.catch`, `.finally` 의 콜백 |
+| async/await | `await` 이후의 함수 재개 |
+| 직접 등록 | `queueMicrotask(fn)` |
+| DOM 변경 관찰 | `MutationObserver` 콜백 |
+| Node.js 전용 | (그보다 앞 우선순위: `process.nextTick`) |
+
+**핵심 규칙**: 큐가 **비어있을 때까지** 모두 실행. 처리 중에 새로운 마이크로태스크가 등록되어도 **같은 틱 안에서** 처리된다.
+
+그래서 `Promise.then` 으로 자기 자신을 무한 등록하면 (`function loop() { Promise.resolve().then(loop) }`) 큐가 영원히 빌 일이 없어 **페이지가 freeze** 된다. setTimeout 으로 같은 일을 하면 매 틱마다 한 개씩만 처리되어 렌더링과 이벤트가 정상 동작한다.
+
+> [!IMPORTANT]
+> **"마이크로 > 매크로" 의 본질은 큐 처리량의 차이.** 매크로는 한 개씩, 마이크로는 전부. 그래서 같은 시점에 등록해도 마이크로가 항상 먼저 끝난다.
+
+## 한 틱의 알고리즘
+
+```text
+while (true) {
+  // 1. 매크로태스크 큐에서 한 개 꺼냄
+  task = taskQueue.shift();
+  if (task) execute(task);
+
+  // 2. 마이크로태스크 큐를 *완전히* 비울 때까지
+  while (microtaskQueue.length > 0) {
+    microtask = microtaskQueue.shift();
+    execute(microtask);
+    // 이 microtask 안에서 새 microtask 가 등록되어도 이 루프 안에서 처리됨
+  }
+
+  // 3. 필요하면 렌더링 (브라우저)
+  if (shouldRender()) {
+    runAnimationFrameCallbacks();
+    style → layout → paint;
+  }
+}
+```
+
+## 우선순위 실험
+
+```javascript
+console.log('A');
+setTimeout(() => console.log('B'), 0);
+Promise.resolve().then(() => console.log('C'));
+queueMicrotask(() => console.log('D'));
+console.log('E');
+
+// 출력: A, E, C, D, B
+```
+
+이유:
+- A, E: 동기, 콜 스택에서 즉시
+- C, D: 마이크로태스크, 동기 끝나자마자
+- B: 매크로태스크, 다음 틱
+
+## 함정과 한계
+
+### 마이크로태스크 무한 등록
+
+마이크로태스크 큐는 "완전히 비울 때까지" 처리하므로, 안에서 또 마이크로태스크를 등록하면 렌더링과 매크로태스크가 영원히 못 돈다.
+
+```javascript
+function loop() { Promise.resolve().then(loop); }
+loop(); // 페이지 freeze
+```
+
+### setTimeout 의 최소 4ms
+
+5회 이상 중첩된 `setTimeout` 은 0ms 를 요청해도 최소 4ms 지연. 모든 주요 브라우저가 명세 준수.
+
+### Node.js 의 특수 단계
+
+Node.js 의 libuv 기반 이벤트 루프는 더 세분화되어 있다.
+
+| 단계 | 처리 대상 |
+|:---|:---|
+| timers | `setTimeout`, `setInterval` 만료된 콜백 |
+| pending callbacks | 일부 시스템 작업의 콜백 |
+| idle, prepare | 내부용 |
+| poll | I/O 콜백, 새 이벤트 대기 |
+| check | `setImmediate` 콜백 |
+| close callbacks | `socket.on('close', ...)` 등 |
+
+각 단계 사이마다 마이크로태스크 큐가 비워지고, `process.nextTick` 은 더 앞 우선순위.
+
+## 실무 예시
+
+### 무거운 작업 잘게 쪼개기
+
+```javascript
+function processInChunks(items, processor) {
+  let i = 0;
+  function next() {
+    const start = Date.now();
+    while (i < items.length && Date.now() - start < 50) {
+      processor(items[i++]);
+    }
+    if (i < items.length) setTimeout(next, 0); // UI 에 양보
+  }
+  next();
+}
+```
+
+### 다음 마이크로태스크에 미루기
+
+```javascript
+function notify(observer, data) {
+  queueMicrotask(() => observer.update(data));
+  // 호출자의 동기 코드가 완전히 끝난 직후, 다음 매크로 전에
+}
+```
+
+## 참고
+
+- [[Microtask Queue]]
+- [[Promise]]
+- [[async/await]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- WHATWG HTML, [Event loop](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop)
+- Node.js Docs, [The event loop](https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick)
+- Philip Roberts, [What the heck is the event loop?](https://www.youtube.com/watch?v=8aGhZQkoFbQ)
