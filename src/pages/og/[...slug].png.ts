@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { renderOgPng, type OgImageProps } from '../../lib/og-image';
 import { getPublishedPosts, getPublishedWiki } from '../../lib/content-queries';
-import { SITE_TITLE, SITE_DESCRIPTION } from '../../consts';
+import { SITE_TITLE, SITE_DESCRIPTION } from '@/shared/config';
 
 interface SerializedProps {
   title: string;

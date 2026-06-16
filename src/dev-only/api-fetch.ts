@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { FILE_UPLOAD_MAX_BYTES } from '../consts';
+import { FILE_UPLOAD_MAX_BYTES } from '@/shared/config';
 import { errorResponse, jsonResponse, notFoundResponse } from './api-utils';
 
 export const prerender = false;

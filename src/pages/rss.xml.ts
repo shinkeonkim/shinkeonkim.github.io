@@ -1,6 +1,6 @@
 import rss from '@astrojs/rss';
 import type { APIContext } from 'astro';
-import { SITE_DESCRIPTION, SITE_TITLE } from '../consts';
+import { SITE_DESCRIPTION, SITE_TITLE } from '@/shared/config';
 import { getPublishedPosts, sortByDateDesc } from '../lib/content-queries';
 import { postToFeedItem } from '../lib/feed';
 

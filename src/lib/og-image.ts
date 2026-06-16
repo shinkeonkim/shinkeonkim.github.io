@@ -2,7 +2,7 @@ import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { SITE_TITLE, SITE_AUTHOR } from '../consts';
+import { SITE_TITLE, SITE_AUTHOR } from '@/shared/config';
 
 const FONT_DIR = join(process.cwd(), '.cache', 'fonts', 'pretendard');
 

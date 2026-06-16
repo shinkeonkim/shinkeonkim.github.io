@@ -1,5 +1,5 @@
 import type { APIContext } from 'astro';
-import { SITE_AUTHOR, SITE_DESCRIPTION, SITE_TITLE, SITE_URL } from '../consts';
+import { SITE_AUTHOR, SITE_DESCRIPTION, SITE_TITLE, SITE_URL } from '@/shared/config';
 import { getPublishedPosts, sortByDateDesc } from '../lib/content-queries';
 
 export async function GET(_context: APIContext) {

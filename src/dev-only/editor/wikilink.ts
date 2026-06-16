@@ -2,7 +2,7 @@ import { api, type TreeEntry } from './api';
 import { getCaretCoordinates } from './caret';
 import { escapeHtml } from './utils';
 import type { CollectionName } from './state';
-import { WIKILINK_AUTOCOMPLETE_MAX } from '../../consts';
+import { WIKILINK_AUTOCOMPLETE_MAX } from '@/shared/config';
 
 interface PageEntry {
   collection: CollectionName;

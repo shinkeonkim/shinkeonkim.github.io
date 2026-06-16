@@ -1,5 +1,5 @@
 import type { CurrentFile } from './state';
-import { EDITOR_AUTOSAVE_INTERVAL_MS } from '../../consts';
+import { EDITOR_AUTOSAVE_INTERVAL_MS } from '@/shared/config';
 
 const PREFIX = 'editor-draft:';
 const AUTOSAVE_INTERVAL = EDITOR_AUTOSAVE_INTERVAL_MS;

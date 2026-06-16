@@ -6,7 +6,7 @@ import {
   personSchema,
   websiteSchema,
 } from './schema';
-import { SITE_URL } from '../consts';
+import { SITE_URL } from '@/shared/config';
 
 describe('absoluteUrl', () => {
   it('joins site URL with absolute pathname', () => {

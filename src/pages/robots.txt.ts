@@ -1,5 +1,5 @@
 import type { APIContext } from 'astro';
-import { SITE_URL } from '../consts';
+import { SITE_URL } from '@/shared/config';
 
 const AI_CRAWLERS = [
   'GPTBot',

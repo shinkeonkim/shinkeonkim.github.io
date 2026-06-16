@@ -1,6 +1,6 @@
 import type { CollectionEntry } from 'astro:content';
 import { createMarkdownProcessor } from '@astrojs/markdown-remark';
-import { SITE_AUTHOR, SITE_URL } from '../consts';
+import { SITE_AUTHOR, SITE_URL } from '@/shared/config';
 
 import { notePreview, noteTitle } from './notes';
 

@@ -6,7 +6,7 @@ import {
   SITE_SOCIAL,
   SITE_TITLE,
   SITE_URL,
-} from '../consts';
+} from '@/shared/config';
 
 type SchemaObject = Record<string, unknown>;
 
