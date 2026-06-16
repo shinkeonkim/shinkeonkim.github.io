@@ -29,10 +29,10 @@ blog so:
 
 ## Baseline (verified before any change)
 
-- `bun astro check` — 0 errors, 0 warnings, 16 hints (all pre-existing
+- `bun astro check` , 0 errors, 0 warnings, 16 hints (all pre-existing
   `ts(6133)` unused-name warnings in dev-only test files).
-- `bun run test` — 9 files, 119 tests pass.
-- `git status` — clean working tree on `master` at `f8a840d`.
+- `bun run test` , 9 files, 119 tests pass.
+- `git status` , clean working tree on `master` at `f8a840d`.
 
 ## Current pain points (audited from
 `find src -type f | xargs wc -l | sort -rn`)
@@ -79,7 +79,7 @@ src/
 │   │   ├── references/                # bibtex, references
 │   │   ├── external/                  # giscus-counts, url-preview, external-profiles
 │   │   └── modulepreload-integration.mjs
-│   ├── types/                         # NEW — extracted shared types
+│   ├── types/                         # NEW , extracted shared types
 │   │   ├── content.ts                 # CollectionEntry aliases, Post/Note/Wiki types
 │   │   ├── graph.ts                   # GraphNode, GraphLink, GraphNodeKind, GraphLinkKind
 │   │   └── index.ts
@@ -122,13 +122,13 @@ src/
 │       │       └── runtime.ts         # easeApply, lerp, parseColor, computeSnapshot, activeAppearance, currentChapter, activeEffects, key helpers
 │       └── ui/
 │           ├── AnimationLoader.astro  # CSS + bootstrap split out
-│           ├── AnimationPlayer.tsx    # NEW — extracted PlayerWrapper React tree
+│           ├── AnimationPlayer.tsx    # NEW , extracted PlayerWrapper React tree
 │           └── AnimationBacklinks.astro
 ├── features/                          # user-facing features
 │   ├── search/
 │   │   ├── ui/
 │   │   │   ├── SearchButton.astro
-│   │   │   └── SearchModal.astro      # shell only — markup, opens dialog, mounts script
+│   │   │   └── SearchModal.astro      # shell only , markup, opens dialog, mounts script
 │   │   ├── lib/
 │   │   │   ├── pagefind.ts            # loadPagefind, doSearch
 │   │   │   ├── modes.ts               # detectMode, MODE_LABELS, HELP_ITEMS
@@ -171,14 +171,14 @@ src/
 │   │   └── Footer.astro
 │   ├── post-toc/
 │   │   └── PostToc.astro
-│   ├── post-article/                  # NEW — extracted from PostLayout
+│   ├── post-article/                  # NEW , extracted from PostLayout
 │   │   ├── PostBreadcrumbs.astro
 │   │   ├── PostHeader.astro
 │   │   ├── PostCover.astro
 │   │   ├── PostAdjacent.astro
 │   │   ├── PostSeriesNav.astro
 │   │   └── styles/post-article.css
-│   ├── hero-3d/                       # NEW — split from Hero3D.tsx
+│   ├── hero-3d/                       # NEW , split from Hero3D.tsx
 │   │   ├── Hero3D.tsx                 # public component (mounts + lifecycle)
 │   │   ├── theme.ts                   # readTheme, ThemeColors
 │   │   ├── keyboard.ts                # KEYBOARD_ROWS + key meshes builder
@@ -195,19 +195,19 @@ src/
 ├── pages/                             # Astro pages (unchanged routes; only imports updated)
 ├── layouts/                           # thin shells; heavy logic moved out
 │   ├── BaseLayout.astro               # unchanged shape; imports updated
-│   └── PostLayout.astro               # ≤300 lines — pulls in widgets/post-article/*
+│   └── PostLayout.astro               # ≤300 lines , pulls in widgets/post-article/*
 ├── content/                           # Astro content collections (UNCHANGED)
 ├── content.config.ts
 ├── plugins/                           # Markdown plugins (UNCHANGED)
 ├── styles/                            # Global CSS (UNCHANGED)
 └── dev-only/
     ├── integration.mjs
-    ├── shared/                        # NEW — utilities shared across editor/studio/api
+    ├── shared/                        # NEW , utilities shared across editor/studio/api
     │   ├── api-utils.ts
     │   ├── api-utils.test.ts
     │   ├── git-utils.ts
     │   └── path-utils.ts
-    ├── api/                           # NEW — endpoints grouped by surface
+    ├── api/                           # NEW , endpoints grouped by surface
     │   ├── content/                   # api-file, api-files, api-file-ops
     │   ├── git/                       # api-git
     │   ├── render/                    # api-render
@@ -217,9 +217,9 @@ src/
     │   ├── sources/                   # api-sources
     │   ├── url-preview/               # api-url-preview
     │   └── grep/                      # api-grep
-    ├── editor/                        # entrypoint + modules (moves only — see Phase 7)
-    ├── studio/                        # entrypoint + modules (moves only — see Phase 7)
-    ├── chart-editor/                  # NEW — split of chart-editor.astro
+    ├── editor/                        # entrypoint + modules (moves only , see Phase 7)
+    ├── studio/                        # entrypoint + modules (moves only , see Phase 7)
+    ├── chart-editor/                  # NEW , split of chart-editor.astro
     │   ├── chart-editor.astro         # shell only
     │   ├── lib/state.ts
     │   └── styles/chart-editor.css
@@ -263,7 +263,7 @@ per file extension.
 
 **Verification**: `bun astro check`, `bun run test`, `bun run build` produce the
 same dist hash on a control file (read `dist/index.html` first 200 bytes
-before/after — they should match because no runtime behavior changed).
+before/after , they should match because no runtime behavior changed).
 
 ### Phase 2, lib/ → shared/lib/ subgrouped
 
@@ -283,7 +283,7 @@ before/after — they should match because no runtime behavior changed).
    `bun astro check` after each subgroup.
 3. Update `astro.config.mjs` paths for `sitemap-images.mjs`,
    `sitemap-lastmod.mjs`, `modulepreload-integration.mjs`. These are
-   `import` statements relative to repo root — change to `./src/shared/lib/...`
+   `import` statements relative to repo root , change to `./src/shared/lib/...`
    form.
 4. Update vitest config if it has `src/lib/**` patterns.
 
@@ -321,7 +321,7 @@ Mechanical move, no logic edits. One commit per slice for bisectability:
    NoteCardScript (note), ReferencesBlock (source), AnimationBacklinks
    (animation/ui).
 4. **widgets** commit: Header, MobileNav, Footer, PostToc, Graph, Graph3D,
-   GraphView, LocalGraph, ChartJs, Hero3D (placeholder — split happens in
+   GraphView, LocalGraph, ChartJs, Hero3D (placeholder , split happens in
    Phase 6).
 5. **features** commit: SearchButton+SearchModal, ThemeToggle, ShareButtons,
    Comments, UrlPreview, WikilinkHoverPreview, CodeWithOutput+Loader,
@@ -345,24 +345,24 @@ Mechanical move, no logic edits. One commit per slice for bisectability:
 Each split is its own commit. Order chosen by ease of verification (easiest
 first so we accumulate confidence before touching the trickier ones).
 
-1. **`Graph.tsx` (300)** — already at threshold. Move types to
+1. **`Graph.tsx` (300)** , already at threshold. Move types to
    `shared/types/graph.ts` (Phase 3 does this), brings it to ~270 lines. ✓
-2. **`AnimationLoader.astro` (535)** — extract React tree into
+2. **`AnimationLoader.astro` (535)** , extract React tree into
    `entities/animation/ui/AnimationPlayer.tsx`. The `.astro` file then just
    ships CSS + script that loads the player. Targets: `.astro` ~150,
    `.tsx` ~350 (or further split into Modal sub-component to land below 300).
-3. **`MermaidLoader.astro` (462)** — split as planned:
+3. **`MermaidLoader.astro` (462)** , split as planned:
    `features/mermaid/lib/{render,zoom,export}.ts` +
    `features/mermaid/ui/MermaidLoader.astro` (~120 lines) +
    `features/mermaid/styles/mermaid.css`.
-4. **`SearchModal.astro` (695)** — split as planned. CSS to
+4. **`SearchModal.astro` (695)** , split as planned. CSS to
    `features/search/styles/search-modal.css`. Script body into
    `features/search/lib/*.ts` modules (compiled by Vite; loaded via
    `<script>` block). The `.astro` shell stays under 100 lines.
-5. **`Hero3D.tsx` (561)** — split as planned into
+5. **`Hero3D.tsx` (561)** , split as planned into
    `widgets/hero-3d/{Hero3D,theme,keyboard,screen,words,camera}.ts(x)`.
    The exported `Hero3D` component orchestrates; helpers are pure.
-6. **`PostLayout.astro` (642)** — extract:
+6. **`PostLayout.astro` (642)** , extract:
    - `widgets/post-article/PostBreadcrumbs.astro`
    - `widgets/post-article/PostHeader.astro` (h1 + meta + tags + cover)
    - `widgets/post-article/PostCover.astro`
@@ -372,10 +372,10 @@ first so we accumulate confidence before touching the trickier ones).
      block)
    - Keep frontmatter logic + JSON-LD assembly in `PostLayout.astro`
      (it composes everything; target ~200 lines).
-7. **`schema.ts` (490)** — split into `engine/schema/{elements,effects,document,runtime}.ts`.
+7. **`schema.ts` (490)** , split into `engine/schema/{elements,effects,document,runtime}.ts`.
    Re-export from `engine/schema/index.ts` to preserve `from '@/entities/animation/engine/schema'`
    imports.
-8. **`engine-render-elements.tsx` (468)** — split:
+8. **`engine-render-elements.tsx` (468)** , split:
    - `render-elements/{rect,circle,line-arrow,text,image,path,polygon,group,code}.tsx`
    - Top-level `render-elements/index.tsx` (or `render-elements.tsx`)
      re-exports `RenderElement` switch.
@@ -390,27 +390,27 @@ page-local UI; one extraction each.
 Audit each `.astro` file for usage of Astro-specific features:
 
 - `getCollection`, `Astro.props`, `Astro.url`, `Astro.glob`, `Astro.site`,
-  `<slot />`, `<style is:global>`, `<script is:inline>`, build-time fetches —
+  `<slot />`, `<style is:global>`, `<script is:inline>`, build-time fetches , 
   **keep as Astro**.
-- Pure markup + classes, props, no Astro globals — **convert to tsx React
+- Pure markup + classes, props, no Astro globals , **convert to tsx React
   component**, mount via `client:load` or `client:visible` from a parent
   `.astro`.
 
 Targets identified now (will re-confirm during implementation):
 
-- `KatexCopy.astro` — only attaches an event listener to clipboard. Pure JS in
+- `KatexCopy.astro` , only attaches an event listener to clipboard. Pure JS in
   a `<script>` tag. Conversion adds no value because there's no JSX/state.
   **DECISION: keep Astro** (Astro feature used: zero-JS shell).
-- `BackToTop.astro` — pure markup + small script. **Keep Astro**.
-- `Pagination.astro` — uses Astro props but no runtime. **Keep Astro**.
-- `embed/*.astro` — pure prop-driven markup, often a single `<iframe>`. Could
+- `BackToTop.astro` , pure markup + small script. **Keep Astro**.
+- `Pagination.astro` , uses Astro props but no runtime. **Keep Astro**.
+- `embed/*.astro` , pure prop-driven markup, often a single `<iframe>`. Could
   be tsx, but conversion requires `client:idle` and forces React bundling for
   static iframes. **Keep Astro** (no benefit).
-- `Backlinks.astro`, `RelatedPosts.astro`, `LocalGraph.astro` — use
+- `Backlinks.astro`, `RelatedPosts.astro`, `LocalGraph.astro` , use
   `getCollection` at build time. **Keep Astro**.
-- `ChartJs.tsx`, `Graph*.tsx`, `Hero3D.tsx`, `AnimationPlayer.tsx` — already
+- `ChartJs.tsx`, `Graph*.tsx`, `Hero3D.tsx`, `AnimationPlayer.tsx` , already
   tsx. Used as React islands. ✓
-- `WikilinkHoverPreview.astro` — script-only Astro shell. Could be tsx but
+- `WikilinkHoverPreview.astro` , script-only Astro shell. Could be tsx but
   conversion would change the hydration model. **Keep Astro**.
 
 **Conclusion**: under the explicit "Astro features required" filter from the
@@ -452,11 +452,11 @@ without behavior regressions:
 3. **Likely wins** to evaluate (each is its own commit, gated by Lighthouse
    delta):
    - **Defer Hero3D**: only mount on `client:idle` (currently `client:load`
-     or similar) — verify after move in Phase 5.
+     or similar) , verify after move in Phase 5.
    - **AnimationLoader IO threshold**: currently `rootMargin: '200px 0px'`.
      Consider raising for below-the-fold to skip first-paint cost.
    - **Mermaid eager-load detection**: currently dynamic import on first
-     viewport hit — keep as-is, but ensure the `MutationObserver` on
+     viewport hit , keep as-is, but ensure the `MutationObserver` on
      `<html class>` doesn't trigger reflow on every theme toggle. Audit only.
    - **Pretendard preload**: currently `as="font"` of variable subset 91.
      Check actual hit rate via build output.
@@ -483,10 +483,10 @@ Within a phase, commits are atomic and bisectable.
 
 ## Verification gates (per commit)
 
-1. `bun astro check` — must report 0 errors (warnings/hints unchanged from
+1. `bun astro check` , must report 0 errors (warnings/hints unchanged from
    baseline).
-2. `bun run test` — all 119 tests must pass.
-3. `bun run build` — must complete with exit 0.
+2. `bun run test` , all 119 tests must pass.
+3. `bun run build` , must complete with exit 0.
 4. Manual smoke (only after Phase 5 and Phase 7 commits):
    - `/`, `/posts/`, `/posts/<any slug>/`, `/graph/`, `/animations/`, `/about/`
      load with no console errors.
@@ -508,7 +508,7 @@ the commit message includes:
 
 ## Open questions for the user
 
-None — request is concrete enough to proceed once plan is signed off.
+None , request is concrete enough to proceed once plan is signed off.
 
 ## Estimated commit count
 
@@ -544,9 +544,9 @@ Externally-rooted assumptions verified by `grep` sweeps before kickoff:
 - [scripts/build-studio-icons.mjs](file:///Users/koa/004-Projects/0001-Resume/100-github-io/scripts/build-studio-icons.mjs#L7)
   writes `'src/dev-only/studio/icon-data.ts'`. Studio internals are NOT moved
   (per scope exclusion). No update needed.
-- `.github/workflows/{codeql,deploy,lighthouse,pr-checks}.yml` — no `src/`
+- `.github/workflows/{codeql,deploy,lighthouse,pr-checks}.yml` , no `src/`
   paths. No update needed.
-- `eslint.config.js`, `.prettierrc*` — no `src/` paths. No update needed.
+- `eslint.config.js`, `.prettierrc*` , no `src/` paths. No update needed.
 
 SearchModal `<script is:inline define:vars={{ tagList, commandList }}>` split
 caveat: removing `is:inline` lets the bundled `<script>` use `import`. The
