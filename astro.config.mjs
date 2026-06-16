@@ -1,7 +1,6 @@
 // @ts-check
-import { parse as parsePath, resolve as resolvePath } from 'node:path';
 import { defineConfig } from 'astro/config';
-import { parse as parseJs } from 'acorn';
+import AutoImport from 'astro-auto-import';
 import mdx from '@astrojs/mdx';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
@@ -25,58 +24,6 @@ import devEditor from './src/dev-only/integration.mjs';
 import modulepreload from './src/lib/modulepreload-integration.mjs';
 import { buildImageMap } from './src/lib/sitemap-images.mjs';
 import { buildLastmodMap, resolveLastmod } from './src/lib/sitemap-lastmod.mjs';
-
-// MDX auto-imports, in-tree replacement for astro-auto-import.
-// astro-auto-import@0.5.1 (latest) still injects via the deprecated
-// `markdown.remarkPlugins` key, which causes Astro 6.4+ to emit a
-// one-time `markdown.remarkPlugins ... are deprecated` warning at boot
-// even when our own config uses `markdown.processor`. To remove the
-// warning without making writers add `import CodeWithOutput from '...'`
-// to every MDX file, we wire the same plugin directly onto our
-// `unified()` processor. The plugin is intentionally identical in shape
-// to astro-auto-import's (build an `mdxjsEsm` node once, then unshift
-// it onto every non-`.md` file's mdast).
-const MDX_AUTO_IMPORTS = [
-  './src/components/CodeWithOutput.astro',
-  './src/components/ChartJs.tsx',
-];
-
-/** @param {string} p */
-function defaultImportName(p) {
-  return parsePath(p).name.replaceAll(/[^\w\d]/g, '');
-}
-
-/** @param {string[]} paths */
-function buildMdxImportsNode(paths) {
-  const js = paths
-    .map((p) => `import ${defaultImportName(p)} from ${JSON.stringify(resolvePath(p))};`)
-    .join('\n');
-  // `acorn.parse` with `sourceType: 'module'` already returns a Program
-  // node (with `body`, `type: 'Program'`, `sourceType: 'module'`). MDX
-  // wants this raw estree under `data.estree`. astro-auto-import added
-  // a dead `body: []` here to placate its old MDX types and suppressed
-  // the resulting duplicate-key warning - we don't need either.
-  return {
-    type: 'mdxjsEsm',
-    value: '',
-    data: {
-      estree: parseJs(js, { ecmaVersion: 'latest', sourceType: 'module' }),
-    },
-  };
-}
-
-const mdxAutoImportsNode = buildMdxImportsNode(MDX_AUTO_IMPORTS);
-
-function remarkInjectMdxAutoImports() {
-  /** @param {any} tree @param {any} vfile */
-  return (tree, vfile) => {
-    // Skip pure `.md` files. They are not JSX-aware and a stray
-    // `mdxjsEsm` node would either be ignored or break the parser.
-    if (!vfile.basename?.endsWith('.md')) {
-      tree.children.unshift(mdxAutoImportsNode);
-    }
-  };
-}
 
 const SITE_URL = 'https://shinkeonkim.com';
 // Pre-build URL → cover/thumbnail and URL → lastmod maps once, at
@@ -121,6 +68,15 @@ export default defineConfig({
     layout: 'constrained',
   },
   integrations: [
+    // MUST be listed BEFORE mdx(), astro-auto-import injects import
+    // statements into MDX files at compile time so writers can use
+    // <CodeWithOutput .../> without a per-file import line.
+    AutoImport({
+      imports: [
+        './src/components/CodeWithOutput.astro',
+        './src/components/ChartJs.tsx',
+      ],
+    }),
     mdx(),
     react(),
     sitemap({
@@ -237,11 +193,6 @@ export default defineConfig({
         remarkMathLenient,
         remarkMath,
         remarkUrlPreview,
-        // Last in the chain to match the original astro-auto-import
-        // ordering (it was appended at the end by Astro's legacy
-        // plugin coercion). The plugin only unshifts a single
-        // `mdxjsEsm` node, no other plugin needs to see it.
-        remarkInjectMdxAutoImports,
       ],
       rehypePlugins: [
         rehypeSlug,
