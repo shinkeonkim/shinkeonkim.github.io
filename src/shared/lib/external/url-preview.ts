@@ -15,7 +15,7 @@ let cachePromise: Promise<UrlPreviewCache> | null = null;
 
 export function loadUrlPreviews(): Promise<UrlPreviewCache> {
   if (!cachePromise) {
-    cachePromise = import('../data/url-previews.json')
+    cachePromise = import('@/data/url-previews.json')
       .then((mod) => (mod.default ?? mod) as UrlPreviewCache)
       .catch(() => ({}) as UrlPreviewCache);
   }

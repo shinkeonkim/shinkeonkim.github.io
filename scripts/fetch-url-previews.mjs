@@ -7,7 +7,7 @@ import ogs from 'open-graph-scraper';
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const CONTENT_ROOT = path.join(REPO_ROOT, 'src/content');
 const CACHE_PATH = path.join(REPO_ROOT, 'src/data/url-previews.json');
-const EXTERNAL_PROFILES_PATH = path.join(REPO_ROOT, 'src/lib/external-profiles.ts');
+const EXTERNAL_PROFILES_PATH = path.join(REPO_ROOT, 'src/shared/lib/external/external-profiles.ts');
 const TAG_RE = /<UrlPreview\s+url=["']([^"']+)["']\s*\/>/g;
 const PROFILE_URL_RE = /url:\s*['"](https?:\/\/[^'"]+)['"]/g;
 
