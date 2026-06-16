@@ -7,7 +7,6 @@ import sitemap from '@astrojs/sitemap';
 import { EnumChangefreq } from 'sitemap';
 import pagefind from 'astro-pagefind';
 import tailwindcss from '@tailwindcss/vite';
-import { unified } from '@astrojs/markdown-remark';
 import { remarkAlert } from 'remark-github-blockquote-alert';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -179,52 +178,45 @@ export default defineConfig({
     },
   },
   markdown: {
-    // Astro 6.4+: pass the remark/rehype plugin chain via a `unified()`
-    // processor instead of the deprecated `markdown.{remarkPlugins,
-    // rehypePlugins,remarkRehype}` keys. `@astrojs/mdx@6.x` reads
-    // `markdown.processor` and inherits the same plugins for .mdx files
-    // automatically, so we don't need to duplicate the list in mdx().
-    processor: unified({
-      remarkPlugins: [
-        remarkAnimation,
-        remarkMermaid,
-        remarkAlert,
-        remarkWikilink,
-        remarkMathLenient,
-        remarkMath,
-        remarkUrlPreview,
-      ],
-      rehypePlugins: [
-        rehypeSlug,
-        [
-          rehypeAutolinkHeadings,
-          {
-            behavior: 'append',
-            properties: {
-              className: ['heading-anchor'],
-              ariaLabel: 'permalink',
-              tabindex: -1,
-            },
-            // Empty content: the visible "#" comes from a CSS ::after pseudo-
-            // element on .heading-anchor (see global.css). A bare text node here
-            // would be concatenated into the heading's own text node, so
-            // Astro's getHeadings() returns e.g. "제목#" - which leaks into
-            // the TOC, Pagefind search index, RSS, and OG image titles.
-            content: () => [],
+    remarkPlugins: [
+      remarkAnimation,
+      remarkMermaid,
+      remarkAlert,
+      remarkWikilink,
+      remarkMathLenient,
+      remarkMath,
+      remarkUrlPreview,
+    ],
+    rehypePlugins: [
+      rehypeSlug,
+      [
+        rehypeAutolinkHeadings,
+        {
+          behavior: 'append',
+          properties: {
+            className: ['heading-anchor'],
+            ariaLabel: 'permalink',
+            tabindex: -1,
           },
-        ],
-        [
-          rehypeExternalLinks,
-          {
-            target: '_blank',
-            rel: ['noopener', 'noreferrer'],
-            protocols: ['http', 'https'],
-          },
-        ],
-        [rehypeKatex, { output: 'html', strict: 'ignore' }],
-        rehypeLazyImages,
+          // Empty content: the visible "#" comes from a CSS ::after pseudo-
+          // element on .heading-anchor (see global.css). A bare text node here
+          // would be concatenated into the heading's own text node, so
+          // Astro's getHeadings() returns e.g. "제목#" - which leaks into
+          // the TOC, Pagefind search index, RSS, and OG image titles.
+          content: () => [],
+        },
       ],
-    }),
+      [
+        rehypeExternalLinks,
+        {
+          target: '_blank',
+          rel: ['noopener', 'noreferrer'],
+          protocols: ['http', 'https'],
+        },
+      ],
+      [rehypeKatex, { output: 'html', strict: 'ignore' }],
+      rehypeLazyImages,
+    ],
     shikiConfig: {
       themes: {
         light: 'github-light',
