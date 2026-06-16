@@ -191,6 +191,24 @@ export const groupElementSchema = z.object({
   childIds: z.array(idSchema).default([]),
 });
 
+export const codeElementSchema = z.object({
+  type: z.literal('code'),
+  ...baseElementProps,
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  content: z.string(),
+  language: z.string().default('javascript'),
+  fontSize: z.number().positive().default(12),
+  showLineNumbers: z.boolean().default(false),
+  fill: z.string().default('#1e293b'),
+  textColor: z.string().default('#e2e8f0'),
+  padding: z.number().nonnegative().default(12),
+  cornerRadius: z.number().nonnegative().default(8),
+  title: z.string().optional(),
+});
+
 export const elementSchema = z.discriminatedUnion('type', [
   rectElementSchema,
   circleElementSchema,
@@ -201,6 +219,7 @@ export const elementSchema = z.discriminatedUnion('type', [
   pathElementSchema,
   polygonElementSchema,
   groupElementSchema,
+  codeElementSchema,
 ]);
 
 export const effectSchema = z.discriminatedUnion('type', [
@@ -284,6 +303,7 @@ export type ImageElement = z.infer<typeof imageElementSchema>;
 export type PathElement = z.infer<typeof pathElementSchema>;
 export type PolygonElement = z.infer<typeof polygonElementSchema>;
 export type GroupElement = z.infer<typeof groupElementSchema>;
+export type CodeElement = z.infer<typeof codeElementSchema>;
 export type AnimationElement = z.infer<typeof elementSchema>;
 export type Appearance = z.infer<typeof appearanceSchema>;
 export type TrackKeyframe = z.infer<typeof trackKeyframeSchema>;
