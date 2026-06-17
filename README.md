@@ -6,19 +6,45 @@ Astro + MDX + GitHub Actions + GitHub Pages 기반의 개인 블로그. `[[wikil
 
 ## 구조
 
+FSD 영감을 받은 레이어 구조입니다. 블로그 엔진을 별도 패키지로 분리할 수 있도록 의존성 흐름을 일방향으로 정렬했습니다 (`shared <- entities <- features <- widgets <- pages/layouts`).
+
 ```
 src/
-├── content/
-│   ├── posts/   # 일반 글 (.md / .mdx)
-│   ├── notes/   # 한줄 노트
-│   └── wiki/    # 위키 페이지
-├── components/
-├── layouts/
-├── pages/
-├── plugins/    # remark-wikilink 등
-└── styles/
-scripts/        # 일회성 유틸 (uv/Python, Node)
+├── content/                  # Astro 콘텐츠 컬렉션
+│   ├── posts/                # 일반 글 (.md / .mdx)
+│   ├── notes/                # 한줄 노트
+│   └── wiki/                 # 위키 페이지
+├── shared/                   # 재사용 가능한 공통 자산
+│   ├── config/               # 사이트 메타, NAV_ITEMS, pagination 상수 등
+│   ├── lib/                  # 도메인 중립 유틸 (content, seo, references, external)
+│   ├── ui/                   # 범용 UI 프리미티브
+│   ├── analytics/            # GA, 서비스 워커 등록
+│   └── types/                # 공유 타입 (graph 등)
+├── entities/                 # 도메인 모델 + 도메인 UI
+│   ├── post/, note/, wiki/, source/
+│   └── animation/            # SVG 애니메이션 엔진 + UI
+│       └── engine/           # schema/, render-elements/, engine.tsx, loader.ts
+├── features/                 # 사용자 인터랙션 단위
+│   ├── search/, theme-toggle/, share/, comments/
+│   ├── url-preview/, code-with-output/, mermaid/
+│   ├── backlinks/, dev-edit/, embed/
+├── widgets/                  # 페이지 레벨 컴포지트 UI
+│   ├── header/, footer/, author-card/, post-toc/
+│   ├── post-article/         # PostLayout 의 슬라이스
+│   ├── graph-view/, hero-3d/, chart-js/
+├── layouts/                  # Astro 레이아웃 (BaseLayout, PostLayout)
+├── pages/                    # Astro 라우트
+├── plugins/                  # 마크다운 플러그인 (remark-wikilink 등)
+├── styles/                   # 글로벌 CSS
+└── dev-only/                 # 개발 전용 (/_editor, /_studio, /_chart-editor)
+    ├── shared/               # api-utils, git-utils, path-utils
+    ├── api/                  # purpose 별 endpoint (content/, git/, render/, ...)
+    ├── editor/               # 마크다운 에디터 모듈
+    └── studio/               # 애니메이션 스튜디오 모듈
+scripts/                      # 일회성 유틸 (uv/Python, Node)
 ```
+
+경로 별칭: `@/*` -> `src/*` ([tsconfig.json](tsconfig.json)). 슬라이스 간 import 는 반드시 `@/` 별칭을 사용하고, 같은 슬라이스 내 import 만 상대 경로를 씁니다.
 
 레거시 Jekyll 콘텐츠는 `_posts/`, `_tabs/`, `assets/` 에 보존되어 있으며 빌드에는 포함되지 않습니다. 현재 남은 3개 파일은 [`scripts/migrate-jekyll-posts.py`](scripts/migrate-jekyll-posts.py) 화이트리스트에서 의도적으로 제외된 잔재입니다 ([_posts/README.md](_posts/README.md) 참고).
 
