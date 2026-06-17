@@ -1,8 +1,8 @@
 import type { APIRoute } from 'astro';
 import fs from 'node:fs';
 import path from 'node:path';
-import { COLLECTIONS, CONTENT_ROOT, type Collection } from './path-utils';
-import { errorResponse, jsonResponse, notFoundResponse } from './api-utils';
+import { COLLECTIONS, CONTENT_ROOT, type Collection } from '@/dev-only/shared/path-utils';
+import { errorResponse, jsonResponse, notFoundResponse } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
 

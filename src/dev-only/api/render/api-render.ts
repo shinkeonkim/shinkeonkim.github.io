@@ -1,15 +1,15 @@
 import type { APIRoute } from 'astro';
-import { notFoundResponse } from './api-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 import { createMarkdownProcessor, parseFrontmatter } from '@astrojs/markdown-remark';
 import { codeToHtml } from 'shiki';
 import { remarkAlert } from 'remark-github-blockquote-alert';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import remarkWikilink from '../plugins/remark-wikilink.mjs';
-import remarkMermaid from '../plugins/remark-mermaid.mjs';
-import remarkMathLenient from '../plugins/remark-math-lenient.mjs';
-import remarkUrlPreview from '../plugins/remark-url-preview.mjs';
-import remarkAnimation from '../plugins/remark-animation.mjs';
+import remarkWikilink from '@/plugins/remark-wikilink.mjs';
+import remarkMermaid from '@/plugins/remark-mermaid.mjs';
+import remarkMathLenient from '@/plugins/remark-math-lenient.mjs';
+import remarkUrlPreview from '@/plugins/remark-url-preview.mjs';
+import remarkAnimation from '@/plugins/remark-animation.mjs';
 
 export const prerender = false;
 

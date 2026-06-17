@@ -24,51 +24,51 @@ export default function devEditor() {
         });
         injectRoute({
           pattern: '/_studio/api/animations',
-          entrypoint: path.join(here, 'api-animations.ts'),
+          entrypoint: path.join(here, 'api/animations/api-animations.ts'),
         });
         injectRoute({
           pattern: '/_studio/api/animations/[id]',
-          entrypoint: path.join(here, 'api-animation.ts'),
+          entrypoint: path.join(here, 'api/animations/api-animation.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/files',
-          entrypoint: path.join(here, 'api-files.ts'),
+          entrypoint: path.join(here, 'api/content/api-files.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/file',
-          entrypoint: path.join(here, 'api-file.ts'),
+          entrypoint: path.join(here, 'api/content/api-file.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/render',
-          entrypoint: path.join(here, 'api-render.ts'),
+          entrypoint: path.join(here, 'api/render/api-render.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/upload',
-          entrypoint: path.join(here, 'api-upload.ts'),
+          entrypoint: path.join(here, 'api/upload/api-upload.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/fetch',
-          entrypoint: path.join(here, 'api-fetch.ts'),
+          entrypoint: path.join(here, 'api/fetch/api-fetch.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/ops',
-          entrypoint: path.join(here, 'api-file-ops.ts'),
+          entrypoint: path.join(here, 'api/content/api-file-ops.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/git',
-          entrypoint: path.join(here, 'api-git.ts'),
+          entrypoint: path.join(here, 'api/git/api-git.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/sources',
-          entrypoint: path.join(here, 'api-sources.ts'),
+          entrypoint: path.join(here, 'api/sources/api-sources.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/url-preview',
-          entrypoint: path.join(here, 'api-url-preview.ts'),
+          entrypoint: path.join(here, 'api/url-preview/api-url-preview.ts'),
         });
         injectRoute({
           pattern: '/_editor/api/grep',
-          entrypoint: path.join(here, 'api-grep.ts'),
+          entrypoint: path.join(here, 'api/grep/api-grep.ts'),
         });
       },
     },

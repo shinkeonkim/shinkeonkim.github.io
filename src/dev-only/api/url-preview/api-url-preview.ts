@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { notFoundResponse } from './api-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 import ogs from 'open-graph-scraper';
 import fs from 'node:fs/promises';
 import path from 'node:path';

@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
-import { COLLECTIONS, listFiles, listTree, type TreeEntry, type FileEntry } from './path-utils';
-import { notFoundResponse } from './api-utils';
+import { COLLECTIONS, listFiles, listTree, type TreeEntry, type FileEntry } from '@/dev-only/shared/path-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
 

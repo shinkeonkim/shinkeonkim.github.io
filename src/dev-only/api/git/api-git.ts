@@ -16,8 +16,8 @@ import {
   stashList,
   stashPop,
   stashPush,
-} from './git-utils';
-import { notFoundResponse } from './api-utils';
+} from '@/dev-only/shared/git-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
 

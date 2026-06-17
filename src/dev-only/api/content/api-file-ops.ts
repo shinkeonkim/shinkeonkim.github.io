@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { notFoundResponse } from './api-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 import {
   COLLECTIONS,
   createFolder,
@@ -9,7 +9,7 @@ import {
   moveFile,
   renameFile,
   renameFolder,
-} from './path-utils';
+} from '@/dev-only/shared/path-utils';
 
 export const prerender = false;
 

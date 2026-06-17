@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
-import { isCollection, loadFile, saveFile } from './path-utils';
-import { notFoundResponse } from './api-utils';
+import { isCollection, loadFile, saveFile } from '@/dev-only/shared/path-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
 

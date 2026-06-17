@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { animationDefSchema, ID_RE } from '@/entities/animation/engine/schema';
 import { ANIM_DIR } from '@/entities/animation/engine/loader';
-import { errorResponse, jsonResponse, requireDev } from './api-utils';
+import { errorResponse, jsonResponse, requireDev } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
 

@@ -1,8 +1,8 @@
 import type { APIRoute } from 'astro';
-import { notFoundResponse } from './api-utils';
+import { notFoundResponse } from '@/dev-only/shared/api-utils';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONTENT_ROOT } from './path-utils';
+import { CONTENT_ROOT } from '@/dev-only/shared/path-utils';
 
 export const prerender = false;
 

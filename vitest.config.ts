@@ -19,7 +19,7 @@ export default defineConfig({
       include: [
         'src/shared/lib/**/*.{ts,mjs}',
         'src/plugins/**/*.mjs',
-        'src/dev-only/api-utils.ts',
+        'src/dev-only/shared/api-utils.ts',
       ],
       exclude: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
     },
