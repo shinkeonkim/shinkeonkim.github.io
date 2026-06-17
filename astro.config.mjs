@@ -73,7 +73,7 @@ export default defineConfig({
     AutoImport({
       imports: [
         './src/components/CodeWithOutput.astro',
-        './src/components/ChartJs.tsx',
+        './src/widgets/chart-js/ChartJs.tsx',
       ],
     }),
     mdx(),
