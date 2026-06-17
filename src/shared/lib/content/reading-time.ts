@@ -3,7 +3,7 @@ const WORD_RE = /[A-Za-z0-9]+/g;
 const CODE_FENCE_RE = /```[\s\S]*?```/g;
 const HTML_RE = /<[^>]+>/g;
 
-interface ReadingStats {
+export interface ReadingStats {
   cjkChars: number;
   asciiWords: number;
   totalSeconds: number;
