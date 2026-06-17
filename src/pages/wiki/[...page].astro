@@ -2,6 +2,10 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import Pagination from '@/shared/ui/Pagination.astro';
+import WikiRecentUpdates from '@/widgets/wiki-landing/WikiRecentUpdates.astro';
+import WikiStubList, { type WikiStub } from '@/widgets/wiki-landing/WikiStubList.astro';
+import WikiList from '@/widgets/wiki-list/WikiList.astro';
+import WikiFilterUI from '@/features/wiki-filter/ui/WikiFilterUI.astro';
 import { SITE_LOCALE, WIKI_PER_PAGE } from '@/shared/config';
 import type { GetStaticPaths, Page } from 'astro';
 
@@ -22,11 +26,6 @@ const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
 });
 
 const isLanding = page.currentPage === 1;
-
-interface StubInfo {
-  entry: CollectionEntry<'wiki'>;
-  chars: number;
-}
 
 interface WikiIndexEntry {
   id: string;
@@ -52,7 +51,6 @@ const wikiIndex: WikiIndexEntry[] = allEntries.map((w) => ({
   updatedLabel: w.data.updated ? fmt.format(w.data.updated) : null,
 }));
 
-// Tag counts (descending by frequency, then alphabetical).
 const tagCounts = new Map<string, number>();
 for (const w of allEntries) {
   for (const t of w.data.tags ?? []) {
@@ -64,7 +62,7 @@ const sortedTags = Array.from(tagCounts.entries())
   .map(([tag, count]) => ({ tag, count }));
 
 let recentUpdates: CollectionEntry<'wiki'>[] = [];
-let stubs: StubInfo[] = [];
+let stubs: WikiStub[] = [];
 
 if (isLanding) {
   recentUpdates = allEntries
@@ -83,8 +81,7 @@ if (isLanding) {
   stubs.sort((a, b) => a.chars - b.chars);
 }
 
-// Serialize index for inline embedding. Escape `<` to prevent `</script>` injection
-// from any title/tag string that might contain HTML-like characters.
+// Escape `<` to prevent `</script>` injection from any title/tag string.
 const wikiIndexJson = JSON.stringify(wikiIndex).replace(/</g, '\\u003c');
 ---
 
@@ -101,55 +98,10 @@ const wikiIndexJson = JSON.stringify(wikiIndex).replace(/</g, '\\u003c');
 
     <div data-wiki-context>
       {isLanding && recentUpdates.length > 0 && (
-        <section class="mb-8" data-pagefind-ignore="all">
-          <h2 class="mb-3 text-lg font-semibold">최근 업데이트</h2>
-          <ul class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {recentUpdates.map((w) => (
-              <li>
-                <a
-                  href={`/wiki/${w.id}/`}
-                  class="block rounded-md border border-border bg-surface-elevated px-3 py-2 no-underline hover:border-accent"
-                >
-                  <span class="block text-sm font-medium">{w.data.title}</span>
-                  <time
-                    datetime={w.data.updated!.toISOString()}
-                    class="mt-0.5 block text-xs text-fg-muted"
-                  >
-                    {fmt.format(w.data.updated!)}
-                  </time>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </section>
+        <WikiRecentUpdates entries={recentUpdates} fmt={fmt} />
       )}
-
       {isLanding && stubs.length > 0 && (
-        <section class="mb-8" data-pagefind-ignore="all">
-          <h2 class="mb-3 text-lg font-semibold">📝 내용 보강 필요 ({stubs.length})</h2>
-          <p class="mb-2 text-xs text-fg-muted">
-            본문이 100자 미만인 위키 페이지. 한 줄 정의만 있거나 미작성 상태입니다.
-          </p>
-          <ul class="flex flex-wrap gap-1.5">
-            {stubs.slice(0, 24).map(({ entry, chars }) => (
-              <li>
-                <a
-                  href={`/wiki/${entry.id}/`}
-                  class="inline-flex items-baseline gap-1 rounded-full border border-dashed border-border px-2.5 py-0.5 text-sm no-underline hover:border-accent hover:text-accent"
-                  title={`본문 ${chars}자`}
-                >
-                  {entry.data.title}
-                  <span class="text-xs opacity-60">{chars}자</span>
-                </a>
-              </li>
-            ))}
-            {stubs.length > 24 && (
-              <li class="text-xs text-fg-muted self-center">
-                +{stubs.length - 24}개 더
-              </li>
-            )}
-          </ul>
-        </section>
+        <WikiStubList stubs={stubs} />
       )}
     </div>
 
@@ -159,81 +111,14 @@ const wikiIndexJson = JSON.stringify(wikiIndex).replace(/</g, '\\u003c');
       </header>
     )}
 
-    <section
-      class="wiki-filter mb-4"
-      data-wiki-filter-ui
-      data-pagefind-ignore="all"
-      aria-label="위키 필터"
-    >
-      <label class="block">
-        <span class="sr-only">위키 페이지 검색</span>
-        <input
-          type="search"
-          data-wiki-search
-          placeholder="제목, 별칭, 태그로 검색…"
-          autocomplete="off"
-          class="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm placeholder:text-fg-muted focus:border-accent focus:outline-none"
-        />
-      </label>
-      {sortedTags.length > 0 && (
-        <details class="mt-2 wiki-filter-tags" data-wiki-tag-panel>
-          <summary class="cursor-pointer select-none text-xs text-fg-muted hover:text-accent">
-            태그로 필터 ({sortedTags.length})
-            <span data-wiki-active-tag-label class="ml-1 hidden text-accent"></span>
-          </summary>
-          <div class="mt-2 flex flex-wrap gap-1.5" data-wiki-tag-chips>
-            {sortedTags.map(({ tag, count }) => (
-              <button
-                type="button"
-                data-wiki-tag={tag}
-                aria-pressed="false"
-                class="wiki-tag-chip inline-flex items-baseline gap-1 rounded-full border border-border bg-transparent px-2.5 py-0.5 text-xs hover:border-accent hover:text-accent"
-              >
-                #{tag} <span class="opacity-60">{count}</span>
-              </button>
-            ))}
-          </div>
-        </details>
-      )}
-    </section>
+    <WikiFilterUI tags={sortedTags} />
 
     <section
       data-pagefind-body
       data-pagefind-filter="section:wiki"
       data-wiki-default-list
     >
-      {page.data.length === 0 ? (
-        <p class="text-sm text-fg-muted">
-          아직 작성된 위키 페이지가 없습니다.
-        </p>
-      ) : (
-        <ul class="wiki-list">
-          {page.data.map((w) => (
-            <li>
-              <a href={`/wiki/${w.id}/`} class="wiki-list-item group">
-                <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                  <span class="text-base font-medium group-hover:text-accent">
-                    {w.data.title}
-                  </span>
-                  {w.data.updated && (
-                    <time
-                      datetime={w.data.updated.toISOString()}
-                      class="shrink-0 text-xs text-fg-muted tabular-nums"
-                    >
-                      {fmt.format(w.data.updated)}
-                    </time>
-                  )}
-                </div>
-                {w.data.tags.length > 0 && (
-                  <div class="mt-0.5 text-xs text-fg-muted">
-                    {w.data.tags.map((t) => `#${t}`).join(' ')}
-                  </div>
-                )}
-              </a>
-            </li>
-          ))}
-        </ul>
-      )}
+      <WikiList entries={page.data} fmt={fmt} />
     </section>
 
     <section data-wiki-filtered hidden data-pagefind-ignore="all" aria-label="필터 결과">
@@ -263,15 +148,7 @@ const wikiIndexJson = JSON.stringify(wikiIndex).replace(/</g, '\\u003c');
 </BaseLayout>
 
 <style>
-  /* Active tag chip - styled via attribute selector so it works regardless of
-     Tailwind aria variant support. */
-  .wiki-tag-chip[aria-pressed='true'] {
-    border-color: var(--color-accent);
-    background: var(--color-surface-elevated);
-    color: var(--color-accent);
-  }
-
-  /* Dense list: subtle dividers, no card borders. Suits an index page. */
+  /* Filtered-view list uses the same dense list look as WikiList. */
   .wiki-list {
     border-top: 1px solid var(--color-border);
   }
@@ -287,190 +164,7 @@ const wikiIndexJson = JSON.stringify(wikiIndex).replace(/</g, '\\u003c');
 </style>
 
 <script>
-  // Wiki listing filter: in-page search (title / aliases / tags) + tag chip filter.
-  // State is mirrored to URL query params (?search=, ?tag=) so filtered views are shareable.
-  type WikiEntry = {
-    id: string;
-    title: string;
-    aliases: string[];
-    tags: string[];
-    updated: string | null;
-    updatedLabel: string | null;
-  };
-
-  function setupWikiFilter(): void {
-    const filterUi = document.querySelector<HTMLElement>('[data-wiki-filter-ui]');
-    if (!filterUi || filterUi.dataset.wikiFilterReady === '1') return;
-
-    const dataEl = document.getElementById('wiki-index-data');
-    const searchInput = document.querySelector<HTMLInputElement>('[data-wiki-search]');
-    const contextEl = document.querySelector<HTMLElement>('[data-wiki-context]');
-    const pagesHeaderEl = document.querySelector<HTMLElement>('[data-wiki-pages-header]');
-    const defaultListEl = document.querySelector<HTMLElement>('[data-wiki-default-list]');
-    const paginationWrapEl = document.querySelector<HTMLElement>('[data-wiki-pagination-wrap]');
-    const filteredView = document.querySelector<HTMLElement>('[data-wiki-filtered]');
-    const filteredCount = document.querySelector<HTMLElement>('[data-wiki-filtered-count]');
-    const filteredList = document.querySelector<HTMLUListElement>('[data-wiki-filtered-list]');
-    const filteredEmpty = document.querySelector<HTMLElement>('[data-wiki-filtered-empty]');
-    const tagButtons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('[data-wiki-tag]'),
-    );
-    const tagLabel = document.querySelector<HTMLElement>('[data-wiki-active-tag-label]');
-    const tagPanel = document.querySelector<HTMLDetailsElement>('[data-wiki-tag-panel]');
-
-    if (
-      !dataEl ||
-      !searchInput ||
-      !filteredView ||
-      !filteredCount ||
-      !filteredList ||
-      !filteredEmpty
-    ) {
-      return;
-    }
-
-    let allEntries: WikiEntry[] = [];
-    try {
-      allEntries = JSON.parse(dataEl.textContent ?? '[]') as WikiEntry[];
-    } catch {
-      return;
-    }
-
-    filterUi.dataset.wikiFilterReady = '1';
-
-    // Use `search` (not `q`) to avoid colliding with the global SearchModal,
-    // which auto-opens on `?q=` and strips it from the URL.
-    const params = new URLSearchParams(window.location.search);
-    let query = params.get('search') ?? '';
-    let activeTag = params.get('tag') ?? '';
-
-    if (query) searchInput.value = query;
-    if (activeTag && tagPanel) tagPanel.open = true;
-
-    const escapeHtml = (s: string): string =>
-      s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-
-    const norm = (s: string): string => s.normalize('NFC').toLowerCase();
-
-    function syncUrl(): void {
-      const url = new URL(window.location.href);
-      if (query) url.searchParams.set('search', query);
-      else url.searchParams.delete('search');
-      if (activeTag) url.searchParams.set('tag', activeTag);
-      else url.searchParams.delete('tag');
-      window.history.replaceState({}, '', url.toString());
-    }
-
-    function setFilterState(active: boolean): void {
-      // Filter UI itself stays visible in both states. Toggle only context,
-      // section header, default list, pagination, and the filtered container.
-      if (contextEl) contextEl.hidden = active;
-      if (pagesHeaderEl) pagesHeaderEl.hidden = active;
-      if (defaultListEl) defaultListEl.hidden = active;
-      if (paginationWrapEl) paginationWrapEl.hidden = active;
-      filteredView!.hidden = !active;
-    }
-
-    function render(): void {
-      const hasFilter = query.trim().length > 0 || activeTag.length > 0;
-
-      for (const btn of tagButtons) {
-        btn.setAttribute(
-          'aria-pressed',
-          btn.dataset.wikiTag === activeTag && activeTag.length > 0 ? 'true' : 'false',
-        );
-      }
-
-      if (tagLabel) {
-        if (activeTag) {
-          tagLabel.textContent = `· #${activeTag}`;
-          tagLabel.classList.remove('hidden');
-        } else {
-          tagLabel.textContent = '';
-          tagLabel.classList.add('hidden');
-        }
-      }
-
-      syncUrl();
-
-      if (!hasFilter) {
-        setFilterState(false);
-        filteredList!.innerHTML = '';
-        return;
-      }
-
-      const q = norm(query.trim());
-      const filtered = allEntries.filter((e) => {
-        if (activeTag && !e.tags.includes(activeTag)) return false;
-        if (q) {
-          const haystack = norm(
-            `${e.title} ${e.aliases.join(' ')} ${e.tags.join(' ')}`,
-          );
-          return haystack.includes(q);
-        }
-        return true;
-      });
-
-      setFilterState(true);
-
-      if (filtered.length === 0) {
-        filteredList!.innerHTML = '';
-        filteredCount!.textContent = `검색 결과 없음 · 전체 ${allEntries.length}개`;
-        filteredEmpty!.classList.remove('hidden');
-        return;
-      }
-
-      filteredEmpty!.classList.add('hidden');
-      filteredCount!.textContent = `검색 결과 ${filtered.length}개 · 전체 ${allEntries.length}개`;
-      filteredList!.innerHTML = filtered
-        .map((e) => {
-          const title = escapeHtml(e.title);
-          const updated =
-            e.updated && e.updatedLabel
-              ? `<time datetime="${escapeHtml(e.updated)}" class="shrink-0 text-xs text-fg-muted tabular-nums">${escapeHtml(e.updatedLabel)}</time>`
-              : '';
-          const tagsRow =
-            e.tags.length > 0
-              ? `<div class="mt-0.5 text-xs text-fg-muted">${e.tags.map((t) => `#${escapeHtml(t)}`).join(' ')}</div>`
-              : '';
-          return `<li><a href="/wiki/${encodeURIComponent(e.id)}/" class="wiki-list-item group"><div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5"><span class="text-base font-medium group-hover:text-accent">${title}</span>${updated}</div>${tagsRow}</a></li>`;
-        })
-        .join('');
-    }
-
-    let debounceId: ReturnType<typeof setTimeout> | null = null;
-    searchInput.addEventListener('input', () => {
-      if (debounceId !== null) clearTimeout(debounceId);
-      debounceId = setTimeout(() => {
-        query = searchInput.value;
-        render();
-      }, 80);
-    });
-
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && searchInput.value) {
-        e.preventDefault();
-        searchInput.value = '';
-        query = '';
-        render();
-      }
-    });
-
-    for (const btn of tagButtons) {
-      btn.addEventListener('click', () => {
-        const tag = btn.dataset.wikiTag ?? '';
-        activeTag = activeTag === tag ? '' : tag;
-        render();
-      });
-    }
-
-    render();
-  }
+  import { setupWikiFilter } from '@/features/wiki-filter/lib/wiki-filter';
 
   if (document.readyState !== 'loading') setupWikiFilter();
   else document.addEventListener('DOMContentLoaded', setupWikiFilter);
