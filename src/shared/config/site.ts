@@ -4,3 +4,6 @@ export const SITE_DESCRIPTION =
 export const SITE_URL = 'https://shinkeonkim.com';
 export const SITE_AUTHOR = 'koa (김신건)';
 export const SITE_LOCALE = 'ko-KR';
+export const SITE_AUTHOR_BIO =
+  'koa(김신건). Python · Django · Astro 로 작업하는 개발자. 알고리즘 문제 풀이, 웹 개발, 데이터베이스를 기록합니다.';
+export const SITE_AUTHOR_AVATAR = '/apple-touch-icon.png';

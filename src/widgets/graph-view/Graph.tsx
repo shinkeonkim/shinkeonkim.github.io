@@ -2,8 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import type { GraphLink, GraphLinkKind, GraphNode } from '@/shared/types/graph';
 
-export type { GraphLink, GraphLinkKind, GraphNode, GraphNodeKind } from '@/shared/types/graph';
-
 interface Props {
   nodes: GraphNode[];
   links: GraphLink[];

@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { animationDefSchema, type AnimationDef } from './schema';
 
 export const ANIM_DIR = join(process.cwd(), 'public', 'animations');
-export const ANIM_PUBLIC_URL = '/animations';
 
 export async function listAnimationFiles(): Promise<string[]> {
   try {
