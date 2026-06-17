@@ -1,5 +1,6 @@
 import { lazy, Suspense, useMemo, useState } from 'react';
-import Graph2D, { type GraphNode, type GraphLink } from './Graph';
+import Graph2D from './Graph';
+import type { GraphLink, GraphNode } from '@/shared/types/graph';
 
 const Graph3D = lazy(() => import('./Graph3D'));
 

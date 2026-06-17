@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph3D, { type ForceGraphMethods } from 'react-force-graph-3d';
 import * as THREE from 'three';
-import type { GraphNode, GraphLink } from './Graph';
+import type { GraphLink, GraphNode } from '@/shared/types/graph';
 
 interface Props {
   nodes: GraphNode[];
