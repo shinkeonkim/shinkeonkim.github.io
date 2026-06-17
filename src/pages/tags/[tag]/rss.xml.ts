@@ -3,7 +3,7 @@ import { getCollection } from 'astro:content';
 import type { APIContext } from 'astro';
 import { SITE_TITLE } from '@/shared/config';
 import { getPublishedPosts, sortByDateDesc } from '@/shared/lib/content/content-queries';
-import { postToFeedItem } from '../../../lib/feed';
+import { postToFeedItem } from '@/shared/lib/seo/feed';
 import { canonicalizeTag, getTagMeta, tagToSlug } from '../../../data/tags';
 
 // Mirrors /tags/[tag].astro: canonical + alias slugs both emit identical feeds

@@ -3,7 +3,7 @@ import type { APIContext } from 'astro';
 import { SITE_TITLE } from '@/shared/config';
 import { sortByDateDesc } from '@/shared/lib/content/content-queries';
 import { getPostTaxonomy } from '@/shared/lib/content/taxonomy';
-import { postToFeedItem } from '../../../../lib/feed';
+import { postToFeedItem } from '@/shared/lib/seo/feed';
 
 const FEED_LIMIT = 30;
 

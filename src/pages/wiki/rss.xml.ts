@@ -2,7 +2,7 @@ import rss from '@astrojs/rss';
 import type { APIContext } from 'astro';
 import { SITE_TITLE } from '@/shared/config';
 import { getPublishedWiki } from '@/shared/lib/content/content-queries';
-import { wikiToFeedItem } from '../../lib/feed';
+import { wikiToFeedItem } from '@/shared/lib/seo/feed';
 
 const FEED_LIMIT = 50;
 

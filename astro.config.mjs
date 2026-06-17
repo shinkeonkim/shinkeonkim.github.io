@@ -21,8 +21,8 @@ import remarkAnimation from './src/plugins/remark-animation.mjs';
 import rehypeLazyImages from './src/plugins/rehype-lazy-images.mjs';
 import devEditor from './src/dev-only/integration.mjs';
 import modulepreload from './src/lib/modulepreload-integration.mjs';
-import { buildImageMap } from './src/lib/sitemap-images.mjs';
-import { buildLastmodMap, resolveLastmod } from './src/lib/sitemap-lastmod.mjs';
+import { buildImageMap } from './src/shared/lib/seo/sitemap-images.mjs';
+import { buildLastmodMap, resolveLastmod } from './src/shared/lib/seo/sitemap-lastmod.mjs';
 
 const SITE_URL = 'https://shinkeonkim.com';
 // Pre-build URL → cover/thumbnail and URL → lastmod maps once, at

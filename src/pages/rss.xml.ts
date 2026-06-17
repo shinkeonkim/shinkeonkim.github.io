@@ -2,7 +2,7 @@ import rss from '@astrojs/rss';
 import type { APIContext } from 'astro';
 import { SITE_DESCRIPTION, SITE_TITLE } from '@/shared/config';
 import { getPublishedPosts, sortByDateDesc } from '@/shared/lib/content/content-queries';
-import { postToFeedItem } from '../lib/feed';
+import { postToFeedItem } from '@/shared/lib/seo/feed';
 
 export async function GET(context: APIContext) {
   const posts = sortByDateDesc(await getPublishedPosts()).slice(0, 30);
