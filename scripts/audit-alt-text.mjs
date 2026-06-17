@@ -5,7 +5,11 @@ import path from 'node:path';
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const SCAN_DIRS = [
   { dir: 'src/content', exts: ['.md', '.mdx'] },
-  { dir: 'src/components', exts: ['.astro', '.tsx'] },
+  { dir: 'src/shared/ui', exts: ['.astro', '.tsx'] },
+  { dir: 'src/shared/analytics', exts: ['.astro'] },
+  { dir: 'src/widgets', exts: ['.astro', '.tsx'] },
+  { dir: 'src/features', exts: ['.astro', '.tsx'] },
+  { dir: 'src/entities', exts: ['.astro', '.tsx'] },
   { dir: 'src/layouts', exts: ['.astro'] },
   { dir: 'src/pages', exts: ['.astro'] },
 ];

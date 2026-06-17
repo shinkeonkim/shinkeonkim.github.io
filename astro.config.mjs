@@ -72,7 +72,7 @@ export default defineConfig({
     // <CodeWithOutput .../> without a per-file import line.
     AutoImport({
       imports: [
-        './src/components/CodeWithOutput.astro',
+        './src/features/code-with-output/ui/CodeWithOutput.astro',
         './src/widgets/chart-js/ChartJs.tsx',
       ],
     }),
