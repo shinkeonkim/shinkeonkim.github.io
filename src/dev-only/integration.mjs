@@ -20,7 +20,7 @@ export default function devEditor() {
         });
         injectRoute({
           pattern: '/_chart-editor',
-          entrypoint: path.join(here, 'chart-editor.astro'),
+          entrypoint: path.join(here, 'chart-editor/chart-editor.astro'),
         });
         injectRoute({
           pattern: '/_studio/api/animations',
