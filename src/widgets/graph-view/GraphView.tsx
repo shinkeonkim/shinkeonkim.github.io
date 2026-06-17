@@ -97,10 +97,10 @@ export default function GraphView({ nodes, links }: Props) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="노드 이름으로 검색…"
-          className="flex-1 min-w-[200px] rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[color:var(--color-accent)]"
+          className="flex-1 min-w-[200px] rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
         />
         {tagCount > 0 && (
-          <label className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] px-2.5 py-1.5 text-sm cursor-pointer select-none">
+          <label className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm cursor-pointer select-none">
             <input
               type="checkbox"
               checked={showTags}
@@ -111,7 +111,7 @@ export default function GraphView({ nodes, links }: Props) {
           </label>
         )}
         <div
-          className="inline-flex overflow-hidden rounded-md border border-[color:var(--color-border)]"
+          className="inline-flex overflow-hidden rounded-md border border-border"
           role="tablist"
         >
           <button
@@ -121,8 +121,8 @@ export default function GraphView({ nodes, links }: Props) {
             onClick={() => setMode('2d')}
             className={
               mode === '2d'
-                ? 'bg-[color:var(--color-surface-elevated)] px-3 py-2 text-sm text-[color:var(--color-accent)]'
-                : 'px-3 py-2 text-sm text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]'
+                ? 'bg-surface-elevated px-3 py-2 text-sm text-accent'
+                : 'px-3 py-2 text-sm text-fg-muted hover:text-fg'
             }
           >
             2D
@@ -134,8 +134,8 @@ export default function GraphView({ nodes, links }: Props) {
             onClick={() => setMode('3d')}
             className={
               mode === '3d'
-                ? 'bg-[color:var(--color-surface-elevated)] px-3 py-2 text-sm text-[color:var(--color-accent)]'
-                : 'px-3 py-2 text-sm text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]'
+                ? 'bg-surface-elevated px-3 py-2 text-sm text-accent'
+                : 'px-3 py-2 text-sm text-fg-muted hover:text-fg'
             }
           >
             3D
@@ -143,7 +143,7 @@ export default function GraphView({ nodes, links }: Props) {
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-[color:var(--color-fg-muted)]">컬렉션:</span>
+        <span className="text-fg-muted">컬렉션:</span>
         {ALL_COLLECTIONS.map((c) => {
           const enabled = enabledCollections.has(c);
           return (
@@ -154,8 +154,8 @@ export default function GraphView({ nodes, links }: Props) {
               onClick={() => toggleCollection(c)}
               className={
                 enabled
-                  ? 'rounded-full border border-[color:var(--color-accent)] bg-[color:var(--color-surface-elevated)] px-2.5 py-0.5 text-[color:var(--color-accent)]'
-                  : 'rounded-full border border-[color:var(--color-border)] px-2.5 py-0.5 text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-accent)]'
+                  ? 'rounded-full border border-accent bg-surface-elevated px-2.5 py-0.5 text-accent'
+                  : 'rounded-full border border-border px-2.5 py-0.5 text-fg-muted hover:border-accent'
               }
             >
               {COLLECTION_LABELS[c]} ({collectionCounts[c]})
@@ -166,7 +166,7 @@ export default function GraphView({ nodes, links }: Props) {
           <button
             type="button"
             onClick={exportSVG}
-            className="rounded-md border border-[color:var(--color-border)] px-2 py-1 hover:border-[color:var(--color-accent)]"
+            className="rounded-md border border-border px-2 py-1 hover:border-accent"
             title="SVG 다운로드"
           >
             ⤓ SVG
@@ -174,7 +174,7 @@ export default function GraphView({ nodes, links }: Props) {
           <button
             type="button"
             onClick={exportJSON}
-            className="rounded-md border border-[color:var(--color-border)] px-2 py-1 hover:border-[color:var(--color-accent)]"
+            className="rounded-md border border-border px-2 py-1 hover:border-accent"
             title="JSON 다운로드 (nodes + links)"
           >
             ⤓ JSON
@@ -182,17 +182,17 @@ export default function GraphView({ nodes, links }: Props) {
         </span>
       </div>
       {filteredCounts && (
-        <p className="text-xs text-[color:var(--color-fg-muted)]">
+        <p className="text-xs text-fg-muted">
           {filteredCounts.matches}개 노드가 "{query}" 와 일치 (총 {filteredCounts.total}개 중)
         </p>
       )}
-      <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-elevated)] p-2">
+      <div className="rounded-lg border border-border bg-surface-elevated p-2">
         {mode === '2d' ? (
           <Graph2D nodes={visibleNodes} links={visibleLinks} query={query} />
         ) : (
           <Suspense
             fallback={
-              <div className="flex h-[560px] items-center justify-center text-sm text-[color:var(--color-fg-muted)]">
+              <div className="flex h-[560px] items-center justify-center text-sm text-fg-muted">
                 3D 뷰를 불러오는 중…
               </div>
             }
