@@ -1,12 +1,12 @@
-import { api, type SourceSummary } from './api';
-import { confirmModal, ensureHost, openModal } from './modal';
-import { setStatus } from './status';
-import { escapeHtml } from './utils';
+import { api, type SourceSummary } from '@/dev-only/editor/core/api';
+import { confirmModal, ensureHost, openModal } from '@/dev-only/editor/ui/modal';
+import { setStatus } from '@/dev-only/editor/core/status';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
 import {
   parseReferencesFromFrontmatter,
   upsertReferencesInFrontmatter,
   type ReferenceItem,
-} from './yaml-utils';
+} from '@/dev-only/editor/lib/yaml-utils';
 
 interface PickerOptions {
   getContent: () => string;

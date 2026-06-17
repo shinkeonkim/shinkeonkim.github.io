@@ -1,4 +1,4 @@
-import { escapeHtml } from './utils';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
 
 export interface ModalField {
   name: string;

@@ -1,6 +1,6 @@
-import { api } from './api';
-import { ScrollSync } from './scroll-sync';
-import type { Ext } from './state';
+import { api } from '@/dev-only/editor/core/api';
+import { ScrollSync } from '@/dev-only/editor/text/scroll-sync';
+import type { Ext } from '@/dev-only/editor/core/state';
 
 export class PreviewPane {
   private container: HTMLElement;

@@ -1,4 +1,4 @@
-import type { MarkdownToolbar } from './toolbar';
+import type { MarkdownToolbar } from '@/dev-only/editor/ui/toolbar';
 
 interface AnimationSummary {
   id: string;

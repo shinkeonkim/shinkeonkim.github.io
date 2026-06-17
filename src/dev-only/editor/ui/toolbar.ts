@@ -1,5 +1,5 @@
-import { setStatus } from './status';
-import { openModal } from './modal';
+import { setStatus } from '@/dev-only/editor/core/status';
+import { openModal } from '@/dev-only/editor/ui/modal';
 
 export interface ToolbarDeps {
   textarea: HTMLTextAreaElement;

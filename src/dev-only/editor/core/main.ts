@@ -1,15 +1,15 @@
-import { api } from './api';
-import { Autosaver, clearDraft, readDraft } from './autosave';
-import { FileOpsController } from './file-ops';
-import { FindReplaceBar } from './find-replace';
-import { FrontmatterPanel } from './frontmatter-panel';
-import { GitPanel } from './git-panel';
-import { EditorHistory } from './history';
-import { GlobalSearch } from './global-search';
-import { ImageDialogController } from './image-dialog';
-import { AnimationPicker } from './animation-picker';
-import { setupListContinuation } from './list-continuation';
-import { confirmModal } from './modal';
+import { api } from '@/dev-only/editor/core/api';
+import { Autosaver, clearDraft, readDraft } from '@/dev-only/editor/file/autosave';
+import { FileOpsController } from '@/dev-only/editor/file/file-ops';
+import { FindReplaceBar } from '@/dev-only/editor/text/find-replace';
+import { FrontmatterPanel } from '@/dev-only/editor/panels/frontmatter-panel';
+import { GitPanel } from '@/dev-only/editor/panels/git-panel';
+import { EditorHistory } from '@/dev-only/editor/core/history';
+import { GlobalSearch } from '@/dev-only/editor/text/global-search';
+import { ImageDialogController } from '@/dev-only/editor/ui/image-dialog';
+import { AnimationPicker } from '@/dev-only/editor/panels/animation-picker';
+import { setupListContinuation } from '@/dev-only/editor/text/list-continuation';
+import { confirmModal } from '@/dev-only/editor/ui/modal';
 import {
   clearUiState,
   isFreshSaveSnapshot,
@@ -17,17 +17,17 @@ import {
   saveUiState,
   type PersistReason,
   type PersistedUiState,
-} from './persistence';
-import { PreviewPane } from './preview';
-import { ReferencesPicker } from './references-picker';
-import { state, COLLECTION_NAMES } from './state';
-import { initStatus, setStatus } from './status';
-import { FileTree } from './tree';
-import { MarkdownToolbar } from './toolbar';
-import { UrlPreviewController } from './url-preview';
-import { todayIsoDate, todayIsoTime, urlFor } from './utils';
-import { WikilinkAutocomplete } from './wikilink';
-import type { CollectionName, CurrentFile, Ext } from './state';
+} from '@/dev-only/editor/core/persistence';
+import { PreviewPane } from '@/dev-only/editor/ui/preview';
+import { ReferencesPicker } from '@/dev-only/editor/panels/references-picker';
+import { state, COLLECTION_NAMES } from '@/dev-only/editor/core/state';
+import { initStatus, setStatus } from '@/dev-only/editor/core/status';
+import { FileTree } from '@/dev-only/editor/ui/tree';
+import { MarkdownToolbar } from '@/dev-only/editor/ui/toolbar';
+import { UrlPreviewController } from '@/dev-only/editor/lib/url-preview';
+import { todayIsoDate, todayIsoTime, urlFor } from '@/dev-only/editor/lib/utils';
+import { WikilinkAutocomplete } from '@/dev-only/editor/text/wikilink';
+import type { CollectionName, CurrentFile, Ext } from '@/dev-only/editor/core/state';
 
 function template(collection: CollectionName, slug: string): string {
   const filename = slug.split('/').pop() ?? slug;

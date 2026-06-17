@@ -1,7 +1,7 @@
-import { api, type GitFile, type GitStatusPayload } from './api';
-import { confirmModal, openModal } from './modal';
-import { setStatus } from './status';
-import { escapeHtml } from './utils';
+import { api, type GitFile, type GitStatusPayload } from '@/dev-only/editor/core/api';
+import { confirmModal, openModal } from '@/dev-only/editor/ui/modal';
+import { setStatus } from '@/dev-only/editor/core/status';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
 
 export class GitPanel {
   private root: HTMLElement;

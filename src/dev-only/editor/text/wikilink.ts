@@ -1,7 +1,7 @@
-import { api, type TreeEntry } from './api';
-import { getCaretCoordinates } from './caret';
-import { escapeHtml } from './utils';
-import type { CollectionName } from './state';
+import { api, type TreeEntry } from '@/dev-only/editor/core/api';
+import { getCaretCoordinates } from '@/dev-only/editor/text/caret';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
+import type { CollectionName } from '@/dev-only/editor/core/state';
 import { WIKILINK_AUTOCOMPLETE_MAX } from '@/shared/config';
 
 interface PageEntry {

@@ -1,4 +1,4 @@
-import type { CurrentFile } from './state';
+import type { CurrentFile } from '@/dev-only/editor/core/state';
 import { EDITOR_AUTOSAVE_INTERVAL_MS } from '@/shared/config';
 
 const PREFIX = 'editor-draft:';

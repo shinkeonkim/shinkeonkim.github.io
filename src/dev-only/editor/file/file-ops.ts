@@ -1,10 +1,10 @@
-import { api } from './api';
-import { confirmModal, openModal } from './modal';
-import { setStatus } from './status';
-import type { DraggedItem, DropTarget } from './tree';
-import type { CollectionName, Ext } from './state';
+import { api } from '@/dev-only/editor/core/api';
+import { confirmModal, openModal } from '@/dev-only/editor/ui/modal';
+import { setStatus } from '@/dev-only/editor/core/status';
+import type { DraggedItem, DropTarget } from '@/dev-only/editor/ui/tree';
+import type { CollectionName, Ext } from '@/dev-only/editor/core/state';
 
-import { COLLECTION_NAMES } from './state';
+import { COLLECTION_NAMES } from '@/dev-only/editor/core/state';
 const COLLECTION_OPTIONS = COLLECTION_NAMES.map((c) => ({ value: c, label: c }));
 
 function splitNameAndExt(name: string, fallbackExt: Ext): { base: string; ext: Ext } {

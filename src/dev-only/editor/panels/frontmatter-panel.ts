@@ -1,6 +1,6 @@
 import { parse as parseYaml } from 'yaml';
-import { escapeHtml } from './utils';
-import type { MarkdownToolbar } from './toolbar';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
+import type { MarkdownToolbar } from '@/dev-only/editor/ui/toolbar';
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
 

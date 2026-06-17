@@ -1,7 +1,7 @@
-import { api } from './api';
-import { setStatus } from './status';
-import { formatBytes } from './utils';
-import type { MarkdownToolbar } from './toolbar';
+import { api } from '@/dev-only/editor/core/api';
+import { setStatus } from '@/dev-only/editor/core/status';
+import { formatBytes } from '@/dev-only/editor/lib/utils';
+import type { MarkdownToolbar } from '@/dev-only/editor/ui/toolbar';
 
 type Purpose = 'body' | 'cover' | 'thumbnail';
 type Source = 'upload' | 'url-fetch' | 'url-direct';

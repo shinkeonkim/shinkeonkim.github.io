@@ -1,7 +1,7 @@
-import { api, type TreeEntry } from './api';
-import { escapeHtml } from './utils';
-import { COLLECTION_NAMES } from './state';
-import type { CollectionName, CurrentFile, Ext } from './state';
+import { api, type TreeEntry } from '@/dev-only/editor/core/api';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
+import { COLLECTION_NAMES } from '@/dev-only/editor/core/state';
+import type { CollectionName, CurrentFile, Ext } from '@/dev-only/editor/core/state';
 
 export interface DraggedFile {
   type: 'file';

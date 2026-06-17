@@ -1,6 +1,6 @@
-import { api, type GrepMatch } from './api';
-import { escapeHtml } from './utils';
-import type { CollectionName, Ext } from './state';
+import { api, type GrepMatch } from '@/dev-only/editor/core/api';
+import { escapeHtml } from '@/dev-only/editor/lib/utils';
+import type { CollectionName, Ext } from '@/dev-only/editor/core/state';
 
 export type GlobalSearchJump = (
   collection: CollectionName,

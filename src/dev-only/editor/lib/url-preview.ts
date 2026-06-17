@@ -1,6 +1,6 @@
-import { api, type UrlPreviewResponse } from './api';
-import { openModal } from './modal';
-import { setStatus } from './status';
+import { api, type UrlPreviewResponse } from '@/dev-only/editor/core/api';
+import { openModal } from '@/dev-only/editor/ui/modal';
+import { setStatus } from '@/dev-only/editor/core/status';
 
 const TAG_RE = /<UrlPreview\s+url=["']([^"']+)["']\s*\/>/g;
 const URL_RE = /https?:\/\/[^\s<>"')]+/g;

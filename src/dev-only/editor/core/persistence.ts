@@ -1,4 +1,4 @@
-import type { CurrentFile } from './state';
+import type { CurrentFile } from '@/dev-only/editor/core/state';
 
 const STORAGE_KEY = 'editor-ui-state-v1';
 const SILENT_RESTORE_AFTER_SAVE_WINDOW_MS = 5_000;

@@ -1,4 +1,4 @@
-import type { CollectionName, Ext } from './state';
+import type { CollectionName, Ext } from '@/dev-only/editor/core/state';
 
 export interface TreeEntry {
   name: string;
