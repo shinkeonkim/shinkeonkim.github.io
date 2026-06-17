@@ -20,7 +20,7 @@ import remarkUrlPreview from './src/plugins/remark-url-preview.mjs';
 import remarkAnimation from './src/plugins/remark-animation.mjs';
 import rehypeLazyImages from './src/plugins/rehype-lazy-images.mjs';
 import devEditor from './src/dev-only/integration.mjs';
-import modulepreload from './src/lib/modulepreload-integration.mjs';
+import modulepreload from './src/shared/lib/modulepreload-integration.mjs';
 import { buildImageMap } from './src/shared/lib/seo/sitemap-images.mjs';
 import { buildLastmodMap, resolveLastmod } from './src/shared/lib/seo/sitemap-lastmod.mjs';
 

@@ -17,8 +17,7 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
       include: [
-        'src/lib/**/*.ts',
-        'src/shared/lib/**/*.ts',
+        'src/shared/lib/**/*.{ts,mjs}',
         'src/plugins/**/*.mjs',
         'src/dev-only/api-utils.ts',
       ],
