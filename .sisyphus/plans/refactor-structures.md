@@ -564,3 +564,50 @@ Phase 6 (tsx migration) audit conclusion confirmed:
 - All heavy interactive UI (animations, graphs, Hero3D) is already `.tsx`. ✓
 
 Decision: proceed to Phase 0 now.
+
+## Phase 10, follow-up round (post-review)
+
+User-driven follow-up after the first 22 commits. Eight items:
+
+1. dev-only/editor/ split by purpose into subfolders (file moves only,
+   no internal logic changes, focus-loss class still in force).
+2. SearchModal.astro deferred from Phase 5: revisit with a re-execution
+   safety check. `__searchModalBound` flag + IIFE shape stays; remove
+   `is:inline` and `define:vars` to let the script become a bundled
+   module that can import from lib/.
+3. Hero3D.tsx deferred from Phase 5: pull constants + readTheme into
+   theme.ts, and extract the per-subsystem builders (keyboard, words,
+   screen) behind named factories so the main useEffect orchestrates
+   instead of definining everything inline.
+4. Utility CSS sheet: 125 occurrences of
+   `text-[color:var(--color-fg-muted)]`, 72 of
+   `border-[color:var(--color-border)]`, etc. Tailwind 4 `@theme`
+   already exposes `--color-fg-muted` etc., so the codebase can switch
+   from the arbitrary-value syntax to the short utility
+   (`text-fg-muted`, `border-default`, ...). Generate the short
+   utilities via @theme + custom variants as needed and codemod
+   existing occurrences in one sweep.
+5. BaseLayout.astro (251) still inlines its full <head> meta tags and
+   pre-hydration theme bootstrap. Extract into widgets/site-head/SeoMeta,
+   widgets/site-head/IconLinks, widgets/site-head/ThemeBootstrap so
+   BaseLayout becomes a thin shell that just composes them.
+6. pages/wiki/[...page].astro (478): three discrete sections (recent
+   updates, stub list, filter UI + filtered view) plus a substantial
+   client-side filter script. Extract:
+   - features/wiki-filter/ui/WikiFilterUI.astro
+   - features/wiki-filter/lib/wiki-filter.ts (script body)
+   - widgets/wiki-landing/WikiRecentUpdates.astro
+   - widgets/wiki-landing/WikiStubList.astro
+   - widgets/wiki-list/WikiList.astro
+7. pages/tags/index.astro (145): two visually distinct lists
+   (featured-with-description, tag cloud). Extract:
+   - widgets/tag-cloud/FeaturedTagList.astro
+   - widgets/tag-cloud/TagCloud.astro
+8. Depth >= 4 audit: index.astro (242), animations/[...page] (508),
+   posts/[...page] (213), tags/[tag] (228) checked for opportunities.
+
+Risks recap (carry forward):
+- dev-only editor focus-loss bug class: file moves OK, no
+  subscribe-driven internal rewrites.
+- SearchModal `is:inline` swap to bundled `<script>`: behavior
+  delta around view transitions, guard the IIFE bind flag stays.
