@@ -1,5 +1,4 @@
 import type {
-  AnimationDef,
   AnimationEffect,
   Chapter,
 } from '@/entities/animation/engine/schema';

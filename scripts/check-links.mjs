@@ -69,7 +69,13 @@ const broken = allLinks
 
 function isInternal(url) {
   if (!url) return false;
-  if (/^https?:\/\//.test(url)) return /shinkeonkim\.com/.test(url);
+  if (/^https?:\/\//.test(url)) {
+    try {
+      return new URL(url).hostname === 'shinkeonkim.com';
+    } catch {
+      return false;
+    }
+  }
   return true;
 }
 
