@@ -200,15 +200,6 @@ export function initCanvas(root: SVGSVGElement): void {
   render();
 }
 
-export function getCanvasZoom(): number {
-  return canvasZoom;
-}
-
-export function setCanvasZoom(z: number): void {
-  canvasZoom = Math.max(0.1, Math.min(5, z));
-  render();
-}
-
 function onCanvasWheel(e: WheelEvent): void {
   if (!e.ctrlKey && !e.metaKey) return;
   e.preventDefault();

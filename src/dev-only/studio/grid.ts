@@ -35,17 +35,6 @@ export function setGridEnabled(on: boolean): void {
   for (const fn of listeners) fn();
 }
 
-export function setGridSize(size: number): void {
-  if (!(Number.isFinite(size) && size > 0)) return;
-  gridSize = size;
-  try {
-    localStorage.setItem(SIZE_KEY, String(size));
-  } catch {
-    return;
-  }
-  for (const fn of listeners) fn();
-}
-
 export function subscribeGrid(fn: () => void): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);

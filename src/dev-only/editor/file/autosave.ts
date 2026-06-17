@@ -43,27 +43,6 @@ export function clearDraft(file: CurrentFile): void {
   }
 }
 
-export function listDrafts(): { key: string; record: DraftRecord }[] {
-  const out: { key: string; record: DraftRecord }[] = [];
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith(PREFIX)) continue;
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw) as DraftRecord;
-        out.push({ key, record: parsed });
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    return out;
-  }
-  return out;
-}
-
 export class Autosaver {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSnapshot = '';
