@@ -4,7 +4,7 @@ import type {
   ArrowElement,
   LineElement,
   SnapshotMap,
-} from '../../animations/schema';
+} from '@/entities/animation/engine/schema';
 import {
   SVG_NS,
   escapeXml,

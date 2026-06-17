@@ -1,4 +1,4 @@
-import type { AnimationElement, GroupElement } from '../../animations/schema';
+import type { AnimationElement, GroupElement } from '@/entities/animation/engine/schema';
 import {
   addElement,
   deleteElement,

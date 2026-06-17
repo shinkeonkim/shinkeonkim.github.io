@@ -1,4 +1,4 @@
-import type { AnimationElement, Anchor } from '../../animations/schema';
+import type { AnimationElement, Anchor } from '@/entities/animation/engine/schema';
 
 export interface AnchorPoint {
   x: number;

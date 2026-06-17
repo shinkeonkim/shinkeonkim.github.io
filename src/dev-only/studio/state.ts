@@ -7,8 +7,8 @@ import type {
   PropertyTrack,
   TrackKeyframe,
   SnapshotMap,
-} from '../../animations/schema';
-import { animationDefSchema, computeSnapshot } from '../../animations/schema';
+} from '@/entities/animation/engine/schema';
+import { animationDefSchema, computeSnapshot } from '@/entities/animation/engine/schema';
 
 export type Selection =
   | { kind: 'none' }

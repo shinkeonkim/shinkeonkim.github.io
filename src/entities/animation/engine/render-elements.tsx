@@ -11,8 +11,8 @@ import type {
   SnapshotMap,
   TextElement,
 } from './schema';
-import { engineMarkerUrl } from './engine-markers';
-import { elementCenterFromState } from './engine-phase-styles';
+import { engineMarkerUrl } from './markers';
+import { elementCenterFromState } from './phase-styles';
 
 export interface RenderProps {
   baseType: AnimationElement['type'];

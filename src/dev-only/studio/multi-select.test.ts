@@ -16,7 +16,7 @@ import { getVisibleElementIds } from './main';
 import { intersectsMarquee } from './canvas';
 import { toggleSelectionFor } from './state';
 import type { Selection } from './state';
-import type { AnimationDef, AnimationElement, Appearance } from '../../animations/schema';
+import type { AnimationDef, AnimationElement, Appearance } from '@/entities/animation/engine/schema';
 
 // ---------------------------------------------------------------------------
 // Helpers: minimal AnimationDef-like structure builders

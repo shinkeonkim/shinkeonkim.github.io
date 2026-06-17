@@ -12,7 +12,7 @@ import {
   updateAppearance,
   updateChapter,
 } from './state';
-import type { AnimationElement } from '../../animations/schema';
+import type { AnimationElement } from '@/entities/animation/engine/schema';
 import { friendlyElementLabel } from './element-list';
 
 let tracksEl: HTMLElement | null = null;

@@ -8,13 +8,13 @@ import type {
   Chapter,
 } from './schema';
 import { activeEffects as activeEffectsAt, computeSnapshot, currentChapter } from './schema';
-import { ENGINE_MARKER_DEFS } from './engine-markers';
-import { entryStyle, exitStyle } from './engine-phase-styles';
+import { ENGINE_MARKER_DEFS } from './markers';
+import { entryStyle, exitStyle } from './phase-styles';
 import {
   RenderElement,
   FlowParticle,
   resolveArrowCoords,
-} from './engine-render-elements';
+} from './render-elements';
 
 interface ActiveEffectInstance {
   key: string;

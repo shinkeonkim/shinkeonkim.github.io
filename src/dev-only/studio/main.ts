@@ -52,8 +52,8 @@ import {
 import { initPalette, openPalette, registerCommands } from './studio-palette';
 import { groupElements, ungroupElement, isGroup } from './studio-groups';
 import { initHistoryPanel, openHistoryPanel } from './studio-history';
-import { activeAppearance } from '../../animations/schema';
-import type { AnimationDef } from '../../animations/schema';
+import { activeAppearance } from '@/entities/animation/engine/schema';
+import type { AnimationDef } from '@/entities/animation/engine/schema';
 
 function queryUi(): StudioUi | null {
   const app = document.getElementById('studio-app');

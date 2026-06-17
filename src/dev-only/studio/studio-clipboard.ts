@@ -1,4 +1,4 @@
-import type { AnimationElement } from '../../animations/schema';
+import type { AnimationElement } from '@/entities/animation/engine/schema';
 import {
   addElement,
   getDef,

@@ -32,7 +32,7 @@ import type {
   Appearance,
   EntryMode,
   ExitMode,
-} from '../../animations/schema';
+} from '@/entities/animation/engine/schema';
 import { captureFocusWithin, restoreFocusWithin } from './studio-focus';
 import { alignSelected, distributeSelected, type AlignKind, type DistributeKind } from './studio-align';
 import { ungroupElement } from './studio-groups';

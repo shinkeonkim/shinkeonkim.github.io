@@ -1,4 +1,4 @@
-import type { AnimationDef } from '../../animations/schema';
+import type { AnimationDef } from '@/entities/animation/engine/schema';
 
 const BASE = '/_studio/api/animations';
 

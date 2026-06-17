@@ -1,8 +1,8 @@
 import type { APIRoute } from 'astro';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { animationDefSchema, ID_RE } from '../animations/schema';
-import { ANIM_DIR } from '../animations/loader';
+import { animationDefSchema, ID_RE } from '@/entities/animation/engine/schema';
+import { ANIM_DIR } from '@/entities/animation/engine/loader';
 import { errorResponse, jsonResponse, requireDev } from './api-utils';
 
 export const prerender = false;

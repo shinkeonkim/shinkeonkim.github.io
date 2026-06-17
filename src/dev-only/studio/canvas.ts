@@ -7,7 +7,7 @@ import type {
   RectElement,
   SnapshotMap,
   TextElement,
-} from '../../animations/schema';
+} from '@/entities/animation/engine/schema';
 import {
   getDef,
   getSelection,
@@ -23,7 +23,7 @@ import {
   getSelectedElementIds,
 } from './state';
 import { snapPoint } from './grid';
-import type { Anchor } from '../../animations/schema';
+import type { Anchor } from '@/entities/animation/engine/schema';
 import { findContainingGroup, groupBbox, isGroup, moveGroupBy } from './studio-groups';
 import {
   SVG_NS,
@@ -75,7 +75,7 @@ interface RotateState {
 
 interface ConnectState {
   fromId: string;
-  fromAnchor: import('../../animations/schema').Anchor;
+  fromAnchor: import('@/entities/animation/engine/schema').Anchor;
   startX: number;
   startY: number;
   currentX: number;
@@ -1191,7 +1191,7 @@ function renderElement(
     return g;
   }
   if (baseEl.type === 'path') {
-    const p = state as unknown as import('../../animations/schema').PathElement;
+    const p = state as unknown as import('@/entities/animation/engine/schema').PathElement;
     const g = makeG(baseEl.id, rotation, p.x, p.y);
     const dash = p.strokeDasharray ? `stroke-dasharray="${p.strokeDasharray}"` : '';
     const xform = (p.x || p.y) ? `transform="translate(${p.x} ${p.y})"` : '';
@@ -1199,7 +1199,7 @@ function renderElement(
     return g;
   }
   if (baseEl.type === 'polygon') {
-    const pg = state as unknown as import('../../animations/schema').PolygonElement;
+    const pg = state as unknown as import('@/entities/animation/engine/schema').PolygonElement;
     const g = makeG(baseEl.id, rotation, 0, 0);
     g.innerHTML = `<polygon points="${escapeXml(pg.points)}" fill="${pg.fill}" stroke="${pg.stroke}" stroke-width="${pg.strokeWidth}" opacity="${pg.opacity}" pointer-events="all" />`;
     return g;
@@ -1208,7 +1208,7 @@ function renderElement(
 }
 
 import { showPreview as _showPreview, hidePreview as _hidePreview } from './canvas-preview';
-export function showPreview(def: import('../../animations/schema').AnimationDef): void {
+export function showPreview(def: import('@/entities/animation/engine/schema').AnimationDef): void {
   _showPreview(canvasEl, def);
 }
 export function hidePreview(): void {

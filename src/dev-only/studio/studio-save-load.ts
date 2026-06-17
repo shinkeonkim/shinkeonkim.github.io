@@ -1,4 +1,4 @@
-import { animationDefSchema } from '../../animations/schema';
+import { animationDefSchema } from '@/entities/animation/engine/schema';
 import {
   getDef,
   isDraft,

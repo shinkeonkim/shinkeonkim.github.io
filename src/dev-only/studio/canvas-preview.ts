@@ -1,4 +1,4 @@
-import type { AnimationDef } from '../../animations/schema';
+import type { AnimationDef } from '@/entities/animation/engine/schema';
 
 let previewRoot: HTMLDivElement | null = null;
 
@@ -6,7 +6,7 @@ async function mountReactPreview(host: HTMLElement, def: AnimationDef): Promise<
   const [{ createRoot }, { createElement }, EngineMod] = await Promise.all([
     import('react-dom/client'),
     import('react'),
-    import('../../animations/engine'),
+    import('@/entities/animation/engine/engine'),
   ]);
   const Engine = EngineMod.default;
   const root = createRoot(host);

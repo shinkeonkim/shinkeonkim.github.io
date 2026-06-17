@@ -1,4 +1,4 @@
-import type { ImageElement } from '../../animations/schema';
+import type { ImageElement } from '@/entities/animation/engine/schema';
 import { addElement, getDef, uniqueElementId } from './state';
 import type { IconCategory, IconEntry } from './icon-library-types';
 import { ICON_GROUPS, ICON_LIBRARY } from './icon-data';

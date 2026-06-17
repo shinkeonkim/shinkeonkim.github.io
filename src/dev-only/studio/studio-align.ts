@@ -1,4 +1,4 @@
-import type { AnimationElement } from '../../animations/schema';
+import type { AnimationElement } from '@/entities/animation/engine/schema';
 import { getDef, getSelection, getSelectedElementIds, updateElementBase } from './state';
 
 export type AlignKind = 'left' | 'center-h' | 'right' | 'top' | 'middle-v' | 'bottom';

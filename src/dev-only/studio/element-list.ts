@@ -10,7 +10,7 @@ import {
   isElementSelected,
   toggleSelectionFor,
 } from './state';
-import type { AnimationElement } from '../../animations/schema';
+import type { AnimationElement } from '@/entities/animation/engine/schema';
 
 let listEl: HTMLElement | null = null;
 let toolsRootEl: HTMLElement | null = null;
