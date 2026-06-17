@@ -11,109 +11,29 @@ import { AnimationPicker } from '@/dev-only/editor/panels/animation-picker';
 import { setupListContinuation } from '@/dev-only/editor/text/list-continuation';
 import { confirmModal } from '@/dev-only/editor/ui/modal';
 import {
-  clearUiState,
-  isFreshSaveSnapshot,
-  loadUiState,
   saveUiState,
   type PersistReason,
   type PersistedUiState,
 } from '@/dev-only/editor/core/persistence';
 import { PreviewPane } from '@/dev-only/editor/ui/preview';
 import { ReferencesPicker } from '@/dev-only/editor/panels/references-picker';
-import { state, COLLECTION_NAMES } from '@/dev-only/editor/core/state';
+import { state } from '@/dev-only/editor/core/state';
 import { initStatus, setStatus } from '@/dev-only/editor/core/status';
 import { FileTree } from '@/dev-only/editor/ui/tree';
 import { MarkdownToolbar } from '@/dev-only/editor/ui/toolbar';
 import { UrlPreviewController } from '@/dev-only/editor/lib/url-preview';
-import { todayIsoDate, todayIsoTime, urlFor } from '@/dev-only/editor/lib/utils';
+import { urlFor } from '@/dev-only/editor/lib/utils';
 import { WikilinkAutocomplete } from '@/dev-only/editor/text/wikilink';
 import type { CollectionName, CurrentFile, Ext } from '@/dev-only/editor/core/state';
-
-function template(collection: CollectionName, slug: string): string {
-  const filename = slug.split('/').pop() ?? slug;
-  if (collection === 'posts') {
-    return `---\ntitle: "${filename}"\ndescription: ""\ndate: ${todayIsoDate()}\ntags: []\ndraft: true\n---\n\n`;
-  }
-  if (collection === 'notes') {
-    return `---\ndate: ${todayIsoTime()}\ntags: []\n---\n\n`;
-  }
-  if (collection === 'sources') {
-    return `---\ntitle: "${filename}"\ntype: website\ntags: []\n---\n\n출처에 대한 간단한 설명을 작성하세요.\n`;
-  }
-  return `---\ntitle: "${filename}"\naliases: []\ntags: []\nupdated: ${todayIsoDate()}\n---\n\n## 개요\n\n`;
-}
-
-interface EditorUi {
-  status: HTMLElement;
-  textarea: HTMLTextAreaElement;
-  saveBtn: HTMLButtonElement;
-  pathEl: HTMLElement;
-  previewToggle: HTMLInputElement;
-  previewEl: HTMLElement;
-  previewContent: HTMLElement;
-  previewLink: HTMLButtonElement;
-  splitEl: HTMLElement;
-  treeRoot: HTMLElement;
-  toolbarRoot: HTMLElement;
-  gitPanelRoot: HTMLElement;
-  gitToggleBtn: HTMLButtonElement;
-  autosaveIndicator: HTMLElement;
-}
-
-function queryUi(): EditorUi | null {
-  const status = document.getElementById('editor-status');
-  const textarea = document.getElementById('editor-textarea') as HTMLTextAreaElement | null;
-  const saveBtn = document.getElementById('editor-save') as HTMLButtonElement | null;
-  const pathEl = document.getElementById('editor-current-path');
-  const previewToggle = document.getElementById('editor-preview-toggle') as HTMLInputElement | null;
-  const previewEl = document.getElementById('editor-preview');
-  const previewContent = document.getElementById('editor-preview-content');
-  const previewLink = document.getElementById('editor-preview-link') as HTMLButtonElement | null;
-  const splitEl = document.getElementById('editor-split');
-  const treeRoot = document.getElementById('editor-tree-root');
-  const toolbarRoot = document.querySelector<HTMLElement>('.editor-md-toolbar');
-  const gitPanelRoot = document.getElementById('editor-git-panel');
-  const gitToggleBtn = document.getElementById('editor-git-toggle') as HTMLButtonElement | null;
-  const autosaveIndicator = document.getElementById('editor-autosave-indicator');
-
-  if (
-    !status ||
-    !textarea ||
-    !saveBtn ||
-    !pathEl ||
-    !previewToggle ||
-    !previewEl ||
-    !previewContent ||
-    !previewLink ||
-    !splitEl ||
-    !treeRoot ||
-    !toolbarRoot ||
-    !gitPanelRoot ||
-    !gitToggleBtn ||
-    !autosaveIndicator
-  ) {
-    return null;
-  }
-  return {
-    status,
-    textarea,
-    saveBtn,
-    pathEl,
-    previewToggle,
-    previewEl,
-    previewContent,
-    previewLink,
-    splitEl,
-    treeRoot,
-    toolbarRoot,
-    gitPanelRoot,
-    gitToggleBtn,
-    autosaveIndicator,
-  };
-}
+import { newFileTemplate } from './template';
+import { queryEditorUi } from './ui-query';
+import { setupTreeSearchFilter } from './tree-search';
+import { bindEditorShortcuts } from './keyboard';
+import { setupEditorDropPaste } from './drop-paste';
+import { restoreSession } from './session-restore';
 
 export function initEditor(): void {
-  const ui = queryUi();
+  const ui = queryEditorUi();
   if (!ui) {
     console.error('[editor] missing required elements');
     return;
@@ -137,6 +57,7 @@ export function initEditor(): void {
     autosaveIndicator,
   } = ui;
 
+  void splitEl;
   initStatus(statusEl);
 
   const referencesPicker = new ReferencesPicker({
@@ -221,34 +142,7 @@ export function initEditor(): void {
   void frontmatterPanel;
 
   const treeSearchInput = document.getElementById('editor-tree-search') as HTMLInputElement | null;
-  if (treeSearchInput) {
-    const applyFilter = (): void => {
-      const q = treeSearchInput.value.trim().toLowerCase();
-      const treeRoot = document.getElementById('editor-tree-root');
-      if (!treeRoot) return;
-      const rows = treeRoot.querySelectorAll<HTMLElement>('.editor-tree-row');
-      rows.forEach((row) => {
-        if (!q) {
-          row.classList.remove('is-filter-hidden');
-          return;
-        }
-        const name = row.querySelector<HTMLElement>('[data-tree-name]')?.textContent?.toLowerCase() ?? '';
-        if (name.includes(q)) row.classList.remove('is-filter-hidden');
-        else row.classList.add('is-filter-hidden');
-      });
-    };
-    treeSearchInput.addEventListener('input', applyFilter);
-    treeSearchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        treeSearchInput.value = '';
-        applyFilter();
-      }
-    });
-    new MutationObserver(applyFilter).observe(
-      document.getElementById('editor-tree-root') ?? document.body,
-      { childList: true, subtree: true },
-    );
-  }
+  if (treeSearchInput) setupTreeSearchFilter(treeSearchInput);
 
   function setCurrent(file: CurrentFile | null, caret?: { start: number; end: number; scrollTop: number }): void {
     state.current = file;
@@ -372,7 +266,7 @@ export function initEditor(): void {
       });
       if (!proceed) return;
     }
-    textarea.value = template(result.collection, result.slug);
+    textarea.value = newFileTemplate(result.collection, result.slug);
     setCurrent(result);
     state.isDirty = true;
     setStatus('새 파일 (저장 안 됨)', 'ok');
@@ -483,60 +377,8 @@ export function initEditor(): void {
     preview.schedule();
   });
 
-  document.addEventListener('keydown', (e) => {
-    const mod = e.ctrlKey || e.metaKey;
-    if (mod && e.key.toLowerCase() === 's') {
-      e.preventDefault();
-      if (state.current) void save();
-      return;
-    }
-    const inTextarea = e.target === textarea;
-    if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
-      e.preventDefault();
-      globalSearch.toggle();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'f' && inTextarea) {
-      e.preventDefault();
-      findReplace.show();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'z' && inTextarea) {
-      e.preventDefault();
-      if (e.shiftKey) history.redo();
-      else history.undo();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'y' && inTextarea) {
-      e.preventDefault();
-      history.redo();
-    }
-  });
-
-  textarea.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    textarea.classList.add('editor-drag-hover');
-  });
-  textarea.addEventListener('dragleave', () => textarea.classList.remove('editor-drag-hover'));
-  textarea.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    textarea.classList.remove('editor-drag-hover');
-    const file = e.dataTransfer?.files?.[0];
-    if (file) await imageDialog.handleDroppedFile(file);
-  });
-
-  textarea.addEventListener('paste', async (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (file) await imageDialog.handleDroppedFile(file);
-        return;
-      }
-    }
-  });
+  bindEditorShortcuts({ textarea, save, history, findReplace, globalSearch });
+  setupEditorDropPaste(textarea, imageDialog);
 
   previewLink.addEventListener('click', () => {
     if (previewLink.dataset.href) window.open(previewLink.dataset.href, '_blank', 'noopener');
@@ -552,49 +394,5 @@ export function initEditor(): void {
   textarea.disabled = true;
   saveBtn.disabled = true;
 
-  void (async () => {
-    // URL query params take priority over session restore (from Edit button)
-    const urlParams = new URLSearchParams(window.location.search);
-    const qCollection = urlParams.get('collection');
-    const qSlug = urlParams.get('slug');
-
-    if (qCollection && qSlug && COLLECTION_NAMES.includes(qCollection as CollectionName)) {
-      try {
-        await loadFile(qCollection as CollectionName, qSlug);
-      } catch {
-        setStatus(`파일을 찾을 수 없습니다: ${qCollection}/${qSlug}`, 'error');
-      }
-      return;
-    }
-
-    const snapshot = loadUiState();
-    if (!snapshot) {
-      setStatus('준비됨', 'ok');
-      return;
-    }
-    if (snapshot.treeSearch && treeSearchInput) {
-      treeSearchInput.value = snapshot.treeSearch;
-      treeSearchInput.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    if (snapshot.previewOpen && !previewToggle.checked) {
-      previewToggle.checked = true;
-      previewToggle.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-    if (snapshot.gitPanelOpen) gitPanel.open();
-
-    if (snapshot.current) {
-      const silent = isFreshSaveSnapshot(snapshot);
-      await loadFile(snapshot.current.collection, snapshot.current.slug, {
-        silent,
-        caret: {
-          start: snapshot.caretStart,
-          end: snapshot.caretEnd,
-          scrollTop: snapshot.scrollTop,
-        },
-      });
-      if (!silent) clearUiState();
-    } else {
-      setStatus('준비됨', 'ok');
-    }
-  })();
+  void restoreSession({ treeSearchInput, previewToggle, gitPanel, loadFile });
 }
