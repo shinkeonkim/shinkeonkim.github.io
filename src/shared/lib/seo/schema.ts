@@ -24,6 +24,11 @@ export function personSchema(): SchemaObject {
   };
 }
 
+// SearchAction is intentionally omitted. The site has no server-side `?q=`
+// endpoint (the Pagefind modal opens client-side, invisible to crawlers),
+// and Google's sitelinks search box guidance now treats the schema as a
+// no-op for most blogs. Keeping it caused GSC to report
+// `/?q={search_term_string}` under "Page with redirect".
 export function websiteSchema(): SchemaObject {
   return {
     '@context': 'https://schema.org',
@@ -35,14 +40,6 @@ export function websiteSchema(): SchemaObject {
     inLanguage: SITE_LOCALE,
     description: SITE_DESCRIPTION,
     publisher: { '@id': `${SITE_URL}/#person` },
-    potentialAction: {
-      '@type': 'SearchAction',
-      target: {
-        '@type': 'EntryPoint',
-        urlTemplate: `${SITE_URL}/?q={search_term_string}`,
-      },
-      'query-input': 'required name=search_term_string',
-    },
   };
 }
 

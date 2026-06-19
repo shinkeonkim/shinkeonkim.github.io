@@ -19,18 +19,11 @@ describe('absoluteUrl', () => {
 });
 
 describe('websiteSchema', () => {
-  it('has @type WebSite and SearchAction', () => {
+  it('has @type WebSite without SearchAction', () => {
     const s = websiteSchema();
     expect(s['@type']).toBe('WebSite');
     expect(s['@id']).toBe(`${SITE_URL}/#website`);
-    const action = s.potentialAction as {
-      '@type': string;
-      target: { '@type': string; urlTemplate: string };
-    };
-    expect(action['@type']).toBe('SearchAction');
-    expect(action.target['@type']).toBe('EntryPoint');
-    expect(action.target.urlTemplate).toContain('search_term_string');
-    expect(action.target.urlTemplate).toBe(`${SITE_URL}/?q={search_term_string}`);
+    expect(s.potentialAction).toBeUndefined();
   });
 
   it('publisher references Person @id (graph link)', () => {
