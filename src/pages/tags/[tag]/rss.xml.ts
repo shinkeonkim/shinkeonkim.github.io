@@ -24,7 +24,7 @@ export async function getStaticPaths() {
   const entries: { params: { tag: string }; props: { canonicalSlug: string; displayLabel: string } }[] = [];
   const seen = new Set<string>();
   const rawAliasSlug = (alias: string): string =>
-    alias.normalize('NFC').replace(/[\\/?#%]+/g, '-').replace(/^-+|-+$/g, '');
+    alias.normalize('NFC').replace(/\s+/g, '-').replace(/[\\/?#%]+/g, '-').replace(/^-+|-+$/g, '');
 
   const pushEntry = (slug: string, canonicalSlug: string, displayLabel: string) => {
     if (!slug || seen.has(slug)) return;
@@ -34,6 +34,12 @@ export async function getStaticPaths() {
 
   for (const [canonicalSlug, displayLabel] of canonicalToLabel) {
     pushEntry(canonicalSlug, canonicalSlug, displayLabel);
+    // Backward-compat: legacy space-containing tag URL still resolves its RSS
+    // feed (mirrors the alias logic in /tags/[tag].astro).
+    const legacySpaceSlug = displayLabel.normalize('NFC').trim().toLowerCase();
+    if (legacySpaceSlug.includes(' ') && legacySpaceSlug !== canonicalSlug) {
+      pushEntry(legacySpaceSlug, canonicalSlug, displayLabel);
+    }
     const meta = getTagMeta(canonicalSlug);
     for (const alias of meta?.aliases ?? []) {
       pushEntry(tagToSlug(alias), canonicalSlug, displayLabel);

@@ -41,9 +41,10 @@ export async function getStaticPaths() {
   }[] = [];
   const seenSlugs = new Set<string>();
   // Raw alias slug preserves the original casing ('PS', 'JavaScript') so direct
-  // links like /tags/PS/ resolve. Only strips URL-unsafe characters; no lowercase.
+  // links like /tags/PS/ resolve. Folds spaces to hyphens (same rule as
+  // normKey) so the alias URL stays a single, encoding-free path segment.
   const rawAliasSlug = (alias: string): string =>
-    alias.normalize('NFC').replace(/[\\/?#%]+/g, '-').replace(/^-+|-+$/g, '');
+    alias.normalize('NFC').replace(/\s+/g, '-').replace(/[\\/?#%]+/g, '-').replace(/^-+|-+$/g, '');
 
   const pushEntry = (slug: string, canonicalSlug: string, displayLabel: string, isAlias: boolean) => {
     if (!slug || seenSlugs.has(slug)) return;
@@ -53,6 +54,15 @@ export async function getStaticPaths() {
 
   for (const [canonicalSlug, displayLabel] of canonicalToLabel) {
     pushEntry(canonicalSlug, canonicalSlug, displayLabel, false);
+    // Backward-compat: the old canonical URL kept literal spaces ('/tags/boj 1328/').
+    // Emit the un-hyphenated form as an alias so existing GSC entries, bookmarks,
+    // and tag chips rendered with `.toLowerCase()` keep resolving instead of 404ing.
+    // The alias page renders the same content with <link rel="canonical"> pointing
+    // to the new hyphenated URL, consolidating SEO signals.
+    const legacySpaceSlug = displayLabel.normalize('NFC').trim().toLowerCase();
+    if (legacySpaceSlug.includes(' ') && legacySpaceSlug !== canonicalSlug) {
+      pushEntry(legacySpaceSlug, canonicalSlug, displayLabel, true);
+    }
     const meta = getTagMeta(canonicalSlug);
     for (const alias of meta?.aliases ?? []) {
       pushEntry(tagToSlug(alias), canonicalSlug, displayLabel, true);

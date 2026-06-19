@@ -40,10 +40,18 @@ export function slugify(value) {
   return value.normalize('NFC').toLowerCase().replace(SLUG_RE, '-').replace(/^-|-$/g, '');
 }
 
-// Mirrors src/pages/tags/[tag].astro: just lowercase. The sitemap URL
-// gets percent-encoded by `new URL(...)` on insert.
+// Mirrors src/data/tags.ts normKey / tagToSlug: NFC + trim + lowercase,
+// then fold spaces and URL-unsafe characters into hyphens. The canonical
+// tag URL in [tag].astro is built from this same slug, so the lastmod
+// lookup keys must produce the same string.
 export function tagSlug(value) {
-  return value.toLowerCase();
+  return value
+    .normalize('NFC')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[\\/?#%]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 export function parseDate(value) {

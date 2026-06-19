@@ -58,8 +58,12 @@ const TAG_METADATA: TagMeta[] = [
 const aliasToCanonical = new Map<string, string>();
 const canonicalToMeta = new Map<string, TagMeta>();
 
+// Canonical equivalence key for a tag. Spaces fold to hyphens here (not just
+// in tagToSlug) because the key is also the URL segment for unregistered tags
+// via `encodeURIComponent(canonicalSlug)`. Without this, 'BOJ 1328' became
+// '/tags/boj%201328/' which GSC flagged "Crawled - not indexed".
 function normKey(s: string): string {
-  return s.normalize('NFC').trim().toLowerCase();
+  return s.normalize('NFC').trim().toLowerCase().replace(/\s+/g, '-');
 }
 
 for (const meta of TAG_METADATA) {

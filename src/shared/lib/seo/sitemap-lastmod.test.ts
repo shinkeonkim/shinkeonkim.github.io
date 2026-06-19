@@ -32,12 +32,20 @@ describe('slugify', () => {
 });
 
 describe('tagSlug', () => {
-  it('lowercases without slugifying spaces', () => {
-    // Tag pages use raw lowercase; URL encoding happens on emit.
-    expect(tagSlug('Binary Search')).toBe('binary search');
+  it('folds spaces to hyphens so /tags/<slug>/ has no %20', () => {
+    expect(tagSlug('Binary Search')).toBe('binary-search');
   });
-  it('preserves Korean', () => {
+  it('lowercases ASCII', () => {
+    expect(tagSlug('JavaScript')).toBe('javascript');
+  });
+  it('preserves Korean (NFC)', () => {
     expect(tagSlug('문제풀이')).toBe('문제풀이');
+  });
+  it('folds spaces inside Korean tags', () => {
+    expect(tagSlug('수열과 쿼리')).toBe('수열과-쿼리');
+  });
+  it('strips leading and trailing hyphens', () => {
+    expect(tagSlug('  weird-tag  ')).toBe('weird-tag');
   });
 });
 
