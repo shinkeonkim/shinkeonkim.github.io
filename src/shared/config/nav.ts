@@ -9,8 +9,8 @@ export const NAV_ITEMS = [
 ] as const;
 
 export const EXTERNAL_NAV_ITEMS = [
-  { href: 'https://www.shinkeonkim.com/my-resume', label: '이력서' },
-  { href: 'https://www.shinkeonkim.com/my-portfolio', label: '포트폴리오' },
+  { href: 'https://shinkeonkim.com/my-resume', label: '이력서' },
+  { href: 'https://shinkeonkim.com/my-portfolio', label: '포트폴리오' },
 ] as const;
 
 export const DEV_NAV_ITEMS = [
