@@ -33,6 +33,49 @@ const [imageMap, lastmodMap] = await Promise.all([
   buildLastmodMap(SITE_URL),
 ]);
 
+// Tag slugs that are registered aliases (in src/data/tags.ts TAG_METADATA).
+// The [tag] route emits them as alias pages whose <link rel="canonical">
+// points to the registered canonical, so they should NOT appear in the
+// sitemap (only the canonical URL should).
+//
+// Mirror src/data/tags.ts when adding/removing TAG_METADATA aliases.
+const TAG_REGISTERED_ALIAS_SLUGS = new Set([
+  'js',
+  'JavaScript',
+  'JS',
+  'PS',
+  '문제풀이',
+  'async-await',
+  'networking',
+  'postgres',
+  'PostgreSQL',
+  'Python',
+]);
+
+// True when `page` looks like an alias tag URL we don't want in the sitemap:
+// - any /tags/<slug>/ whose slug still contains a space (legacy slug kept
+//   alive for backward compat by [tag].astro's legacy alias emission)
+// - any /tags/<slug>/ matching a registered alias (lowercase or raw-case)
+/** @param {string} page */
+function isTagAliasUrl(page) {
+  let pathname;
+  try {
+    pathname = new URL(page).pathname;
+  } catch {
+    return false;
+  }
+  const m = pathname.match(/^\/tags\/([^/]+)\/$/);
+  if (!m) return false;
+  let slug;
+  try {
+    slug = decodeURIComponent(m[1]);
+  } catch {
+    return false;
+  }
+  if (slug.includes(' ')) return true;
+  return TAG_REGISTERED_ALIAS_SLUGS.has(slug);
+}
+
 // URLs to exclude from the production sitemap.
 // - `/_editor`, `/_studio`, `/__`, dev-only injected routes (the
 //   integration already guards them on `command !== 'dev'`, but this is
@@ -41,6 +84,7 @@ const [imageMap, lastmodMap] = await Promise.all([
 //   intended for in-progress visual review of internal building blocks,
 //   not for public search indexing.
 // - `/og/`, programmatically generated OG images, not browsable pages.
+// - Tag alias URLs (see isTagAliasUrl above).
 /** @param {string} page */
 function isExcludedFromSitemap(page) {
   return (
@@ -48,7 +92,8 @@ function isExcludedFromSitemap(page) {
     page.includes('/_studio') ||
     page.includes('/__') ||
     page.includes('/dev/') ||
-    page.includes('/og/')
+    page.includes('/og/') ||
+    isTagAliasUrl(page)
   );
 }
 
