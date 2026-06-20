@@ -1,3 +1,5 @@
+import { WIKI_PER_PAGE } from '@/shared/config';
+
 interface WikiEntry {
   id: string;
   title: string;
@@ -33,6 +35,50 @@ function renderFilteredItem(e: WikiEntry): string {
   return `<li><a href="/wiki/${encodeURIComponent(e.id)}/" class="wiki-list-item group"><div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5"><span class="text-base font-medium group-hover:text-accent">${title}</span>${updated}</div>${tagsRow}</a></li>`;
 }
 
+// Build the page-number list with ellipses, mirroring src/shared/ui/Pagination.astro.
+function buildPageList(currentPage: number, lastPage: number): (number | 'ellipsis')[] {
+  if (lastPage <= 7) {
+    return Array.from({ length: lastPage }, (_, i) => i + 1);
+  }
+  const out: (number | 'ellipsis')[] = [1];
+  if (currentPage > 3) out.push('ellipsis');
+  const start = Math.max(2, currentPage - 1);
+  const end = Math.min(lastPage - 1, currentPage + 1);
+  for (let i = start; i <= end; i++) out.push(i);
+  if (currentPage < lastPage - 2) out.push('ellipsis');
+  out.push(lastPage);
+  return out;
+}
+
+// Mirror Pagination.astro's Tailwind classes. Buttons (not anchors) because the
+// page change is client-side state only; no navigation, no full reload.
+function renderPagination(currentPage: number, lastPage: number): string {
+  if (lastPage <= 1) return '';
+  const btnBase = 'rounded-md border px-3 py-1.5 no-underline';
+  const btnIdle = `${btnBase} border-border hover:border-accent hover:text-accent`;
+  const btnCurrent = `${btnBase} border-accent bg-surface-elevated text-accent`;
+  const muted = 'rounded-md border border-border px-3 py-1.5 text-fg-muted opacity-50';
+
+  const prev =
+    currentPage > 1
+      ? `<button type="button" data-wiki-filter-page="${currentPage - 1}" rel="prev" class="${btnIdle}">← 이전</button>`
+      : `<span class="${muted}">← 이전</span>`;
+  const next =
+    currentPage < lastPage
+      ? `<button type="button" data-wiki-filter-page="${currentPage + 1}" rel="next" class="${btnIdle}">다음 →</button>`
+      : `<span class="${muted}">다음 →</span>`;
+
+  const pages = buildPageList(currentPage, lastPage)
+    .map((p) =>
+      p === 'ellipsis'
+        ? '<span class="px-2 text-fg-muted">…</span>'
+        : `<button type="button" data-wiki-filter-page="${p}" ${p === currentPage ? 'aria-current="page"' : ''} class="${p === currentPage ? btnCurrent : btnIdle}">${p}</button>`,
+    )
+    .join('');
+
+  return `${prev}${pages}${next}`;
+}
+
 export function setupWikiFilter(): void {
   const filterUi = document.querySelector<HTMLElement>('[data-wiki-filter-ui]');
   if (!filterUi || filterUi.dataset.wikiFilterReady === '1') return;
@@ -47,6 +93,7 @@ export function setupWikiFilter(): void {
   const filteredCount = document.querySelector<HTMLElement>('[data-wiki-filtered-count]');
   const filteredList = document.querySelector<HTMLUListElement>('[data-wiki-filtered-list]');
   const filteredEmpty = document.querySelector<HTMLElement>('[data-wiki-filtered-empty]');
+  const filteredPagination = document.querySelector<HTMLElement>('[data-wiki-filtered-pagination]');
   const tagButtons = Array.from(
     document.querySelectorAll<HTMLButtonElement>('[data-wiki-tag]'),
   );
@@ -78,6 +125,7 @@ export function setupWikiFilter(): void {
   const params = new URLSearchParams(window.location.search);
   let query = params.get('search') ?? '';
   let activeTag = params.get('tag') ?? '';
+  let currentPage = Math.max(1, parseInt(params.get('page') ?? '1', 10) || 1);
 
   if (query) searchInput.value = query;
   if (activeTag && tagPanel) tagPanel.open = true;
@@ -88,6 +136,8 @@ export function setupWikiFilter(): void {
     else url.searchParams.delete('search');
     if (activeTag) url.searchParams.set('tag', activeTag);
     else url.searchParams.delete('tag');
+    if (currentPage > 1) url.searchParams.set('page', String(currentPage));
+    else url.searchParams.delete('page');
     window.history.replaceState({}, '', url.toString());
   }
 
@@ -119,11 +169,15 @@ export function setupWikiFilter(): void {
       }
     }
 
-    syncUrl();
-
     if (!hasFilter) {
+      currentPage = 1;
+      syncUrl();
       setFilterState(false);
       filteredList!.innerHTML = '';
+      if (filteredPagination) {
+        filteredPagination.hidden = true;
+        filteredPagination.innerHTML = '';
+      }
       return;
     }
 
@@ -142,15 +196,40 @@ export function setupWikiFilter(): void {
     setFilterState(true);
 
     if (filtered.length === 0) {
+      currentPage = 1;
+      syncUrl();
       filteredList!.innerHTML = '';
       filteredCount!.textContent = `검색 결과 없음 · 전체 ${allEntries.length}개`;
       filteredEmpty!.classList.remove('hidden');
+      if (filteredPagination) {
+        filteredPagination.hidden = true;
+        filteredPagination.innerHTML = '';
+      }
       return;
     }
 
+    const lastPage = Math.max(1, Math.ceil(filtered.length / WIKI_PER_PAGE));
+    if (currentPage > lastPage) currentPage = lastPage;
+    if (currentPage < 1) currentPage = 1;
+    syncUrl();
+
+    const pageStart = (currentPage - 1) * WIKI_PER_PAGE;
+    const pageSlice = filtered.slice(pageStart, pageStart + WIKI_PER_PAGE);
+
     filteredEmpty!.classList.add('hidden');
-    filteredCount!.textContent = `검색 결과 ${filtered.length}개 · 전체 ${allEntries.length}개`;
-    filteredList!.innerHTML = filtered.map(renderFilteredItem).join('');
+    const rangeStart = pageStart + 1;
+    const rangeEnd = pageStart + pageSlice.length;
+    filteredCount!.textContent =
+      lastPage > 1
+        ? `검색 결과 ${filtered.length}개 중 ${rangeStart}–${rangeEnd} · ${currentPage} / ${lastPage} · 전체 ${allEntries.length}개`
+        : `검색 결과 ${filtered.length}개 · 전체 ${allEntries.length}개`;
+    filteredList!.innerHTML = pageSlice.map(renderFilteredItem).join('');
+
+    if (filteredPagination) {
+      const pagHtml = renderPagination(currentPage, lastPage);
+      filteredPagination.innerHTML = pagHtml;
+      filteredPagination.hidden = pagHtml.length === 0;
+    }
   }
 
   let debounceId: ReturnType<typeof setTimeout> | null = null;
@@ -158,6 +237,7 @@ export function setupWikiFilter(): void {
     if (debounceId !== null) clearTimeout(debounceId);
     debounceId = setTimeout(() => {
       query = searchInput.value;
+      currentPage = 1;
       render();
     }, 80);
   });
@@ -167,6 +247,7 @@ export function setupWikiFilter(): void {
       e.preventDefault();
       searchInput.value = '';
       query = '';
+      currentPage = 1;
       render();
     }
   });
@@ -175,7 +256,24 @@ export function setupWikiFilter(): void {
     btn.addEventListener('click', () => {
       const tag = btn.dataset.wikiTag ?? '';
       activeTag = activeTag === tag ? '' : tag;
+      currentPage = 1;
       render();
+    });
+  }
+
+  // Event delegation: pagination buttons are recreated on every render(), so
+  // bind once on the persistent container.
+  if (filteredPagination) {
+    filteredPagination.addEventListener('click', (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLElement)) return;
+      const btn = target.closest<HTMLElement>('[data-wiki-filter-page]');
+      if (!btn) return;
+      const next = parseInt(btn.dataset.wikiFilterPage ?? '', 10);
+      if (!Number.isFinite(next) || next < 1) return;
+      currentPage = next;
+      render();
+      filteredView!.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   }
 
