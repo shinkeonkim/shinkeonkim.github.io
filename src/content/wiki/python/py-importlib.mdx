@@ -1,0 +1,339 @@
+---
+title: "[Python] importlib: 동적 import와 메타데이터"
+aliases: ["python importlib", "importlib.import_module", "importlib.reload", "importlib.metadata", "entry_points"]
+tags: [python, importlib, import, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`importlib`는 **import 시스템에 대한 프로그래밍 인터페이스**. 동적 모듈 로딩, 메타데이터 조회, 진입점 발견, hot reload 등을 제공한다. 플러그인 시스템·테스트·동적 디스패치의 기반.
+
+`import` 문은 `importlib.__import__()`의 syntax sugar.
+
+## import_module: 동적 import
+
+```python
+import importlib
+
+mod = importlib.import_module("os.path")
+print(mod.join("/a", "b"))    # '/a/b'
+
+# 변수에서 모듈 이름
+name = "json"
+mod = importlib.import_module(name)
+data = mod.loads('{"x": 1}')
+
+# 점 표기로 서브모듈
+mod = importlib.import_module("myapp.plugins.auth")
+```
+
+`__import__()`보다 깔끔. 플러그인 발견, 설정 기반 디스패치에 활용.
+
+## reload
+
+```python
+import importlib
+import my_module
+
+# 코드 변경 후
+importlib.reload(my_module)
+```
+
+REPL/Jupyter에서 코드 변경을 즉시 반영. 프로덕션에선 안 쓰는 게 좋음(미묘한 버그).
+
+함정: 다른 모듈이 `from my_module import X`로 가져간 X는 갱신 안 됨. 부분 hot reload는 어려움.
+
+## find_spec, util
+
+```python
+import importlib.util
+
+spec = importlib.util.find_spec("numpy")
+if spec is None:
+    print("numpy 없음")
+else:
+    print(spec.origin)    # 파일 경로
+```
+
+설치 여부 확인 후 분기:
+
+```python
+HAS_NUMPY = importlib.util.find_spec("numpy") is not None
+
+if HAS_NUMPY:
+    import numpy as np
+else:
+    np = None
+```
+
+선택적 의존성 처리 패턴.
+
+## 파일 경로로 import
+
+```python
+import importlib.util
+
+spec = importlib.util.spec_from_file_location(
+    "my_module", "/path/to/file.py"
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+module.my_function()
+```
+
+플러그인 디렉터리 스캔 후 동적 로드.
+
+## importlib.metadata
+
+설치된 패키지의 메타데이터 조회 (PEP 566, 3.8+).
+
+```python
+from importlib.metadata import version, metadata, distributions, entry_points
+
+print(version("requests"))     # '2.32.0'
+print(version("astropy"))       # PackageNotFoundError if not installed
+
+meta = metadata("requests")
+print(meta["Name"], meta["Summary"])
+
+# 설치된 모든 배포
+for dist in distributions():
+    print(dist.metadata["Name"], dist.version)
+```
+
+이전 `pkg_resources`(setuptools)를 대체. 더 빠르고 stdlib에 있음.
+
+### __version__ 자동 설정
+
+```python
+# myapp/__init__.py
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("myapp")
+except PackageNotFoundError:
+    __version__ = "0.0.0+local"
+```
+
+`pyproject.toml`의 version과 자동 동기화.
+
+## entry_points: 플러그인 발견
+
+다른 패키지가 등록한 진입점을 발견. 플러그인 아키텍처의 표준.
+
+```python
+from importlib.metadata import entry_points
+
+# 모든 entry_points
+eps = entry_points()
+
+# 특정 그룹
+plugins = entry_points(group="myapp.plugins")
+for ep in plugins:
+    plugin_class = ep.load()      # 실제 객체 로드
+    plugin_class()
+```
+
+다른 패키지의 `pyproject.toml`:
+
+```toml
+[project.entry-points."myapp.plugins"]
+auth = "myapp_auth:AuthPlugin"
+cache = "myapp_cache:CachePlugin"
+```
+
+설치만 하면 자동 발견. pytest plugin, Click plugin, Sphinx extension 등 모두 이 메커니즘.
+
+## resources: 패키지 데이터 파일
+
+`importlib.resources` (3.9+)는 패키지 내부의 데이터 파일 안전 접근.
+
+```python
+from importlib.resources import files
+
+# myapp/data/config.json 읽기
+content = (files("myapp.data") / "config.json").read_text()
+
+# binary
+data = (files("myapp.data") / "logo.png").read_bytes()
+```
+
+기존 `pkgutil.get_data`나 `__file__` 기반 접근보다 안전 (zip/wheel 안 패키지도 동작).
+
+## 자주 보는 패턴
+
+### 설정 기반 클래스 선택
+
+```python
+import importlib
+
+def get_backend(name):
+    module_path, class_name = name.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+config = {"backend": "myapp.backends.redis.RedisBackend"}
+Backend = get_backend(config["backend"])
+backend = Backend()
+```
+
+YAML/TOML 설정으로 클래스 지정 → 코드 수정 없이 백엔드 교체.
+
+Django의 `MIDDLEWARE = [...]`이 같은 패턴.
+
+### 플러그인 로더
+
+```python
+import importlib
+import pkgutil
+
+def load_plugins(package):
+    """package 안의 모든 모듈 로드."""
+    pkg = importlib.import_module(package)
+    for finder, name, ispkg in pkgutil.iter_modules(pkg.__path__):
+        full_name = f"{package}.{name}"
+        importlib.import_module(full_name)
+
+load_plugins("myapp.plugins")
+```
+
+모듈 import 시 `register()` 호출 등 부작용으로 자동 등록.
+
+### Lazy import
+
+```python
+# 무거운 의존성을 사용 시점에만
+def visualize():
+    import matplotlib.pyplot as plt    # 함수 호출 시 import
+    ...
+```
+
+또는 `importlib.util.LazyLoader`:
+
+```python
+import importlib.util
+import sys
+
+spec = importlib.util.find_spec("numpy")
+loader = importlib.util.LazyLoader(spec.loader)
+spec.loader = loader
+module = importlib.util.module_from_spec(spec)
+sys.modules["numpy"] = module
+# 진짜 import는 첫 attribute 접근 시
+```
+
+대형 라이브러리(tensorflow, pytorch)는 부분만 쓸 때 시작 시간 단축.
+
+### 동적 호출 가능 객체 로드
+
+```python
+import importlib
+
+def load_callable(path: str):
+    """'module.path:func_name' 형태로 함수 로드."""
+    module_path, attr = path.split(":")
+    module = importlib.import_module(module_path)
+    return getattr(module, attr)
+
+fn = load_callable("myapp.handlers:on_login")
+fn(user_id)
+```
+
+Celery task, Flask route registration 등.
+
+### 진입점 기반 CLI 플러그인
+
+```toml
+# 플러그인 패키지의 pyproject.toml
+[project.entry-points."mycli.commands"]
+deploy = "mycli_deploy:deploy_command"
+```
+
+```python
+# 메인 CLI
+from importlib.metadata import entry_points
+
+def main():
+    commands = entry_points(group="mycli.commands")
+    for ep in commands:
+        register_command(ep.name, ep.load())
+```
+
+설치만 하면 자동으로 CLI에 명령 추가.
+
+## 함정
+
+### 1. 순환 import
+
+`importlib.import_module`도 일반 import와 같은 순환 함정 가짐. `py-import-system`에서 다룸.
+
+### 2. reload의 한계
+
+```python
+import my_module
+from my_module import some_func
+
+importlib.reload(my_module)
+some_func()    # 여전히 옛날 버전!
+```
+
+`from X import Y`는 이름 바인딩만 가져옴. reload 후엔 명시적 재 import 필요.
+
+### 3. find_spec과 import side effects
+
+```python
+spec = importlib.util.find_spec("numpy")    # import는 안 됨 (모듈 객체 미생성)
+# 그러나 일부 finder는 검색 중 부수효과 가능 (드물지만)
+```
+
+조건부 import는 try/except가 더 명확할 수 있음.
+
+```python
+try:
+    import numpy
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+```
+
+### 4. 동적 import의 보안
+
+```python
+mod = importlib.import_module(user_input)    # 위험! 임의 코드 실행
+```
+
+사용자 입력 → 화이트리스트 검증 후만 사용.
+
+```python
+ALLOWED = {"myapp.plugins.auth", "myapp.plugins.cache"}
+
+def safe_import(name):
+    if name not in ALLOWED:
+        raise ValueError(f"forbidden: {name}")
+    return importlib.import_module(name)
+```
+
+## 모듈 캐시: sys.modules
+
+```python
+import sys
+
+print("os" in sys.modules)    # True (한 번 import되면 캐시)
+
+# 재 import 강제
+del sys.modules["my_module"]
+import my_module    # 새로 로드 (그러나 다른 곳의 참조는 옛 것)
+```
+
+테스트에서 격리된 모듈 상태 필요 시 사용. 일반 코드는 만지지 말 것.
+
+## 참고
+
+- [`importlib` documentation](https://docs.python.org/3/library/importlib.html)
+- [`importlib.metadata`](https://docs.python.org/3/library/importlib.metadata.html)
+- [`importlib.resources`](https://docs.python.org/3/library/importlib.resources.html)
+- [PEP 328 – Import system](https://peps.python.org/pep-0328/)
+- [PEP 566 – Metadata for Python Software Packages](https://peps.python.org/pep-0566/)
+- [Entry points specification](https://packaging.python.org/en/latest/specifications/entry-points/)

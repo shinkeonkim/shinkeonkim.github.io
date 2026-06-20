@@ -1,0 +1,309 @@
+---
+title: "[Django] Mixin 패턴: LoginRequired, UserPasses, Custom"
+aliases: ["django mixin", "LoginRequiredMixin", "UserPassesTestMixin", "PermissionRequiredMixin", "django CBV mixin"]
+tags: [django, mixin, cbv, auth]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django Mixin은 **CBV에 공통 기능을 추가하는 작은 클래스**. 다중 상속으로 조합. 인증, 권한, 로깅, 메시지 등에 활용. MRO(Method Resolution Order) 따라 가장 왼쪽 mixin 우선.
+
+## 빌트인 Auth Mixin
+
+### LoginRequiredMixin
+
+```python
+from django.contrib.auth.mixins import LoginRequiredMixin
+
+class PostCreateView(LoginRequiredMixin, CreateView):
+    model = Post
+    fields = ["title", "body"]
+    login_url = "/login/"           # settings.LOGIN_URL 기본
+    redirect_field_name = "next"
+```
+
+미인증 시 로그인 페이지로 리다이렉트.
+
+### PermissionRequiredMixin
+
+```python
+from django.contrib.auth.mixins import PermissionRequiredMixin
+
+class PostDeleteView(PermissionRequiredMixin, DeleteView):
+    model = Post
+    permission_required = "blog.delete_post"
+    # 또는
+    permission_required = ("blog.delete_post", "blog.view_post")
+    raise_exception = True    # 403 즉시 (기본은 로그인 페이지로)
+```
+
+### UserPassesTestMixin
+
+임의 조건.
+
+```python
+from django.contrib.auth.mixins import UserPassesTestMixin
+
+class PostUpdateView(UserPassesTestMixin, UpdateView):
+    model = Post
+
+    def test_func(self):
+        post = self.get_object()
+        return post.author == self.request.user or self.request.user.is_staff
+```
+
+## 다중 mixin
+
+```python
+class PostUpdateView(LoginRequiredMixin, UserPassesTestMixin, UpdateView):
+    ...
+```
+
+순서 중요: Mixin → 본 View. MRO로 왼쪽 우선.
+
+## 커스텀 Mixin
+
+### Soft delete
+
+```python
+class SoftDeleteMixin:
+    def delete(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        self.object.deleted_at = timezone.now()
+        self.object.save()
+        return HttpResponseRedirect(self.get_success_url())
+
+class PostDeleteView(SoftDeleteMixin, DeleteView):
+    model = Post
+    success_url = reverse_lazy("post-list")
+```
+
+### Owner-filtering
+
+```python
+class OwnerFilterMixin:
+    """현재 사용자의 객체만 보이게."""
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.user.is_authenticated:
+            return qs.filter(owner=self.request.user)
+        return qs.none()
+
+class PostListView(LoginRequiredMixin, OwnerFilterMixin, ListView):
+    model = Post
+```
+
+### Set Author
+
+```python
+class SetAuthorMixin:
+    """생성 시 author 자동 설정."""
+
+    def form_valid(self, form):
+        form.instance.author = self.request.user
+        return super().form_valid(form)
+
+class PostCreateView(LoginRequiredMixin, SetAuthorMixin, CreateView):
+    model = Post
+    fields = ["title", "body"]
+```
+
+### Message Mixin
+
+```python
+class SuccessMessageMixin:
+    success_message = "저장되었습니다"
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        messages.success(self.request, self.success_message)
+        return response
+
+class PostCreateView(LoginRequiredMixin, SetAuthorMixin, SuccessMessageMixin, CreateView):
+    success_message = "포스트가 작성되었습니다"
+```
+
+Django 1.6+ `django.contrib.messages.views.SuccessMessageMixin` 빌트인.
+
+### Audit Log
+
+```python
+class AuditLogMixin:
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        AuditLog.objects.create(
+            user=self.request.user,
+            action=self.audit_action,
+            object_id=self.object.id,
+            object_type=self.object._meta.model_name,
+        )
+        return response
+
+class PostUpdateView(AuditLogMixin, UpdateView):
+    audit_action = "post_updated"
+```
+
+## 메서드 데코레이터 vs Mixin
+
+```python
+# 데코레이터 (FBV)
+@login_required
+def my_view(request):
+    ...
+
+# Mixin (CBV)
+class MyView(LoginRequiredMixin, View):
+    ...
+
+# CBV에 데코레이터
+from django.utils.decorators import method_decorator
+
+@method_decorator(login_required, name="dispatch")
+class MyView(View):
+    ...
+```
+
+Mixin이 더 OOP 친화적. method_decorator는 레거시 호환.
+
+## dispatch 오버라이드
+
+가장 강력한 hook.
+
+```python
+class MaintenanceMixin:
+    """유지보수 모드 차단."""
+    def dispatch(self, request, *args, **kwargs):
+        if settings.MAINTENANCE_MODE and not request.user.is_superuser:
+            return render(request, "maintenance.html", status=503)
+        return super().dispatch(request, *args, **kwargs)
+
+class HomeView(MaintenanceMixin, TemplateView):
+    template_name = "home.html"
+```
+
+## 다중 권한 체크
+
+```python
+class StaffOrOwnerMixin(UserPassesTestMixin):
+    def test_func(self):
+        if self.request.user.is_staff:
+            return True
+        obj = self.get_object()
+        return obj.owner == self.request.user
+```
+
+```python
+class PostUpdateView(LoginRequiredMixin, StaffOrOwnerMixin, UpdateView):
+    model = Post
+```
+
+## get_context_data 확장
+
+```python
+class StatsMixin:
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["total_posts"] = Post.objects.count()
+        context["total_users"] = User.objects.count()
+        return context
+
+class HomeView(StatsMixin, TemplateView):
+    template_name = "home.html"
+```
+
+## ViewSet (DRF) mixin
+
+```python
+from rest_framework import mixins, viewsets
+
+class PostViewSet(
+    mixins.CreateModelMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+```
+
+ModelViewSet 풀세트가 아닌 일부 액션만 노출 시 mixin 조합.
+
+## MRO 디버깅
+
+```python
+class MyView(LoginRequiredMixin, UserPassesTestMixin, OwnerFilterMixin, ListView):
+    pass
+
+MyView.__mro__
+# (MyView, LoginRequiredMixin, AccessMixin, UserPassesTestMixin, OwnerFilterMixin, ListView, ..., object)
+```
+
+`super()` 호출이 MRO 순서로 위임. 메서드 충돌 시 왼쪽 우선.
+
+## 함정
+
+### 1. Mixin 순서
+
+```python
+class MyView(UserPassesTestMixin, LoginRequiredMixin, View):    # ← Permission 먼저 검사 가능
+class MyView(LoginRequiredMixin, UserPassesTestMixin, View):    # ← Login 먼저
+```
+
+순서로 동작 달라짐. `LoginRequiredMixin`이 보통 가장 왼쪽 (먼저 인증).
+
+### 2. View 자체가 가장 오른쪽
+
+```python
+class MyView(ListView, LoginRequiredMixin):    # 잘못!
+```
+
+기본 클래스(View, ListView)는 가장 오른쪽.
+
+### 3. super() 호출 누락
+
+```python
+class MyMixin:
+    def get_context_data(self, **kwargs):
+        return {"extra": "..."}    # super() 안 호출 → 부모 context 손실
+```
+
+항상 `super().get_context_data(**kwargs)` 부터.
+
+### 4. 같은 메서드 정의
+
+```python
+class A(Mixin):
+    def get_queryset(self):
+        return Post.objects.filter(...)
+
+class B(MyView):
+    def get_queryset(self):
+        return Post.objects.exclude(...)    # MRO에 따라 A vs B 결정
+```
+
+MRO에서 가장 왼쪽 정의가 이김. `super()`로 chaining 명시.
+
+### 5. dispatch에서 self.object 접근
+
+```python
+class MyMixin:
+    def dispatch(self, request, *args, **kwargs):
+        self.object    # AttributeError! get_object 안 호출됨
+```
+
+DetailView/UpdateView에서 `self.object`는 `get()`/`post()`에서 설정. dispatch에선 직접 `get_object()` 호출.
+
+## 자주 보는 외부 라이브러리
+
+- **django-braces**: 추가 mixin 모음 (`AjaxRequestMixin`, `JsonResponseMixin` 등)
+- **django-rules**: 객체 단위 권한
+- **django-guardian**: object-level permissions
+
+## 참고
+
+- [Django CBV docs](https://docs.djangoproject.com/en/stable/topics/class-based-views/)
+- [Authentication mixins](https://docs.djangoproject.com/en/stable/topics/auth/default/#the-loginrequired-mixin)
+- [Classy CBV](https://ccbv.co.uk/) - 모든 CBV 클래스 시각화
+- [django-braces](https://github.com/brack3t/django-braces)

@@ -1,0 +1,455 @@
+---
+title: "[SQL] Data Types"
+aliases: ["SQL Data Types", "SQL 데이터 타입", "SQL Types", "DATE", "TIMESTAMP", "JSON", "JSONB", "VARCHAR", "NUMERIC"]
+tags: [sql, data-types, schema, database]
+updated: 2026-06-20
+---
+
+## 정의
+
+SQL 의 컬럼은 **타입** 을 가진다. 가능한 값의 도메인, 가능한 연산, 정렬 순서, 인덱스 종류, 저장 크기가 타입에 따라 결정된다.
+
+같은 의미의 타입도 dialect 마다 이름과 동작이 다르다. 표준 SQL 의 타입을 기준으로, [[PostgreSQL]] / [[MySQL]] 의 실용 매핑을 정리.
+
+전체 SQL 체계는 [[SQL]] 참고.
+
+## 타입 분류
+
+| 그룹 | 주요 타입 | 대표 연산 |
+|:---|:---|:---|
+| 숫자 | `INTEGER`, `BIGINT`, `NUMERIC`, `DOUBLE` | 산술, 집계, 반올림 |
+| 문자열 | `VARCHAR`, `TEXT`, `CHAR` | `LIKE`, 정규식, 연결, 추출 |
+| 부울 | `BOOLEAN` | `AND/OR/NOT` |
+| 날짜·시간 | `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `INTERVAL` | 차이, 추출, 절단 |
+| 이진 | `BYTEA` (PG), `BLOB` (MySQL) | 길이, 해시, 인코딩 |
+| UUID | `UUID` (PG), `BINARY(16)` / `CHAR(36)` (MySQL) | 생성, 비교 |
+| 화폐 | `NUMERIC(p, s)`, `MONEY` (PG) | 정밀 산술 |
+| JSON | `JSON`, `JSONB` (PG) | 경로 추출, containment |
+| 배열 | `INTEGER[]`, `TEXT[]` (PG) | 슬라이싱, `ANY/ALL`, `unnest` |
+| 범위 | `INT4RANGE`, `TSRANGE` (PG) | 포함, 겹침 |
+| 공간 | `GEOMETRY`, `GEOGRAPHY` (PostGIS) | 거리, 포함, 교차 |
+| 열거 | `ENUM` (PG/MySQL) | 정렬, 비교 |
+
+## 숫자 타입
+
+| 표준 / PG | MySQL | 크기 | 범위 |
+|:---|:---|:---|:---|
+| `SMALLINT` | `SMALLINT` | 2 B | -32,768 ~ 32,767 |
+| `INTEGER` / `INT` | `INT` | 4 B | -2³¹ ~ 2³¹ - 1 |
+| `BIGINT` | `BIGINT` | 8 B | -2⁶³ ~ 2⁶³ - 1 |
+| `NUMERIC(p, s)` / `DECIMAL` | `DECIMAL(p, s)` | 가변 | 정밀 (p 자릿수, s 소수점) |
+| `REAL` / `FLOAT4` | `FLOAT` | 4 B | 단정밀 부동소수 |
+| `DOUBLE PRECISION` | `DOUBLE` | 8 B | 배정밀 부동소수 |
+
+### NUMERIC vs DOUBLE
+
+```sql
+-- 화폐, 회계 → NUMERIC (정밀, 느림)
+CREATE TABLE invoices (total NUMERIC(12, 2));
+INSERT INTO invoices VALUES (10.10), (20.20);
+SELECT SUM(total) FROM invoices;        -- 정확히 30.30
+
+-- 과학 계산, 통계 → DOUBLE (빠름, 부동소수 오차 OK)
+CREATE TABLE measurements (val DOUBLE PRECISION);
+-- 0.1 + 0.2 = 0.30000000000000004
+```
+
+> [!IMPORTANT]
+> 돈에 `FLOAT`/`DOUBLE` 절대 금지. 누적 오차 발생.
+
+### 자주 쓰는 연산
+
+```sql
+SELECT ABS(-3),                              -- 3
+       CEIL(2.3), FLOOR(2.7),                -- 3, 2
+       ROUND(2.345, 2),                      -- 2.35
+       TRUNC(2.99),                          -- 2 (PG)
+       MOD(10, 3),    10 % 3,                -- 1
+       POWER(2, 10),                         -- 1024
+       SQRT(16), LN(2.718), LOG(10, 1000),
+       RANDOM();                             -- PG: 0~1 / MySQL: RAND()
+```
+
+집계 함수는 [[SQL GROUP BY]] 참고.
+
+## 문자열 타입
+
+| 표준 | PostgreSQL | MySQL | 비고 |
+|:---|:---|:---|:---|
+| `CHARACTER(n)` | `CHAR(n)` | `CHAR(n)` | 고정, 짧으면 공백 패딩 |
+| `CHARACTER VARYING(n)` | `VARCHAR(n)` | `VARCHAR(n)` | 가변 |
+| `CHARACTER LARGE OBJECT` | `TEXT` | `TEXT`, `LONGTEXT` | 사실상 무제한 |
+
+> PostgreSQL 에선 `VARCHAR`, `TEXT`, `CHAR` 내부 성능 동일, 길이 제약만 차이.
+> MySQL 에선 `VARCHAR` 가 행 안에 저장, `TEXT` 는 별도 저장 영역, 성능 차이 있음.
+
+### 자주 쓰는 연산
+
+```sql
+-- 길이
+SELECT LENGTH('hello');                        -- 5 (PG, 문자 수)
+SELECT CHAR_LENGTH('hello'), OCTET_LENGTH('한');  -- 글자 수 vs 바이트 수
+
+-- 연결
+SELECT 'Hello, ' || 'World';                   -- PG, MySQL (ANSI_MODE)
+SELECT CONCAT('Hello, ', 'World');             -- 양쪽 모두
+
+-- 자르기
+SELECT SUBSTRING('hello world' FROM 7 FOR 5);  -- 'world'
+SELECT SUBSTR('hello world', 7, 5);            -- 같음
+
+-- 변환
+SELECT UPPER('abc'), LOWER('ABC'), INITCAP('hello world');     -- PG
+SELECT REPLACE('a-b-c', '-', '_');             -- 'a_b_c'
+
+-- 트림
+SELECT TRIM('  hello  '), LTRIM('  hello'), RTRIM('hello  ');
+
+-- 패딩
+SELECT LPAD('7', 3, '0');                      -- '007'
+```
+
+### LIKE vs ILIKE vs 정규식
+
+| 연산 | 의미 | dialect |
+|:---|:---|:---|
+| `LIKE '...'` | `%`, `_` 와일드카드 | 표준 |
+| `ILIKE '...'` | LIKE + 대소문자 무시 | PostgreSQL |
+| `~`, `~*` | 정규식 (대소문자 / 무시) | PostgreSQL |
+| `REGEXP_MATCHES`, `REGEXP_REPLACE` | 정규식 함수 | PostgreSQL |
+| `REGEXP` / `RLIKE` | 정규식 | MySQL |
+| `REGEXP_LIKE`, `REGEXP_SUBSTR` | 정규식 함수 | MySQL 8+ |
+
+```sql
+SELECT * FROM users WHERE name LIKE 'A%';                       -- 표준
+SELECT * FROM users WHERE name ILIKE 'a%';                      -- PG
+SELECT * FROM users WHERE name ~* '^a';                         -- PG 정규식
+SELECT * FROM users WHERE name REGEXP '^A';                     -- MySQL
+```
+
+## 부울
+
+```sql
+-- PostgreSQL
+CREATE TABLE flags (active BOOLEAN NOT NULL DEFAULT FALSE);
+INSERT INTO flags VALUES (TRUE), (FALSE), (NULL);
+SELECT * FROM flags WHERE active;     -- TRUE 만, NULL 제외
+
+-- MySQL
+-- BOOLEAN ≡ TINYINT(1), TRUE=1, FALSE=0
+CREATE TABLE flags (active TINYINT(1) NOT NULL DEFAULT 0);
+SELECT * FROM flags WHERE active = 1;
+```
+
+## 날짜·시간
+
+가장 함정이 많은 타입. 표준 + dialect 차이가 크다.
+
+| 표준 / PG | MySQL | 의미 |
+|:---|:---|:---|
+| `DATE` | `DATE` | 'YYYY-MM-DD' |
+| `TIME` | `TIME` | 'HH:MM:SS' (PG: 6 자리 마이크로초) |
+| `TIMESTAMP` | `DATETIME` | 시각 (시간대 없음) |
+| `TIMESTAMP WITH TIME ZONE` (`TIMESTAMPTZ`) | `TIMESTAMP` | 시각 + UTC 변환 저장 |
+| `INTERVAL` | (없음) | 기간 (예: `INTERVAL '1 day'`) |
+
+### MySQL 의 TIMESTAMP
+
+- 범위 1970-2038 (32-bit Unix time)
+- INSERT 시 세션 timezone 으로 해석 → UTC 저장 → SELECT 시 다시 세션 timezone
+- `DATETIME` 은 timezone 없음, 그대로 저장
+
+### PostgreSQL 의 TIMESTAMPTZ
+
+- 항상 UTC 로 저장
+- 표시는 세션 timezone (`SET TIME ZONE 'Asia/Seoul';`)
+- 권장: 시각은 항상 `TIMESTAMPTZ`
+
+### 현재 시각
+
+```sql
+SELECT NOW();                          -- PG: 트랜잭션 시작 시점
+SELECT CURRENT_TIMESTAMP;              -- 표준
+SELECT CURRENT_DATE, CURRENT_TIME;
+SELECT CLOCK_TIMESTAMP();              -- PG: 진짜 wall clock
+SELECT STATEMENT_TIMESTAMP();          -- PG: statement 시작 시점
+```
+
+MySQL: `NOW()`, `CURRENT_TIMESTAMP()`, `SYSDATE()` (실시간), `UTC_TIMESTAMP()`.
+
+### 산술
+
+<CodeWithOutput
+  variants={[
+    { language: 'sql', label: 'PostgreSQL', code: `-- 날짜 + 기간
+SELECT DATE '2024-01-15' + INTERVAL '7 day';        -- 2024-01-22
+SELECT DATE '2024-01-15' - INTERVAL '1 month';      -- 2023-12-15
+SELECT TIMESTAMPTZ '2024-01-15 10:00+09' + INTERVAL '3 hour';
+
+-- 두 날짜 차이
+SELECT DATE '2024-12-31' - DATE '2024-01-01';       -- 365 (일 수)
+SELECT AGE(TIMESTAMP '2024-12-31', TIMESTAMP '2024-01-01');
+-- → '11 mons 30 days'
+
+-- 추출
+SELECT EXTRACT(YEAR  FROM created_at),
+       EXTRACT(MONTH FROM created_at),
+       EXTRACT(DOW   FROM created_at);     -- 일요일=0
+
+-- 절단 (truncate)
+SELECT DATE_TRUNC('month', created_at);    -- 월의 1일 00:00
+SELECT DATE_TRUNC('day', created_at);` },
+    { language: 'sql', label: 'MySQL', code: `-- 날짜 + 기간
+SELECT DATE_ADD('2024-01-15', INTERVAL 7 DAY);      -- 2024-01-22
+SELECT DATE_SUB('2024-01-15', INTERVAL 1 MONTH);    -- 2023-12-15
+SELECT '2024-01-15 10:00:00' + INTERVAL 3 HOUR;
+
+-- 두 날짜 차이
+SELECT DATEDIFF('2024-12-31', '2024-01-01');        -- 365
+SELECT TIMESTAMPDIFF(MONTH, '2024-01-01', '2024-12-31');     -- 11
+
+-- 추출
+SELECT YEAR(created_at), MONTH(created_at), DAY(created_at),
+       DAYOFWEEK(created_at);     -- 일요일=1
+
+-- 절단
+SELECT DATE_FORMAT(created_at, '%Y-%m-01');
+SELECT DATE(created_at);` },
+  ]}
+  outputLabel="비고"
+  output={`-- PostgreSQL 의 EXTRACT 와 INTERVAL 표준 SQL 에 충실
+-- MySQL 은 함수 기반 API
+-- DAYOFWEEK 시작 요일이 dialect 마다 다름!
+--   PG: 0=일 1=월 ... 6=토
+--   MySQL: 1=일 2=월 ... 7=토`}
+/>
+
+### 시간대 함정
+
+```sql
+-- PG, TIMESTAMP (timezone 없음) 에 TIMESTAMPTZ 를 넣으면 세션 timezone 으로 변환되어 저장
+INSERT INTO logs (ts) VALUES ('2024-01-15 10:00 UTC');
+-- 세션이 Asia/Seoul 이면 '2024-01-15 19:00' 으로 저장 (KST)
+
+-- 권장: 항상 TIMESTAMPTZ
+ALTER TABLE logs ALTER COLUMN ts TYPE TIMESTAMPTZ USING ts AT TIME ZONE 'UTC';
+```
+
+## JSON
+
+웹 백엔드 어디서나 만난다. 인덱싱 가능 여부가 dialect 의 가장 큰 차이.
+
+| | PostgreSQL | MySQL |
+|:---|:---|:---|
+| 타입 | `JSON` (텍스트), `JSONB` (바이너리) | `JSON` (바이너리만) |
+| 인덱싱 | `JSONB` GIN, expression 인덱스 | generated column + 인덱스 |
+| containment `@>` | ✓ | ✗ (대안: `JSON_CONTAINS`) |
+| 경로 추출 | `->`, `->>`, `#>`, `#>>` | `->`, `->>`, `JSON_EXTRACT` |
+
+<CodeWithOutput
+  variants={[
+    { language: 'sql', label: 'PostgreSQL', code: `CREATE TABLE events (id SERIAL PK, payload JSONB);
+
+INSERT INTO events (payload) VALUES
+  ('{"user": 42, "tags": ["a","b"], "meta": {"ip": "1.2.3.4"}}'::jsonb);
+
+-- 경로 추출
+SELECT payload -> 'user'        FROM events;     -- 42 (jsonb)
+SELECT payload ->> 'user'       FROM events;     -- '42' (text)
+SELECT payload #> '{meta, ip}'  FROM events;     -- 깊은 경로
+SELECT payload #>> '{meta, ip}' FROM events;     -- '1.2.3.4' (text)
+
+-- 포함 (containment)
+SELECT * FROM events WHERE payload @> '{"user": 42}';
+
+-- 인덱스
+CREATE INDEX idx_events_payload ON events USING GIN (payload);
+CREATE INDEX idx_events_user ON events ((payload ->> 'user'));` },
+    { language: 'sql', label: 'MySQL', code: `CREATE TABLE events (id INT PK AUTO_INCREMENT, payload JSON);
+
+INSERT INTO events (payload) VALUES
+  ('{"user": 42, "tags": ["a","b"], "meta": {"ip": "1.2.3.4"}}');
+
+-- 경로 추출
+SELECT payload -> '$.user'           FROM events;     -- 42
+SELECT payload ->> '$.user'          FROM events;     -- '42' (unquote)
+SELECT JSON_EXTRACT(payload, '$.meta.ip') FROM events;
+SELECT payload ->> '$.meta.ip'       FROM events;
+
+-- 포함 대안
+SELECT * FROM events WHERE JSON_CONTAINS(payload, '42', '$.user');
+
+-- 인덱스 (generated column)
+ALTER TABLE events
+  ADD COLUMN user_id INT
+  GENERATED ALWAYS AS (payload ->> '$.user') VIRTUAL,
+  ADD INDEX idx_user_id (user_id);` },
+  ]}
+  outputLabel="비고"
+  output={`-- PG 의 JSONB 는 인덱싱과 containment 가 강력
+-- MySQL 의 JSON 은 generated column 트릭이 필요
+-- JSON 에 무거운 쿼리를 자주 돌리면 별도 컬럼으로 정규화 검토`}
+/>
+
+JSON 의 `tags` 배열을 펼쳐 행으로:
+
+```sql
+-- PostgreSQL
+SELECT id, tag
+FROM events, jsonb_array_elements_text(payload -> 'tags') AS tag;
+
+-- MySQL 8+
+SELECT id, jt.tag
+FROM events,
+JSON_TABLE(payload, '$.tags[*]' COLUMNS (tag VARCHAR(50) PATH '$')) AS jt;
+```
+
+[[Pandas explode]] 와 같은 개념.
+
+## 배열 (PostgreSQL)
+
+```sql
+CREATE TABLE posts (id SERIAL PK, tags TEXT[]);
+
+INSERT INTO posts (tags) VALUES (ARRAY['db', 'sql']), ('{"db","cache"}');
+
+SELECT * FROM posts WHERE tags @> ARRAY['db'];                    -- 포함
+SELECT * FROM posts WHERE 'sql' = ANY(tags);                       -- 멤버
+SELECT array_length(tags, 1) FROM posts;                           -- 길이
+SELECT id, t FROM posts, unnest(tags) AS t;                        -- 펼침
+
+CREATE INDEX idx_posts_tags ON posts USING GIN (tags);
+```
+
+MySQL 에는 배열 타입이 없다, 보통 `JSON` 으로 흉내.
+
+## UUID
+
+```sql
+-- PostgreSQL
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE TABLE users (id UUID PRIMARY KEY DEFAULT uuid_generate_v4());
+
+-- MySQL 8+
+CREATE TABLE users (id BINARY(16) PRIMARY KEY DEFAULT (UUID_TO_BIN(UUID())));
+```
+
+UUID v4 (랜덤) 는 인덱스 지역성이 나쁘다. 시간 정렬 UUID (v7, ULID) 가 B-tree 친화적.
+
+## ENUM
+
+```sql
+-- PostgreSQL
+CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
+ALTER TABLE orders ADD COLUMN status order_status;
+ALTER TYPE order_status ADD VALUE 'refunded';     -- 추가
+-- 값 제거는 직접 불가, 우회 필요
+
+-- MySQL
+CREATE TABLE orders (
+  ...,
+  status ENUM('pending', 'paid', 'shipped', 'cancelled')
+);
+ALTER TABLE orders MODIFY COLUMN status
+  ENUM('pending', 'paid', 'shipped', 'cancelled', 'refunded');     -- 풀 리라이트
+```
+
+ENUM 은 추가는 쉬워도 변경/제거가 까다롭다. **상태가 자주 변하면 lookup 테이블 + FK 가 더 유연**.
+
+## 타입 변환 (CAST)
+
+```sql
+SELECT CAST('42' AS INTEGER);
+SELECT '42'::INTEGER;     -- PostgreSQL 단축
+
+-- 안전한 변환 (실패 시 NULL, PG 17+)
+SELECT CAST('abc' AS INTEGER ON ERROR NULL);
+-- 또는 사용자 함수, TRY_CAST 같은 패턴
+
+-- TO_CHAR / TO_DATE / TO_NUMBER (PG, Oracle 영향)
+SELECT TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI');
+SELECT TO_DATE('2024-01-15', 'YYYY-MM-DD');
+```
+
+> [!CAUTION]
+> 묵시적 형변환은 **인덱스를 깬다**. `WHERE id = '42'` 가 id 가 정수면 양쪽 모두 INTEGER 로 변환, 인덱스 OK. 하지만 `WHERE CAST(id AS TEXT) = '42'` 는 인덱스 못 쓴다.
+
+## pandas 와 타입 대응
+
+| SQL | pandas | dtype |
+|:---|:---|:---|
+| `INTEGER`, `BIGINT` | `int64`, `Int64` (nullable) | int |
+| `NUMERIC` | `Decimal` (object) 또는 `float64` | object/float |
+| `DOUBLE` | `float64` | float |
+| `BOOLEAN` | `bool`, `boolean` (nullable) | bool |
+| `VARCHAR`, `TEXT` | `object`, `string` | string |
+| `DATE` | `datetime64[ns]` (또는 `datetime64[ns, tz]`) | datetime |
+| `TIMESTAMP` | `datetime64[ns]` | datetime |
+| `TIMESTAMPTZ` | `datetime64[ns, UTC]` | datetime tz-aware |
+| `INTERVAL` | `timedelta64[ns]` | timedelta |
+| `JSON`, `JSONB` | `object` (dict) | object |
+| `ARRAY` | `object` (list) | object |
+| `UUID` | `object` (str) | object |
+
+DB 와 DataFrame 의 타입 매핑은 [[Pandas read_sql]] 의 `dtype_backend`, `parse_dates`, `dtype=` 옵션 참고.
+
+[[Pandas nullable]] (`Int64`, `boolean`) 가 NULL 을 정수/부울에 보존하기 위해 도입되었다.
+
+## 함정
+
+### 1. VARCHAR(N) 의 N
+
+- PG: 글자 수, 초과 시 에러
+- MySQL: 글자 수, 초과 시 에러 (`strict_mode`) 또는 잘림 (`non_strict`)
+- 인코딩 (utf8mb4) 차이로 바이트 길이 ≠ 글자 수
+
+### 2. TIMESTAMP vs TIMESTAMPTZ
+
+PG 에서 `TIMESTAMP` 와 `TIMESTAMPTZ` 는 다른 타입. 운영에서 시각은 **항상 `TIMESTAMPTZ`**.
+
+### 3. NUMERIC 의 정밀도
+
+```sql
+NUMERIC(10, 2)     -- 전체 10 자리, 소수점 이하 2 자리
+-- 정수부 최대 8 자리, 99999999.99 까지
+```
+
+### 4. FLOAT 의 비교
+
+```sql
+SELECT 0.1::FLOAT + 0.2::FLOAT = 0.3::FLOAT;     -- FALSE!
+-- 같음 비교는 위험, ABS(a - b) < epsilon
+```
+
+### 5. NULL 의 정렬
+
+```sql
+ORDER BY salary DESC NULLS LAST     -- PG (표준)
+ORDER BY salary IS NULL, salary DESC     -- MySQL 우회
+```
+
+### 6. 묵시적 변환 (MySQL)
+
+```sql
+-- MySQL: 문자열 ↔ 숫자 묵시적 변환
+SELECT '1' + 1;          -- 2
+SELECT '1a' + 1;         -- 2 (경고만)
+SELECT 'a' + 1;          -- 1 (조용히 0 으로 변환!)
+```
+
+PG 는 같은 케이스에서 에러. 둘 다 운영 코드에선 명시적 변환 권장.
+
+## 참고
+
+- [[SQL]]
+- [[SQL DDL]]
+- [[SQL DML]]
+- [[SQL GROUP BY]]
+- [[PostgreSQL]]
+- [[MySQL]]
+- [[Pandas read_sql]]
+- [[Pandas nullable]]
+- [[Pandas explode]]
+- [[Pandas to_datetime]]
+- [PostgreSQL Data Types](https://www.postgresql.org/docs/current/datatype.html)
+- [MySQL Data Types](https://dev.mysql.com/doc/refman/8.0/en/data-types.html)

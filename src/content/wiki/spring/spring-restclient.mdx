@@ -1,0 +1,424 @@
+---
+title: "[Spring] RestClient, WebClient, RestTemplate"
+aliases: ["spring restclient", "RestTemplate deprecated", "WebClient", "HTTP client spring", "spring 6 RestClient"]
+tags: [spring, http-client, rest, restclient]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring HTTP 클라이언트 3종:
+
+- **RestTemplate**: 동기, 전통 (5.0+ maintenance)
+- **WebClient**: reactive, async/sync 모두
+- **RestClient** (6.1+): 현대 동기, fluent API (RestTemplate 대체)
+
+신규 코드는 RestClient 또는 WebClient.
+
+## RestClient (6.1+, 권장 동기)
+
+```java
+RestClient client = RestClient.builder()
+    .baseUrl("https://api.example.com")
+    .defaultHeader("Authorization", "Bearer xxx")
+    .defaultHeader("User-Agent", "myapp/1.0")
+    .build();
+
+// GET
+User user = client.get()
+    .uri("/users/{id}", 1)
+    .retrieve()
+    .body(User.class);
+
+// POST
+User created = client.post()
+    .uri("/users")
+    .contentType(MediaType.APPLICATION_JSON)
+    .body(new CreateUserDto("alice@x.com", "Alice"))
+    .retrieve()
+    .body(User.class);
+
+// 쿼리 파라미터
+List<User> users = client.get()
+    .uri(uriBuilder -> uriBuilder.path("/users")
+        .queryParam("active", true)
+        .queryParam("limit", 100)
+        .build())
+    .retrieve()
+    .body(new ParameterizedTypeReference<>() {});
+
+// 헤더, 다양한 응답
+ResponseEntity<User> response = client.get()
+    .uri("/users/{id}", 1)
+    .accept(MediaType.APPLICATION_JSON)
+    .retrieve()
+    .toEntity(User.class);
+
+response.getStatusCode();
+response.getHeaders();
+response.getBody();
+```
+
+## 에러 처리
+
+```java
+User user = client.get()
+    .uri("/users/{id}", 999)
+    .retrieve()
+    .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+        throw new NotFoundException("User not found");
+    })
+    .onStatus(HttpStatusCode::is5xxServerError, (req, res) -> {
+        throw new ExternalServiceException();
+    })
+    .body(User.class);
+
+// 또는 exchange (저수준)
+client.get()
+    .uri("/users/1")
+    .exchange((request, response) -> {
+        if (response.getStatusCode().is2xxSuccessful()) {
+            return response.bodyTo(User.class);
+        }
+        return null;
+    });
+```
+
+## WebClient (Reactive)
+
+```java
+WebClient client = WebClient.builder()
+    .baseUrl("https://api.example.com")
+    .defaultHeader("Authorization", "Bearer xxx")
+    .build();
+
+// 비동기
+Mono<User> userMono = client.get()
+    .uri("/users/{id}", 1)
+    .retrieve()
+    .bodyToMono(User.class);
+
+// 컬렉션
+Flux<Post> postsFlux = client.get()
+    .uri("/posts")
+    .retrieve()
+    .bodyToFlux(Post.class);
+
+// 동기 (block)
+User user = userMono.block(Duration.ofSeconds(5));
+```
+
+### 병렬
+
+```java
+Mono<User> userMono = ...;
+Mono<List<Order>> ordersMono = ...;
+Mono<Stats> statsMono = ...;
+
+Mono.zip(userMono, ordersMono, statsMono)
+    .map(tuple -> new Dashboard(tuple.getT1(), tuple.getT2(), tuple.getT3()))
+    .subscribe(dashboard -> ...);
+```
+
+## RestTemplate (legacy)
+
+```java
+@Bean
+public RestTemplate restTemplate(RestTemplateBuilder builder) {
+    return builder
+        .rootUri("https://api.example.com")
+        .basicAuthentication("user", "pass")
+        .setConnectTimeout(Duration.ofSeconds(5))
+        .setReadTimeout(Duration.ofSeconds(10))
+        .build();
+}
+
+User user = restTemplate.getForObject("/users/{id}", User.class, 1);
+restTemplate.postForObject("/users", dto, User.class);
+ResponseEntity<User> response = restTemplate.getForEntity("/users/1", User.class);
+
+// 일반 exchange
+ResponseEntity<List<User>> response = restTemplate.exchange(
+    "/users",
+    HttpMethod.GET,
+    null,
+    new ParameterizedTypeReference<List<User>>() {}
+);
+```
+
+RestTemplate은 새 프로젝트 비권장. 기존 코드는 동작하지만 RestClient로 점진 마이그레이션.
+
+## HTTP Interface (선언형, 6.0+)
+
+```java
+public interface UserApi {
+
+    @GetExchange("/users/{id}")
+    User findById(@PathVariable Long id);
+
+    @PostExchange("/users")
+    User create(@RequestBody CreateUserDto dto);
+
+    @GetExchange("/users")
+    List<User> search(@RequestParam String q);
+}
+
+@Configuration
+public class HttpClientConfig {
+
+    @Bean
+    public UserApi userApi(RestClient.Builder builder) {
+        RestClient client = builder.baseUrl("https://api.example.com").build();
+        RestClientAdapter adapter = RestClientAdapter.create(client);
+        HttpServiceProxyFactory factory = HttpServiceProxyFactory
+            .builderFor(adapter)
+            .build();
+        return factory.createClient(UserApi.class);
+    }
+}
+```
+
+Feign 같은 선언형 API. RestClient/WebClient 모두 백엔드 가능.
+
+## Interceptor / Filter
+
+```java
+RestClient client = RestClient.builder()
+    .baseUrl("...")
+    .requestInterceptor((request, body, execution) -> {
+        log.info("Request: {} {}", request.getMethod(), request.getURI());
+        long start = System.nanoTime();
+        ClientHttpResponse response = execution.execute(request, body);
+        log.info("Response: {} ({}ms)", response.getStatusCode(), (System.nanoTime() - start) / 1_000_000);
+        return response;
+    })
+    .build();
+```
+
+요청/응답 로깅, 인증 헤더 자동 추가, retry 등.
+
+## 타임아웃
+
+```java
+RestClient client = RestClient.builder()
+    .requestFactory(ClientHttpRequestFactoryBuilder.detect()
+        .connectTimeout(Duration.ofSeconds(5))
+        .readTimeout(Duration.ofSeconds(10))
+        .build())
+    .build();
+```
+
+WebClient:
+
+```java
+HttpClient httpClient = HttpClient.create()
+    .responseTimeout(Duration.ofSeconds(10))
+    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000);
+
+WebClient client = WebClient.builder()
+    .clientConnector(new ReactorClientHttpConnector(httpClient))
+    .build();
+```
+
+타임아웃 미설정 = 무한 대기 위험.
+
+## Retry
+
+```java
+RestClient client = RestClient.builder()
+    .requestInterceptor((request, body, execution) -> {
+        int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                ClientHttpResponse response = execution.execute(request, body);
+                if (!response.getStatusCode().is5xxServerError()) {
+                    return response;
+                }
+                if (attempt == maxAttempts) return response;
+            } catch (IOException e) {
+                if (attempt == maxAttempts) throw e;
+            }
+            try { Thread.sleep(1000L * attempt); } catch (InterruptedException ignored) {}
+        }
+        throw new IllegalStateException();
+    })
+    .build();
+```
+
+또는 Spring Retry, Resilience4j 통합.
+
+## 자주 보는 패턴
+
+### Service Client
+
+```java
+@Service
+public class GitHubClient {
+    private final RestClient client;
+
+    public GitHubClient(RestClient.Builder builder) {
+        this.client = builder.baseUrl("https://api.github.com").build();
+    }
+
+    public GitHubUser getUser(String username) {
+        return client.get()
+            .uri("/users/{u}", username)
+            .header("Accept", "application/vnd.github+json")
+            .retrieve()
+            .body(GitHubUser.class);
+    }
+
+    public List<Repo> listRepos(String org) {
+        return client.get()
+            .uri("/orgs/{o}/repos", org)
+            .retrieve()
+            .body(new ParameterizedTypeReference<>() {});
+    }
+}
+```
+
+### Token 자동 주입
+
+```java
+RestClient client = RestClient.builder()
+    .requestInterceptor((request, body, execution) -> {
+        String token = tokenService.getCurrentToken();
+        request.getHeaders().setBearerAuth(token);
+        return execution.execute(request, body);
+    })
+    .build();
+```
+
+### 다중 API client
+
+```java
+@Configuration
+public class ApiClientsConfig {
+
+    @Bean
+    public GitHubApi githubApi(RestClient.Builder builder) {
+        return HttpServiceProxyFactory
+            .builderFor(RestClientAdapter.create(builder.baseUrl("https://api.github.com").build()))
+            .build()
+            .createClient(GitHubApi.class);
+    }
+
+    @Bean
+    public StripeApi stripeApi(RestClient.Builder builder) {
+        return HttpServiceProxyFactory
+            .builderFor(RestClientAdapter.create(builder.baseUrl("https://api.stripe.com").build()))
+            .build()
+            .createClient(StripeApi.class);
+    }
+}
+```
+
+## 직렬화 (Jackson)
+
+기본 `ObjectMapper` 사용. 커스텀:
+
+```java
+RestClient client = RestClient.builder()
+    .messageConverters(converters -> {
+        converters.add(0, new MappingJackson2HttpMessageConverter(customObjectMapper));
+    })
+    .build();
+```
+
+## File upload / download
+
+```java
+// Upload
+MultipartBodyBuilder builder = new MultipartBodyBuilder();
+builder.part("file", new FileSystemResource("file.pdf"));
+builder.part("description", "My file");
+
+ResponseEntity<String> response = client.post()
+    .uri("/upload")
+    .body(builder.build())
+    .retrieve()
+    .toEntity(String.class);
+
+// Download
+byte[] bytes = client.get()
+    .uri("/file.pdf")
+    .retrieve()
+    .body(byte[].class);
+
+// 또는 stream
+client.get()
+    .uri("/large-file.zip")
+    .exchange((req, res) -> {
+        try (InputStream in = res.getBody()) {
+            Files.copy(in, Path.of("downloaded.zip"));
+            return null;
+        }
+    });
+```
+
+## 함정
+
+### 1. RestTemplate 사용 시작
+
+```java
+@Bean
+public RestTemplate restTemplate() {
+    return new RestTemplate();    // 새 프로젝트엔 비권장
+}
+```
+
+RestClient 또는 WebClient 권장. RestTemplate은 5.0+ maintenance.
+
+### 2. WebClient를 blocking으로
+
+```java
+String result = webClient.get().retrieve().bodyToMono(String.class).block();
+```
+
+reactive context 안에서 `.block()`은 deadlock 위험. 동기 코드면 RestClient.
+
+### 3. 타임아웃 미설정
+
+```java
+RestClient client = RestClient.builder().build();    // 기본 무한 대기
+```
+
+외부 API 응답 안 함 → 앱 hang. 항상 타임아웃.
+
+### 4. 에러 응답 무시
+
+```java
+User user = client.get().uri("/users/999").retrieve().body(User.class);
+// 404가 반환되면 예외 던짐 (기본 동작), 그래도 처리 명시 권장
+```
+
+`onStatus`로 처리.
+
+### 5. URL injection
+
+```java
+String username = userInput;
+client.get().uri("/users/" + username).retrieve();    // SQL injection X, 그러나 path manipulation 가능
+```
+
+`uri("/users/{u}", username)` 형태로 URI variable.
+
+## 라이브러리 비교
+
+| 도구 | 특징 |
+|------|------|
+| RestClient | Spring 6.1+, 동기 권장 |
+| WebClient | Reactive, async |
+| RestTemplate | Legacy (5.0+ maintenance) |
+| OpenFeign | 선언형, Spring Cloud |
+| Retrofit | Square, Android 친화 |
+| OkHttp | 저수준 |
+
+Spring Cloud 환경은 OpenFeign이 더 풍부. 일반은 RestClient.
+
+## 참고
+
+- [RestClient](https://docs.spring.io/spring-framework/reference/integration/rest-clients.html#rest-restclient)
+- [WebClient](https://docs.spring.io/spring-framework/reference/web/webflux-webclient.html)
+- [HTTP Interface](https://docs.spring.io/spring-framework/reference/integration/rest-clients.html#rest-http-interface)
+- [OpenFeign](https://docs.spring.io/spring-cloud-openfeign/reference/)

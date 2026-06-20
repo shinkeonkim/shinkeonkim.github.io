@@ -1,0 +1,374 @@
+---
+title: "[Django] DRF Permission, Throttle, Filter"
+aliases: ["drf permission", "drf throttling", "drf filter", "django object permission", "drf auth"]
+tags: [django, drf, permission, throttle, security]
+updated: 2026-06-20
+---
+
+## 정의
+
+DRF는 view 호출 전 **인증(Authentication) → 권한(Permission) → 스로틀(Throttle)** 순으로 검사. 각 단계가 통과해야 view 메서드 실행. 모두 클래스 기반이라 조합·재사용 가능.
+
+## 빌트인 Permission
+
+```python
+from rest_framework import permissions
+
+# settings.py
+REST_FRAMEWORK = {
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
+```
+
+| Permission | 동작 |
+|-----------|------|
+| `AllowAny` | 누구나 |
+| `IsAuthenticated` | 로그인된 사용자 |
+| `IsAdminUser` | `is_staff=True` |
+| `IsAuthenticatedOrReadOnly` | 인증 또는 SAFE_METHODS (GET/HEAD/OPTIONS) |
+| `DjangoModelPermissions` | Django model permission 활용 |
+| `DjangoObjectPermissions` | object-level (django-guardian 등) |
+
+```python
+class PostViewSet(ModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+```
+
+## 커스텀 Permission
+
+```python
+from rest_framework import permissions
+
+class IsAuthorOrReadOnly(permissions.BasePermission):
+    """글 작성자만 수정/삭제. 다른 사용자는 읽기만."""
+
+    def has_permission(self, request, view):
+        return request.method in permissions.SAFE_METHODS or request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return obj.author == request.user
+```
+
+- `has_permission`: list/create 등 view 레벨
+- `has_object_permission`: retrieve/update/destroy 등 객체 레벨 (`get_object()` 호출 시 자동)
+
+```python
+class PostViewSet(ModelViewSet):
+    permission_classes = [IsAuthenticated, IsAuthorOrReadOnly]
+```
+
+## 액션별 permission
+
+```python
+class PostViewSet(ModelViewSet):
+
+    def get_permissions(self):
+        if self.action == "destroy":
+            return [IsAdminUser()]
+        elif self.action in ["update", "partial_update"]:
+            return [IsAuthorOrReadOnly()]
+        elif self.action == "list":
+            return [AllowAny()]
+        return [IsAuthenticated()]
+```
+
+## Object-level (django-guardian)
+
+```bash
+pip install django-guardian
+```
+
+```python
+INSTALLED_APPS += ["guardian"]
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "guardian.backends.ObjectPermissionBackend",
+]
+```
+
+```python
+from guardian.shortcuts import assign_perm
+
+assign_perm("view_post", user, post)
+user.has_perm("view_post", post)
+```
+
+```python
+from rest_framework.permissions import DjangoObjectPermissions
+
+class PostViewSet(ModelViewSet):
+    permission_classes = [DjangoObjectPermissions]
+```
+
+queryset도 자동 필터:
+
+```python
+from guardian.shortcuts import get_objects_for_user
+
+def get_queryset(self):
+    return get_objects_for_user(self.request.user, "blog.view_post")
+```
+
+## Throttling
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/day",
+        "user": "1000/day",
+        "burst": "60/min",
+        "sustained": "1000/day",
+    }
+}
+```
+
+단위: `/second`, `/minute`, `/hour`, `/day`.
+
+### 커스텀 throttle
+
+```python
+from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
+
+class BurstRateThrottle(UserRateThrottle):
+    scope = "burst"
+
+class SustainedRateThrottle(UserRateThrottle):
+    scope = "sustained"
+
+class PostViewSet(ModelViewSet):
+    throttle_classes = [BurstRateThrottle, SustainedRateThrottle]
+```
+
+### Scoped throttle
+
+```python
+class ContactThrottle(ScopedRateThrottle):
+    pass
+
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "contact": "5/hour",
+}
+
+class ContactViewSet(ViewSet):
+    throttle_scope = "contact"
+    throttle_classes = [ScopedRateThrottle]
+```
+
+특정 엔드포인트만.
+
+### Redis 백엔드
+
+기본은 Django cache. Redis 권장 (분산):
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_URL"),
+    },
+}
+```
+
+throttle도 자동으로 Redis 사용.
+
+## Filtering
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ]
+}
+```
+
+```bash
+pip install django-filter
+```
+
+### FilterSet
+
+```python
+import django_filters
+
+class PostFilter(django_filters.FilterSet):
+    min_views = django_filters.NumberFilter(field_name="views", lookup_expr="gte")
+    max_views = django_filters.NumberFilter(field_name="views", lookup_expr="lte")
+    title = django_filters.CharFilter(lookup_expr="icontains")
+    created_after = django_filters.DateFilter(field_name="created_at", lookup_expr="gte")
+    is_published = django_filters.BooleanFilter()
+    tags = django_filters.ModelMultipleChoiceFilter(
+        field_name="tags__name",
+        to_field_name="name",
+        queryset=Tag.objects.all(),
+    )
+
+    class Meta:
+        model = Post
+        fields = ["author", "is_published"]
+
+class PostViewSet(ModelViewSet):
+    filterset_class = PostFilter
+```
+
+쿼리:
+```
+GET /api/posts/?title=django&min_views=100&tags=python&tags=web
+```
+
+### Search / Ordering
+
+```python
+class PostViewSet(ModelViewSet):
+    search_fields = ["title", "body", "author__username"]
+    ordering_fields = ["created_at", "views", "title"]
+    ordering = ["-created_at"]    # 기본
+```
+
+```
+GET /api/posts/?search=django
+GET /api/posts/?ordering=-views
+GET /api/posts/?ordering=-views,title
+```
+
+`search_fields` 접두:
+- `^`: starts with
+- `=`: 정확
+- `@`: full-text (PG만)
+- `$`: regex
+
+## 커스텀 filter backend
+
+```python
+from rest_framework import filters
+
+class IsOwnerFilterBackend(filters.BaseFilterBackend):
+    """현재 사용자의 객체만 노출."""
+
+    def filter_queryset(self, request, queryset, view):
+        return queryset.filter(owner=request.user)
+
+class PostViewSet(ModelViewSet):
+    filter_backends = [IsOwnerFilterBackend]
+```
+
+## 자주 보는 패턴
+
+### Token 만료
+
+```python
+from rest_framework.throttling import UserRateThrottle
+
+class TokenRefreshThrottle(UserRateThrottle):
+    scope = "token_refresh"
+    rate = "5/hour"
+
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["token_refresh"] = "5/hour"
+```
+
+비밀번호 시도, 토큰 재발급 등 민감 endpoint에 강한 throttle.
+
+### Permission + 객체 + 필드
+
+```python
+class PostSerializer(ModelSerializer):
+    class Meta:
+        model = Post
+        fields = ["id", "title", "body", "author", "internal_note"]
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        if not self.context["request"].user.is_staff:
+            rep.pop("internal_note", None)
+        return rep
+```
+
+권한별 다른 필드 노출.
+
+### Multi-tenant
+
+```python
+class TenantFilterBackend(filters.BaseFilterBackend):
+    def filter_queryset(self, request, queryset, view):
+        return queryset.filter(tenant=request.tenant)
+
+class PostViewSet(ModelViewSet):
+    filter_backends = [TenantFilterBackend]
+    permission_classes = [IsAuthenticated, IsTenantMember]
+```
+
+## ProblemDetail 응답
+
+```python
+class CustomThrottleException(Throttled):
+    default_detail = "Rate limit exceeded"
+    default_code = "throttled"
+```
+
+```python
+# 또는 예외 핸들러
+from rest_framework.views import exception_handler
+
+def custom_exception_handler(exc, context):
+    response = exception_handler(exc, context)
+    if isinstance(exc, Throttled):
+        response.data = {
+            "error": "Rate limit exceeded",
+            "wait_seconds": exc.wait,
+        }
+    return response
+```
+
+## 함정
+
+### 1. permission_classes vs get_permissions
+
+클래스 변수는 모든 액션 공통. action별 다르면 `get_permissions()` 메서드.
+
+### 2. has_object_permission는 list에 호출 X
+
+```python
+def has_object_permission(self, request, view, obj):
+    return obj.owner == request.user
+
+# list 액션은 호출 안 됨 → 필터링 안 됨
+```
+
+list에서 객체 필터는 `get_queryset()`에서.
+
+### 3. throttle rate 변경
+
+settings 변경 후 캐시 비워야 새 rate 적용.
+
+### 4. SAFE_METHODS
+
+```python
+permissions.SAFE_METHODS = ["GET", "HEAD", "OPTIONS"]
+```
+
+이걸 비교. PUT/PATCH/DELETE는 unsafe.
+
+### 5. JWT 만료 + throttle
+
+```python
+JWT_AUTH_RETURN_EXPIRATION = True
+```
+
+만료된 토큰으로 요청 → 401, 그러나 throttle 카운트 증가 가능. 401은 throttle 제외 로직 추가 검토.
+
+## 참고
+
+- [DRF Permissions](https://www.django-rest-framework.org/api-guide/permissions/)
+- [DRF Throttling](https://www.django-rest-framework.org/api-guide/throttling/)
+- [DRF Filtering](https://www.django-rest-framework.org/api-guide/filtering/)
+- [django-filter](https://django-filter.readthedocs.io/)
+- [django-guardian](https://django-guardian.readthedocs.io/)

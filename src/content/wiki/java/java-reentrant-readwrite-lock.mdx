@@ -1,0 +1,107 @@
+---
+title: "[Java] ReentrantReadWriteLock"
+aliases: ["ReentrantReadWriteLock", "java.util.concurrent.locks.ReentrantReadWriteLock", "RRWLock", "읽기쓰기락", "ReadWriteLock"]
+tags: [java, concurrent, lock, read-write]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.locks.ReentrantReadWriteLock`** 는 **읽기 락과 쓰기 락을 분리** 한 [[ReentrantLock]] 의 확장.
+
+핵심 규칙:
+- **여러 reader 가 동시에 read lock 획득 가능** (병렬 읽기)
+- **writer 는 배타적**, write lock 잡혀 있으면 reader 도 새 writer 도 대기
+- **재진입 가능** (같은 스레드)
+
+## 시각화
+
+```anim:java-rwlock
+{}
+```
+
+## 사용
+
+```java
+ReentrantReadWriteLock rrw = new ReentrantReadWriteLock();
+Lock readLock = rrw.readLock();
+Lock writeLock = rrw.writeLock();
+
+// Reader
+readLock.lock();
+try {
+    return data.get();
+} finally {
+    readLock.unlock();
+}
+
+// Writer
+writeLock.lock();
+try {
+    data.update();
+} finally {
+    writeLock.unlock();
+}
+```
+
+## 언제 유리한가
+
+**읽기 >> 쓰기** 인 시나리오. 여러 reader 가 동시에 읽을 수 있으니 throughput 이 향상.
+
+**쓰기가 잦으면 오히려 손해**. ReentrantLock 보다 오버헤드가 크고, write lock 대기로 reader 도 같이 멈춘다.
+
+```text
+Read 80%, Write 20% 이상 → ReentrantLock 이 더 빠를 가능성
+Read 99%, Write 1% → ReentrantReadWriteLock 유리
+```
+
+## 공정성
+
+```java
+ReentrantReadWriteLock fair = new ReentrantReadWriteLock(true);
+```
+
+- **non-fair (기본)**: writer starvation 가능 (계속 reader 가 들어와 writer 가 기다림)
+- **fair**: FIFO, writer 기아 방지하지만 throughput 저하
+
+## downgrading 과 upgrading
+
+```java
+// downgrading (writer → reader), 가능
+writeLock.lock();
+try {
+    data.update();
+    readLock.lock();      // ← write 락 유지한 채 read 락도 획득
+} finally {
+    writeLock.unlock();   // ← write 만 풀어 reader 로 강등
+}
+try {
+    return data.get();
+} finally {
+    readLock.unlock();
+}
+
+// upgrading (reader → writer), 직접 불가능 → deadlock
+readLock.lock();
+writeLock.lock();    // ❌ deadlock 발생 가능
+```
+
+## StampedLock 과의 비교
+
+[[StampedLock]] (JDK 1.8) 은 추가로 **optimistic read** 를 지원. read lock 없이 시도 후 검증. 변경 가능성이 낮을 때 더 빠르다.
+
+| 항목 | ReentrantReadWriteLock | StampedLock |
+|:---|:---|:---|
+| 재진입 | ✓ | ✗ |
+| 조건 변수 | ✓ | ✗ |
+| optimistic read | ✗ | ✓ |
+| 인터럽트 응답 | ✓ | △ (메서드별) |
+| 도입 | JDK 1.5 | JDK 1.8 |
+
+## 참고
+
+- [[ReentrantLock]]
+- [[volatile]]
+- [[CopyOnWriteArrayList]]
+- [[Blocking]]
+- Oracle, [ReentrantReadWriteLock (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/ReentrantReadWriteLock.html)

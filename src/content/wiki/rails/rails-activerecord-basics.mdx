@@ -1,0 +1,321 @@
+---
+title: "[Rails] ActiveRecord 기초: Model, Migration, CRUD"
+aliases: ["activerecord basics", "rails model", "rails migration", "create_table", "AR CRUD"]
+tags: [rails, activerecord, orm, model]
+updated: 2026-06-20
+---
+
+## 정의
+
+**ActiveRecord**는 Rails의 ORM. 클래스 ↔ 테이블 1:1 매핑(관례), 인스턴스 = 행. Active Record 패턴 그대로(데이터 + 행동). 마이그레이션으로 스키마 버전 관리, 풍부한 Query DSL, 콜백·검증·관계 내장.
+
+## 모델 생성
+
+```bash
+rails generate model Post title:string body:text published:boolean
+
+# 만들어지는 것:
+# - app/models/post.rb
+# - db/migrate/20260620_create_posts.rb
+# - test/models/post_test.rb
+# - test/fixtures/posts.yml
+```
+
+```ruby
+# app/models/post.rb
+class Post < ApplicationRecord
+end
+
+# db/migrate/20260620120000_create_posts.rb
+class CreatePosts < ActiveRecord::Migration[7.2]
+  def change
+    create_table :posts do |t|
+      t.string :title, null: false
+      t.text :body
+      t.boolean :published, default: false
+      t.timestamps    # created_at, updated_at 자동
+    end
+  end
+end
+```
+
+## 마이그레이션 실행
+
+```bash
+rails db:migrate                # 적용
+rails db:rollback               # 마지막 1개 되돌리기
+rails db:rollback STEP=3
+rails db:migrate:status         # 현재 상태
+rails db:reset                  # drop + create + migrate + seed
+rails db:seed
+```
+
+## CRUD
+
+```ruby
+# Create
+post = Post.new(title: "Hello")
+post.body = "..."
+post.save                       # bool 반환 (검증 실패면 false)
+post.save!                      # 실패 시 예외
+
+post = Post.create(title: "Hello", body: "...")   # new + save 한 번에
+post = Post.create!(...)        # 예외
+
+# Read
+Post.find(1)                    # PK, 없으면 RecordNotFound
+Post.find_by(slug: "hello")     # 단일, 없으면 nil
+Post.find_by!(slug: "hello")    # 예외
+Post.where(published: true)
+Post.first
+Post.last
+Post.all                        # 보통 안 씀 (큰 테이블 위험)
+
+# Update
+post.title = "New"
+post.save
+post.update(title: "New", body: "...")    # 한 번에
+post.update!(title: "New")
+
+# 일괄
+Post.where(published: false).update_all(featured: false)    # 검증·콜백 우회 (빠름)
+
+# Delete
+post.destroy                    # 콜백 실행
+post.destroy!
+Post.destroy_all                # 모든 행 (콜백 실행, 느림)
+Post.delete_all                 # SQL DELETE (콜백 우회)
+post.delete                     # 단일, 콜백 우회
+```
+
+## 마이그레이션 자주 쓰는 메서드
+
+```ruby
+class Example < ActiveRecord::Migration[7.2]
+  def change
+    create_table :posts do |t|
+      t.string :title, null: false, limit: 200
+      t.text :body
+      t.references :author, null: false, foreign_key: true   # FK
+      t.references :category, foreign_key: true
+      t.boolean :published, default: false, null: false
+      t.integer :views, default: 0
+      t.decimal :price, precision: 10, scale: 2
+      t.datetime :published_at
+      t.timestamps
+
+      t.index :slug, unique: true
+      t.index [:author_id, :created_at]
+    end
+  end
+end
+
+# 컬럼 추가
+add_column :posts, :slug, :string
+add_index :posts, :slug, unique: true
+
+# 변경
+change_column :posts, :title, :string, limit: 500
+change_column_null :posts, :title, false
+change_column_default :posts, :published, from: nil, to: false
+
+# 삭제
+remove_column :posts, :slug
+remove_index :posts, :slug
+
+# 이름 변경
+rename_column :posts, :body, :content
+rename_table :posts, :articles
+
+# 참조
+add_reference :posts, :author, foreign_key: true
+remove_reference :posts, :author, foreign_key: true
+```
+
+## 마이그레이션 generator
+
+```bash
+rails g migration AddSlugToPosts slug:string:uniq
+rails g migration AddAuthorRefToPosts author:references
+rails g migration CreateJoinTableAuthorsPosts authors posts
+```
+
+이름 규칙으로 자동 생성.
+
+## strong migrations / safe migrations
+
+큰 테이블에 락 거는 마이그레이션은 위험. `strong_migrations` gem이 dangerous한 작업 차단.
+
+```ruby
+# Gemfile
+gem "strong_migrations"
+```
+
+NULL not null 추가, default with backfill 등이 자동 감지.
+
+## 트랜잭션
+
+```ruby
+ActiveRecord::Base.transaction do
+  user.update!(balance: user.balance - amount)
+  recipient.update!(balance: recipient.balance + amount)
+end
+# 예외 시 rollback
+
+# 중첩 (savepoint)
+ActiveRecord::Base.transaction do
+  ...
+  ActiveRecord::Base.transaction(requires_new: true) do
+    ...    # 이 내부 실패는 outer는 안 깨짐
+  end
+end
+```
+
+## 더티 추적
+
+```ruby
+post.title = "New"
+post.title_changed?          # true
+post.title_was               # 이전 값
+post.changes                 # {"title" => ["old", "new"]}
+post.changed                 # ["title"]
+post.changed_attributes      # {"title" => "old"}
+
+# 저장 후
+post.saved_change_to_title?
+post.saved_change_to_title   # ["old", "new"]
+```
+
+콜백/검증에서 활용.
+
+## 직렬화 / JSON
+
+```ruby
+post.as_json
+post.to_json
+post.attributes
+```
+
+API에는 `ActiveModel::Serializer`, `Jbuilder`, `Alba`, `Blueprinter` 같은 라이브러리.
+
+## 한 번에 가져오기 / 청크
+
+```ruby
+Post.find_each(batch_size: 1000) do |p|
+  process(p)
+end
+
+Post.in_batches(of: 1000) do |batch|
+  batch.update_all(processed: true)
+end
+```
+
+큰 테이블 순회. `each`는 모두 메모리에 로드 → 위험.
+
+## reload, refresh
+
+```ruby
+post.reload          # DB 다시 읽기 (변경사항 버림)
+```
+
+콜백/외부에서 DB 변경 후 동기화.
+
+## 자주 보는 패턴
+
+### counter cache
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post, counter_cache: true
+end
+
+# Post에 comments_count 컬럼 자동 갱신
+post.comments_count    # SQL 안 함
+```
+
+### touch
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post, touch: true
+end
+
+# Comment 변경 시 post.updated_at 갱신
+```
+
+캐시 무효화에 유용.
+
+### enum (7.0+)
+
+```ruby
+class Post < ApplicationRecord
+  enum :status, { draft: 0, published: 1, archived: 2 }
+end
+
+post.draft?
+post.published!
+Post.published     # 스코프 자동
+```
+
+### 가상 컬럼
+
+```ruby
+class User < ApplicationRecord
+  attribute :full_name, :string, default: -> { "#{first_name} #{last_name}" }
+end
+
+# 또는 DB store
+class User < ApplicationRecord
+  store :preferences, accessors: [:theme, :language]
+end
+
+user.theme = "dark"
+user.save
+```
+
+## 함정
+
+### 1. find vs find_by
+
+```ruby
+Post.find(1)              # 1 없으면 ActiveRecord::RecordNotFound (404 자동)
+Post.find_by(id: 1)       # 없으면 nil
+Post.find_by!(id: 1)      # 없으면 예외
+```
+
+view에서 자동 404 원하면 `find`.
+
+### 2. N+1
+
+```ruby
+Post.all.each { |p| puts p.author.name }    # N+1
+Post.includes(:author).each { ... }          # 해결 (eager load)
+```
+
+### 3. update_all은 콜백 우회
+
+```ruby
+Post.update_all(published: true)    # before_save 등 미실행
+```
+
+검증·콜백 필요하면 루프 + save.
+
+### 4. save 없이 변경
+
+```ruby
+post.title = "New"
+# save 호출 안 함 → 변경 영원히 안 됨
+```
+
+`update`가 더 명확.
+
+### 5. 마이그레이션 순서
+
+여러 개발자가 같은 base에서 다른 마이그레이션 만들면 timestamp 순서로 적용. 충돌 시 명시적 해결.
+
+## 참고
+
+- [Rails Guides: Active Record Basics](https://guides.rubyonrails.org/active_record_basics.html)
+- [Active Record Migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [Active Record Querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [strong_migrations](https://github.com/ankane/strong_migrations)

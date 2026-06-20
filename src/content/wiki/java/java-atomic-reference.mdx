@@ -1,0 +1,105 @@
+---
+title: "[Java] AtomicReference"
+aliases: ["AtomicReference", "java.util.concurrent.atomic.AtomicReference", "원자 참조"]
+tags: [java, concurrent, atomic, cas, lock-free, reference]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.atomic.AtomicReference<V>`** 는 **객체 참조를 atomic 하게 갱신** 하는 래퍼. `volatile` 참조 + CAS 의 결합.
+
+[[AtomicInteger]] 의 객체 버전. 불변 객체 패턴, 상태 머신, lock-free 자료구조의 빌딩 블록.
+
+## 핵심 메서드
+
+```java
+AtomicReference<Config> ref = new AtomicReference<>(initial);
+
+ref.get();                            // 현재 참조
+ref.set(newConfig);                   // 단순 설정 (volatile write)
+ref.compareAndSet(expected, newVal);  // CAS, 성공 시 true
+ref.getAndSet(newVal);                // 이전 값 반환 + 새 값으로
+ref.updateAndGet(c -> c.withFoo("x")); // 람다로 갱신 (CAS 루프 내장)
+ref.accumulateAndGet(arg, (cur, a) -> ...);
+```
+
+## 가장 흔한 패턴, 불변 객체 교체
+
+```java
+class ConfigHolder {
+    private final AtomicReference<Config> ref = new AtomicReference<>(defaultConfig);
+
+    public Config get() { return ref.get(); }
+
+    public void reload(Config newConfig) {
+        ref.set(newConfig);              // volatile write, 다른 스레드 즉시 봄
+    }
+
+    public void update(Function<Config, Config> updater) {
+        ref.updateAndGet(updater);       // CAS 루프, 동시 update 안전
+    }
+}
+```
+
+`Config` 가 **불변** 이면 한 번 참조한 객체는 변하지 않는다. 새 설정으로 교체할 때 참조만 atomic 하게 바꾸면 안전. [[CopyOnWriteArrayList]] 의 사상.
+
+## 사용 사례
+
+### 1. lock-free 단일 객체 swap
+
+```java
+private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
+
+// Writer
+snapshot.set(takeSnapshot());
+
+// Reader (lock-free)
+Snapshot s = snapshot.get();
+process(s);
+```
+
+### 2. 상태 머신
+
+```java
+enum State { READY, RUNNING, STOPPED }
+private final AtomicReference<State> state = new AtomicReference<>(State.READY);
+
+public boolean start() {
+    return state.compareAndSet(State.READY, State.RUNNING);
+}
+```
+
+### 3. lock-free 자료구조의 노드 포인터
+
+```java
+class Node<E> {
+    final E value;
+    AtomicReference<Node<E>> next;
+}
+```
+
+[[ConcurrentLinkedQueue]] 의 internal pattern.
+
+## ABA 문제와 해법
+
+[[AtomicInteger]] 와 같은 ABA 문제. 해법.
+
+- **`AtomicStampedReference<V>`**: stamp (int 버전) 추가
+- **`AtomicMarkableReference<V>`**: boolean mark 추가 (삭제 표시 등)
+
+```java
+AtomicStampedReference<Node> ref = new AtomicStampedReference<>(node, 0);
+int[] stampHolder = new int[1];
+Node current = ref.get(stampHolder);
+ref.compareAndSet(current, newNode, stampHolder[0], stampHolder[0] + 1);
+```
+
+## 참고
+
+- [[AtomicInteger]]
+- [[volatile]]
+- [[CopyOnWriteArrayList]]
+- [[ConcurrentLinkedQueue]]
+- [[Non-Blocking]]
+- Oracle, [AtomicReference (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/AtomicReference.html)

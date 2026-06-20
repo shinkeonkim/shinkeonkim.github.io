@@ -1,0 +1,430 @@
+---
+title: "[Django] DRF ViewSet, Router, @action"
+aliases: ["drf viewset", "ModelViewSet", "drf router", "drf action", "drf mixin"]
+tags: [django, drf, viewset, router]
+updated: 2026-06-20
+---
+
+## 정의
+
+**ViewSet**은 같은 리소스의 관련 view들을 클래스 하나로 묶는다. Django의 generic views와 비슷하나 `list`/`retrieve`/`create`/`update`/`partial_update`/`destroy` action 메서드로 통일. **Router**가 자동으로 URL pattern 생성.
+
+## 계층
+
+```
+ViewSet (베이스)
+├── GenericViewSet  (+ generics 기능)
+│   ├── ReadOnlyModelViewSet (list, retrieve)
+│   └── ModelViewSet (모든 CRUD)
+```
+
+## ModelViewSet 기본
+
+```python
+from rest_framework import viewsets
+from .models import Post
+from .serializers import PostSerializer
+
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+```
+
+자동 액션:
+- `list` → GET /posts/
+- `retrieve` → GET /posts/{pk}/
+- `create` → POST /posts/
+- `update` → PUT /posts/{pk}/
+- `partial_update` → PATCH /posts/{pk}/
+- `destroy` → DELETE /posts/{pk}/
+
+## Router
+
+```python
+# urls.py
+from rest_framework.routers import DefaultRouter
+from .views import PostViewSet, CommentViewSet
+
+router = DefaultRouter()
+router.register("posts", PostViewSet, basename="post")
+router.register("comments", CommentViewSet)
+
+urlpatterns = [
+    path("api/", include(router.urls)),
+]
+```
+
+URL 자동:
+```
+/api/posts/                 list, create
+/api/posts/{pk}/            retrieve, update, partial_update, destroy
+/api/comments/              ...
+```
+
+`DefaultRouter`는 추가로 `/api/` 루트(API browsable list)와 `.json`/`.api` 포맷 suffix 제공. `SimpleRouter`는 더 미니멀.
+
+## 메서드 오버라이드
+
+```python
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action == "list":
+            qs = qs.filter(is_published=True)
+        if q := self.request.query_params.get("q"):
+            qs = qs.filter(title__icontains=q)
+        return qs.select_related("author").prefetch_related("tags")
+
+    def get_serializer_class(self):
+        if self.action in ["list", "retrieve"]:
+            return PostReadSerializer
+        return PostWriteSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(updated_by=self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.is_deleted = True
+        instance.save()
+```
+
+`perform_*` hook으로 저장 로직만 커스터마이즈.
+
+## @action: 커스텀 액션
+
+표준 7개 외 추가 endpoint.
+
+```python
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+
+    @action(detail=True, methods=["post"])
+    def publish(self, request, pk=None):
+        post = self.get_object()
+        post.is_published = True
+        post.save()
+        return Response({"status": "published"})
+
+    @action(detail=True, methods=["post", "delete"])
+    def like(self, request, pk=None):
+        post = self.get_object()
+        if request.method == "POST":
+            post.likes.add(request.user)
+        else:
+            post.likes.remove(request.user)
+        return Response({"like_count": post.likes.count()})
+
+    @action(detail=False)
+    def featured(self, request):
+        qs = self.get_queryset().filter(is_featured=True)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, url_path="my-posts", url_name="my-posts")
+    def my_posts(self, request):
+        qs = self.get_queryset().filter(author=request.user)
+        return Response(self.get_serializer(qs, many=True).data)
+```
+
+`detail=True`: `/posts/{pk}/action/`, `detail=False`: `/posts/action/`.
+
+## Permissions
+
+```python
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+
+class PostViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_permissions(self):
+        if self.action == "destroy":
+            return [IsAdminUser()]
+        return super().get_permissions()
+```
+
+action별 다른 권한.
+
+### Object-level
+
+```python
+class IsAuthorOrReadOnly(permissions.BasePermission):
+    def has_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return obj.author == request.user
+
+class PostViewSet(ModelViewSet):
+    permission_classes = [IsAuthenticated, IsAuthorOrReadOnly]
+```
+
+`get_object()`가 자동으로 검사.
+
+## ReadOnlyModelViewSet
+
+읽기 전용 API.
+
+```python
+class CategoryViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+```
+
+`list`, `retrieve`만.
+
+## GenericViewSet + Mixin
+
+```python
+from rest_framework import mixins, viewsets
+
+class UserViewSet(
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+```
+
+update/destroy 제외, create는 포함. 세밀한 제어.
+
+## Nested router
+
+```bash
+pip install drf-nested-routers
+```
+
+```python
+from rest_framework_nested import routers
+
+router = routers.DefaultRouter()
+router.register("posts", PostViewSet)
+
+posts_router = routers.NestedDefaultRouter(router, "posts", lookup="post")
+posts_router.register("comments", CommentViewSet, basename="post-comments")
+
+urlpatterns = [
+    path("api/", include(router.urls)),
+    path("api/", include(posts_router.urls)),
+]
+```
+
+`/api/posts/{post_pk}/comments/` 형태.
+
+```python
+class CommentViewSet(ModelViewSet):
+    def get_queryset(self):
+        return Comment.objects.filter(post_id=self.kwargs["post_pk"])
+
+    def perform_create(self, serializer):
+        post = Post.objects.get(id=self.kwargs["post_pk"])
+        serializer.save(post=post, author=self.request.user)
+```
+
+## Filter, Search, Ordering
+
+```python
+class PostViewSet(ModelViewSet):
+    filterset_fields = ["is_published", "author"]
+    search_fields = ["title", "body"]
+    ordering_fields = ["created_at", "views"]
+    ordering = ["-created_at"]    # 기본
+```
+
+쿼리:
+```
+GET /api/posts/?is_published=true&author=1
+GET /api/posts/?search=django
+GET /api/posts/?ordering=-views
+```
+
+`django-filter` 의존성:
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ]
+}
+```
+
+### FilterSet 커스텀
+
+```python
+import django_filters
+
+class PostFilter(django_filters.FilterSet):
+    min_views = django_filters.NumberFilter(field_name="views", lookup_expr="gte")
+    created_after = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+
+    class Meta:
+        model = Post
+        fields = ["author", "is_published"]
+
+class PostViewSet(ModelViewSet):
+    filterset_class = PostFilter
+```
+
+## Pagination
+
+```python
+# settings.py
+REST_FRAMEWORK = {
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+}
+```
+
+응답:
+```json
+{
+  "count": 100,
+  "next": "...",
+  "previous": null,
+  "results": [...]
+}
+```
+
+### CursorPagination (안정적)
+
+```python
+class PostPagination(CursorPagination):
+    page_size = 20
+    ordering = "-created_at"
+
+class PostViewSet(ModelViewSet):
+    pagination_class = PostPagination
+```
+
+대용량 + 실시간 데이터에 안정적 (PageNumberPagination은 offset 누락 위험).
+
+## Throttling
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": "1000/day",
+        "anon": "100/day",
+        "burst": "60/min",
+    }
+}
+
+class PostViewSet(ModelViewSet):
+    throttle_classes = [UserRateThrottle, BurstRateThrottle]
+```
+
+`BurstRateThrottle`은 커스텀 scope.
+
+## 자주 보는 패턴
+
+### Read/Write 분리 + nested
+
+```python
+class PostViewSet(ModelViewSet):
+    queryset = Post.objects.select_related("author").prefetch_related("tags", "comments")
+
+    def get_serializer_class(self):
+        return PostReadSerializer if self.action in ["list", "retrieve"] else PostWriteSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+```
+
+### 캐싱
+
+```python
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+
+class PostViewSet(ModelViewSet):
+    @method_decorator(cache_page(60 * 5))
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+```
+
+또는 ETag로 conditional GET.
+
+### Bulk action
+
+```python
+@action(detail=False, methods=["post"])
+def bulk_publish(self, request):
+    ids = request.data.get("ids", [])
+    updated = Post.objects.filter(id__in=ids, author=request.user).update(is_published=True)
+    return Response({"updated": updated})
+```
+
+## 함정
+
+### 1. queryset 정의 위치
+
+```python
+class PostViewSet(ModelViewSet):
+    queryset = Post.objects.all()    # 클래스 변수 → import 시 평가
+```
+
+복잡한 필터링은 `get_queryset()` 메서드.
+
+### 2. perform_create 호출 빠뜨림
+
+```python
+def create(self, request):
+    serializer = self.get_serializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()    # perform_create 우회!
+```
+
+커스텀 로직 있으면 `super().create(...)` 사용 또는 `perform_create` 명시.
+
+### 3. action url_path
+
+```python
+@action(detail=False)
+def my_posts(self, request):    # /posts/my_posts/
+
+@action(detail=False, url_path="my-posts")
+def my_posts(self, request):    # /posts/my-posts/
+```
+
+기본은 메서드명. URL 컨벤션 맞추려면 명시.
+
+### 4. Router register 순서
+
+```python
+router.register("posts", PostViewSet)
+router.register("posts/featured", FeaturedPostViewSet)    # 충돌 가능
+```
+
+URL 패턴 충돌 주의.
+
+### 5. context 누락
+
+ViewSet은 자동으로 context 제공. 외부에서 직접 serializer 사용 시 context 명시.
+
+## 참고
+
+- [DRF ViewSets](https://www.django-rest-framework.org/api-guide/viewsets/)
+- [Routers](https://www.django-rest-framework.org/api-guide/routers/)
+- [Filtering](https://www.django-rest-framework.org/api-guide/filtering/)
+- [drf-nested-routers](https://github.com/alanjds/drf-nested-routers)
+- [drf-spectacular](https://drf-spectacular.readthedocs.io/)

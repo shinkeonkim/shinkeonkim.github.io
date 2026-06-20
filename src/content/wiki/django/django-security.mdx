@@ -1,0 +1,388 @@
+---
+title: "[Django] 보안: CSRF, XSS, SQL injection, headers"
+aliases: ["django security", "CSRF", "XSS", "SQL injection", "security middleware", "SECURE_HSTS"]
+tags: [django, security, csrf, xss, hsts]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django는 OWASP Top 10 대부분을 기본 방어한다: CSRF 토큰, ORM의 SQL 인젝션 방지, 템플릿 자동 escape, 비밀번호 해싱, 세션 쿠키 보안 등. 그러나 **설정 누락**, **safe 필터 남용**, **raw SQL 부주의**가 흔한 위험. 배포 시 `manage.py check --deploy`로 점검.
+
+## CSRF (Cross-Site Request Forgery)
+
+다른 사이트가 사용자 세션을 도용해 POST 요청을 보내는 공격.
+
+### 자동 방어
+
+```python
+MIDDLEWARE = [
+    ...,
+    "django.middleware.csrf.CsrfViewMiddleware",
+]
+```
+
+POST/PUT/DELETE 요청은 CSRF 토큰 검증. 누락 시 403.
+
+```html
+<form method="post">
+    {% csrf_token %}    {# 필수 #}
+    ...
+</form>
+```
+
+### AJAX/SPA
+
+```javascript
+const csrfToken = document.cookie
+    .split("; ")
+    .find(r => r.startsWith("csrftoken="))
+    ?.split("=")[1];
+
+fetch("/api/posts/", {
+    method: "POST",
+    headers: {
+        "X-CSRFToken": csrfToken,
+        "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+});
+```
+
+`CSRF_COOKIE_HTTPONLY = False` (기본)로 JS가 쿠키 읽을 수 있음.
+
+### 면제
+
+```python
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+def webhook(request):
+    ...
+```
+
+JWT 인증 API는 csrf_exempt 또는 별도 처리. 그러나 세션 인증 + csrf_exempt는 위험.
+
+### CSRF_TRUSTED_ORIGINS
+
+POST 요청의 Origin/Referer 검증. HTTPS 서비스에 필수.
+
+```python
+CSRF_TRUSTED_ORIGINS = [
+    "https://example.com",
+    "https://*.example.com",
+]
+```
+
+## XSS (Cross-Site Scripting)
+
+악성 스크립트가 다른 사용자 브라우저에서 실행.
+
+### 자동 방어
+
+DTL은 변수 출력 시 자동 HTML escape.
+
+```html
+{{ user_input }}    {# <script>를 &lt;script&gt;로 #}
+```
+
+### safe 필터 = 무력화
+
+```html
+{{ user_input|safe }}    {# 위험! 신뢰할 수 있는 HTML에만 #}
+```
+
+`mark_safe()` (Python) 동일.
+
+### Content Security Policy
+
+```python
+INSTALLED_APPS += ["csp"]    # django-csp
+MIDDLEWARE += ["csp.middleware.CSPMiddleware"]
+
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_SCRIPT_SRC = ("'self'", "https://cdn.example.com")
+CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
+CSP_IMG_SRC = ("'self'", "data:", "https:")
+```
+
+스크립트 출처 제한 → XSS 완화.
+
+### nonce 사용 (인라인 스크립트)
+
+```python
+CSP_INCLUDE_NONCE_IN = ["script-src"]
+```
+
+```html
+<script nonce="{{ request.csp_nonce }}">...</script>
+```
+
+## SQL Injection
+
+ORM 사용 시 자동 방어. `?` 또는 `%s` 플레이스홀더.
+
+```python
+# 안전 (ORM)
+Post.objects.filter(title=user_input)
+
+# 안전 (raw with params)
+Post.objects.raw("SELECT * FROM blog_post WHERE title = %s", [user_input])
+
+# 안전 (cursor)
+with connection.cursor() as c:
+    c.execute("SELECT * FROM blog_post WHERE id = %s", [user_input])
+```
+
+### 위험
+
+```python
+# WRONG
+Post.objects.raw(f"SELECT * FROM blog_post WHERE title = '{user_input}'")
+Post.objects.extra(where=[f"title = '{user_input}'"])
+```
+
+문자열 포매팅으로 SQL 만들지 말 것. 항상 placeholder.
+
+## 비밀번호 보안
+
+```python
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+    "django.contrib.auth.hashers.ScryptPasswordHasher",
+]
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 12}},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+```
+
+Argon2 권장 (argon2-cffi 설치 필요).
+
+## 세션 / 쿠키 보안
+
+```python
+SESSION_COOKIE_SECURE = True       # HTTPS only
+SESSION_COOKIE_HTTPONLY = True     # JS 접근 차단
+SESSION_COOKIE_SAMESITE = "Lax"    # CSRF 보호 강화
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_HTTPONLY = False        # JS에서 읽어야 (AJAX)
+SESSION_COOKIE_AGE = 1209600        # 2주
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+```
+
+`SameSite=Lax`는 일반 GET 요청은 허용, POST는 같은 사이트만. `Strict`는 더 엄격하나 외부 링크에서 로그인 상태 유지 안 됨.
+
+## HTTPS 강제
+
+```python
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = True
+
+# HSTS
+SECURE_HSTS_SECONDS = 31536000             # 1년
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True                  # hstspreload.org 등록 후
+```
+
+HSTS는 brower가 HTTPS만 사용하게 강제. 잘못 설정 시 사이트 접근 불가 → 단계적 적용 (짧은 시간부터).
+
+## Clickjacking
+
+```python
+MIDDLEWARE += ["django.middleware.clickjacking.XFrameOptionsMiddleware"]
+X_FRAME_OPTIONS = "DENY"    # 또는 "SAMEORIGIN"
+```
+
+iframe 안에 사이트가 임베드되는 걸 차단. 클릭재킹 공격 방어.
+
+## Content-Type, MIME sniffing
+
+```python
+SECURE_CONTENT_TYPE_NOSNIFF = True    # X-Content-Type-Options: nosniff
+```
+
+브라우저가 MIME 추측을 막아 XSS 일부 방어.
+
+## Host header attack
+
+```python
+ALLOWED_HOSTS = ["example.com", "www.example.com"]    # * 금지
+USE_X_FORWARDED_HOST = True    # 리버스 프록시 뒤
+```
+
+Host header injection 차단.
+
+## 파일 업로드
+
+```python
+DATA_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024     # 5MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000
+```
+
+업로드 파일 검증:
+- 확장자 화이트리스트
+- MIME 타입 검증 (python-magic)
+- 이미지는 Pillow로 재인코딩 (악성 페이로드 제거)
+- 저장 위치 격리 (실행 권한 X)
+- 파일명 sanitize (path traversal 방지)
+
+```python
+def save_upload(f):
+    ext = Path(f.name).suffix.lower()
+    if ext not in {".jpg", ".png", ".pdf"}:
+        raise ValueError("forbidden type")
+
+    safe_name = uuid4().hex + ext
+    path = Path("media") / safe_name
+    with path.open("wb") as out:
+        for chunk in f.chunks():
+            out.write(chunk)
+```
+
+## CORS
+
+API + SPA 분리 시.
+
+```bash
+pip install django-cors-headers
+```
+
+```python
+INSTALLED_APPS += ["corsheaders"]
+MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",    # 가능한 앞쪽
+    ...
+]
+
+CORS_ALLOWED_ORIGINS = ["https://app.example.com"]
+CORS_ALLOW_CREDENTIALS = True
+```
+
+`CORS_ALLOW_ALL_ORIGINS = True`는 개발용만. 프로덕션은 명시.
+
+## Rate limiting
+
+```python
+# DRF
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/day",
+        "user": "1000/day",
+    },
+}
+```
+
+`django-ratelimit` 라이브러리는 일반 view에도.
+
+```python
+from django_ratelimit.decorators import ratelimit
+
+@ratelimit(key="ip", rate="5/m")
+def login_view(request):
+    ...
+```
+
+## 보안 체크 명령
+
+```bash
+python manage.py check --deploy
+```
+
+배포 시 권장 설정 누락 점검. 출력 예:
+
+```
+WARNING: SECURE_HSTS_SECONDS not set.
+WARNING: SESSION_COOKIE_SECURE not set.
+```
+
+CI에 추가하면 실수 방지.
+
+## 비밀 정보
+
+- SECRET_KEY: 환경변수 (절대 커밋 X)
+- DB password: 환경변수
+- API token: Secrets Manager / Vault
+- `.env`는 `.gitignore`
+
+```python
+SECRET_KEY = os.environ["SECRET_KEY"]    # 누락 시 KeyError (즉시 알림)
+```
+
+## 의존성 보안
+
+```bash
+pip install pip-audit
+pip-audit
+```
+
+CVE 검사. `safety`, `dependabot` (GitHub) 자동화.
+
+## 자주 보는 함정
+
+### 1. DEBUG=True 배포
+
+stacktrace, settings 모두 노출. 절대 금지.
+
+### 2. ALLOWED_HOSTS = ["*"]
+
+Host header attack 가능.
+
+### 3. SECRET_KEY 하드코딩
+
+git에 노출되면 즉시 회전. 환경변수로.
+
+### 4. mark_safe 남용
+
+```python
+return mark_safe(f"<b>{user_input}</b>")    # XSS!
+
+# 안전
+from django.utils.html import format_html
+return format_html("<b>{}</b>", user_input)
+```
+
+### 5. raw SQL with f-string
+
+```python
+Post.objects.raw(f"SELECT * FROM blog_post WHERE id = {id}")    # SQL injection
+```
+
+### 6. 파일 업로드 검증 안 함
+
+확장자만 보고 PHP/JS 업로드 → 서버 권한 탈취.
+
+### 7. 로그에 비밀 출력
+
+```python
+logger.info(f"User logged in: {request.POST}")    # 비밀번호 노출
+```
+
+## 자주 보는 보안 라이브러리
+
+- **django-axes**: 로그인 시도 잠금
+- **django-defender**: 비슷한 기능
+- **django-csp**: Content Security Policy
+- **django-cors-headers**: CORS
+- **django-honeypot**: 봇 함정
+- **django-ratelimit**: 일반 view rate limit
+- **django-otp**: 2FA
+
+## 참고
+
+- [Security in Django](https://docs.djangoproject.com/en/stable/topics/security/)
+- [Deployment checklist](https://docs.djangoproject.com/en/stable/howto/deployment/checklist/)
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [django-csp](https://django-csp.readthedocs.io/)
+- [django-axes](https://django-axes.readthedocs.io/)
+- [pip-audit](https://pypi.org/project/pip-audit/)

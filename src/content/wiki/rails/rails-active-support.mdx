@@ -1,0 +1,351 @@
+---
+title: "[Rails] Active Support: Ruby 확장"
+aliases: ["active support", "rails ruby extension", "concern", "Time helpers", "blank present"]
+tags: [rails, active-support, ruby, helper]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Active Support**는 Ruby 표준 라이브러리에 Rails가 추가하는 유틸리티 + 코어 확장. `1.day.ago`, `"hello".pluralize`, `blank?` 등 모든 Rails 코드에서 사용. Rails 없는 Ruby 프로젝트도 `require "active_support/all"`로 사용 가능.
+
+## 주요 카테고리
+
+- Time / Date 헬퍼
+- 문자열 변환
+- Hash / Array 유틸
+- Object 메서드 (`blank?`, `present?`)
+- Concern / Callbacks
+- Cache
+- Notifications (instrumentation)
+- 동시성 헬퍼
+
+## Time / Date
+
+```ruby
+1.day.ago               # 1일 전
+3.hours.from_now        # 3시간 후
+1.month.from_now
+2.weeks.ago.beginning_of_week
+Date.today.end_of_month
+Time.current            # 현재 (시간대 인식)
+Date.tomorrow
+Time.zone.parse("2026-06-20 14:00")
+
+# Duration
+1.day + 3.hours         # 27시간
+2.days.in_seconds       # 172800
+1.year.in_days          # 365.25
+
+# 비교
+1.day.ago < Time.current    # true
+
+# 포맷
+Time.current.to_s(:db)       # "2026-06-20 14:30:00"
+Time.current.to_fs(:long)    # "June 20, 2026 14:30"
+```
+
+## 문자열 확장
+
+```ruby
+"hello".pluralize          # "hellos"
+"hellos".singularize       # "hello"
+"helloWorld".underscore    # "hello_world"
+"hello_world".camelize     # "HelloWorld"
+"hello world".titleize     # "Hello World"
+"hello world".parameterize # "hello-world"
+"hello".starts_with?("he") # true (Ruby 2.5+ 표준)
+"hello".ends_with?("lo")
+
+# 잘라내기
+"hello world".truncate(8)         # "hello..."
+"hello world".truncate(8, omission: "…")
+"hello world".truncate_words(2)   # "hello world..."
+
+# 코드 변환
+"some_class_name".classify     # "SomeClassName"
+"SomeClass".tableize           # "some_classes"
+"SomeClass".foreign_key        # "some_class_id"
+"posts/comment".singularize    # "posts/comment"
+
+# 변환
+"5".to_i; "5.0".to_f; "true".to_b    # to_b는 ActiveModel
+"<p>Hello</p>".html_safe?      # false (자동 escape)
+ActionController::Base.helpers.strip_tags("<p>Hi</p>")    # "Hi"
+```
+
+## Object 메서드
+
+### blank? / present?
+
+```ruby
+nil.blank?         # true
+"".blank?          # true
+"  ".blank?        # true
+[].blank?          # true
+{}.blank?          # true
+0.blank?           # false
+
+"hello".present?   # true
+"".present?        # false
+"  ".present?      # false
+```
+
+`present?` = `!blank?`. nil-safe로 사용.
+
+### presence
+
+```ruby
+""    || "default"      # "" (빈 문자열이지만 truthy)
+"".presence || "default"    # "default" (blank면 nil)
+
+name = params[:name].presence || "anonymous"
+```
+
+### try
+
+```ruby
+user.try(:name)              # user가 nil이면 nil, 아니면 user.name
+user&.name                   # Ruby 2.3+ safe navigation (더 명시적)
+
+user.try(:profile).try(:bio)
+user&.profile&.bio
+```
+
+`try`는 정의되지 않은 메서드도 안전. `&.`는 NoMethodError.
+
+## Hash 확장
+
+```ruby
+{a: 1, b: 2}.symbolize_keys      # {a: 1, b: 2}
+{"a" => 1, "b" => 2}.symbolize_keys  # {a: 1, b: 2}
+{a: 1, b: 2}.stringify_keys      # {"a" => 1, "b" => 2}
+
+{a: 1, b: 2}.except(:a)          # {b: 2}
+{a: 1, b: 2}.slice(:a)            # {a: 1}
+
+{a: 1, b: 2}.deep_merge(b: 3, c: 4)    # {a: 1, b: 3, c: 4}
+# 중첩 hash 재귀 merge
+
+{a: 1, b: 2}.deep_transform_keys(&:to_s)
+{a: 1, b: nil}.compact     # {a: 1}
+
+# 기본값
+hash.fetch(:key, "default")
+hash.dig(:a, :b, :c)       # nested 안전 접근
+```
+
+### HashWithIndifferentAccess
+
+```ruby
+h = ActiveSupport::HashWithIndifferentAccess.new(a: 1)
+h[:a]      # 1
+h["a"]     # 1 (string/symbol 동일)
+
+# Rails params도 같은 동작
+params[:user][:name]
+params["user"]["name"]
+```
+
+## Array 확장
+
+```ruby
+[1, 2, 3].in_groups_of(2)               # [[1, 2], [3, nil]]
+[1, 2, 3, 4, 5].in_groups(2)            # [[1, 2, 3], [4, 5, nil]]
+[1, 2, 3].split(2)                       # [[1], [3]]
+[1, 2, 3, 4].second                      # 2
+[1, 2, 3, 4].third
+[1, 2, 3, 4].fourth ... fifth, forty_two   # 농담? 진짜 있음
+[1, 2, 3].to_sentence                    # "1, 2, and 3"
+%w[apple banana].to_sentence(words_connector: ", ", two_words_connector: " 또는 ")
+
+# Pluck (배열 of hash)
+[{a: 1}, {a: 2}].pluck(:a)   # [1, 2]
+```
+
+## Concern
+
+`extend ActiveSupport::Concern`. [rails-concerns](rails-concerns) 참고.
+
+## Configurable
+
+```ruby
+class MyClass
+  include ActiveSupport::Configurable
+
+  config_accessor :api_key, :timeout
+  config.timeout = 30
+end
+
+MyClass.config.api_key = "..."
+MyClass.config.api_key
+```
+
+class-level 설정.
+
+## Notifications (Instrumentation)
+
+Rails 내부도 사용. 임의 이벤트 publish/subscribe.
+
+```ruby
+# 구독
+ActiveSupport::Notifications.subscribe("user.signup") do |name, started, finished, unique_id, payload|
+  Rails.logger.info("User signed up: #{payload[:user_id]}")
+end
+
+# 발행
+ActiveSupport::Notifications.instrument("user.signup", user_id: user.id) do
+  send_welcome_email(user)
+end
+```
+
+Rails 자체 이벤트:
+- `sql.active_record` (모든 SQL)
+- `process_action.action_controller`
+- `render_template.action_view`
+- `start_processing.action_controller`
+
+APM 도구가 자동 구독.
+
+```ruby
+ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+  event = ActiveSupport::Notifications::Event.new(*args)
+  Rails.logger.debug("SQL: #{event.payload[:sql]} took #{event.duration}ms")
+end
+```
+
+## Numeric 확장
+
+```ruby
+50.bytes        # 50
+1.kilobyte      # 1024
+2.megabytes     # 2097152
+3.gigabytes
+4.terabytes
+
+1.day           # ActiveSupport::Duration 60*60*24
+1.hour
+60.minutes
+1.second.in_milliseconds  # 1000
+
+# Numeric 메서드
+50.percent_of(100)   # 50.0
+50.percentage_of(100)
+```
+
+## Callback
+
+```ruby
+class MyClass
+  include ActiveSupport::Callbacks
+  define_callbacks :process
+
+  set_callback :process, :before, :prepare
+  set_callback :process, :after, :cleanup
+
+  def process
+    run_callbacks(:process) do
+      # 실제 작업
+    end
+  end
+
+  private
+
+  def prepare; end
+  def cleanup; end
+end
+```
+
+Rails의 model callbacks, controller filters 모두 이 위에.
+
+## Cache (Rails.cache 외)
+
+```ruby
+cache = ActiveSupport::Cache::MemoryStore.new
+cache.write("key", value, expires_in: 1.hour)
+cache.read("key")
+cache.fetch("key") { expensive }
+```
+
+`MemoryStore`, `FileStore`, `MemCacheStore`, `RedisCacheStore` 등.
+
+## Logger
+
+```ruby
+logger = ActiveSupport::Logger.new(STDOUT)
+logger = ActiveSupport::TaggedLogging.new(logger)
+logger.tagged("request_id=#{id}") do
+  logger.info("Processing")
+end
+# 출력: [request_id=abc] Processing
+```
+
+## OrderedOptions
+
+```ruby
+config = ActiveSupport::OrderedOptions.new
+config.api_key = "..."
+config[:api_key]    # "..." (dot 또는 hash)
+```
+
+옵션 객체.
+
+## 함정
+
+### 1. blank?의 의외 동작
+
+```ruby
+0.blank?         # false (0은 truthy)
+false.blank?     # true
+[nil].blank?     # false (요소 있음)
+[nil].compact.blank?    # true
+```
+
+### 2. try의 silent failure
+
+```ruby
+user.try(:invalid_method)    # nil (예외 안 던짐, 디버깅 어려움)
+```
+
+`try` 남용은 버그 숨김. 가능하면 `&.` (NoMethodError는 던짐).
+
+### 3. require "active_support"
+
+```ruby
+require "active_support"            # 기본만
+require "active_support/all"        # 전부 (무거움)
+require "active_support/core_ext/object/blank"    # 일부만
+```
+
+Rails 없이 Ruby 프로젝트에서 사용 시.
+
+### 4. duration 비교
+
+```ruby
+1.day == 86400.seconds    # true (둘 다 Duration)
+1.day == 86400             # false (Numeric 비교)
+1.day.to_i == 86400        # true
+```
+
+### 5. tableize / pluralize 오류
+
+```ruby
+"deer".pluralize    # "deers" (실제 영어로 "deer")
+"sheep".pluralize   # "sheep"
+"person".pluralize  # "people"
+```
+
+영어 불규칙. 커스텀 inflection 등록 가능:
+
+```ruby
+ActiveSupport::Inflector.inflections do |inflect|
+  inflect.irregular "person", "people"
+  inflect.uncountable %w[equipment]
+end
+```
+
+## 참고
+
+- [Active Support Core Extensions](https://guides.rubyonrails.org/active_support_core_extensions.html)
+- [Active Support Instrumentation](https://guides.rubyonrails.org/active_support_instrumentation.html)
+- [API: ActiveSupport](https://api.rubyonrails.org/classes/ActiveSupport.html)

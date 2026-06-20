@@ -1,0 +1,391 @@
+---
+title: "[SQL] DDL"
+aliases: ["SQL DDL", "DDL", "Data Definition Language", "CREATE TABLE", "ALTER TABLE", "DROP TABLE"]
+tags: [sql, ddl, schema, database]
+updated: 2026-06-20
+---
+
+## 정의
+
+**DDL** (Data Definition Language) 은 **스키마를 정의/변경/제거** 하는 SQL 의 하위 집합. 대상은 테이블, 인덱스, 뷰, 시퀀스, 스키마, 도메인 등.
+
+대부분의 DDL 은 **DDL 자체가 한 트랜잭션** 으로 묶이고 (PostgreSQL 은 트랜잭션 안에서 롤백 가능, MySQL 8.0 의 일부 DDL 은 atomic), 자주 일어나지 않는다. **자주 일어나는 건 DML**.
+
+전체 SQL 체계는 [[SQL]] 참고.
+
+## 핵심 키워드
+
+| 명령 | 의미 |
+|:---|:---|
+| `CREATE` | 새 객체 생성 |
+| `ALTER` | 기존 객체 수정 |
+| `DROP` | 객체 제거 |
+| `TRUNCATE` | 테이블 데이터 전부 제거 (구조 유지, 빠름) |
+| `RENAME` | 이름 변경 |
+| `COMMENT` | 메타데이터 코멘트 (PG/MySQL 지원) |
+
+## CREATE TABLE 기본
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  code={`CREATE TABLE users (
+  id          SERIAL          PRIMARY KEY,
+  email       VARCHAR(255)    NOT NULL UNIQUE,
+  name        VARCHAR(50)     NOT NULL,
+  age         INTEGER         CHECK (age >= 0),
+  city        VARCHAR(30)     DEFAULT 'Seoul',
+  created_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+\\d users`}
+  output={`             Table "public.users"
+   Column   |     Type      |   Modifiers
+------------+---------------+------------------
+ id         | integer       | not null PK
+ email      | varchar(255)  | not null UNIQUE
+ name       | varchar(50)   | not null
+ age        | integer       | CHECK (age >= 0)
+ city       | varchar(30)   | default 'Seoul'
+ created_at | timestamp     | not null default now()`}
+/>
+
+## 제약조건 (Constraints)
+
+| 제약 | 의미 | 예 |
+|:---|:---|:---|
+| `NOT NULL` | NULL 금지 | `name VARCHAR(50) NOT NULL` |
+| `UNIQUE` | 중복 금지 (단일/복합) | `email VARCHAR(255) UNIQUE` |
+| `PRIMARY KEY` | NOT NULL + UNIQUE + 테이블당 하나 | `id INTEGER PRIMARY KEY` |
+| `FOREIGN KEY` | 다른 테이블 PK 참조 | 아래 예 |
+| `CHECK` | 사용자 정의 조건 | `CHECK (age >= 0)` |
+| `DEFAULT` | 기본값 | `DEFAULT 'Seoul'` |
+
+### 복합 키 / 외래 키
+
+```sql
+CREATE TABLE order_items (
+  order_id   INTEGER NOT NULL,
+  product_id INTEGER NOT NULL,
+  qty        INTEGER NOT NULL CHECK (qty > 0),
+  PRIMARY KEY (order_id, product_id),
+  FOREIGN KEY (order_id)   REFERENCES orders(id)   ON DELETE CASCADE,
+  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT
+);
+```
+
+`ON DELETE` 옵션:
+
+- `CASCADE`: 부모 삭제 시 자식도 삭제
+- `RESTRICT` / `NO ACTION`: 자식이 있으면 부모 삭제 거부 (기본)
+- `SET NULL`: 자식의 FK 를 NULL 로
+- `SET DEFAULT`: 자식의 FK 를 DEFAULT 로
+
+### 명명된 제약
+
+```sql
+CREATE TABLE accounts (
+  id      INTEGER,
+  balance INTEGER,
+  CONSTRAINT pk_accounts        PRIMARY KEY (id),
+  CONSTRAINT ck_balance_nonneg  CHECK (balance >= 0)
+);
+
+ALTER TABLE accounts DROP CONSTRAINT ck_balance_nonneg;
+```
+
+이름을 주면 `ALTER` 로 핀포인트 변경이 가능하다.
+
+## 자동 증가 PK, dialect 차이
+
+같은 의미, 문법은 dialect 마다 다르다.
+
+<CodeWithOutput
+  variants={[
+    { language: 'sql', label: 'ANSI (권장)', code: `-- SQL:2003 표준
+CREATE TABLE t (
+  id   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name VARCHAR(50) NOT NULL
+);` },
+    { language: 'sql', label: 'PostgreSQL', code: `-- 1) SERIAL (구식, 여전히 흔함)
+CREATE TABLE t (
+  id   SERIAL PRIMARY KEY,
+  name VARCHAR(50) NOT NULL
+);
+
+-- 2) IDENTITY (10+ 권장)
+CREATE TABLE t (
+  id   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name VARCHAR(50) NOT NULL
+);` },
+    { language: 'sql', label: 'MySQL', code: `CREATE TABLE t (
+  id   INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(50) NOT NULL
+) ENGINE=InnoDB;` },
+  ]}
+  outputLabel="결과"
+  output={`-- 어느 쪽이든 동일: INSERT 시 id 컬럼을 비우면 자동 채워짐
+INSERT INTO t (name) VALUES ('Alice');
+-- id = 1
+INSERT INTO t (name) VALUES ('Bob');
+-- id = 2`}
+/>
+
+dialect 별 자세한 비교는 [[PostgreSQL]], [[MySQL]].
+
+## ALTER TABLE
+
+### 컬럼 추가/삭제/수정
+
+```sql
+-- 컬럼 추가
+ALTER TABLE users ADD COLUMN phone VARCHAR(20);
+
+-- 컬럼 삭제
+ALTER TABLE users DROP COLUMN phone;
+
+-- 타입 변경 (PostgreSQL)
+ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
+ALTER TABLE users ALTER COLUMN age TYPE BIGINT USING age::BIGINT;
+
+-- 타입 변경 (MySQL)
+ALTER TABLE users MODIFY COLUMN age BIGINT;
+ALTER TABLE users CHANGE COLUMN age years BIGINT;  -- 이름까지 변경
+
+-- 컬럼 이름 변경 (PostgreSQL)
+ALTER TABLE users RENAME COLUMN age TO years;
+
+-- DEFAULT 변경
+ALTER TABLE users ALTER COLUMN city SET DEFAULT 'Busan';
+ALTER TABLE users ALTER COLUMN city DROP DEFAULT;
+
+-- NOT NULL 제약 추가/제거
+ALTER TABLE users ALTER COLUMN name SET NOT NULL;
+ALTER TABLE users ALTER COLUMN name DROP NOT NULL;
+```
+
+### 제약조건 추가/제거
+
+```sql
+ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);
+ALTER TABLE users ADD CONSTRAINT fk_users_dept
+  FOREIGN KEY (dept_id) REFERENCES departments(id);
+
+ALTER TABLE users DROP CONSTRAINT uq_users_email;
+```
+
+### 테이블 이름 변경
+
+```sql
+ALTER TABLE users RENAME TO members;
+```
+
+### 큰 테이블에서 주의
+
+> [!CAUTION]
+> 큰 테이블 (수억 행) 에서 `ALTER` 는 테이블 락을 잡고 풀 리라이트가 일어날 수 있다.
+> - PostgreSQL 은 11+ 부터 일부 `ADD COLUMN ... DEFAULT` 가 즉시 메타데이터만 변경.
+> - MySQL 8.0 의 INSTANT 알고리즘: `ALGORITHM=INSTANT, LOCK=NONE`.
+> - 그 외엔 pt-online-schema-change, gh-ost, pg-osc 같은 온라인 마이그레이션 도구 사용.
+
+## DROP TABLE
+
+```sql
+DROP TABLE users;
+DROP TABLE IF EXISTS users;
+DROP TABLE users CASCADE;     -- 의존 객체 (FK, 뷰) 까지 함께 삭제
+```
+
+`CASCADE` 는 위험하다. 의도가 명확할 때만.
+
+## TRUNCATE
+
+데이터는 다 지우되 테이블 구조는 유지. `DELETE` 보다 훨씬 빠르다 (행 단위 로깅 없이 페이지 단위 정리).
+
+```sql
+TRUNCATE TABLE events;
+TRUNCATE TABLE events RESTART IDENTITY;    -- 시퀀스도 리셋 (PG)
+TRUNCATE TABLE events CASCADE;             -- FK 참조 자식까지 (PG)
+```
+
+> [!IMPORTANT]
+> - `TRUNCATE` 는 DDL 이라 트랜잭션 안에서 롤백 동작이 dialect 마다 다르다 (PG: OK, MySQL: 묵시적 커밋).
+> - 트리거가 안 걸린다 (행 단위 이벤트가 발생 안 함).
+
+## CREATE INDEX
+
+조회 성능을 위해. PK/UNIQUE 는 자동 인덱스 생성.
+
+```sql
+-- 단일 컬럼
+CREATE INDEX idx_users_email ON users(email);
+
+-- 복합 (순서 중요, 좌측 prefix 부터 사용 가능)
+CREATE INDEX idx_orders_user_date ON orders(user_id, created_at DESC);
+
+-- UNIQUE
+CREATE UNIQUE INDEX ux_users_email ON users(email);
+
+-- 부분 인덱스 (PostgreSQL)
+CREATE INDEX idx_orders_active ON orders(user_id) WHERE status = 'active';
+
+-- 표현식 인덱스
+CREATE INDEX idx_users_lower_email ON users(LOWER(email));
+
+-- 동시 생성 (락 최소화, PostgreSQL)
+CREATE INDEX CONCURRENTLY idx_huge ON big_table(key);
+```
+
+| 인덱스 종류 | 용도 | dialect |
+|:---|:---|:---|
+| B-tree (기본) | 등호, 범위, ORDER BY | 모든 RDBMS |
+| Hash | 등호만 | PG (디스크), MySQL Memory engine |
+| GIN | 다값 (JSONB, 배열, 풀텍스트) | PostgreSQL |
+| GiST | 공간, 범위 | PostgreSQL |
+| BRIN | 거대 테이블 + 물리적 클러스터링 | PostgreSQL |
+| Full-text | 자연어 검색 | PG (`tsvector`), MySQL (`FULLTEXT`) |
+
+### 인덱스가 효과 없는 경우
+
+- 컬럼에 함수 적용: `WHERE LOWER(name) = 'alice'` → 표현식 인덱스 필요
+- `LIKE '%xxx'` (앞에 와일드카드) → reverse 인덱스 또는 trigram (`pg_trgm`)
+- 카디널리티 매우 낮을 때 (성별 1/2) → 옵티마이저가 풀 스캔 선택
+- 데이터 변환: `WHERE CAST(id AS TEXT) = '1'` → 형변환 인덱스 깨짐
+
+## CREATE VIEW
+
+쿼리를 이름 붙여 재사용. 뷰는 **저장된 SELECT**, 데이터를 따로 가지지 않는다.
+
+```sql
+CREATE VIEW active_users AS
+SELECT id, name, email
+FROM users
+WHERE status = 'active';
+
+SELECT * FROM active_users;     -- 일반 테이블처럼 사용
+```
+
+### 머티리얼라이즈드 뷰 (Materialized View)
+
+결과를 실제로 저장. 빠르지만 갱신이 필요.
+
+```sql
+-- PostgreSQL
+CREATE MATERIALIZED VIEW user_stats AS
+SELECT city, COUNT(*) AS cnt, AVG(salary) AS avg_sal
+FROM users
+GROUP BY city;
+
+REFRESH MATERIALIZED VIEW user_stats;
+REFRESH MATERIALIZED VIEW CONCURRENTLY user_stats;  -- 잠금 최소화 (UNIQUE 인덱스 필요)
+```
+
+MySQL 은 기본 머티리얼라이즈드 뷰가 없다, 직접 테이블 + 트리거/스케줄로 구현.
+
+## CREATE SCHEMA
+
+논리 네임스페이스.
+
+```sql
+CREATE SCHEMA analytics;
+CREATE TABLE analytics.events (...);
+SET search_path TO analytics, public;     -- PostgreSQL
+```
+
+MySQL 은 `SCHEMA` 와 `DATABASE` 가 동의어. PostgreSQL 은 데이터베이스 안에 여러 스키마.
+
+## SEQUENCE (PostgreSQL)
+
+```sql
+CREATE SEQUENCE order_seq START 1000 INCREMENT 1;
+
+INSERT INTO orders (id, ...) VALUES (NEXTVAL('order_seq'), ...);
+SELECT CURRVAL('order_seq');
+SELECT SETVAL('order_seq', 5000);
+```
+
+MySQL 은 시퀀스가 없고 `AUTO_INCREMENT` 만 있다.
+
+## CREATE TRIGGER
+
+```sql
+-- PostgreSQL
+CREATE OR REPLACE FUNCTION update_modified()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.modified_at := NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_users_modified
+BEFORE UPDATE ON users
+FOR EACH ROW EXECUTE FUNCTION update_modified();
+
+-- MySQL
+CREATE TRIGGER trg_users_modified
+BEFORE UPDATE ON users
+FOR EACH ROW
+SET NEW.modified_at = NOW();
+```
+
+## pandas 와 SQL DDL
+
+pandas 는 DDL 이 거의 필요 없다. DataFrame 의 **컬럼 = SQL 의 컬럼**, **dtype = SQL 의 컬럼 타입**, 자동으로 추론된다.
+
+| SQL DDL | pandas 대응 |
+|:---|:---|
+| `CREATE TABLE` | `pd.DataFrame({...})` |
+| `ALTER TABLE ADD COLUMN` | `df['new_col'] = ...` |
+| `ALTER TABLE DROP COLUMN` | `df.drop(columns=['col'])` |
+| `ALTER COLUMN TYPE` | `df['col'].astype(...)` |
+| `DROP TABLE` | `del df` |
+| `TRUNCATE` | `df.drop(df.index)` / `df.iloc[0:0]` |
+| `INDEX` | `df.set_index(...)` (개념적, 성능적으로 다름) |
+
+DB 에 DataFrame 을 쓸 때는 [[Pandas read_sql]] 의 `to_sql(dtype=...)` 로 타입 명시.
+
+## 함정
+
+### 1. CASCADE 의 폭발성
+
+```sql
+DROP TABLE users CASCADE;
+-- users 를 참조하는 모든 FK 테이블, 뷰, 함수가 사라질 수 있다
+```
+
+운영 환경에선 CASCADE 보다 의존성 파악 후 단계적 DROP.
+
+### 2. 큰 테이블의 ALTER
+
+수억 행 테이블에 `ADD COLUMN ... NOT NULL DEFAULT ...` 는 전부 리라이트. 단계적으로:
+
+1. NULL 허용 컬럼 추가
+2. 배치로 백필
+3. NOT NULL 제약 추가
+
+PG 11+ / MySQL 8.0 에선 일부 메타데이터만 바꾸는 INSTANT 가능.
+
+### 3. 인덱스 너무 많이
+
+INSERT/UPDATE/DELETE 가 모든 인덱스를 갱신. 인덱스 1 개 추가 = 쓰기 비용 증가. 실제 쿼리 plan 보고 결정.
+
+### 4. CHAR vs VARCHAR
+
+- `CHAR(N)`: 고정 길이, 짧으면 공백 패딩
+- `VARCHAR(N)`: 가변 길이, 길이 제한
+- `TEXT` (PG) / `LONGTEXT` (MySQL): 사실상 무제한
+
+PostgreSQL 은 `VARCHAR` 와 `TEXT` 의 내부 표현이 같다, 길이 제한 외엔 성능 차이 없음. 일반적으로 `TEXT` 권장.
+
+## 참고
+
+- [[SQL]]
+- [[SQL DML]]
+- [[SQL DCL TCL]]
+- [[SQL Data Types]]
+- [[PostgreSQL]]
+- [[MySQL]]
+- [[Pandas read_sql]]
+- [PostgreSQL DDL](https://www.postgresql.org/docs/current/ddl.html)
+- [MySQL Data Definition Statements](https://dev.mysql.com/doc/refman/8.0/en/sql-data-definition-statements.html)

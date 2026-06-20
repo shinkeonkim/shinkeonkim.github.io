@@ -1,0 +1,361 @@
+---
+title: "[Spring] AOP: @Aspect, Pointcut, Advice"
+aliases: ["spring aop", "AspectJ", "@Aspect", "@Before", "@Around", "pointcut expression"]
+tags: [spring, aop, aspect, cross-cutting]
+updated: 2026-06-20
+---
+
+## 정의
+
+**AOP (Aspect-Oriented Programming)**는 **cross-cutting concerns**(로깅, 트랜잭션, 보안 등)를 비즈니스 코드에서 분리하는 기법. Spring AOP는 **proxy 기반**(런타임 weaving), AspectJ는 컴파일 타임 weaving.
+
+Spring의 `@Transactional`, `@Cacheable`, `@Async`, `@Secured` 모두 AOP로 구현.
+
+## 핵심 용어
+
+- **Join Point**: AOP가 끼어들 수 있는 지점 (메서드 실행)
+- **Pointcut**: 어떤 Join Point에 적용할지 표현식
+- **Advice**: 끼어들어 실행할 코드
+- **Aspect**: Pointcut + Advice의 묶음
+- **Weaving**: aspect를 코드에 엮는 과정
+
+## 설정
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-aop")
+```
+
+자동 활성화 (Spring Boot). 수동:
+
+```java
+@Configuration
+@EnableAspectJAutoProxy
+public class AopConfig { }
+```
+
+## 첫 Aspect
+
+```java
+@Aspect
+@Component
+public class LoggingAspect {
+
+    private static final Logger log = LoggerFactory.getLogger(LoggingAspect.class);
+
+    @Before("execution(* com.example.service.*.*(..))")
+    public void beforeServiceMethod(JoinPoint jp) {
+        log.info("Calling {}", jp.getSignature().toShortString());
+    }
+
+    @AfterReturning(pointcut = "execution(* com.example.service.*.*(..))", returning = "result")
+    public void afterReturning(JoinPoint jp, Object result) {
+        log.info("Returned from {}: {}", jp.getSignature().toShortString(), result);
+    }
+
+    @AfterThrowing(pointcut = "execution(* com.example.service.*.*(..))", throwing = "ex")
+    public void afterThrowing(JoinPoint jp, Throwable ex) {
+        log.error("Exception in {}: {}", jp.getSignature().toShortString(), ex.getMessage());
+    }
+
+    @Around("execution(* com.example.service.*.*(..))")
+    public Object timing(ProceedingJoinPoint pjp) throws Throwable {
+        long start = System.currentTimeMillis();
+        try {
+            return pjp.proceed();
+        } finally {
+            log.info("{} took {}ms", pjp.getSignature().toShortString(), System.currentTimeMillis() - start);
+        }
+    }
+}
+```
+
+## Advice 종류
+
+| Advice | 시점 |
+|--------|------|
+| `@Before` | 메서드 실행 전 |
+| `@After` | 후 (finally) |
+| `@AfterReturning` | 정상 반환 후 |
+| `@AfterThrowing` | 예외 발생 후 |
+| `@Around` | 전후 모두 (가장 강력) |
+
+`@Around`만 `proceed()` 호출로 원래 메서드 실행 + 반환값 변경 가능.
+
+## Pointcut 표현식
+
+```java
+// execution: 가장 흔함
+@Before("execution(public * com.example..*Service.*(..))")    // Service로 끝나는 클래스의 메서드
+
+execution(modifier? return-type declaring-type? method-name(parameters) throws-clause?)
+
+// 예시
+execution(public * *.find*(..))                  // public, find로 시작
+execution(* com.example.UserService.findBy*(*))   // 인자 1개
+execution(* *(String, ..))                        // 첫 인자 String
+execution(void com.example..*(..))                 // void 반환
+```
+
+다른 표현:
+
+```java
+@within(org.springframework.stereotype.Service)    // @Service 클래스의 모든 메서드
+@annotation(com.example.Audited)                    // @Audited 메서드만
+within(com.example.service..*)                      // 특정 패키지
+target(com.example.UserService)                     // 특정 타입
+args(java.lang.String)                              // 인자 타입
+```
+
+조합:
+
+```java
+@Before("execution(* com.example.service.*.*(..)) && @annotation(Audited)")
+```
+
+## Pointcut 재사용
+
+```java
+@Aspect
+@Component
+public class LoggingAspect {
+
+    @Pointcut("execution(* com.example.service.*.*(..))")
+    public void serviceMethods() {}
+
+    @Pointcut("@annotation(com.example.Audited)")
+    public void audited() {}
+
+    @Before("serviceMethods() && audited()")
+    public void log(JoinPoint jp) {
+        ...
+    }
+}
+```
+
+## @Around: 전후 제어
+
+```java
+@Around("@annotation(retry)")
+public Object retry(ProceedingJoinPoint pjp, Retry retry) throws Throwable {
+    int attempts = 0;
+    while (true) {
+        try {
+            return pjp.proceed();
+        } catch (Exception e) {
+            attempts++;
+            if (attempts >= retry.times()) throw e;
+            Thread.sleep(retry.delayMs() * (long) Math.pow(2, attempts));
+        }
+    }
+}
+```
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+public @interface Retry {
+    int times() default 3;
+    long delayMs() default 100;
+}
+
+// 사용
+@Service
+public class ApiService {
+    @Retry(times = 5, delayMs = 200)
+    public Response call() { ... }
+}
+```
+
+## 인자 캡처
+
+```java
+@Around("execution(* com.example.UserService.findById(..)) && args(id)")
+public Object cacheById(ProceedingJoinPoint pjp, Long id) throws Throwable {
+    User cached = cache.get(id);
+    if (cached != null) return cached;
+    User result = (User) pjp.proceed();
+    cache.put(id, result);
+    return result;
+}
+```
+
+## 자주 보는 사용 예
+
+### 메서드 실행 시간 측정
+
+```java
+@Aspect
+@Component
+public class TimingAspect {
+    @Around("@annotation(Timed)")
+    public Object timing(ProceedingJoinPoint pjp) throws Throwable {
+        long start = System.nanoTime();
+        try {
+            return pjp.proceed();
+        } finally {
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            metricsService.recordExecutionTime(pjp.getSignature().toShortString(), ms);
+        }
+    }
+}
+```
+
+### 감사 로그
+
+```java
+@Around("@annotation(Audited)")
+public Object audit(ProceedingJoinPoint pjp) throws Throwable {
+    String user = currentUser();
+    String method = pjp.getSignature().toShortString();
+    log.info("AUDIT user={} method={} args={}", user, method, Arrays.toString(pjp.getArgs()));
+    Object result = pjp.proceed();
+    log.info("AUDIT user={} method={} result=ok", user, method);
+    return result;
+}
+```
+
+### 권한 검사
+
+```java
+@Before("@annotation(RequiresAdmin)")
+public void checkAdmin() {
+    if (!currentUser().isAdmin()) {
+        throw new AccessDeniedException("Admin only");
+    }
+}
+```
+
+`@PreAuthorize`가 더 일반적이지만 도메인 특화 검사는 직접 AOP.
+
+### 트랜잭션 (예시, Spring 내장)
+
+```java
+@Around("@annotation(Transactional)")
+public Object transactional(ProceedingJoinPoint pjp) throws Throwable {
+    TransactionStatus tx = txManager.getTransaction(...);
+    try {
+        Object result = pjp.proceed();
+        txManager.commit(tx);
+        return result;
+    } catch (Exception e) {
+        txManager.rollback(tx);
+        throw e;
+    }
+}
+```
+
+Spring의 `@Transactional`이 정확히 이렇게 동작.
+
+## proxy 메커니즘
+
+- **JDK Dynamic Proxy**: 인터페이스 기반 (interface 구현체일 때)
+- **CGLIB**: 클래스 상속 (interface 없을 때)
+
+Spring Boot는 기본 CGLIB. `proxyTargetClass=false`로 변경.
+
+```yaml
+spring:
+  aop:
+    proxy-target-class: false    # JDK proxy 우선
+```
+
+## 함정
+
+### 1. 자기 호출 (self-invocation)
+
+```java
+@Service
+public class UserService {
+    @Transactional
+    public void a() {
+        b();    // proxy 거치지 않음 → @Transactional 무시!
+    }
+
+    @Transactional(propagation = REQUIRES_NEW)
+    public void b() { ... }
+}
+```
+
+같은 인스턴스 내부 호출은 proxy 통과 안 함. 해결:
+- 다른 Bean으로 분리
+- `AopContext.currentProxy()` (proxy 노출 필요)
+- `@Lazy`로 self-inject
+
+```java
+@Service
+public class UserService {
+    @Autowired @Lazy
+    private UserService self;
+
+    public void a() {
+        self.b();    // proxy 통과
+    }
+}
+```
+
+### 2. private 메서드
+
+Spring AOP는 public 메서드만. AspectJ load-time weaving 필요 시 private도.
+
+### 3. final 클래스/메서드
+
+CGLIB은 상속 → final 못 함. JDK proxy는 인터페이스 → 문제 없음.
+
+### 4. 예외 정보 손실
+
+```java
+@Around("...")
+public Object wrap(ProceedingJoinPoint pjp) throws Throwable {
+    try {
+        return pjp.proceed();
+    } catch (Exception e) {
+        throw new RuntimeException(e);    // 원래 예외 wrapper
+    }
+}
+```
+
+예외 처리 신중히. 트랜잭션 롤백 동작도 영향.
+
+### 5. 너무 많은 Aspect
+
+```java
+@Aspect class Logging { ... }
+@Aspect class Timing { ... }
+@Aspect class Security { ... }
+@Aspect class Caching { ... }
+@Aspect class Auditing { ... }
+```
+
+매 메서드 호출에 5개 advice 실행 → 성능, 디버깅. 필요한 것만.
+
+## Order
+
+```java
+@Aspect
+@Order(1)
+public class LoggingAspect { }
+
+@Aspect
+@Order(2)
+public class TimingAspect { }
+```
+
+여러 aspect가 같은 join point에 적용 시 순서.
+
+## 자주 보는 어노테이션 (AOP로 구현됨)
+
+| 어노테이션 | 출처 |
+|----------|------|
+| `@Transactional` | Spring TX |
+| `@Cacheable` `@CacheEvict` `@CachePut` | Spring Cache |
+| `@Async` | Spring Async |
+| `@Scheduled` | Spring Task |
+| `@PreAuthorize` `@PostAuthorize` | Spring Security |
+| `@Retryable` | Spring Retry |
+
+## 참고
+
+- [Spring AOP](https://docs.spring.io/spring-framework/reference/core/aop.html)
+- [AspectJ pointcut expressions](https://www.eclipse.org/aspectj/doc/released/progguide/semantics-pointcuts.html)
+- [Spring Cache](https://docs.spring.io/spring-framework/reference/integration/cache.html)
+- [@Transactional](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative.html)

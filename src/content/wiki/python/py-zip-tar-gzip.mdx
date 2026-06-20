@@ -1,0 +1,298 @@
+---
+title: "[Python] zipfile, tarfile, gzip, lzma: 압축과 아카이브"
+aliases: ["python zipfile", "tarfile", "gzip", "lzma", "bz2", "shutil.archive", "압축"]
+tags: [python, zipfile, tarfile, gzip, archive, compression, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+압축·아카이브 관련 표준 모듈.
+
+- **`zipfile`**: ZIP 아카이브 (Windows 친화)
+- **`tarfile`**: TAR/TAR.GZ/TAR.BZ2 (Unix 표준)
+- **`gzip`**: 단일 파일 gzip 압축
+- **`bz2`**: bzip2 압축
+- **`lzma`**: LZMA/XZ 압축
+- **`zlib`**: 저수준 raw deflate
+
+`shutil.make_archive` / `unpack_archive`로 통합 인터페이스.
+
+## zipfile
+
+```python
+import zipfile
+
+# 만들기
+with zipfile.ZipFile("backup.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+    zf.write("file1.txt")
+    zf.write("dir/file2.txt", arcname="renamed.txt")
+    zf.writestr("inline.txt", "hello from memory")
+
+# 읽기
+with zipfile.ZipFile("backup.zip") as zf:
+    print(zf.namelist())
+    for name in zf.namelist():
+        print(name, zf.getinfo(name).file_size)
+
+    # 추출
+    zf.extractall("output/")
+    zf.extract("file1.txt", "output/")
+
+    # 메모리로 읽기
+    with zf.open("file1.txt") as f:
+        data = f.read()
+```
+
+압축 모드:
+- `ZIP_STORED`: 압축 없음
+- `ZIP_DEFLATED`: 일반 zlib
+- `ZIP_BZIP2`: bzip2 (느림, 작음)
+- `ZIP_LZMA`: 가장 작음, 매우 느림
+
+### Zip Slip 함정
+
+`extractall`은 절대 경로/`../` 포함 파일명을 받아들이면 임의 위치 쓰기 가능.
+
+```python
+# 위험: 신뢰할 수 없는 zip
+zf.extractall("output/")    # 'malicious/../../etc/passwd' 같은 항목 가능
+
+# 안전 (3.12+)
+zf.extractall("output/", filter="data")    # filter 검사
+```
+
+3.11+ tarfile에는 `filter` 인자 있음. zipfile도 검증 필요.
+
+수동 검증:
+
+```python
+from pathlib import Path
+
+def safe_extract(zf, dest):
+    dest = Path(dest).resolve()
+    for member in zf.namelist():
+        target = (dest / member).resolve()
+        if not target.is_relative_to(dest):
+            raise ValueError(f"unsafe path: {member}")
+        zf.extract(member, dest)
+```
+
+## tarfile
+
+```python
+import tarfile
+
+# 만들기
+with tarfile.open("backup.tar.gz", "w:gz") as tf:
+    tf.add("src/", arcname="src")    # 디렉터리 재귀
+    tf.add("README.md")
+
+# 읽기
+with tarfile.open("backup.tar.gz") as tf:
+    tf.list()
+    tf.extractall("output/", filter="data")    # 3.12+ filter 권장
+```
+
+모드: `w:gz`, `w:bz2`, `w:xz`, `w` (압축 없음).
+
+### tar의 보안 (PEP 706, 3.12+)
+
+```python
+# 권장 (3.12+)
+tf.extractall("output/", filter="data")     # 안전 (심볼릭, 절대경로 등 거부)
+tf.extractall("output/", filter="tar")      # 표준 tar 허용
+tf.extractall("output/", filter="fully_trusted")    # 모두 허용 (3.12 이전 동작)
+```
+
+3.14에선 `data`가 기본. 그 전엔 `fully_trusted`라 명시적 지정 필수.
+
+## gzip / bz2 / lzma: 단일 파일
+
+```python
+import gzip
+import bz2
+import lzma
+
+# 텍스트
+with gzip.open("file.txt.gz", "wt") as f:
+    f.write("hello\n")
+
+with gzip.open("file.txt.gz", "rt") as f:
+    print(f.read())
+
+# 바이너리
+with gzip.open("data.bin.gz", "wb") as f:
+    f.write(b"\x00\x01\x02")
+
+# 인메모리
+import io
+buf = io.BytesIO()
+with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+    gz.write(b"hello")
+compressed = buf.getvalue()
+```
+
+`gzip.open`은 file-like 객체와 동일하게 동작 (`with open(...)` 대신 사용).
+
+### CSV + gzip
+
+```python
+import gzip
+import csv
+
+with gzip.open("big.csv.gz", "rt", newline="") as f:
+    reader = csv.reader(f)
+    for row in reader:
+        process(row)
+```
+
+압축 파일을 디스크에 풀지 않고 직접 처리.
+
+## shutil 통합 인터페이스
+
+```python
+import shutil
+
+# 아카이브 만들기
+shutil.make_archive("backup", "zip", root_dir="src")
+shutil.make_archive("backup", "gztar", root_dir="src")
+shutil.make_archive("backup", "bztar")
+shutil.make_archive("backup", "xztar")
+
+# 풀기
+shutil.unpack_archive("backup.tar.gz", "output")
+```
+
+확장자에서 포맷 자동 추론. 간단한 백업 스크립트에 편리.
+
+## 압축 비교
+
+| 알고리즘 | 속도 | 압축률 | 일반 용도 |
+|----------|------|--------|----------|
+| gzip (zlib) | 빠름 | 보통 | 웹, 로그, tar.gz |
+| bzip2 | 느림 | 좋음 | 텍스트 |
+| lzma/xz | 매우 느림 | 최고 | 배포 패키지 |
+| zstd (third-party) | 매우 빠름 | 좋음 | 현대 표준 |
+| brotli (third-party) | 빠름 | 좋음 | 웹 |
+| snappy (third-party) | 매우 빠름 | 낮음 | 인메모리 |
+
+`zstandard` 패키지로 zstd. 새 프로젝트에서 검토할 가치.
+
+```bash
+pip install zstandard
+```
+
+```python
+import zstandard as zstd
+
+cctx = zstd.ZstdCompressor(level=3)
+compressed = cctx.compress(b"hello" * 1000)
+```
+
+## 자주 보는 패턴
+
+### 로그 로테이션 (수동)
+
+```python
+import gzip
+import shutil
+from pathlib import Path
+
+def rotate_log(path):
+    p = Path(path)
+    if p.exists():
+        with open(p, "rb") as src, gzip.open(p.with_suffix(".log.gz"), "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        p.unlink()
+```
+
+`logging.handlers.RotatingFileHandler`로 자동 처리도 가능.
+
+### 인메모리 ZIP을 HTTP 응답으로
+
+```python
+import io
+import zipfile
+
+def make_zip_response(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+# Flask/Django response
+return Response(make_zip_response(files), mimetype="application/zip")
+```
+
+### 대용량 파일 스트리밍 압축
+
+```python
+import gzip
+import shutil
+
+with open("big.csv", "rb") as src, gzip.open("big.csv.gz", "wb") as dst:
+    shutil.copyfileobj(src, dst, length=64 * 1024)
+```
+
+`shutil.copyfileobj`가 chunked 복사.
+
+### 무결성 (CRC32)
+
+```python
+import zlib
+
+with open("file.txt", "rb") as f:
+    crc = 0
+    while chunk := f.read(64 * 1024):
+        crc = zlib.crc32(chunk, crc)
+print(f"{crc & 0xffffffff:08x}")
+```
+
+CRC32는 무결성 (단순 손상)용. 보안용 무결성은 SHA-256.
+
+## 멀티파일 vs 단일
+
+| 도구 | 형태 |
+|------|------|
+| `gzip` | 단일 파일 압축 (`.gz`) |
+| `tarfile` | 여러 파일 묶기 + 압축 옵션 (`.tar`, `.tar.gz`) |
+| `zipfile` | 여러 파일 + 디렉터리 + 압축 (`.zip`) |
+
+`tar.gz`는 tar로 묶고 전체를 gzip. 개별 파일 추출이 zip보다 느리지만 (전체 풀어야 함) 압축률 더 좋음.
+
+## 함정
+
+### 1. zip의 한계
+
+- 4GB 미만 파일/아카이브 (Zip64 확장 활성화 필요: 자동이긴 함)
+- 권한 정보 보존 약함 (Unix 권한 X)
+- 파일 이름 인코딩 모호 (cp437 vs utf-8)
+
+```python
+# UTF-8 명시 (3.11+)
+zipfile.ZipFile(..., metadata_encoding="utf-8")
+```
+
+### 2. tarfile의 권한·소유자
+
+tar는 권한·소유자 보존. 신뢰할 수 없는 tar는 위험 → `filter="data"`.
+
+### 3. 압축 + 암호화
+
+`zipfile`은 약한 ZipCrypto (보안 X). 강력한 암호화는 `pyzipper` 또는 GPG/age로 외부 암호화.
+
+### 4. 멀티스레드 압축
+
+표준 모듈은 단일 스레드. CPU 코어 활용은 `pigz` (gzip 병렬) 외부 호출 또는 `zstandard`의 multi_threaded.
+
+## 참고
+
+- [`zipfile` documentation](https://docs.python.org/3/library/zipfile.html)
+- [`tarfile` documentation](https://docs.python.org/3/library/tarfile.html)
+- [`gzip` documentation](https://docs.python.org/3/library/gzip.html)
+- [`shutil` archive operations](https://docs.python.org/3/library/shutil.html#archiving-operations)
+- [PEP 706 – Filter for tarfile.extractall](https://peps.python.org/pep-0706/)
+- [`zstandard`](https://python-zstandard.readthedocs.io/)
+- [Zip Slip 취약점](https://snyk.io/research/zip-slip-vulnerability)

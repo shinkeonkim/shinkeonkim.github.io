@@ -1,0 +1,374 @@
+---
+title: "[Spring] Testing: @SpringBootTest, MockMvc, Testcontainers"
+aliases: ["spring test", "SpringBootTest", "WebMvcTest", "DataJpaTest", "MockMvc", "Testcontainers"]
+tags: [spring, testing, junit, mockito, testcontainers]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring Boot Test는 **단위/슬라이스/통합 테스트** 모두 지원. `spring-boot-starter-test`가 JUnit 5, Mockito, AssertJ, Hamcrest, JsonPath 포함. 슬라이스 어노테이션(`@WebMvcTest`, `@DataJpaTest` 등)으로 빠른 부분 테스트.
+
+## 빠른 시작
+
+```kotlin
+testImplementation("org.springframework.boot:spring-boot-starter-test")
+testImplementation("org.testcontainers:junit-jupiter")
+testImplementation("org.testcontainers:postgresql")
+```
+
+```java
+@SpringBootTest
+class MyApplicationTests {
+
+    @Test
+    void contextLoads() {
+        // ApplicationContext가 정상 시작되면 통과
+    }
+}
+```
+
+## @SpringBootTest (통합)
+
+```java
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class UserApiIntegrationTest {
+    @Autowired
+    private TestRestTemplate restTemplate;
+
+    @Test
+    void shouldCreateUser() {
+        var dto = new CreateUserDto("alice@example.com", "Alice");
+        ResponseEntity<User> response = restTemplate.postForEntity("/api/users", dto, User.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody().email()).isEqualTo("alice@example.com");
+    }
+}
+```
+
+`RANDOM_PORT`로 실제 서버 시작.
+
+## @WebMvcTest (web layer만)
+
+```java
+@WebMvcTest(UserController.class)
+class UserControllerTest {
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockBean
+    private UserService userService;
+
+    @Test
+    void shouldReturnUser() throws Exception {
+        when(userService.findById(1L)).thenReturn(new User(1L, "alice@example.com", "Alice"));
+
+        mockMvc.perform(get("/api/users/1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.email").value("alice@example.com"));
+    }
+
+    @Test
+    void shouldReturn404() throws Exception {
+        when(userService.findById(99L)).thenThrow(new NotFoundException());
+
+        mockMvc.perform(get("/api/users/99"))
+            .andExpect(status().isNotFound());
+    }
+}
+```
+
+Controller, JSON 직렬화, validation만 로드. Service/Repository는 mock.
+
+## MockMvc
+
+```java
+mockMvc.perform(
+    post("/api/users")
+        .contentType(MediaType.APPLICATION_JSON)
+        .content("""
+            {"email":"a@x.com","name":"Alice"}
+            """)
+        .header("Authorization", "Bearer token")
+)
+.andExpect(status().isCreated())
+.andExpect(header().string("Location", containsString("/api/users/")))
+.andExpect(jsonPath("$.id").exists())
+.andExpect(jsonPath("$.email").value("a@x.com"))
+.andDo(print());
+```
+
+`jsonPath`는 응답 본문 검증.
+
+## @DataJpaTest (JPA layer)
+
+```java
+@DataJpaTest
+class UserRepositoryTest {
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private TestEntityManager em;
+
+    @Test
+    void shouldFindByEmail() {
+        em.persistAndFlush(new User("alice@x.com", "Alice"));
+
+        Optional<User> found = userRepository.findByEmail("alice@x.com");
+        assertThat(found).isPresent();
+    }
+}
+```
+
+기본은 H2 in-memory. 트랜잭션 자동 rollback. JPA Bean과 Repository만 로드.
+
+실제 DB 사용:
+
+```java
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+class UserRepositoryTest { ... }
+```
+
+Testcontainers와 함께 사용.
+
+## @JsonTest, @WebFluxTest, @JdbcTest 등
+
+- `@JsonTest`: Jackson 직렬화/역직렬화만
+- `@WebFluxTest`: WebFlux controller
+- `@DataMongoTest`, `@DataRedisTest`: 해당 데이터 layer
+- `@RestClientTest`: RestTemplate/WebClient mock 서버
+
+## Mockito
+
+```java
+@Mock
+private UserRepository repository;
+
+@InjectMocks
+private UserService userService;
+
+@BeforeEach
+void setUp() {
+    MockitoAnnotations.openMocks(this);
+}
+
+@Test
+void shouldFindById() {
+    User user = new User(1L, "alice@x.com");
+    when(repository.findById(1L)).thenReturn(Optional.of(user));
+
+    User result = userService.findById(1L);
+
+    assertThat(result.email()).isEqualTo("alice@x.com");
+    verify(repository).findById(1L);
+    verifyNoMoreInteractions(repository);
+}
+```
+
+`@ExtendWith(MockitoExtension.class)`로 자동.
+
+## @MockBean / @SpyBean
+
+ApplicationContext의 Bean을 mock으로 교체.
+
+```java
+@SpringBootTest
+class MyTest {
+    @MockBean
+    private EmailService emailService;
+
+    @Autowired
+    private UserService userService;
+
+    @Test
+    void test() {
+        userService.signUp(...);
+        verify(emailService).sendWelcome(...);
+    }
+}
+```
+
+`@MockBean`은 새 mock, `@SpyBean`은 실제 Bean을 wrap.
+
+## AssertJ
+
+```java
+import static org.assertj.core.api.Assertions.*;
+
+assertThat(user).isNotNull();
+assertThat(user.email()).isEqualTo("a@x.com");
+assertThat(users).hasSize(3).extracting("email").containsExactly("a", "b", "c");
+assertThatThrownBy(() -> userService.delete(99L))
+    .isInstanceOf(NotFoundException.class)
+    .hasMessageContaining("not found");
+```
+
+Hamcrest보다 read-friendly.
+
+## Testcontainers
+
+실제 DB/Redis/Kafka 컨테이너 띄워 통합 테스트.
+
+```kotlin
+testImplementation("org.testcontainers:junit-jupiter")
+testImplementation("org.testcontainers:postgresql")
+testImplementation("org.springframework.boot:spring-boot-testcontainers")
+```
+
+```java
+@SpringBootTest
+@Testcontainers
+class UserIntegrationTest {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16")
+        .withDatabaseName("test")
+        .withUsername("test")
+        .withPassword("test");
+
+    @DynamicPropertySource
+    static void configure(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Test
+    void shouldSaveUser() {
+        User saved = userRepository.save(new User("a@x.com", "Alice"));
+        assertThat(saved.id()).isNotNull();
+    }
+}
+```
+
+3.1+ `@ServiceConnection` 더 단순:
+
+```java
+@Container
+@ServiceConnection
+static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+```
+
+자동으로 datasource 연결.
+
+## 테스트 슬라이스 vs 통합
+
+| | @SpringBootTest | @WebMvcTest | @DataJpaTest |
+|---|----------------|-------------|--------------|
+| 시작 시간 | 느림 | 빠름 | 중 |
+| 로드 범위 | 전체 | controller + jackson | JPA |
+| DB | 실제 / mock | mock | H2 / TestContainers |
+| 용도 | 통합 시나리오 | controller 단위 | repository 단위 |
+
+빠른 슬라이스 + 적은 수의 통합 = 효율적 테스트 피라미드.
+
+## profiles
+
+```java
+@SpringBootTest
+@ActiveProfiles("test")
+class MyTest { ... }
+```
+
+`application-test.yml`이 자동 로드.
+
+## TestRestTemplate vs MockMvc vs WebTestClient
+
+| | TestRestTemplate | MockMvc | WebTestClient |
+|---|------------------|---------|---------------|
+| 실제 서버 | O | X | O (또는 mock) |
+| 빠름 | X | O | 보통 |
+| WebFlux | X | X | O |
+| 통합 vs 슬라이스 | 통합 | 슬라이스 | 둘 다 |
+
+## 자주 보는 패턴
+
+### @Sql로 데이터 셋업
+
+```java
+@Sql("/data/users.sql")
+@Test
+void test() { ... }
+
+@Sql(scripts = "/data/insert.sql", executionPhase = BEFORE_TEST_METHOD)
+@Sql(scripts = "/data/cleanup.sql", executionPhase = AFTER_TEST_METHOD)
+```
+
+### Page 테스트
+
+```java
+@Test
+void shouldPaginate() {
+    userRepository.saveAll(List.of(/* 20명 */));
+
+    Page<User> page = userRepository.findAll(PageRequest.of(0, 10, Sort.by("email")));
+
+    assertThat(page.getContent()).hasSize(10);
+    assertThat(page.getTotalElements()).isEqualTo(20);
+}
+```
+
+### WireMock으로 외부 API mock
+
+```kotlin
+testImplementation("com.github.tomakehurst:wiremock-standalone:3.0.1")
+```
+
+```java
+WireMockServer server = new WireMockServer(8089);
+server.start();
+server.stubFor(get(urlEqualTo("/api/data"))
+    .willReturn(aResponse().withBody("{\"key\":\"value\"}")));
+
+// test
+```
+
+## 함정
+
+### 1. @SpringBootTest 남용
+
+전체 컨텍스트 로드는 느림. 슬라이스 우선.
+
+### 2. @MockBean 사용 시 컨텍스트 캐싱
+
+매번 다른 mock 설정이 컨텍스트를 다시 만들게 함 → 느림.
+
+### 3. 트랜잭션과 @SpringBootTest
+
+`@SpringBootTest`는 트랜잭션 자동 X (서비스 자체 트랜잭션). DB 상태 정리 필요.
+
+### 4. 비동기 테스트
+
+```java
+@Test
+void asyncCall() {
+    service.sendAsync();
+    // 즉시 검증하면 아직 실행 안 됨
+    await().atMost(5, SECONDS).until(() -> emails.size() == 1);    // Awaitility
+}
+```
+
+### 5. 직접 ApplicationContext에서 가져오기
+
+```java
+@Autowired
+private ApplicationContext ctx;
+
+UserService svc = ctx.getBean(UserService.class);
+```
+
+테스트에서 정당하지만 production 코드엔 안티패턴.
+
+## 참고
+
+- [Spring Boot Testing](https://docs.spring.io/spring-boot/docs/current/reference/html/features.html#features.testing)
+- [MockMvc](https://docs.spring.io/spring-framework/reference/testing/spring-mvc-test-framework.html)
+- [Testcontainers](https://java.testcontainers.org/)
+- [AssertJ](https://assertj.github.io/doc/)
+- [Awaitility](https://github.com/awaitility/awaitility)
+- [WireMock](https://wiremock.org/)

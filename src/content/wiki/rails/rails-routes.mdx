@@ -1,0 +1,388 @@
+---
+title: "[Rails] Routes: resources, nested, scope, constraints"
+aliases: ["rails routes", "rails routing", "resources", "resourceful routes", "nested routes", "rails namespace"]
+tags: [rails, routing, restful]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails 라우팅은 **URL을 controller#action으로 매핑**. RESTful resources 매크로가 7개 표준 액션을 한 줄로 생성. `config/routes.rb`에 정의. `rails routes`로 전체 확인.
+
+## resources
+
+```ruby
+# config/routes.rb
+Rails.application.routes.draw do
+  resources :posts
+end
+```
+
+생성된 7개 라우트:
+
+| HTTP | URL | Controller#Action | 헬퍼 |
+|------|-----|-------------------|------|
+| GET | /posts | posts#index | posts_path |
+| GET | /posts/new | posts#new | new_post_path |
+| POST | /posts | posts#create | posts_path |
+| GET | /posts/:id | posts#show | post_path(p) |
+| GET | /posts/:id/edit | posts#edit | edit_post_path(p) |
+| PATCH/PUT | /posts/:id | posts#update | post_path(p) |
+| DELETE | /posts/:id | posts#destroy | post_path(p) |
+
+`rails routes -c posts`로 확인.
+
+## 일부만 / 제외
+
+```ruby
+resources :posts, only: [:index, :show]
+resources :posts, except: [:destroy]
+```
+
+## resource (단수, singleton)
+
+```ruby
+resource :profile    # 단수 (현재 사용자 1개)
+```
+
+| HTTP | URL | Action |
+|------|-----|--------|
+| GET | /profile/new | new |
+| POST | /profile | create |
+| GET | /profile | show |
+| GET | /profile/edit | edit |
+| PATCH | /profile | update |
+| DELETE | /profile | destroy |
+
+index 없음. URL에 :id 없음.
+
+## Nested resources
+
+```ruby
+resources :posts do
+  resources :comments
+end
+```
+
+```
+/posts/:post_id/comments       # comments#index
+/posts/:post_id/comments/:id   # comments#show
+```
+
+깊이 1단계 권장. 2단계 이상은 별도 라우트.
+
+## shallow
+
+```ruby
+resources :posts do
+  resources :comments, shallow: true
+end
+```
+
+```
+GET    /posts/:post_id/comments       # index
+POST   /posts/:post_id/comments       # create
+GET    /posts/:post_id/comments/new   # new
+GET    /comments/:id                  # show
+GET    /comments/:id/edit             # edit
+PATCH  /comments/:id                  # update
+DELETE /comments/:id                  # destroy
+```
+
+collection은 nested, member는 평탄. URL 단순 + 부모 컨텍스트 보존.
+
+## namespace, scope, module
+
+```ruby
+# namespace: URL prefix + controller module + 라우트 이름 prefix
+namespace :admin do
+  resources :posts    # /admin/posts → Admin::PostsController, admin_posts_path
+end
+
+# scope: URL prefix만
+scope "/v1" do
+  resources :posts    # /v1/posts → PostsController, posts_path
+end
+
+# scope module: controller module만
+scope module: :admin do
+  resources :posts    # /posts → Admin::PostsController
+end
+
+# scope path: URL prefix만
+scope "/api" do
+  scope module: :api do
+    resources :posts
+  end
+end
+```
+
+## API versioning
+
+```ruby
+namespace :api do
+  namespace :v1 do
+    resources :posts
+    resources :users
+  end
+  namespace :v2 do
+    resources :posts
+  end
+end
+```
+
+`/api/v1/posts`, `Api::V1::PostsController`.
+
+## constraints
+
+```ruby
+# 정규식
+get "/posts/:id", to: "posts#show", constraints: { id: /\d+/ }
+
+# subdomain
+constraints subdomain: "api" do
+  resources :posts
+end
+
+# 메서드 객체
+class AdminConstraint
+  def matches?(request)
+    User.find_by(id: request.session[:user_id])&.admin?
+  end
+end
+
+constraints AdminConstraint.new do
+  mount Sidekiq::Web => "/admin/sidekiq"
+end
+```
+
+## 추가 액션: member, collection
+
+```ruby
+resources :posts do
+  member do
+    post :publish        # /posts/:id/publish
+    delete :archive
+  end
+
+  collection do
+    get :featured        # /posts/featured
+    get :search
+  end
+end
+```
+
+`get on: :member` 단축형:
+
+```ruby
+resources :posts do
+  get :publish, on: :member
+end
+```
+
+## 기본 라우트
+
+```ruby
+# 루트
+root "posts#index"        # GET / → PostsController#index
+
+# 정적
+get "/about", to: "pages#about"
+get "/contact", to: "pages#contact", as: :contact    # 헬퍼 이름 명시
+
+# match (여러 HTTP 메서드)
+match "/search", to: "search#query", via: [:get, :post]
+```
+
+## URL 헬퍼
+
+```ruby
+posts_path              # "/posts"
+post_path(post)         # "/posts/123"
+new_post_path           # "/posts/new"
+edit_post_path(post)
+post_url(post)          # "http://example.com/posts/123" (호스트 포함)
+
+# 옵션
+posts_path(format: :json)        # "/posts.json"
+posts_path(page: 2)               # "/posts?page=2"
+post_path(post, anchor: "comments")  # "/posts/123#comments"
+```
+
+view, controller, mailer에서 모두 사용.
+
+## redirect, mount
+
+```ruby
+# 다른 URL로 리다이렉트
+get "/old-blog/:id", to: redirect("/posts/%{id}")
+get "/old", to: redirect("https://example.com")
+
+# Rack 앱 마운트
+mount Sidekiq::Web => "/sidekiq"
+mount Lookbook::Engine, at: "/lookbook" if Rails.env.development?
+```
+
+## concern (라우트 공유)
+
+```ruby
+concern :commentable do
+  resources :comments
+end
+
+resources :posts, concerns: :commentable
+resources :photos, concerns: :commentable
+```
+
+DRY.
+
+## direct, resolve
+
+특정 URL 생성 규칙.
+
+```ruby
+direct(:homepage) { "https://example.com" }
+homepage_url    # "https://example.com"
+
+resolve("Post") { |post| post_path(post) }
+# url_for(@post) → /posts/:id
+```
+
+## globbing
+
+```ruby
+get "/docs/*path", to: "docs#show"    # /docs/a/b/c → params[:path] = "a/b/c"
+```
+
+## format 제한
+
+```ruby
+resources :posts, defaults: { format: :json }
+get "/api/posts", to: "api/posts#index", constraints: { format: :json }
+```
+
+## 동적 segment
+
+```ruby
+get ":controller/:action/:id"    # legacy, 권장 안 함
+```
+
+## 7-action 외 액션 추가
+
+```ruby
+resources :posts do
+  resources :likes, only: [:create, :destroy]
+  collection { get :search }
+  member { post :duplicate }
+end
+```
+
+## 라우트 디버깅
+
+```bash
+rails routes                          # 전부
+rails routes -c posts                  # 특정 controller
+rails routes -g admin                  # 패턴 검색
+rails routes --expanded                # 상세
+```
+
+브라우저 `/rails/info/routes` (dev mode).
+
+## API only 라우팅
+
+```ruby
+namespace :api, defaults: { format: :json } do
+  namespace :v1 do
+    resources :posts, only: [:index, :show, :create, :update, :destroy]
+    resources :users, only: [:show]
+  end
+end
+```
+
+## 자주 보는 패턴
+
+### Catch-all (404)
+
+```ruby
+# 가장 마지막
+match "*path", to: "errors#not_found", via: :all
+```
+
+### 다국어
+
+```ruby
+scope "(:locale)", locale: /en|ko/ do
+  resources :posts
+end
+# /posts /ko/posts /en/posts
+```
+
+### 인증 분기
+
+```ruby
+authenticate :user, ->(u) { u.admin? } do
+  mount Sidekiq::Web => "/sidekiq"
+end
+```
+
+`devise`가 제공하는 헬퍼.
+
+### Engine 마운트
+
+```ruby
+mount MyEngine::Engine => "/my"
+```
+
+## 함정
+
+### 1. 깊은 nesting
+
+```ruby
+resources :a do
+  resources :b do
+    resources :c    # /a/:a_id/b/:b_id/c/:id (URL 깊고 헬퍼 복잡)
+  end
+end
+```
+
+shallow 또는 평탄화.
+
+### 2. 라우트 순서
+
+```ruby
+get "/posts/featured", to: "posts#featured"
+resources :posts    # /posts/:id가 /posts/featured를 가로챌 수도
+
+# 더 구체적 라우트 먼저
+```
+
+### 3. PATCH vs PUT
+
+기본 update는 PATCH + PUT 둘 다 수락. REST 엄격하면 PATCH만:
+
+```ruby
+resources :posts, only: [:update], via: :patch
+```
+
+### 4. 헬퍼 이름 변경
+
+```ruby
+resources :posts, as: :articles    # post_path → article_path
+```
+
+URL은 그대로, 헬퍼만.
+
+### 5. params에 ?[] (Rails 5+ deprecated)
+
+```ruby
+?tags[]=1&tags[]=2
+```
+
+Rails는 자동 배열 변환. 다른 백엔드와 호환성 확인.
+
+## 참고
+
+- [Rails Guides: Routing](https://guides.rubyonrails.org/routing.html)
+- [routes.rb DSL](https://api.rubyonrails.org/classes/ActionDispatch/Routing/Mapper/Resources.html)
+- [Rails URL helpers](https://api.rubyonrails.org/classes/ActionDispatch/Routing/UrlFor.html)
+- [Sidekiq Web UI mount](https://github.com/sidekiq/sidekiq/wiki/Monitoring)

@@ -1,0 +1,165 @@
+---
+title: "Synchronous (동기)"
+aliases: ["synchronous", "sync", "동기", "동기식", "동기 호출", "synchronous call"]
+tags: [concurrency, programming-model, sync-async]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Synchronous (동기)** 는 호출자가 **결과가 나올 때까지 기다리는** 실행 모델. 함수를 호출한 코드는 그 함수가 반환할 때까지 **다음 줄로 진행하지 않는다**.
+
+이 정의는 Java 의 `synchronized` 키워드와는 **별개의 개념** 이다. `synchronized` 는 동시성 제어 (mutual exclusion), Synchronous 는 호출 모델 (control flow).
+
+[[Asynchronous]] 와의 대비, 그리고 [[Blocking]] 과의 관계가 핵심.
+
+## 가장 단순한 형태
+
+```java
+// Synchronous
+String result = http.get("/api/users");   // 응답이 올 때까지 대기
+process(result);                          // 그 다음 진행
+```
+
+호출자는 응답이 오기 전까지는 다음 줄을 실행하지 않는다. 코드 작성과 디버깅이 가장 쉽다.
+
+## Sync 의 두 형태, blocking vs non-blocking
+
+Synchronous 는 호출자가 **결과를 기다린다** 는 의미이지, 그 동안 **CPU 를 점유** 하는지는 별개. 따라서 두 가지가 가능.
+
+### Synchronous + Blocking (가장 흔함)
+
+호출자가 결과를 기다리는 동안 **스레드가 멈춘다 (block)**. OS 가 스레드를 sleep 상태로 만들고 CPU 를 다른 스레드에게 양보.
+
+```java
+// 전형적인 sync + blocking
+Socket s = serverSocket.accept();         // 연결이 올 때까지 block
+String line = reader.readLine();          // 데이터가 올 때까지 block
+Thread.sleep(1000);                       // 1초 block
+```
+
+### Synchronous + Non-Blocking (드물지만 가능)
+
+호출자가 결과를 기다리지만 **스레드는 활성 상태** 로 계속 돈다. busy-waiting 또는 polling.
+
+```java
+while (!result.isReady()) {
+    Thread.onSpinWait();   // hint, 스레드 양보 안 함
+}
+String value = result.get();
+```
+
+CPU 를 낭비하므로 거의 안 쓴다. 매우 짧은 대기에만 쓰이는 마이크로 최적화.
+
+## 동기 호출 흐름
+
+```text
+[caller]                    [callee]
+   │
+   │── call ───────────────►│
+   │                         │ 작업 수행
+   │ (waiting)              │
+   │                         │
+   │◄─────────── return ────│
+   │
+   │ 결과 처리 시작
+   │
+```
+
+호출자와 호출자의 스택 프레임이 **일직선** 으로 이어진다. 디버깅 시 stack trace 가 그대로 보인다.
+
+## 장점
+
+- **읽기 쉽다**, 위에서 아래로 흐름이 명확
+- **에러 처리가 자연스럽다**, `try / catch` 가 호출자 스택에 닿는다
+- **디버깅이 쉽다**, breakpoint 가 작동, stack trace 가 일관
+- **테스트가 쉽다**, 순차 실행이라 결과 비교 단순
+
+## 단점
+
+- **느린 작업은 스레드를 묶는다**, 동시에 1000명 응답하려면 1000개 스레드
+- **CPU 활용도가 낮을 수 있다**, I/O 대기 중에는 CPU idle
+- **응답성 저하**, 한 요청이 다른 요청의 진행을 막을 수 있다
+
+## 언제 동기가 적절한가
+
+- **응답이 빠르고 일관적**, 5ms 이내의 DB 쿼리 같은 작업
+- **순차 흐름이 본질**, 단계 A 의 결과로 단계 B 를 결정
+- **저부하 시스템**, 동시 접속 < 수백 수준
+- **테스트, 스크립트, 마이그레이션 도구**
+
+## 언제 [[Asynchronous]] 가 더 나은가
+
+- 외부 API 호출 (수 초 걸릴 수 있음)
+- 수만 명 동시 접속을 받는 서버
+- UI 가 멈추면 안 되는 클라이언트
+- 여러 작업을 병렬로 진행해야 할 때
+
+## Java 의 동기 IO 예
+
+### HTTP 클라이언트 (sync)
+
+```java
+// HttpClient 동기 모드
+HttpClient client = HttpClient.newHttpClient();
+HttpResponse<String> response = client.send(
+    HttpRequest.newBuilder(URI.create("https://api.example.com")).build(),
+    BodyHandlers.ofString()
+);
+// 응답이 도착할 때까지 block
+```
+
+### File I/O (sync)
+
+```java
+String content = Files.readString(Path.of("data.txt"));
+// 파일을 다 읽을 때까지 block
+```
+
+### Socket (sync)
+
+```java
+ServerSocket server = new ServerSocket(8080);
+Socket client = server.accept();           // 연결을 받을 때까지 block
+String line = new BufferedReader(...).readLine();   // 데이터를 받을 때까지 block
+```
+
+## Sync 모델의 동시성, 스레드 풀
+
+대량 동시성을 위해 sync 코드는 **스레드 풀** 을 쓴다. 각 요청을 별도 스레드에 할당해 병렬 처리.
+
+```java
+ExecutorService pool = Executors.newFixedThreadPool(100);
+// 매 요청마다
+pool.submit(() -> {
+    String r = http.get(url);    // sync call, but in separate thread
+    process(r);
+});
+```
+
+이 방식의 한계:
+- 스레드 1개당 메모리 ~1MB
+- 100 스레드 ≈ 100MB
+- 10,000 동시 연결 → ~10GB, 비현실적
+
+Java 21+ 의 **Virtual Threads (JEP 444)** 가 이 한계를 깬다. 동기 코드 그대로 두면서도 수백만 동시 연결을 가능하게 만든다.
+
+## sync 와 [[Blocking]] 의 관계
+
+| 표현 | 의미 |
+|:---|:---|
+| **synchronous** | 호출자가 결과를 기다린다 (control flow) |
+| **blocking** | 그 동안 스레드가 멈춘다 (thread state) |
+
+같이 쓰이지만 다른 차원. 대부분의 sync 코드는 blocking 이지만, **non-blocking sync** 도 가능 (`Thread.onSpinWait()`, busy-loop) 하다.
+
+반대로 **async + blocking** 도 가능 (콜백 안에서 다시 sleep 하는 경우, 자주 보는 안티패턴).
+
+## 참고
+
+- [[Asynchronous]]
+- [[Blocking]]
+- [[Non-Blocking]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- Wikipedia, [Synchronous I/O](https://en.wikipedia.org/wiki/Asynchronous_I/O)
+- JEP 444, [Virtual Threads](https://openjdk.org/jeps/444)

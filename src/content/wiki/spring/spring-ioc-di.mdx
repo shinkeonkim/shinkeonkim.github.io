@@ -1,0 +1,440 @@
+---
+title: "[Spring] IoC와 DI: Bean, ApplicationContext, @Autowired"
+aliases: ["spring ioc", "spring di", "dependency injection", "ApplicationContext", "BeanFactory", "constructor injection"]
+tags: [spring, ioc, di, bean, container]
+updated: 2026-06-20
+---
+
+## 정의
+
+**IoC (Inversion of Control)**는 객체 생성/생명주기 제어를 프레임워크가 가져가는 원칙. **DI (Dependency Injection)**는 그 구현 방법. Spring 컨테이너(ApplicationContext)가 Bean을 관리하고 의존성을 주입.
+
+## Bean 등록
+
+### @Component (그리고 sterotype)
+
+```java
+@Component
+public class UserService {
+    ...
+}
+
+@Service          // @Component 의 별칭 (비즈니스 로직)
+public class OrderService { ... }
+
+@Repository       // @Component (DB 접근, 예외 변환)
+public class UserRepository { ... }
+
+@Controller       // @Component (웹)
+public class HomeController { ... }
+
+@RestController   // @Controller + @ResponseBody
+public class ApiController { ... }
+```
+
+`@SpringBootApplication`의 `@ComponentScan`이 자동 검색.
+
+### @Configuration + @Bean
+
+```java
+@Configuration
+public class AppConfig {
+
+    @Bean
+    public RestClient restClient() {
+        return RestClient.builder()
+            .baseUrl("https://api.example.com")
+            .build();
+    }
+
+    @Bean
+    public ObjectMapper objectMapper() {
+        return new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    }
+}
+```
+
+`@Bean` 메서드의 반환값이 Bean. 외부 라이브러리 등 직접 `@Component` 못 다는 경우.
+
+## 의존성 주입
+
+### 생성자 주입 (권장)
+
+```java
+@Service
+public class UserService {
+    private final UserRepository userRepository;
+    private final EmailService emailService;
+
+    public UserService(UserRepository userRepository, EmailService emailService) {
+        this.userRepository = userRepository;
+        this.emailService = emailService;
+    }
+}
+```
+
+장점:
+- final 필드 (불변)
+- 테스트 시 mock 주입 쉬움
+- 순환 의존성 컴파일 타임 발견
+- Spring 없이도 테스트 가능
+
+생성자가 하나면 `@Autowired` 생략 가능 (4.3+).
+
+Lombok 사용:
+
+```java
+@Service
+@RequiredArgsConstructor    // final 필드에 대한 생성자 자동
+public class UserService {
+    private final UserRepository userRepository;
+    private final EmailService emailService;
+}
+```
+
+### Setter 주입 (선택적 의존성)
+
+```java
+@Service
+public class UserService {
+    private EmailService emailService;
+
+    @Autowired(required = false)
+    public void setEmailService(EmailService emailService) {
+        this.emailService = emailService;
+    }
+}
+```
+
+선택적/late binding 필요 시.
+
+### Field 주입 (비권장)
+
+```java
+@Service
+public class UserService {
+    @Autowired
+    private UserRepository userRepository;    // 비권장
+}
+```
+
+테스트 어려움, final 불가, 순환 의존 늦게 발견. 가능하면 피하기.
+
+## ApplicationContext
+
+Bean 컨테이너 + 추가 기능 (이벤트, 메시지, 환경).
+
+```java
+@Autowired
+private ApplicationContext context;
+
+User user = context.getBean(User.class);
+String[] beanNames = context.getBeanDefinitionNames();
+```
+
+직접 호출은 거의 안 함. Bean으로 주입받음.
+
+## Bean 식별: @Qualifier, @Primary
+
+같은 타입 Bean이 여러 개일 때.
+
+```java
+@Bean
+public DataSource primaryDataSource() { ... }
+
+@Bean
+public DataSource secondaryDataSource() { ... }
+```
+
+```java
+@Autowired
+@Qualifier("primaryDataSource")
+private DataSource ds;
+
+// 또는 @Primary
+@Bean
+@Primary
+public DataSource primary() { ... }
+```
+
+`@Primary`는 기본 선택. 다른 곳에서 `@Qualifier` 명시 시 그것.
+
+## Bean Scope
+
+```java
+@Service
+@Scope("singleton")    // 기본 (애플리케이션 1개)
+public class UserService { }
+
+@Component
+@Scope("prototype")    // 매번 새 인스턴스
+public class TempBean { }
+
+@Component
+@Scope(value = "request", proxyMode = ScopedProxyMode.TARGET_CLASS)    // HTTP 요청당
+public class RequestScopedBean { }
+
+@Component
+@Scope("session")
+public class SessionBean { }
+
+@Component
+@Scope("application")    // ServletContext 당 (= singleton과 거의 같음)
+public class AppBean { }
+
+@Component
+@Scope("websocket")
+public class WsBean { }
+```
+
+기본은 singleton. 대부분 그대로.
+
+## 라이프사이클
+
+```java
+@Component
+public class MyBean {
+
+    @PostConstruct
+    public void init() {
+        // 모든 의존성 주입 후 호출
+    }
+
+    @PreDestroy
+    public void cleanup() {
+        // 컨테이너 종료 시 호출
+    }
+}
+```
+
+`InitializingBean`/`DisposableBean` 인터페이스도 가능하나 어노테이션이 더 깔끔.
+
+## @Value: 외부 값 주입
+
+```java
+@Service
+public class MyService {
+
+    @Value("${app.api.key}")
+    private String apiKey;
+
+    @Value("${app.timeout:30}")    // 기본값 30
+    private int timeout;
+
+    @Value("${app.tags}")          // CSV → List
+    private List<String> tags;
+
+    @Value("#{systemProperties['user.home']}")    // SpEL
+    private String home;
+}
+```
+
+`application.properties`/`application.yml`의 값. 환경변수도.
+
+더 큰 설정은 `@ConfigurationProperties`:
+
+```java
+@ConfigurationProperties(prefix = "app")
+public record AppProperties(
+    String name,
+    Api api,
+    int timeout
+) {
+    public record Api(String url, String key) { }
+}
+
+// application.yml
+app:
+  name: myapp
+  api:
+    url: https://api.example.com
+    key: xxx
+  timeout: 30
+
+@EnableConfigurationProperties(AppProperties.class)
+@Configuration
+public class Config { }
+
+@Service
+public class MyService {
+    private final AppProperties props;
+    public MyService(AppProperties props) { this.props = props; }
+}
+```
+
+## Conditional Bean
+
+```java
+@Bean
+@ConditionalOnProperty(name = "feature.enabled", havingValue = "true")
+public FeatureService featureService() { ... }
+
+@Bean
+@ConditionalOnMissingBean
+public DefaultService defaultService() { ... }
+
+@Bean
+@ConditionalOnClass(SomeClass.class)
+public IntegrationBean integration() { ... }
+
+@Bean
+@Profile("prod")    // 활성 프로파일이 prod일 때
+public ProductionConfig prodConfig() { ... }
+
+@Bean
+@Profile("!test")    // test가 아닐 때
+public RealEmailService email() { ... }
+```
+
+Spring Boot 자동 설정의 핵심 메커니즘.
+
+## Profile
+
+환경 분리.
+
+```yaml
+# application.yml
+spring:
+  profiles:
+    active: dev
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+spring:
+  datasource:
+    url: jdbc:h2:mem:devdb
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+```
+
+실행:
+```bash
+java -jar app.jar --spring.profiles.active=prod
+# 또는
+SPRING_PROFILES_ACTIVE=prod java -jar app.jar
+```
+
+## ObjectProvider (선택적 / Optional / 0..N)
+
+```java
+@Service
+public class MyService {
+    private final ObjectProvider<EmailService> emailProvider;
+
+    public void notify(User user) {
+        emailProvider.ifAvailable(email -> email.send(user));
+    }
+}
+```
+
+Bean이 없거나 여러 개일 때 안전 처리.
+
+## 순환 의존성
+
+```java
+@Service
+public class A {
+    public A(B b) { }
+}
+
+@Service
+public class B {
+    public B(A a) { }    // 순환! 시작 실패
+}
+```
+
+해결:
+- 설계 재검토 (대부분 책임 분리 문제)
+- `@Lazy` 주입
+- ApplicationContext 통해 lookup
+
+2.6+ 부터 순환 의존성 기본 금지. 환경에 따라 명시 허용:
+
+```properties
+spring.main.allow-circular-references=true    # 권장 X
+```
+
+## 함정
+
+### 1. field injection의 테스트 어려움
+
+```java
+public class UserService {
+    @Autowired private UserRepository repo;    // 어떻게 mock?
+
+    // 리플렉션으로 가능하지만 번거로움
+}
+```
+
+생성자 주입으로 전환.
+
+### 2. @ComponentScan 범위
+
+`@SpringBootApplication`은 자기 패키지와 하위만 스캔. 다른 패키지의 `@Component`는 안 등록됨.
+
+```java
+@SpringBootApplication(scanBasePackages = {"com.example", "com.other"})
+```
+
+### 3. prototype scope 안의 singleton
+
+```java
+@Component
+@Scope("singleton")
+public class Singleton {
+    @Autowired
+    private Prototype prototype;    // singleton 만들 때 1번만 주입
+}
+```
+
+매번 새 prototype 원하면 `ObjectProvider` 또는 `Provider<T>`.
+
+### 4. @PostConstruct vs @Bean(initMethod=...)
+
+```java
+@PostConstruct        // 어노테이션 기반
+public void init() { ... }
+
+@Bean(initMethod = "init")    // XML 호환
+public MyBean myBean() { ... }
+```
+
+둘 다 동작. 어노테이션이 깔끔.
+
+### 5. @Configuration vs @Component for @Bean methods
+
+```java
+@Configuration
+public class Config {
+    @Bean MyBean a() { return new MyBean(); }
+    @Bean MyBean b() { return a(); }    // 같은 a() 인스턴스 (proxy)
+}
+
+@Component    // proxy 없음
+public class Config {
+    @Bean MyBean a() { return new MyBean(); }
+    @Bean MyBean b() { return a(); }    // 새 MyBean (의도와 다름)
+}
+```
+
+`@Configuration`은 CGLIB proxy로 같은 호출엔 같은 인스턴스. `@Component`는 일반 호출.
+
+## 참고
+
+- [Spring Core: IoC Container](https://docs.spring.io/spring-framework/reference/core/beans.html)
+- [Dependency Injection](https://docs.spring.io/spring-framework/reference/core/beans/dependencies.html)
+- [Bean scopes](https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html)
+- [Spring Boot @ConfigurationProperties](https://docs.spring.io/spring-boot/docs/current/reference/html/features.html#features.external-config.typesafe-configuration-properties)
+- [Lombok](https://projectlombok.org/)

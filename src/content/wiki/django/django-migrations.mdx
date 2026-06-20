@@ -1,0 +1,311 @@
+---
+title: "[Django] 마이그레이션: makemigrations, migrate, 데이터 마이그레이션"
+aliases: ["django migrations", "makemigrations", "migrate", "RunPython", "schema migration", "squashmigrations"]
+tags: [django, migration, schema, db]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django 마이그레이션은 **모델 변경을 DB 스키마 변경으로 변환·기록**하는 시스템. `makemigrations`는 모델과 현재 마이그레이션 상태를 비교해 새 마이그레이션 파일 생성. `migrate`는 DB에 적용. 모든 변경 이력이 `migrations/` 디렉터리에 코드로 보관되어 협업·롤백·재현 가능.
+
+## 기본 흐름
+
+```bash
+# 1. 모델 정의 또는 수정
+# 2. 마이그레이션 파일 생성
+python manage.py makemigrations
+python manage.py makemigrations blog        # 특정 앱만
+python manage.py makemigrations --dry-run   # 미리보기 (파일 안 만듦)
+python manage.py makemigrations --name add_author blog    # 이름 지정
+
+# 3. DB에 적용
+python manage.py migrate
+python manage.py migrate blog               # 특정 앱
+python manage.py migrate blog 0003          # 특정 번호까지 (롤백/포워드)
+python manage.py migrate blog zero          # 전체 롤백
+```
+
+## 마이그레이션 파일 구조
+
+```python
+# blog/migrations/0002_add_slug.py
+from django.db import migrations, models
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("blog", "0001_initial"),
+    ]
+
+    operations = [
+        migrations.AddField(
+            model_name="post",
+            name="slug",
+            field=models.SlugField(default=""),
+            preserve_default=False,
+        ),
+    ]
+```
+
+`dependencies`로 순서, `operations`로 변경 사항. 다른 앱 의존도 가능.
+
+## 자주 보는 Operation
+
+| Operation | 동작 |
+|-----------|------|
+| `CreateModel` | 새 모델 |
+| `DeleteModel` | 모델 삭제 |
+| `RenameModel` | 모델 이름 변경 |
+| `AddField` | 필드 추가 |
+| `RemoveField` | 필드 삭제 |
+| `AlterField` | 필드 변경 |
+| `RenameField` | 필드 이름 변경 |
+| `AlterUniqueTogether` | unique_together |
+| `AlterIndexTogether` | index_together (deprecated, Meta.indexes) |
+| `AddIndex` / `RemoveIndex` | 인덱스 |
+| `AddConstraint` / `RemoveConstraint` | 제약 |
+| `RunPython` | Python 함수 실행 |
+| `RunSQL` | 원시 SQL |
+
+## 마이그레이션 상태 확인
+
+```bash
+python manage.py showmigrations
+python manage.py showmigrations blog
+python manage.py showmigrations --plan
+```
+
+`[X]`는 적용됨, `[ ]`는 미적용.
+
+## 데이터 마이그레이션 (RunPython)
+
+스키마 변경뿐 아니라 데이터 변환도 마이그레이션으로 관리.
+
+```bash
+python manage.py makemigrations --empty blog --name populate_slugs
+```
+
+```python
+# blog/migrations/0003_populate_slugs.py
+from django.db import migrations
+from django.utils.text import slugify
+
+def populate_slugs(apps, schema_editor):
+    Post = apps.get_model("blog", "Post")    # 마이그레이션 시점의 모델 (중요!)
+    for post in Post.objects.all():
+        post.slug = slugify(post.title)
+        post.save()
+
+def reverse(apps, schema_editor):
+    Post = apps.get_model("blog", "Post")
+    Post.objects.update(slug="")
+
+class Migration(migrations.Migration):
+    dependencies = [("blog", "0002_add_slug")]
+
+    operations = [
+        migrations.RunPython(populate_slugs, reverse),
+    ]
+```
+
+**중요**: `apps.get_model()`로 받은 모델은 **그 마이그레이션 시점의 스키마**. 현재 코드의 모델을 import하면 안 됨 (이후 변경이 영향).
+
+## RunSQL
+
+복잡한 변환을 SQL로.
+
+```python
+migrations.RunSQL(
+    "UPDATE blog_post SET views = views * 2 WHERE views > 100;",
+    reverse_sql="UPDATE blog_post SET views = views / 2 WHERE views > 200;",
+)
+```
+
+크로스 DB 호환성 손실. 가능한 한 ORM 사용.
+
+## 마이그레이션 충돌
+
+여러 개발자가 같은 base에서 다른 마이그레이션 → 충돌.
+
+```
+blog/
+    migrations/
+        0001_initial.py
+        0002_add_slug.py
+        0003_add_views.py       # 개발자 A
+        0003_add_tags.py        # 개발자 B
+```
+
+해결:
+
+```bash
+python manage.py makemigrations --merge
+# 0004_merge_*.py 생성, 둘을 합침
+```
+
+또는 한 쪽 마이그레이션 번호 수정 후 dependencies 손봄.
+
+## squashmigrations
+
+마이그레이션이 많아져 느려지면 압축.
+
+```bash
+python manage.py squashmigrations blog 0010
+# 0001 ~ 0010을 squash해서 하나로
+```
+
+테스트 후 옛 마이그레이션 파일 삭제 가능. 단 모든 환경이 squash 결과 이전 마이그레이션을 적용했는지 확인 필요.
+
+## fake migration
+
+DB 변경 없이 마이그레이션 적용된 것으로만 표시.
+
+```bash
+python manage.py migrate blog 0003 --fake
+python manage.py migrate --fake-initial    # initial만 fake
+```
+
+기존 DB에서 Django로 옮기는 경우, 또는 손으로 변경한 스키마를 인식시킬 때. 신중히 사용.
+
+## sqlmigrate: SQL 미리보기
+
+```bash
+python manage.py sqlmigrate blog 0002
+```
+
+마이그레이션이 실행할 SQL 출력. 운영 환경 적용 전 검토.
+
+## 마이그레이션 없는 변경
+
+다음은 makemigrations가 감지 못 함:
+- `verbose_name` 변경 (마이그레이션 생성됨, DB 영향 X)
+- `help_text` 변경 (마이그레이션 생성됨)
+- Manager 변경
+- 메서드 추가/변경
+
+다음은 감지:
+- 필드 추가/변경/삭제
+- Meta options (ordering, db_table, indexes, constraints 등)
+- 모델 추가/삭제/이름 변경
+
+## 큰 테이블 마이그레이션
+
+수백만 행 테이블에 `AddField default=...`는 락 + 백필 → 다운타임 발생 가능.
+
+전략:
+1. NULL 허용 + nullable 추가
+2. 데이터 마이그레이션으로 배치 업데이트 (RunPython + iterator)
+3. NOT NULL + default 변경
+
+```python
+# 단계 1: nullable
+AddField(name="slug", field=SlugField(null=True))
+
+# 단계 2: 배치로 populate
+def populate(apps, _):
+    Post = apps.get_model("blog", "Post")
+    for batch in chunked(Post.objects.filter(slug__isnull=True), 1000):
+        ...
+
+# 단계 3: NOT NULL
+AlterField(name="slug", field=SlugField(null=False))
+```
+
+`django-pg-zero-downtime-migrations` 같은 라이브러리가 자동화.
+
+## 마이그레이션 디렉터리
+
+`blog/migrations/__init__.py` 필수. 누락 시 makemigrations가 인식 못 함.
+
+`.gitignore`에 `migrations/` 추가 금지. **마이그레이션 파일은 반드시 커밋**. 협업과 배포의 핵심.
+
+## 함정
+
+### 1. 마이그레이션 누락 커밋
+
+다른 개발자 환경에서 makemigrations가 다시 만들려고 함 → 충돌. 항상 커밋.
+
+### 2. 모델 변경 후 makemigrations 안 함
+
+런타임에 OperationalError. 그래도 무시하지 말 것.
+
+### 3. RunPython에서 현재 모델 import
+
+```python
+# WRONG
+from blog.models import Post
+
+def migrate_data(apps, _):
+    Post.objects.update(...)    # 현재 코드의 모델, 미래 변경에 깨짐
+
+# CORRECT
+def migrate_data(apps, _):
+    Post = apps.get_model("blog", "Post")
+    Post.objects.update(...)
+```
+
+### 4. reverse 함수 미작성
+
+```python
+migrations.RunPython(forward)    # 자동으로 RunPython.noop이 됨
+
+# 명시
+migrations.RunPython(forward, migrations.RunPython.noop)    # 명시적 noop
+migrations.RunPython(forward, reverse_func)                  # 진짜 역
+```
+
+롤백 가능하게 reverse 작성 권장.
+
+### 5. atomic 트랜잭션
+
+마이그레이션은 기본적으로 트랜잭션. 일부 DDL이 트랜잭션 미지원이면:
+
+```python
+class Migration(migrations.Migration):
+    atomic = False
+```
+
+PostgreSQL은 DDL 트랜잭션 지원, MySQL은 일부만.
+
+## 자주 보는 패턴
+
+### 환경별 다른 마이그레이션
+
+마이그레이션은 환경 독립적이어야. 환경별 조건 분기는 안티패턴. settings로 처리할 것이 있으면 데이터 마이그레이션에서 settings 참조.
+
+### 초기 데이터
+
+```python
+def create_initial_categories(apps, _):
+    Category = apps.get_model("blog", "Category")
+    Category.objects.bulk_create([
+        Category(name="Tech"),
+        Category(name="Design"),
+    ])
+```
+
+또는 `loaddata`로 fixtures.
+
+### 마이그레이션 테스트
+
+```python
+from django.test import TransactionTestCase
+from django.db.migrations.executor import MigrationExecutor
+
+class MigrationTest(TransactionTestCase):
+    def test_data_migration(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate([("blog", "0002")])
+        # 검증
+        executor.migrate([("blog", "0003")])
+        # 데이터 마이그레이션 결과 확인
+```
+
+`django-test-migrations` 같은 라이브러리가 도움.
+
+## 참고
+
+- [Migrations documentation](https://docs.djangoproject.com/en/stable/topics/migrations/)
+- [Migration operations](https://docs.djangoproject.com/en/stable/ref/migration-operations/)
+- [Writing database migrations](https://docs.djangoproject.com/en/stable/howto/writing-migrations/)
+- [django-pg-zero-downtime-migrations](https://github.com/tbicr/django-pg-zero-downtime-migrations)

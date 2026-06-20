@@ -1,0 +1,134 @@
+---
+title: "[Pandas] read_json / to_json"
+aliases: ["Pandas read_json", "Pandas to_json", "JSON pandas"]
+tags: [python, pandas, io, json]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`pandas.read_json`** 은 JSON 문자열 또는 파일을 [[Pandas DataFrame]] 으로 변환. **orient** 파라미터가 핵심, JSON 구조를 어떻게 해석할지 결정한다.
+
+## orient 옵션 비교
+
+| orient | 구조 | 적합도 |
+|:---|:---|:---|
+| `records` | `[{...}, {...}]` (배열 of 객체) | 가장 흔함, API 응답 |
+| `columns` | `{col: {idx: val}}` (열 중심) | 기본값 |
+| `index` | `{idx: {col: val}}` (행 중심) | 잘 안 씀 |
+| `split` | `{columns:[...], index:[...], data:[[...]]}` | 효율적 직렬화 |
+| `table` | JSON Table Schema | 메타데이터 포함 |
+| `values` | `[[...], [...]]` (2D 배열) | 헤더 없는 raw |
+
+## 가장 흔한 패턴, records
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+import io
+
+json_text = '[{"name":"Alice","age":30},{"name":"Bob","age":25}]'
+df = pd.read_json(io.StringIO(json_text), orient='records')
+print(df)`}
+  output={`    name  age
+0  Alice   30
+1    Bob   25`}
+/>
+
+|   | name  | age |
+|---|-------|-----|
+| 0 | Alice | 30  |
+| 1 | Bob   | 25  |
+
+## API 응답 처리 패턴
+
+```python
+import requests
+response = requests.get('https://api.example.com/users')
+df = pd.DataFrame(response.json())      # 직접 변환이 더 명확할 때가 많음
+```
+
+`pd.read_json` 보다 **`pd.DataFrame(json.loads(text))`** 이 더 명확한 경우가 많다.
+
+## 중첩 JSON 처리
+
+깊이 있는 JSON 에는 `pd.json_normalize` 가 강력.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`data = [
+    {'id': 1, 'name': 'Alice', 'address': {'city': 'Seoul', 'zip': '12345'}},
+    {'id': 2, 'name': 'Bob',   'address': {'city': 'Busan', 'zip': '67890'}},
+]
+df = pd.json_normalize(data, sep='_')
+print(df)`}
+  output={`   id   name address_city address_zip
+0   1  Alice        Seoul       12345
+1   2    Bob        Busan       67890`}
+/>
+
+|   | id | name  | address_city | address_zip |
+|---|----|-------|--------------|-------------|
+| 0 | 1  | Alice | Seoul        | 12345       |
+| 1 | 2  | Bob   | Busan        | 67890       |
+
+중첩 객체가 평탄한 컬럼으로 펼쳐진다.
+
+## 배열 안의 배열 (record_path)
+
+```python
+data = [
+    {'user': 'Alice', 'orders': [{'id': 1, 'qty': 2}, {'id': 2, 'qty': 5}]},
+    {'user': 'Bob',   'orders': [{'id': 3, 'qty': 1}]},
+]
+df = pd.json_normalize(data, record_path='orders', meta='user')
+# user 별로 orders 가 펼쳐짐
+```
+
+## 저장 (to_json)
+
+```python
+df.to_json('out.json', orient='records', force_ascii=False, indent=2)
+df.to_json(orient='records', date_format='iso')         # 문자열 반환
+df.to_json('out.jsonl', orient='records', lines=True)    # JSONL (한 줄당 객체)
+```
+
+## 자주 만나는 함정
+
+### 1. orient 미지정 시 columns 가 기본
+
+```python
+pd.read_json('[{"a":1,"b":2}]')                  # orient='columns' 가 기본
+# → 의도와 다른 결과
+pd.read_json('[{"a":1,"b":2}]', orient='records')  # 보통 원하는 것
+```
+
+### 2. 한글이 \\u 로 escape
+
+```python
+df.to_json('out.json', force_ascii=False)   # 한글 그대로
+```
+
+### 3. 날짜 형식
+
+```python
+df.to_json(date_format='iso')        # "2024-01-15T00:00:00"
+df.to_json(date_format='epoch')      # 1705248000000 (default)
+```
+
+### 4. 대용량 JSONL
+
+```python
+# 줄당 객체 형식이 메모리 효율적
+for chunk in pd.read_json('huge.jsonl', lines=True, chunksize=10_000):
+    process(chunk)
+```
+
+## 참고
+
+- [[Pandas DataFrame]]
+- [[Pandas read_csv]]
+- [[Pandas read_excel]]
+- 공식 문서, [read_json](https://pandas.pydata.org/docs/reference/api/pandas.read_json.html), [json_normalize](https://pandas.pydata.org/docs/reference/api/pandas.json_normalize.html)

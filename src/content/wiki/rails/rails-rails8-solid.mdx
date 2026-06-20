@@ -1,0 +1,344 @@
+---
+title: "[Rails] Rails 8: Solid Queue/Cache/Cable, Kamal, Propshaft"
+aliases: ["rails 8", "solid queue", "solid cache", "solid cable", "kamal deploy", "propshaft", "no PaaS"]
+tags: [rails, rails8, solid-queue, kamal]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Rails 8 (2024 11월)**의 표어는 "No PaaS"다. Solid 시리즈로 Redis/외부 큐 의존을 제거하고, Kamal로 Docker 기반 자체 호스팅을 간단하게. 기존 Rails 7 앱은 점진 마이그레이션 가능.
+
+## Solid Trifecta
+
+| 컴포넌트 | 역할 | 백엔드 |
+|----------|------|--------|
+| **Solid Queue** | 백그라운드 잡 | DB |
+| **Solid Cache** | Rails.cache | DB |
+| **Solid Cable** | Action Cable | DB |
+
+세 가지 모두 DB 사용 → Redis 불필요. 비용·운영 단순화.
+
+## Solid Queue
+
+`rails-active-job`에 표준 어댑터. Rails 8 새 앱 기본.
+
+```bash
+bin/rails solid_queue:install
+```
+
+```ruby
+# config/application.rb
+config.active_job.queue_adapter = :solid_queue
+```
+
+설정:
+
+```yaml
+# config/queue.yml
+production:
+  dispatchers:
+    - polling_interval: 1
+      batch_size: 500
+  workers:
+    - queues: "*"
+      threads: 5
+      processes: 1
+      polling_interval: 0.1
+```
+
+워커:
+
+```bash
+bin/jobs
+# 또는
+bundle exec rake solid_queue:start
+```
+
+cron 같은 recurring:
+
+```yaml
+# config/recurring.yml
+production:
+  daily_report:
+    class: DailyReportJob
+    schedule: every day at 9am
+  cleanup:
+    class: CleanupJob
+    schedule: every 1 hour
+```
+
+특징:
+- 트랜잭션 안전 (같은 DB)
+- delayed/recurring 지원
+- queue prioritization
+- Sidekiq 만큼은 아니나 충분히 빠름
+
+## Solid Cache
+
+```ruby
+# config/environments/production.rb
+config.cache_store = :solid_cache_store
+```
+
+DB에 저장 → Redis 없이 캐시. 부분적 LRU 처리.
+
+```ruby
+Rails.cache.write("key", "value", expires_in: 1.hour)
+Rails.cache.read("key")
+Rails.cache.fetch("key") { expensive_computation }
+```
+
+기존 Rails.cache API와 호환.
+
+대규모 → Redis가 여전히 빠름. 작은 ~ 중규모는 충분.
+
+## Solid Cable
+
+```yaml
+# config/cable.yml
+production:
+  adapter: solid_cable
+```
+
+Action Cable이 DB 통해 pub/sub. Redis 불필요.
+
+3분 polling 기본 (config `polling_interval`).
+
+## Kamal 2
+
+Docker 기반 단일 명령 배포.
+
+```bash
+bin/kamal init
+# config/deploy.yml 생성
+
+bin/kamal setup        # 첫 배포 (서버 setup + Docker 이미지 + 컨테이너)
+bin/kamal deploy       # 이후 배포
+bin/kamal app logs
+bin/kamal console
+bin/kamal shell
+bin/kamal rollback
+```
+
+`config/deploy.yml`:
+
+```yaml
+service: myapp
+image: myorg/myapp
+
+servers:
+  web:
+    hosts:
+      - 192.168.0.1
+      - 192.168.0.2
+  job:
+    hosts:
+      - 192.168.0.3
+    cmd: bin/jobs
+
+proxy:
+  ssl: true
+  host: example.com
+
+registry:
+  server: ghcr.io
+  username: myorg
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+env:
+  clear:
+    RAILS_LOG_TO_STDOUT: "1"
+    DATABASE_URL: "postgres://..."
+  secret:
+    - RAILS_MASTER_KEY
+    - SECRET_KEY_BASE
+
+builder:
+  arch: amd64
+  cache:
+    type: gha
+
+accessories:
+  db:
+    image: postgres:16
+    host: 192.168.0.4
+    env:
+      secret: [POSTGRES_PASSWORD]
+    directories:
+      - data:/var/lib/postgresql/data
+```
+
+`bin/kamal deploy`로 빌드 + 푸시 + 무중단 롤링 업데이트.
+
+특징:
+- zero-downtime (Traefik 대신 자체 proxy로 8.0+)
+- 다중 서버
+- accessories (DB, Redis 등 별도 컨테이너)
+- 자체 호스팅에 PaaS 같은 UX
+
+## Propshaft
+
+Sprockets 후속 (Rails 7.x에서 도입). 더 단순한 asset pipeline.
+
+```ruby
+gem "propshaft"
+```
+
+`app/assets/` → 그냥 정적 파일로. 처리 없이 fingerprinting만.
+
+JS는 importmap 또는 esbuild/jsbundling-rails.
+
+## importmap-rails (default)
+
+Bundler 없이 ES modules.
+
+```ruby
+# config/importmap.rb
+pin "application"
+pin "@hotwired/turbo-rails", to: "turbo.min.js"
+pin "@hotwired/stimulus", to: "stimulus.min.js"
+
+bin/importmap pin react react-dom
+```
+
+```erb
+<%= javascript_importmap_tags %>
+```
+
+빌드 단계 없음. 브라우저가 직접 ES module 로드. HTTP/2 + cache로 충분.
+
+## Async query (8.0+ 강화)
+
+```ruby
+load_async_query = Post.where(...).load_async
+# 다른 작업 진행
+posts = load_async_query.to_a
+```
+
+여러 쿼리를 병렬 실행.
+
+## 새 generators 옵션
+
+```bash
+rails new myapp --skip-jbuilder --skip-system-test    # 옵션 정리
+rails new myapp --solid                                # solid 세 가지 모두
+rails new myapp --javascript=esbuild
+```
+
+## 그 외
+
+- **MySQL 인증 native_password 자동**
+- **Active Record encrypt 기본 더 강함**
+- **Authentication generator** (`bin/rails g authentication`)
+- **Composite primary key 정식 지원**
+- **migration generator의 reference에 type 지정**
+
+## Authentication generator
+
+```bash
+bin/rails g authentication
+```
+
+기본적인 로그인/가입/로그아웃 컨트롤러와 모델 생성. Devise만큼 풍부하진 않지만 시작점.
+
+```ruby
+class User < ApplicationRecord
+  has_secure_password
+  ...
+end
+```
+
+## 호환성과 마이그레이션
+
+기존 Rails 7 앱:
+- Solid Queue로 Sidekiq 대체 가능 (양립 가능)
+- Solid Cache로 Redis 대체 점진
+- Solid Cable은 Redis 대체
+- Kamal은 신규/기존 모두
+
+```bash
+# 7 → 8 업그레이드
+bin/rails app:update
+bundle update rails
+```
+
+deprecation warning 처리.
+
+## 함정
+
+### 1. Solid Queue 처리량 한계
+
+수만 jobs/min은 Sidekiq Pro. 일반 앱(수천)은 충분.
+
+### 2. Solid Cache의 cache stampede
+
+여러 워커가 동시 만료 시 thundering herd. lock-based 패턴 필요.
+
+### 3. Kamal과 다중 데이터센터
+
+지역 분산은 자체. Kamal은 단일 cluster 도구.
+
+### 4. Solid Cable polling
+
+WebSocket 자체 latency는 좋지만 broadcast → DB → polling → 클라이언트로 1-3초 지연 가능.
+
+### 5. CI/CD와 Docker 캐시
+
+Kamal builder에 cache 설정 안 하면 빌드 매우 느림.
+
+```yaml
+builder:
+  cache:
+    type: gha          # GitHub Actions
+    type: registry     # Docker Registry
+```
+
+## Rails 8 + AI
+
+Active Record + pgvector (외부 gem) + 위에서 추출한 embedding으로 RAG 패턴 쉽게.
+
+```ruby
+# pgvector
+class Document < ApplicationRecord
+  has_neighbors :embedding, dimensions: 1536
+end
+
+Document.nearest_neighbors(:embedding, query_vector, distance: "cosine").first(5)
+```
+
+표준은 아니나 Rails 생태계가 빠르게 따라잡는 중.
+
+## 자주 보는 패턴
+
+### 미니멀 자체 호스팅
+
+```
+1 VPS:
+  Postgres (Docker compose)
+  Rails app (Kamal)
+  Solid Queue (worker container)
+  Caddy / Kamal proxy (TLS)
+```
+
+월 $5~20에 충분한 작은 사이트 + zero downtime.
+
+### Hetzner/DigitalOcean + Kamal
+
+Hetzner는 가성비 최고. 4코어 16GB가 월 ~€10.
+
+```bash
+bin/kamal setup
+# 30분 안에 완전 배포 + HTTPS
+```
+
+## 참고
+
+- [Rails 8 release notes](https://guides.rubyonrails.org/8_0_release_notes.html)
+- [Solid Queue](https://github.com/rails/solid_queue)
+- [Solid Cache](https://github.com/rails/solid_cache)
+- [Solid Cable](https://github.com/rails/solid_cable)
+- [Kamal](https://kamal-deploy.org/)
+- [Propshaft](https://github.com/rails/propshaft)
+- [importmap-rails](https://github.com/rails/importmap-rails)

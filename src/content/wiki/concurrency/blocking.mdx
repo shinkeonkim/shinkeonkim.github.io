@@ -1,0 +1,208 @@
+---
+title: "Blocking (블로킹)"
+aliases: ["blocking", "block", "블로킹", "블락킹", "blocking call", "blocking I/O"]
+tags: [concurrency, programming-model, blocking-nonblocking, thread]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Blocking** 은 호출이 **결과가 준비될 때까지 호출 스레드를 멈춰두는** 실행 방식. 멈춰 있는 동안 그 스레드는 다른 일을 할 수 없다. OS 가 스레드를 sleep 상태로 만들고 CPU 를 다른 스레드에게 넘겨준다 (대부분의 경우).
+
+[[Non-Blocking]] 의 반대 개념. [[Synchronous]] 와 자주 같이 쓰이지만 **별도의 차원**.
+
+## 시각화
+
+```anim:blocking-thread-suspend
+{}
+```
+
+Thread T 가 blocking I/O 를 호출하면 BLOCKED 상태로 들어가 CPU 를 양보한다. OS scheduler 는 그 사이 Thread U 에게 CPU 를 돌리고, I/O 가 끝나면 T 를 깨워 다시 CPU 를 할당한다. 호출자의 코드 흐름에서는 "한 줄짜리 sync 호출" 로 보이지만, 스레드 입장에서는 깊은 잠에 든 시간이 존재한다.
+
+같은 흐름을 텍스트로 요약하면 다음과 같다.
+
+```text
+Thread T:  [────── blocking call ──────][다음 작업]
+           │                            │
+           │ ← CPU 다른 스레드에 양보     │
+           │   (block 동안 idle)         │
+           │
+           작업 결과 도착, 깨어남
+```
+
+T 스레드는 결과가 도착할 때까지 어떤 코드도 실행하지 않는다. CPU 는 다른 스레드를 처리한다.
+
+## 가장 흔한 예
+
+### 파일 I/O (blocking)
+
+```java
+String content = Files.readString(Path.of("data.txt"));
+// 파일을 다 읽을 때까지 스레드 block
+```
+
+### 네트워크 I/O (blocking)
+
+```java
+ServerSocket ss = new ServerSocket(8080);
+Socket client = ss.accept();              // 연결이 올 때까지 block
+String line = reader.readLine();          // 데이터 한 줄 올 때까지 block
+```
+
+### 락 대기 (blocking)
+
+```java
+synchronized (obj) {                      // 다른 스레드가 락을 갖고 있으면 block
+    ...
+}
+
+lock.lock();                              // ReentrantLock, 락을 얻을 때까지 block
+```
+
+### 잠 자기 (blocking)
+
+```java
+Thread.sleep(1000);                       // 1초 block
+TimeUnit.SECONDS.sleep(1);                // 같음
+```
+
+### BlockingQueue (blocking)
+
+```java
+BlockingQueue<Task> q = new LinkedBlockingQueue<>();
+Task t = q.take();                        // 원소가 들어올 때까지 block
+q.put(task);                              // 큐가 가득 차면 block
+```
+
+이름에 "Blocking" 이 명시적으로 들어있다.
+
+## blocking 의 코드 특징
+
+- **호출 후 즉시 결과 처리 가능**, return 값을 바로 쓸 수 있다
+- **stack trace 가 일직선**, 디버깅이 쉽다
+- **에러는 그 자리에서 throw**, `try/catch` 가 자연스럽다
+
+```java
+try {
+    String result = blockingCall();   // sync + blocking
+    process(result);                  // 결과 즉시 처리
+} catch (IOException e) {
+    handle(e);                        // 같은 메서드에서 catch
+}
+```
+
+## blocking 의 비용
+
+스레드가 block 됐다고 CPU 가 노는 건 아니다. OS 가 다른 스레드를 스케줄링한다. 하지만:
+
+### 1. 스레드 자체가 비싸다
+
+- JVM 의 platform thread 는 OS 스레드와 1:1
+- 스레드 1개당 메모리 ~1MB (스택)
+- 100,000 스레드 → ~100GB RAM, 비현실적
+
+따라서 **blocking 코드 + 많은 동시 요청** 은 스레드 풀로 제한해야 한다. 풀이 꽉 차면 요청들이 큐에서 기다린다.
+
+### 2. context switch 가 잦다
+
+스레드가 block 되면 OS scheduler 가 다른 스레드로 전환. 이 비용은 마이크로초 수준이지만 누적되면 무시 못 한다.
+
+### 3. 응답성 손실
+
+UI 스레드가 block 되면 화면이 멈춘다. Android 의 `NetworkOnMainThreadException`, Swing 의 EDT (Event Dispatch Thread) 보호가 모두 이 문제를 막기 위한 것.
+
+## blocking + [[Synchronous]] 가 가장 흔하다
+
+```java
+String r = http.get(url);          // sync + blocking
+```
+
+- **sync**: 호출자가 결과를 기다린다
+- **blocking**: 스레드가 멈춘다
+
+대부분의 전통적 Java 코드 (HttpURLConnection, JDBC, JPA, file I/O) 가 이 모델.
+
+## blocking + [[Asynchronous]] 도 가능
+
+```java
+new Thread(() -> {
+    String r = http.get(url);         // 별도 스레드에서 blocking
+    callback.accept(r);
+}).start();
+```
+
+호출자는 즉시 풀려나지만, 새 스레드가 block. 자주 보는 안티패턴.
+
+## blocking 의 대안, NIO 와 비동기 I/O
+
+전통적 Java I/O (java.io.\*) 는 모두 blocking. Java NIO (`java.nio.\*`) 는 **non-blocking I/O** 를 지원한다.
+
+```java
+// NIO non-blocking
+ServerSocketChannel channel = ServerSocketChannel.open();
+channel.configureBlocking(false);
+SocketChannel client = channel.accept();   // null 즉시 반환 (연결 없으면)
+```
+
+이 모델로 **Netty, Vert.x, Spring WebFlux** 같은 high-throughput 서버가 가능.
+
+자세히는 [[Non-Blocking]] 참고.
+
+## Virtual Threads, blocking 의 의미가 바뀌다
+
+Java 21+ 의 Virtual Thread (JEP 444) 는 blocking 코드를 **저비용으로** 만든다.
+
+```java
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    executor.submit(() -> {
+        String r = http.get(url);   // blocking call, 그러나 virtual thread 라 OK
+        process(r);
+    });
+}
+```
+
+Virtual thread 는:
+- 스택을 힙에 저장 (KB 수준)
+- block 되면 carrier thread 에서 unmount → carrier 는 다른 virtual thread 처리
+- 결과 도착 시 carrier 에 다시 mount
+
+수백만 동시 연결을 blocking sync 코드로 처리 가능. 사실상 "blocking 의 비용" 을 거의 0 으로 만든다.
+
+## blocking 의 장단점 요약
+
+### 장점
+- 코드가 직관적, 위→아래
+- 디버깅, stack trace 일관
+- 에러 처리 자연스러움
+- 기존 코드 재사용 쉬움 (대부분의 JDK / 라이브러리가 blocking)
+
+### 단점
+- 스레드 자원 소모 (platform thread 기준)
+- 동시 요청 수 한계
+- UI 스레드를 block 하면 응답성 손실
+
+## 언제 blocking 이 적절한가
+
+- **순차 흐름이 본질** (DB 트랜잭션 안 여러 쿼리 순차)
+- **CPU 바운드 작업** (계산 위주, 어차피 스레드가 일함)
+- **동시 요청 수가 적당** (수백 ~ 수천)
+- **Virtual Thread 사용 환경** (Java 21+)
+- **단순함이 우선** (스크립트, 마이그레이션, 배치)
+
+## 언제 [[Non-Blocking]] 이 더 나은가
+
+- **수만 ~ 수십만 동시 연결**
+- **I/O 가 매우 느리고 가변적** (외부 API 등)
+- **백프레셔 제어 필요** (스트림 처리)
+- **함수형 / reactive 패러다임** 채택
+
+## 참고
+
+- [[Non-Blocking]]
+- [[Synchronous]]
+- [[Asynchronous]]
+- [[ReentrantLock]]
+- [[volatile]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- JEP 444, [Virtual Threads](https://openjdk.org/jeps/444)
+- Brian Goetz, *Java Concurrency in Practice*, §5 Building Blocks

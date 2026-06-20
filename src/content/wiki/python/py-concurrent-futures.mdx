@@ -1,0 +1,286 @@
+---
+title: "[Python] concurrent.futures: ThreadPoolExecutor, ProcessPoolExecutor"
+aliases: ["python concurrent.futures", "ThreadPoolExecutor", "ProcessPoolExecutor", "Future", "Executor"]
+tags: [python, concurrent, futures, executor, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`concurrent.futures`는 `threading`과 `multiprocessing` 위에 **고수준 Executor 인터페이스**를 제공한다. 워커 풀, Future 객체, map/submit API로 동기 코드처럼 병렬 작업을 작성할 수 있다.
+
+## 두 Executor
+
+```python
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
+# I/O 바운드 → 스레드
+with ThreadPoolExecutor(max_workers=10) as ex:
+    results = list(ex.map(fetch, urls))
+
+# CPU 바운드 → 프로세스
+with ProcessPoolExecutor(max_workers=4) as ex:
+    results = list(ex.map(compute_hash, files))
+```
+
+선택 기준은 `threading`/`multiprocessing` 페이지와 동일.
+
+## submit + Future
+
+`submit`은 작업을 큐에 넣고 `Future` 즉시 반환. `result()`로 완료 대기.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+def fetch(url):
+    import requests
+    return requests.get(url).text
+
+with ThreadPoolExecutor(max_workers=5) as ex:
+    futures = [ex.submit(fetch, u) for u in urls]
+    for f in futures:
+        result = f.result(timeout=30)
+        process(result)
+```
+
+`f.result()` 호출 시 완료 대기. 작업 예외도 여기서 전파됨.
+
+## as_completed
+
+완료 순서로 결과 받기.
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+with ThreadPoolExecutor(max_workers=5) as ex:
+    futures = {ex.submit(fetch, u): u for u in urls}
+    for f in as_completed(futures):
+        url = futures[f]
+        try:
+            data = f.result()
+            print(f"{url}: ok")
+        except Exception as e:
+            print(f"{url}: {e}")
+```
+
+오래 걸리는 작업이 빠른 작업을 막지 않음. 진행 상황 표시 / 빠른 결과부터 처리에 유용.
+
+## map
+
+submit + as_completed의 편의 래퍼. 순서 보존.
+
+```python
+with ThreadPoolExecutor() as ex:
+    for url, data in zip(urls, ex.map(fetch, urls)):
+        print(url, len(data))
+```
+
+`map(timeout=N)`은 한 작업이 N초 초과 시 `TimeoutError`.
+
+`chunksize` 인자는 ProcessPoolExecutor에서만 유의미 (IPC 비용 줄임).
+
+## Future 메서드
+
+```python
+f = ex.submit(fn, arg)
+
+f.result(timeout=None)    # 결과 (블록)
+f.exception(timeout=None) # 예외 (None이면 정상)
+f.done()                  # bool
+f.running()
+f.cancelled()
+f.cancel()                # 시작 전이면 cancel, 후이면 False
+f.add_done_callback(cb)   # 완료 시 cb(f) 호출
+```
+
+콜백 패턴:
+
+```python
+def on_done(f):
+    try:
+        print("result:", f.result())
+    except Exception as e:
+        print("error:", e)
+
+f = ex.submit(work)
+f.add_done_callback(on_done)
+```
+
+## 예외 처리
+
+```python
+def risky():
+    raise ValueError("oops")
+
+with ThreadPoolExecutor() as ex:
+    f = ex.submit(risky)
+    try:
+        f.result()
+    except ValueError as e:
+        print("caught:", e)
+```
+
+작업 안 예외는 Future에 저장. `result()` 호출 시 재발생. `exception()`은 던지지 않고 반환.
+
+`map`은 첫 예외에서 iteration 중단 → 나머지 결과 누락.
+
+## 타임아웃
+
+```python
+import concurrent.futures
+
+with ThreadPoolExecutor() as ex:
+    f = ex.submit(slow_work)
+    try:
+        result = f.result(timeout=5)
+    except concurrent.futures.TimeoutError:
+        # 주의: 작업이 실제로 중단되지 않음, 결과 무시만
+        ...
+```
+
+`result(timeout)`은 대기 타임아웃일 뿐 작업 자체를 중지하지 않는다 (Python 스레드는 강제 종료 불가). 진짜 중단이 필요하면 작업 안에서 자체 플래그 확인.
+
+## wait
+
+여러 Future를 한 번에 대기.
+
+```python
+from concurrent.futures import wait, ALL_COMPLETED, FIRST_COMPLETED, FIRST_EXCEPTION
+
+futures = [ex.submit(work, i) for i in range(10)]
+
+done, not_done = wait(futures, timeout=10, return_when=FIRST_COMPLETED)
+for f in done:
+    print(f.result())
+```
+
+`return_when`:
+- `ALL_COMPLETED` (기본): 모두 완료
+- `FIRST_COMPLETED`: 하나라도 완료
+- `FIRST_EXCEPTION`: 하나라도 예외
+
+## ProcessPoolExecutor 함정
+
+- `if __name__ == "__main__":` 가드 필수 (Windows/spawn)
+- 워커에 전달되는 함수/인자는 pickle 가능해야
+- 큰 데이터 전달 시 직렬화 비용 큼
+- 자식 프로세스의 import time 비용 (spawn 모드)
+
+```python
+if __name__ == "__main__":
+    with ProcessPoolExecutor() as ex:
+        results = list(ex.map(work, data))
+```
+
+## 워커 수 결정
+
+```python
+import os
+
+# CPU 바운드
+ProcessPoolExecutor(max_workers=os.cpu_count())
+
+# I/O 바운드 (스레드)
+ThreadPoolExecutor(max_workers=os.cpu_count() * 5)    # 또는 더 많이
+ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4))  # 3.8+ 기본
+```
+
+I/O 바운드는 스레드가 대기에 많아 더 많아도 됨. CPU는 코어 수 근처.
+
+## 진행 표시 (tqdm)
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+
+with ThreadPoolExecutor() as ex:
+    futures = [ex.submit(fetch, u) for u in urls]
+    for f in tqdm(as_completed(futures), total=len(urls)):
+        process(f.result())
+```
+
+## 자주 보는 패턴
+
+### 다운로드 워커 풀
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+import requests
+
+def download(url, dest):
+    r = requests.get(url, stream=True)
+    with open(dest, "wb") as f:
+        for chunk in r.iter_content(64 * 1024):
+            f.write(chunk)
+    return dest
+
+with ThreadPoolExecutor(max_workers=10) as ex:
+    futures = {ex.submit(download, u, f"out/{i}.bin"): i for i, u in enumerate(urls)}
+    for f in as_completed(futures):
+        i = futures[f]
+        try:
+            f.result()
+            print(f"{i} done")
+        except Exception as e:
+            print(f"{i} failed: {e}")
+```
+
+### CPU 병렬 변환
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+def compress_image(path):
+    img = Image.open(path)
+    img.thumbnail((1024, 1024))
+    out = path.replace(".jpg", "_small.jpg")
+    img.save(out, optimize=True)
+    return out
+
+if __name__ == "__main__":
+    paths = list(Path("photos").glob("*.jpg"))
+    with ProcessPoolExecutor() as ex:
+        for out in ex.map(compress_image, paths, chunksize=10):
+            print(out)
+```
+
+### 시간 제한 + 폴백
+
+```python
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+with ThreadPoolExecutor() as ex:
+    f = ex.submit(primary_api)
+    try:
+        result = f.result(timeout=2)
+    except TimeoutError:
+        f.cancel()
+        result = fallback_api()
+```
+
+(작업 cancel은 시작 전만 효과. 시작 후엔 작업이 자체 중단 메커니즘 필요.)
+
+## asyncio와의 통합
+
+`asyncio.run_in_executor`로 동기 함수를 비동기 컨텍스트에서 실행.
+
+```python
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+async def main():
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as ex:
+        result = await loop.run_in_executor(ex, blocking_io_call)
+
+asyncio.run(main())
+```
+
+3.9+ 편의 함수: `asyncio.to_thread(fn, *args)` (내부적으로 default executor).
+
+## 참고
+
+- [`concurrent.futures` documentation](https://docs.python.org/3/library/concurrent.futures.html)
+- [PEP 3148 – futures – execute computations asynchronously](https://peps.python.org/pep-3148/)
+- [`asyncio.to_thread`](https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread)
+- [`tqdm`](https://github.com/tqdm/tqdm) - 진행 표시

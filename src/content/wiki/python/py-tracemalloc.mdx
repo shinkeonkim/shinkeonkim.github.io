@@ -1,0 +1,336 @@
+---
+title: "[Python] tracemalloc, sys.getsizeof: 메모리 프로파일링"
+aliases: ["python tracemalloc", "memory profiling", "sys.getsizeof", "memory leak", "snapshot"]
+tags: [python, tracemalloc, memory, profiling, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`tracemalloc`은 Python의 **메모리 할당 추적기**(PEP 454, 3.4+). 어디서 메모리가 할당되었는지 파일·줄 단위로 통계 수집. 메모리 누수 추적과 핫스팟 발견에 표준 도구.
+
+## 기본 사용
+
+```python
+import tracemalloc
+
+tracemalloc.start()
+# ... 작업 ...
+data = [i ** 2 for i in range(100000)]
+
+current, peak = tracemalloc.get_traced_memory()
+print(f"현재: {current / 1e6:.1f}MB, 최대: {peak / 1e6:.1f}MB")
+
+tracemalloc.stop()
+```
+
+`get_traced_memory()`는 `tracemalloc.start()` 호출 이후 추적 중인 메모리 통계.
+
+## Snapshot
+
+특정 시점의 메모리 사용 스냅샷.
+
+```python
+import tracemalloc
+
+tracemalloc.start()
+data = load_dataset()
+
+snapshot = tracemalloc.take_snapshot()
+top = snapshot.statistics("lineno")
+
+for stat in top[:10]:
+    print(stat)
+# /path/to/file.py:42: size=10.5 MiB, count=12345, average=894 B
+```
+
+`statistics("lineno")`는 (파일, 줄) 단위 그룹. `statistics("filename")`은 파일 단위. `statistics("traceback")`은 전체 호출 스택.
+
+## 두 스냅샷 비교
+
+증가량을 보면 누수 추적이 쉬워진다.
+
+```python
+import tracemalloc
+
+tracemalloc.start()
+snap1 = tracemalloc.take_snapshot()
+
+do_suspect_work()    # 누수 의심 함수
+
+snap2 = tracemalloc.take_snapshot()
+diff = snap2.compare_to(snap1, "lineno")
+
+for stat in diff[:10]:
+    print(stat)
+# /path/leaky.py:99: size=+5 MiB, count=+10000
+```
+
+`+` 부호는 증가. 반복 호출 후 누적 증가가 없으면 안 누수.
+
+## 호출 스택까지
+
+```python
+tracemalloc.start(25)    # 25 프레임까지 추적
+snap = tracemalloc.take_snapshot()
+
+for stat in snap.statistics("traceback")[:5]:
+    print(f"{stat.size / 1e3:.1f} KB")
+    for line in stat.traceback.format():
+        print("  ", line)
+```
+
+각 통계가 호출 스택까지 보존. 어떤 코드 경로가 메모리를 할당했는지 추적.
+
+## 누수 디버깅 패턴
+
+```python
+import tracemalloc
+
+tracemalloc.start(10)
+
+# warm up (캐시, lazy init 등 1회성 할당 제외)
+do_work()
+snap1 = tracemalloc.take_snapshot()
+
+# 반복 실행 (정상이라면 메모리가 안정 상태여야)
+for _ in range(100):
+    do_work()
+
+snap2 = tracemalloc.take_snapshot()
+diff = snap2.compare_to(snap1, "lineno")
+
+# 가장 많이 증가한 곳
+for stat in diff[:20]:
+    if stat.size_diff > 1_000_000:    # 1MB 이상 증가
+        print(stat)
+```
+
+매 반복 후 메모리 증가가 누적되면 누수.
+
+## sys.getsizeof
+
+단일 객체의 메모리 크기 (얕은 측정).
+
+```python
+import sys
+
+sys.getsizeof([])              # 56 (3.13 기준, 빈 list)
+sys.getsizeof([1, 2, 3])       # 88
+sys.getsizeof({})              # 64
+sys.getsizeof("hello")         # 54
+sys.getsizeof(b"hello")        # 38
+sys.getsizeof(1)               # 28
+sys.getsizeof(2 ** 100)         # 40 (큰 int)
+```
+
+**얕은 측정**: 컨테이너 자체 크기만, 내부 객체는 별도.
+
+```python
+xs = [list(range(100)) for _ in range(100)]
+sys.getsizeof(xs)              # 외부 list만
+sum(sys.getsizeof(x) for x in xs)   # 내부 list들의 외부
+# 진짜 총합은 재귀 계산 또는 pympler 사용
+```
+
+### 재귀 측정
+
+```python
+from collections.abc import Mapping, Container
+
+def deep_sizeof(obj, seen=None):
+    if seen is None: seen = set()
+    if id(obj) in seen: return 0
+    seen.add(id(obj))
+
+    size = sys.getsizeof(obj)
+    if isinstance(obj, str):
+        return size
+    if isinstance(obj, Mapping):
+        size += sum(deep_sizeof(k, seen) + deep_sizeof(v, seen)
+                    for k, v in obj.items())
+    elif isinstance(obj, Container) and not isinstance(obj, str):
+        size += sum(deep_sizeof(x, seen) for x in obj)
+    return size
+
+print(deep_sizeof({"users": [{"name": "Alice"}, {"name": "Bob"}]}))
+```
+
+순환 참조 방지 위해 seen 추적. `pympler.asizeof`가 더 완성된 구현.
+
+## 메모리 사용량 측정 도구
+
+### resource (Unix)
+
+```python
+import resource
+usage = resource.getrusage(resource.RUSAGE_SELF)
+print(f"RSS: {usage.ru_maxrss} kb")    # 최대 상주 메모리 (macOS는 bytes, Linux는 kb)
+```
+
+### psutil (cross-platform)
+
+```bash
+pip install psutil
+```
+
+```python
+import psutil, os
+
+proc = psutil.Process(os.getpid())
+mem = proc.memory_info()
+print(f"RSS: {mem.rss / 1e6:.1f}MB")
+print(f"VMS: {mem.vms / 1e6:.1f}MB")
+```
+
+OS가 보는 실제 메모리. Python 인터프리터 + heap 모두 포함.
+
+## memory_profiler (line-by-line)
+
+```bash
+pip install memory_profiler
+```
+
+```python
+from memory_profiler import profile
+
+@profile
+def my_func():
+    a = [1] * 10**6
+    b = [2] * 10**7
+    del b
+    return a
+
+my_func()
+```
+
+```bash
+python -m memory_profiler script.py
+```
+
+출력:
+```
+Line #    Mem usage    Increment  Occurrences  Line Contents
+============================================================
+     3   38.305 MiB   38.305 MiB           1   @profile
+     4                                         def my_func():
+     5   45.945 MiB    7.641 MiB           1       a = [1] * 10**6
+     6  122.297 MiB   76.352 MiB           1       b = [2] * 10**7
+     7   45.945 MiB  -76.352 MiB           1       del b
+```
+
+함수의 줄 단위 메모리 변화. 본격 분석엔 유용.
+
+## objgraph
+
+객체 참조 그래프 시각화.
+
+```bash
+pip install objgraph
+```
+
+```python
+import objgraph
+
+objgraph.show_most_common_types(limit=10)
+# function       12345
+# tuple          9876
+# list           5432
+
+objgraph.show_growth(limit=10)        # 이전 호출 이후 증가한 객체
+objgraph.show_backrefs([obj])         # 누가 obj를 참조하는지 그래프
+```
+
+누수 객체의 참조 사슬을 시각화해 어디서 잡고 있는지 추적.
+
+## 자주 보는 패턴
+
+### 큰 객체 찾기
+
+```python
+import tracemalloc
+
+tracemalloc.start()
+load_app()
+
+snap = tracemalloc.take_snapshot()
+for stat in snap.statistics("lineno")[:5]:
+    print(stat)
+# 큰 할당 발견 → 해당 줄에 가서 최적화
+```
+
+### 캐시 누수
+
+```python
+import tracemalloc
+import gc
+
+tracemalloc.start(10)
+
+for i in range(100):
+    process()
+    if i % 10 == 0:
+        gc.collect()
+        snap = tracemalloc.take_snapshot()
+        print(f"iter {i}: {sum(s.size for s in snap.statistics('lineno')) / 1e6:.1f}MB")
+```
+
+지속적 증가는 무한 캐시, 리스너 등록 후 해제 안 함, weakref 누락 가능.
+
+### 함수 단위 메모리
+
+```python
+import tracemalloc
+
+def measure(fn):
+    def wrapper(*args, **kwargs):
+        tracemalloc.start()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            print(f"{fn.__name__}: peak {peak / 1e6:.1f}MB")
+    return wrapper
+
+@measure
+def heavy_function():
+    ...
+```
+
+## 메모리 절감 패턴 (참고)
+
+- `__slots__` 클래스: 메모리 1/3
+- `array.array` 또는 `numpy.ndarray`: list 대비 1/4
+- generator로 lazy: 전체 메모리 X
+- `weakref`: 순환 참조 깨기
+- `pyarrow` / parquet: 큰 데이터셋 메모리 효율
+- `mmap`: 큰 파일 메모리 매핑
+- `del` + `gc.collect()`: 의심되는 큰 객체 해제
+
+## 함정
+
+### 1. tracemalloc 자체 오버헤드
+
+매 할당마다 스택 캡처라 5-10% 정도 느려짐. 프로덕션 상시 켜기 X (디버그/스테이징 한정).
+
+### 2. C 확장의 메모리
+
+tracemalloc은 Python 객체만 추적. NumPy 배열의 raw memory는 Python 객체로 보이지만 내부 C 메모리는 다른 채널.
+
+### 3. 작은 객체 풀
+
+CPython은 작은 객체(`int`, 256 미만 등)를 풀링. `del`해도 즉시 메모리 반환 안 됨. OS 입장에선 여전히 할당됨.
+
+### 4. 메모리 표시 단위 혼란
+
+`ru_maxrss`는 macOS는 bytes, Linux는 kilobytes. 둘 다 다뤄야 하면 분기.
+
+## 참고
+
+- [`tracemalloc` documentation](https://docs.python.org/3/library/tracemalloc.html)
+- [PEP 454 – Add a new tracemalloc module](https://peps.python.org/pep-0454/)
+- [`memory_profiler`](https://github.com/pythonprofilers/memory_profiler)
+- [`objgraph`](https://mg.pov.lt/objgraph/)
+- [`pympler`](https://github.com/pympler/pympler)
+- [`psutil`](https://psutil.readthedocs.io/)

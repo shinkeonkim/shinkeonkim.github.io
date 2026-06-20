@@ -1,0 +1,267 @@
+---
+title: "[Python] json: 직렬화와 역직렬화"
+aliases: ["python json", "json.dumps", "json.loads", "JSON encoder", "custom serializer"]
+tags: [python, json, stdlib, serialization]
+updated: 2026-06-20
+---
+
+## 정의
+
+`json` 모듈은 Python 객체와 JSON 텍스트 간 변환을 제공한다. 표준 라이브러리라 빠르게 시작 가능하나, 대용량/정밀도/속도 면에서 `orjson`, `ujson` 같은 서드파티가 우위.
+
+## 기본 API
+
+| 함수 | 동작 |
+|------|------|
+| `json.dumps(obj)` | 객체 → JSON 문자열 |
+| `json.dump(obj, fp)` | 객체 → 파일 |
+| `json.loads(s)` | JSON 문자열 → 객체 |
+| `json.load(fp)` | 파일 → 객체 |
+
+## 직렬화: dumps
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import json
+
+data = {
+    "name": "Alice",
+    "age": 30,
+    "tags": ["admin", "user"],
+    "active": True,
+    "meta": None,
+}
+
+print(json.dumps(data))
+print(json.dumps(data, indent=2, sort_keys=True))`}
+  output={`{"name": "Alice", "age": 30, "tags": ["admin", "user"], "active": true, "meta": null}
+{
+  "active": true,
+  "age": 30,
+  "meta": null,
+  "name": "Alice",
+  "tags": [
+    "admin",
+    "user"
+  ]
+}`}
+/>
+
+옵션:
+- `indent=N`: pretty print
+- `sort_keys=True`: 키 정렬 (diff/캐시 친화적)
+- `separators=(',', ':')`: 압축 (공백 제거)
+- `ensure_ascii=False`: 한글 등 비ASCII 그대로 (기본 True는 `\uXXXX` 이스케이프)
+
+```python
+json.dumps({"name": "안녕"}, ensure_ascii=False)
+# '{"name": "안녕"}'  ← 가독성/크기 모두 유리
+```
+
+## 역직렬화: loads
+
+```python
+s = '{"name": "Alice", "age": 30}'
+data = json.loads(s)
+print(data["name"], data["age"])
+```
+
+JSON `null` → `None`, `true`/`false` → `True`/`False`, 숫자 → `int` 또는 `float`, 배열 → `list`, 객체 → `dict`.
+
+## 타입 매핑
+
+| Python | JSON |
+|--------|------|
+| `dict` | object |
+| `list`, `tuple` | array |
+| `str` | string |
+| `int`, `float` | number |
+| `True`, `False` | true, false |
+| `None` | null |
+
+역방향에선:
+- JSON object → `dict`
+- JSON array → `list` (tuple로 안 옴!)
+- JSON number → 소수점 있으면 `float`, 없으면 `int`
+
+## 사용자 정의 객체 직렬화
+
+기본 인코더는 사용자 클래스 못 다룬다.
+
+```python
+class User:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+json.dumps(User("Alice", 30))    # TypeError: Object of type User is not JSON serializable
+```
+
+### default 인자
+
+```python
+def to_jsonable(obj):
+    if isinstance(obj, User):
+        return {"name": obj.name, "age": obj.age}
+    raise TypeError(f"Cannot serialize {type(obj)}")
+
+json.dumps(User("Alice", 30), default=to_jsonable)
+# '{"name": "Alice", "age": 30}'
+```
+
+### JSONEncoder 서브클래스
+
+```python
+class CustomEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, User):
+            return {"name": obj.name, "age": obj.age}
+        return super().default(obj)
+
+json.dumps(User("Alice", 30), cls=CustomEncoder, indent=2)
+```
+
+### dataclass + asdict
+
+```python
+from dataclasses import dataclass, asdict
+
+@dataclass
+class User:
+    name: str
+    age: int
+
+json.dumps(asdict(User("Alice", 30)))
+```
+
+## 역직렬화 후 객체로 복원
+
+```python
+import json
+from dataclasses import dataclass
+
+@dataclass
+class User:
+    name: str
+    age: int
+
+def user_hook(d):
+    return User(**d)
+
+json.loads('{"name": "Alice", "age": 30}', object_hook=user_hook)
+# User(name='Alice', age=30)
+```
+
+`object_hook`은 모든 dict에 적용되어 위험할 수 있다. 키 패턴이나 `__type__` 필드로 구분.
+
+## datetime, Decimal 등 자주 만나는 타입
+
+`json` 표준은 이들을 모릅니다.
+
+```python
+from datetime import datetime, date
+from decimal import Decimal
+
+def default(obj):
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return str(obj)
+    raise TypeError
+
+json.dumps({"now": datetime.now(), "price": Decimal("19.99")}, default=default)
+```
+
+서드파티 라이브러리(`orjson`, `pydantic`)는 이런 타입을 기본 지원.
+
+## 함정
+
+### 1. 정수의 정밀도
+
+JSON 표준은 정수 크기 제한이 없지만 일부 파서(특히 JavaScript)는 53비트 초과 시 정밀도 손실. 큰 ID를 다룰 땐 문자열로:
+
+```python
+json.dumps({"id": "9007199254740993"})    # 안전
+json.dumps({"id": 9007199254740993})       # JS 측에서 망가질 수 있음
+```
+
+### 2. NaN, Infinity
+
+JSON 표준엔 없지만 Python `json`은 기본 허용 (확장 모드).
+
+```python
+json.dumps(float("nan"))      # 'NaN' (표준 위반)
+json.loads('NaN')             # nan
+
+# 표준 모드
+json.dumps(float("nan"), allow_nan=False)    # ValueError
+```
+
+다른 언어와 호환을 위해 `allow_nan=False` + 명시적 처리 권장.
+
+### 3. 순서
+
+3.7+ Python dict는 삽입 순서 보장. JSON 표준도 명시적 순서 없지만 대부분의 파서가 순서 보존. `sort_keys=True`로 안정화 가능.
+
+### 4. tuple은 array
+
+```python
+json.dumps((1, 2, 3))         # '[1, 2, 3]'
+json.loads('[1, 2, 3]')       # [1, 2, 3]  (list, 원래 tuple 정보 손실)
+```
+
+타입 정보 손실. 정확히 복원하려면 wrapper 사용.
+
+### 5. dict 키는 문자열만
+
+JSON 표준상 키는 string. Python `json`은 일부 변환 허용 (int/bool → str) 하지만 명시 변환이 안전.
+
+```python
+json.dumps({1: "a"})           # '{"1": "a"}' (조용히 변환)
+json.loads('{"1": "a"}')       # {'1': 'a'}  (문자열로 복원)
+```
+
+## 스트리밍 대용량 처리
+
+표준 `json`은 한 번에 다 로드. GB 단위는 문제.
+
+```python
+# 라인 구분 JSON (JSONL)
+import json
+
+with open("big.jsonl") as f:
+    for line in f:
+        record = json.loads(line)
+        process(record)
+```
+
+또는 `ijson` (streaming parser) 라이브러리.
+
+## 성능
+
+벤치마크에서 대략 (1M 객체 직렬화 기준):
+
+| 라이브러리 | dumps | loads |
+|-----------|-------|-------|
+| `json` (stdlib) | 1x | 1x |
+| `ujson` | 2-3x | 1.5-2x |
+| `orjson` | 3-5x | 2-3x |
+| `simdjson` | - | 5-10x |
+
+`orjson`은 datetime, dataclass, numpy 기본 지원. 새 프로젝트에선 검토.
+
+## 보안
+
+`json.loads`는 안전 (실행 코드 없음, `eval` 사용 안 함). 그러나:
+
+- 신뢰할 수 없는 입력으로부터 메모리 폭탄 방어 필요 (deeply nested, huge arrays)
+- `object_hook`이 임의 클래스로 변환하는 경우 추가 검증
+- 스키마 검증은 `jsonschema`, `pydantic`, `cattrs` 등 활용
+
+## 참고
+
+- [`json` documentation](https://docs.python.org/3/library/json.html)
+- [JSON specification (RFC 8259)](https://datatracker.ietf.org/doc/html/rfc8259)
+- [`orjson` (third-party)](https://github.com/ijl/orjson)
+- [`pydantic`](https://docs.pydantic.dev/) – 검증 + 직렬화

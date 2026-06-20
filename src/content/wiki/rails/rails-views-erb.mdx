@@ -1,0 +1,400 @@
+---
+title: "[Rails] Views: ERB, helpers, partials, layouts"
+aliases: ["rails views", "ERB", "rails helper", "partial", "layout", "form_with", "ViewComponent"]
+tags: [rails, view, erb, helper, partial]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails View는 **ERB(Embedded Ruby) 템플릿 + helper + partial + layout** 조합. controller가 `@instance_variables`를 view로 전달. 뷰 로직은 helper나 ViewComponent로 추출하는 게 일반.
+
+## ERB 기본
+
+```erb
+<%# 주석 (출력 X) %>
+<%= expr %>          <%# 출력 (HTML escape) %>
+<%== expr %>          <%# raw 출력 (위험) %>
+<%= raw expr %>       <%# 위와 동등 %>
+<% statement %>       <%# 실행만 (출력 X) %>
+<%- -%>               <%# 좌우 공백 제거 %>
+```
+
+```erb
+<h1><%= @post.title %></h1>
+
+<% @posts.each do |post| %>
+  <article>
+    <h2><%= link_to post.title, post %></h2>
+    <p><%= truncate(post.body, length: 200) %></p>
+  </article>
+<% end %>
+
+<% if user_signed_in? %>
+  Hello, <%= current_user.name %>
+<% end %>
+```
+
+## XSS 자동 방어
+
+`<%= %>`는 자동 HTML escape. `<script>`가 `&lt;script&gt;`로.
+
+```erb
+<%= "<b>bold</b>" %>          <%# &lt;b&gt;bold&lt;/b&gt; %>
+<%= raw "<b>bold</b>" %>      <%# <b>bold</b> (신뢰할 수 있는 HTML만) %>
+<%= "<b>bold</b>".html_safe %>
+```
+
+## 자주 쓰는 헬퍼
+
+### URL 헬퍼
+
+```erb
+<%= link_to "Read", post_path(post) %>
+<%= link_to "Edit", edit_post_path(post), class: "btn" %>
+<%= link_to "Delete", post, data: { turbo_method: :delete, turbo_confirm: "확실?" } %>
+<%= button_to "발행", publish_post_path(post), method: :post %>
+```
+
+### 폼
+
+```erb
+<%= form_with model: @post do |form| %>
+  <%= form.label :title %>
+  <%= form.text_field :title %>
+
+  <%= form.label :body %>
+  <%= form.text_area :body, rows: 10 %>
+
+  <%= form.collection_select :category_id, Category.all, :id, :name, prompt: "선택" %>
+  <%= form.collection_check_boxes :tag_ids, Tag.all, :id, :name %>
+  <%= form.file_field :image %>
+  <%= form.hidden_field :slug %>
+
+  <%= form.submit %>
+<% end %>
+```
+
+`form_with`는 model 인스턴스에서 URL/메서드(POST 또는 PATCH) 자동 결정. CSRF 토큰 자동 포함. Rails 7+는 기본 turbo 활성.
+
+```erb
+<%# Model 없이 일반 폼 %>
+<%= form_with url: search_path, method: :get do |form| %>
+  <%= form.text_field :q %>
+  <%= form.submit "검색" %>
+<% end %>
+```
+
+### 출력/포맷팅
+
+```erb
+<%= number_to_currency(1234.56) %>           <%# $1,234.56 %>
+<%= number_with_delimiter(1234567) %>         <%# 1,234,567 %>
+<%= number_with_precision(3.14159, precision: 2) %>
+<%= number_to_human_size(1024 * 1024) %>      <%# 1 MB %>
+<%= number_to_percentage(50, precision: 1) %> <%# 50.0% %>
+
+<%= time_ago_in_words(post.created_at) %>     <%# 3시간 %>
+<%= l(post.created_at, format: :short) %>     <%# 06/20 14:30 %>
+<%= I18n.l(post.created_at) %>
+
+<%= truncate(text, length: 100) %>
+<%= simple_format(post.body) %>                <%# 줄바꿈 → <p>/<br> %>
+<%= pluralize(@posts.count, "post") %>         <%# 1 post / 2 posts %>
+<%= sanitize(html, tags: %w[p br a], attributes: %w[href]) %>
+<%= strip_tags(html) %>
+<%= excerpt(text, "keyword", radius: 50) %>
+```
+
+### 자산
+
+```erb
+<%= image_tag "logo.png", alt: "Logo", class: "logo" %>
+<%= image_tag post.image %>                    <%# Active Storage %>
+<%= stylesheet_link_tag "application", "data-turbo-track": "reload" %>
+<%= javascript_include_tag "application", defer: true %>
+<%= asset_path "icons/star.svg" %>
+<%= image_tag asset_path("logo.png") %>
+```
+
+## Partial
+
+DRY를 위한 부분 템플릿. `_` 접두 파일명.
+
+```erb
+<%# views/posts/_post.html.erb %>
+<article class="post">
+  <h2><%= post.title %></h2>
+  <p><%= truncate(post.body, length: 200) %></p>
+</article>
+
+<%# views/posts/index.html.erb %>
+<%= render "post", post: @post %>
+<%= render @post %>                            <%# 모델 추론 %>
+<%= render @posts %>                            <%# 컬렉션 (각 element에 partial) %>
+<%= render partial: "post", collection: @posts, as: :post, spacer_template: "spacer" %>
+
+<%# 다른 디렉터리 %>
+<%= render "shared/header" %>
+<%= render partial: "comments/comment", locals: { comment: c } %>
+```
+
+## Layout
+
+```erb
+<%# app/views/layouts/application.html.erb %>
+<!DOCTYPE html>
+<html>
+<head>
+  <title><%= content_for(:title) || "My App" %></title>
+  <%= csrf_meta_tags %>
+  <%= csp_meta_tag %>
+  <%= stylesheet_link_tag "application" %>
+  <%= javascript_include_tag "application" %>
+  <%= yield :head %>
+</head>
+<body>
+  <%= render "shared/header" %>
+  <main>
+    <%= render "shared/flash" %>
+    <%= yield %>
+  </main>
+  <%= render "shared/footer" %>
+</body>
+</html>
+```
+
+`yield`는 view 내용 삽입 위치. `yield :name`은 `content_for(:name)`과 매칭.
+
+```erb
+<%# views/posts/show.html.erb %>
+<% content_for(:title, @post.title) %>
+<% content_for(:head) do %>
+  <meta property="og:title" content="<%= @post.title %>">
+<% end %>
+
+<article>...</article>
+```
+
+### Layout 변경
+
+```ruby
+class AdminController < ApplicationController
+  layout "admin"
+end
+
+# Action 별
+class PostsController < ApplicationController
+  def print
+    render layout: "print"
+  end
+
+  def show
+    render layout: false    # layout 없이
+  end
+end
+```
+
+## Helper
+
+`app/helpers/`에 module로 정의. 모든 view에서 자동 사용 가능.
+
+```ruby
+# app/helpers/posts_helper.rb
+module PostsHelper
+  def post_status_badge(post)
+    color = post.published? ? "green" : "gray"
+    text = post.published? ? "발행" : "임시저장"
+    content_tag(:span, text, class: "badge bg-#{color}")
+  end
+
+  def reading_time(text)
+    minutes = (text.split.size / 200.0).ceil
+    "#{minutes}분"
+  end
+end
+```
+
+```erb
+<%= post_status_badge(@post) %>
+<small><%= reading_time(@post.body) %></small>
+```
+
+## content_tag, tag
+
+HTML 안전 생성.
+
+```erb
+<%= content_tag(:div, "Hello", class: "greeting") %>
+<%# <div class="greeting">Hello</div> %>
+
+<%= tag.div "Hello", class: "greeting" %>
+<%= tag.span class: "icon" do %>
+  ★
+<% end %>
+```
+
+직접 문자열로 HTML 만드는 것보다 안전 + 가독성.
+
+## ViewComponent
+
+복잡한 컴포넌트를 OOP로.
+
+```bash
+bin/rails g component PostCard post
+```
+
+```ruby
+# app/components/post_card_component.rb
+class PostCardComponent < ViewComponent::Base
+  def initialize(post:)
+    @post = post
+  end
+
+  def status_color
+    @post.published? ? "green" : "gray"
+  end
+end
+```
+
+```erb
+<%# app/components/post_card_component.html.erb %>
+<article class="post-card">
+  <h2><%= @post.title %></h2>
+  <span class="badge bg-<%= status_color %>"><%= @post.status %></span>
+</article>
+```
+
+사용:
+
+```erb
+<%= render PostCardComponent.new(post: @post) %>
+<%= render PostCardComponent.with_collection(@posts) %>
+```
+
+테스트 가능, 캡슐화. 대규모 앱에 권장.
+
+## 캐싱
+
+```erb
+<% cache @post do %>
+  <%# 비싼 렌더링 %>
+<% end %>
+
+<% cache [@post, "v2"] do %>
+  <%# 버전 추가 %>
+<% end %>
+
+<% cache_if condition, @post do %>
+<% end %>
+
+<% @posts.each do |post| %>
+  <% cache post do %>
+    <%= render post %>
+  <% end %>
+<% end %>
+```
+
+Russian Doll Caching: 부모 cache 안에 자식 cache 중첩 → 자식 변경 시 부모도 자동 무효화 (updated_at).
+
+## i18n
+
+```erb
+<%= t("welcome.message") %>
+<%= t("hello", name: user.name) %>
+<%= l(post.created_at, format: :short) %>
+```
+
+```yaml
+# config/locales/ko.yml
+ko:
+  welcome:
+    message: "환영합니다"
+  hello: "%{name}님, 안녕"
+```
+
+## Streaming
+
+큰 페이지의 응답을 청크로.
+
+```ruby
+def index
+  @posts = Post.all
+  render stream: true
+end
+```
+
+기본 layout 먼저 보내고, 본문 점진. UX 빠르나 미들웨어 호환 주의.
+
+## 함정
+
+### 1. 인스턴스 변수 vs 로컬
+
+```ruby
+def show
+  @post = Post.find(params[:id])   # view에서 @post
+  post = Post.find(...)              # view에서 NoMethodError
+end
+```
+
+view는 controller의 `@`만 접근.
+
+### 2. render와 redirect 둘 다 호출
+
+```ruby
+def create
+  render :new
+  redirect_to root_path    # DoubleRenderError
+end
+
+# 명시적 분기
+def create
+  if @post.save
+    redirect_to @post
+  else
+    render :new
+  end
+end
+```
+
+### 3. html_safe 남용
+
+```erb
+<%= user_input.html_safe %>    <%# XSS! %>
+```
+
+신뢰할 수 있는 출처만.
+
+### 4. partial 데이터 전달
+
+```erb
+<%= render "post" %>             <%# post 변수 없으면 nil %>
+<%= render "post", post: @post %>  <%# 명시적 전달 %>
+<%= render @post %>               <%# 모델명 추론 → post 변수 자동 %>
+```
+
+### 5. ERB와 dotenv
+
+```erb
+<%= "#{Time.current.year}년" %>   <%# 문자열 보간 %>
+<% expensive_computation %>         <%# 매 요청마다 실행 %>
+```
+
+비싼 계산은 controller 또는 helper로.
+
+## 대안
+
+- **HAML**: 들여쓰기 기반, 짧음
+- **Slim**: 더 짧음
+- **ViewComponent**: 컴포넌트 OOP
+- **Phlex**: Ruby로만 view (gem)
+
+ERB가 표준. ViewComponent로 점진적 마이그레이션.
+
+## 참고
+
+- [Action View Overview](https://guides.rubyonrails.org/action_view_overview.html)
+- [Layouts and Rendering](https://guides.rubyonrails.org/layouts_and_rendering.html)
+- [Form Helpers](https://guides.rubyonrails.org/form_helpers.html)
+- [ViewComponent](https://viewcomponent.org/)
+- [Phlex](https://www.phlex.fun/)

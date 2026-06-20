@@ -1,0 +1,288 @@
+---
+title: "[Django] Sessions와 Cookies"
+aliases: ["django session", "session backend", "django cookies", "signed cookie", "session middleware"]
+tags: [django, session, cookie, auth]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django Session은 **서버 측 사용자 상태 저장**. 클라이언트엔 세션 ID만 쿠키로 저장, 실제 데이터는 백엔드(DB, cache, file, cookie). 인증, 카트, 임시 상태 등에 사용. `SessionMiddleware`가 활성화.
+
+## 활성화
+
+```python
+MIDDLEWARE = [
+    ...,
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    ...,
+]
+
+INSTALLED_APPS = [
+    ...,
+    "django.contrib.sessions",
+]
+```
+
+기본 활성. 마이그레이션 필요(DB 백엔드).
+
+## 백엔드 선택
+
+```python
+# settings.py
+SESSION_ENGINE = "django.contrib.sessions.backends.db"   # 기본
+```
+
+| 백엔드 | 특징 |
+|--------|------|
+| `db` | DB 테이블 (안정, 기본) |
+| `cached_db` | Cache + DB 백업 |
+| `cache` | Cache only (속도, 휘발성) |
+| `file` | 파일 시스템 |
+| `signed_cookies` | 쿠키에 직접 저장 (서명) |
+
+### 프로덕션 권장
+
+- 단일 인스턴스 + 빠른 응답: `cache` (Redis)
+- 영속성 필요: `cached_db` 또는 `db`
+- 무상태 (multi-region): `signed_cookies` (단 크기 제한)
+
+```python
+SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+SESSION_CACHE_ALIAS = "default"
+```
+
+## 사용
+
+```python
+def cart_add(request, product_id):
+    cart = request.session.get("cart", [])
+    cart.append(product_id)
+    request.session["cart"] = cart
+    request.session.modified = True    # 가변 객체 변경 시 명시
+    return redirect("cart")
+
+def cart_view(request):
+    cart = request.session.get("cart", [])
+    return render(request, "cart.html", {"cart": cart})
+
+def cart_clear(request):
+    if "cart" in request.session:
+        del request.session["cart"]
+    return redirect("home")
+```
+
+세션은 dict 인터페이스: `get`, `set`, `pop`, `setdefault`, `keys`, `items`.
+
+```python
+request.session.keys()
+request.session.values()
+request.session.items()
+request.session.get("key", default)
+request.session.setdefault("counter", 0)
+
+# 전체 비우기
+request.session.flush()
+
+# 세션 ID 새로 (보안)
+request.session.cycle_key()
+```
+
+## 설정
+
+```python
+SESSION_COOKIE_NAME = "sessionid"            # 기본
+SESSION_COOKIE_AGE = 1209600                 # 2주 (초)
+SESSION_COOKIE_DOMAIN = None                  # 또는 ".example.com"
+SESSION_COOKIE_SECURE = True                  # HTTPS only (프로덕션)
+SESSION_COOKIE_HTTPONLY = True                # JS 접근 차단
+SESSION_COOKIE_SAMESITE = "Lax"               # CSRF 보호
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False        # 브라우저 종료 시 만료
+SESSION_SAVE_EVERY_REQUEST = False             # 요청마다 갱신 (refresh)
+```
+
+브라우저 종료 시 만료가 필요하면 `SESSION_EXPIRE_AT_BROWSER_CLOSE = True`.
+
+## 동적 만료
+
+```python
+# 특정 세션만 짧게
+request.session.set_expiry(300)        # 5분
+request.session.set_expiry(0)          # 브라우저 종료 시
+request.session.set_expiry(None)       # 기본 (SESSION_COOKIE_AGE)
+
+# 만료까지 남은 시간
+request.session.get_expiry_age()
+request.session.get_expiry_date()
+```
+
+## 로그인 / 로그아웃과 세션
+
+```python
+from django.contrib.auth import login, logout
+
+def login_view(request):
+    user = authenticate(request, username=u, password=p)
+    if user:
+        login(request, user)   # 세션에 user_id 저장
+        return redirect("home")
+
+def logout_view(request):
+    logout(request)            # 세션 비움 + 키 cycle
+    return redirect("home")
+```
+
+## Cookies (저수준)
+
+```python
+# 설정
+response = HttpResponse()
+response.set_cookie(
+    "preferences",
+    value="dark",
+    max_age=86400,                # 1일
+    expires=None,                  # datetime 또는 None
+    domain=None,
+    secure=True,
+    httponly=True,
+    samesite="Lax",
+)
+
+# 조회
+request.COOKIES.get("preferences", "light")
+
+# 삭제
+response.delete_cookie("preferences")
+```
+
+## Signed cookies
+
+쿠키 위변조 감지. 서버 비밀 키로 서명.
+
+```python
+# 설정
+response.set_signed_cookie("user_pref", "dark", salt="prefs")
+
+# 조회 (검증)
+try:
+    value = request.get_signed_cookie("user_pref", salt="prefs", max_age=3600)
+except BadSignature:
+    value = None
+```
+
+쿠키 내용을 클라이언트가 보지만 변조 시 검증 실패.
+
+## 자주 보는 패턴
+
+### 마지막 검색어
+
+```python
+def search(request):
+    q = request.GET.get("q")
+    if q:
+        history = request.session.get("search_history", [])
+        history.insert(0, q)
+        request.session["search_history"] = history[:10]    # 최근 10개
+    ...
+```
+
+### 임시 데이터 (multi-step form)
+
+```python
+def step1(request):
+    if request.method == "POST":
+        request.session["step1_data"] = request.POST.dict()
+        return redirect("step2")
+    ...
+
+def step2(request):
+    if "step1_data" not in request.session:
+        return redirect("step1")
+    ...
+```
+
+폼셋 전체 검증 후 모델 저장.
+
+### 익명 사용자 카트
+
+```python
+def get_cart(request):
+    if request.user.is_authenticated:
+        return Cart.objects.get_or_create(user=request.user)[0]
+    return request.session.setdefault("cart", {})
+```
+
+로그인 시 세션 카트를 DB 카트에 병합.
+
+### 알림 메시지
+
+세션 한 번 사용 후 자동 삭제는 `messages` 프레임워크:
+
+```python
+from django.contrib import messages
+
+messages.success(request, "저장됨")
+messages.error(request, "실패")
+
+# 템플릿
+{% for msg in messages %}
+    <div class="{{ msg.tags }}">{{ msg }}</div>
+{% endfor %}
+```
+
+내부적으로 세션 또는 쿠키.
+
+## 함정
+
+### 1. 가변 객체 변경 미반영
+
+```python
+request.session["cart"].append(item)   # session 자동 detect 안 함
+```
+
+`request.session.modified = True` 명시 또는 새 객체 할당:
+
+```python
+cart = request.session["cart"]
+cart.append(item)
+request.session["cart"] = cart
+```
+
+### 2. SECRET_KEY 변경 → 모든 세션 무효
+
+서명/암호화에 SECRET_KEY 사용. 변경 시 기존 모든 세션 만료. 회전 시 SESSION_SERIALIZER 호환성 주의.
+
+### 3. signed_cookies 크기 제한
+
+쿠키 크기 ~4KB. 세션이 크면 안 됨. cache/db 백엔드로.
+
+### 4. 만료된 세션 정리
+
+DB 백엔드는 만료 row가 누적. 주기 정리:
+
+```bash
+python manage.py clearsessions    # cron 또는 Celery beat
+```
+
+### 5. cross-subdomain 세션 공유
+
+```python
+SESSION_COOKIE_DOMAIN = ".example.com"
+```
+
+`app.example.com`, `admin.example.com` 사이 공유. CSRF_COOKIE_DOMAIN도 함께.
+
+## 보안
+
+- `SECURE=True`, `HTTPONLY=True`, `SAMESITE="Lax"` 기본
+- 로그인 후 세션 ID 갱신 (Django 자동)
+- 세션 hijack 방지: HTTPS만 사용
+- 민감 데이터는 세션에 저장 X (DB에 저장, 세션엔 user_id만)
+- timeout 짧게 (1-2주 → 1일?)
+
+## 참고
+
+- [Sessions documentation](https://docs.djangoproject.com/en/stable/topics/http/sessions/)
+- [Session settings](https://docs.djangoproject.com/en/stable/ref/settings/#sessions)
+- [Signed cookies](https://docs.djangoproject.com/en/stable/topics/signing/)
+- [Messages framework](https://docs.djangoproject.com/en/stable/ref/contrib/messages/)

@@ -1,0 +1,356 @@
+---
+title: "[Spring] WebFlux: Reactive, Mono, Flux"
+aliases: ["spring webflux", "reactor", "Mono", "Flux", "reactive", "non-blocking"]
+tags: [spring, webflux, reactive, reactor, async]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring WebFlux**는 Project Reactor 기반의 비동기·non-blocking 웹 프레임워크. Spring MVC와 별개. Netty 기본 (Tomcat도 가능). I/O 대량 동시성에 강함. CPU 작업엔 의미 없거나 손해. 모든 의존 라이브러리도 reactive여야 (r2dbc, reactive Mongo 등).
+
+Spring MVC가 충분한 대부분의 앱엔 WebFlux 불필요. 대량 I/O · 스트리밍 · 외부 API 동시 호출 많을 때만.
+
+## 의존성
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-webflux")
+implementation("org.springframework.boot:spring-boot-starter-data-r2dbc")
+runtimeOnly("io.r2dbc:r2dbc-postgresql")
+```
+
+Spring MVC와 같은 jar 안에 두면 충돌. WebFlux만.
+
+## Mono와 Flux
+
+```java
+Mono<User> user = ...;          // 0 또는 1개
+Flux<User> users = ...;          // 0..N개
+```
+
+Reactor의 Publisher. 구독 시점에 실제 동작 (lazy).
+
+```java
+Mono.just(42).subscribe(v -> System.out.println(v));
+
+Flux.range(1, 5)
+    .map(i -> i * 2)
+    .filter(i -> i > 4)
+    .subscribe(v -> System.out.println(v));
+```
+
+## RestController in WebFlux
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    private final UserRepository userRepository;
+
+    @GetMapping
+    public Flux<User> list() {
+        return userRepository.findAll();
+    }
+
+    @GetMapping("/{id}")
+    public Mono<User> get(@PathVariable Long id) {
+        return userRepository.findById(id)
+            .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND)));
+    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public Mono<User> create(@RequestBody Mono<CreateUserDto> dto) {
+        return dto
+            .map(d -> new User(d.email(), d.name()))
+            .flatMap(userRepository::save);
+    }
+
+    @DeleteMapping("/{id}")
+    public Mono<Void> delete(@PathVariable Long id) {
+        return userRepository.deleteById(id);
+    }
+}
+```
+
+## Operators
+
+```java
+mono
+    .map(user -> user.email())                 // 동기 변환
+    .flatMap(email -> findByEmail(email))       // 비동기 변환 (Mono → Mono)
+    .filter(user -> user.isActive())
+    .defaultIfEmpty(User.guest())
+    .switchIfEmpty(Mono.error(new NotFoundException()))
+    .doOnNext(u -> log.info("loaded {}", u))
+    .doOnError(e -> log.error("error", e))
+    .onErrorResume(e -> Mono.just(User.fallback()))
+    .timeout(Duration.ofSeconds(5))
+    .retry(3)
+    .subscribeOn(Schedulers.boundedElastic())    // 스레드 풀 지정
+```
+
+flux:
+
+```java
+flux
+    .filter(...)
+    .map(...)
+    .flatMap(...)             // 1:N
+    .concatMap(...)            // 순서 보존
+    .collectList()             // Flux<T> → Mono<List<T>>
+    .reduce(0, Integer::sum)
+    .take(10)
+    .skip(5)
+    .distinct()
+    .buffer(10)                // 10개씩 묶음
+    .window(Duration.ofSeconds(1))    // 시간 window
+    .merge(other)
+    .zip(other, (a, b) -> a + b)
+```
+
+## R2DBC
+
+JPA 대신 R2DBC (Reactive Relational).
+
+```java
+public interface UserRepository extends ReactiveCrudRepository<User, Long> {
+    Mono<User> findByEmail(String email);
+    Flux<User> findByActiveTrue();
+}
+```
+
+```java
+@Table("users")
+public record User(@Id Long id, String email, String name, boolean active) { }
+```
+
+annotation은 JPA와 다름 (`@Table`은 `org.springframework.data.relational.core.mapping`).
+
+## WebClient
+
+`RestTemplate`의 reactive 대체.
+
+```java
+WebClient client = WebClient.builder()
+    .baseUrl("https://api.example.com")
+    .defaultHeader("Authorization", "Bearer ...")
+    .build();
+
+Mono<User> user = client.get()
+    .uri("/users/{id}", 1)
+    .retrieve()
+    .bodyToMono(User.class);
+
+Flux<Post> posts = client.get()
+    .uri("/posts")
+    .retrieve()
+    .bodyToFlux(Post.class);
+
+// POST
+client.post()
+    .uri("/users")
+    .bodyValue(new CreateUserDto(...))
+    .retrieve()
+    .bodyToMono(User.class);
+```
+
+3.2+ `RestClient`도 가능 (동기/reactive 모두).
+
+## 동시 호출
+
+```java
+Mono<UserProfile> usersMono = client.get().uri("/users/1").retrieve().bodyToMono(UserProfile.class);
+Mono<List<Post>> postsMono = client.get().uri("/posts?userId=1").retrieve().bodyToFlux(Post.class).collectList();
+
+Mono.zip(usersMono, postsMono)
+    .map(t -> new DashboardData(t.getT1(), t.getT2()))
+    .subscribe(...);
+```
+
+`zip`으로 병렬 + 합치기.
+
+## SSE 스트리밍
+
+```java
+@GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public Flux<ServerSentEvent<String>> events() {
+    return Flux.interval(Duration.ofSeconds(1))
+        .map(i -> ServerSentEvent.<String>builder()
+            .data("tick " + i)
+            .build());
+}
+```
+
+브라우저 EventSource로 받음. 실시간 알림, 로그 스트림.
+
+## Functional endpoints
+
+annotation 대신 함수형.
+
+```java
+@Configuration
+public class Routes {
+
+    @Bean
+    public RouterFunction<ServerResponse> userRoutes(UserHandler handler) {
+        return RouterFunctions.route()
+            .GET("/users", handler::list)
+            .GET("/users/{id}", handler::get)
+            .POST("/users", handler::create)
+            .build();
+    }
+}
+
+@Component
+public class UserHandler {
+    public Mono<ServerResponse> list(ServerRequest req) {
+        return ServerResponse.ok().body(userRepository.findAll(), User.class);
+    }
+
+    public Mono<ServerResponse> get(ServerRequest req) {
+        Long id = Long.parseLong(req.pathVariable("id"));
+        return userRepository.findById(id)
+            .flatMap(u -> ServerResponse.ok().bodyValue(u))
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+}
+```
+
+함수형 스타일 선호 시.
+
+## Schedulers (스레드)
+
+```java
+Mono.fromCallable(() -> blockingCall())
+    .subscribeOn(Schedulers.boundedElastic())    // I/O blocking을 별도 스레드로
+    .subscribe(...);
+
+Schedulers.immediate()      // 호출 스레드
+Schedulers.single()         // 단일 스레드
+Schedulers.parallel()       // CPU 작업 (CPU 수만큼)
+Schedulers.boundedElastic() // I/O (최대 10x CPU)
+```
+
+기본은 호출 스레드. 블로킹 작업은 `boundedElastic()` 필수 (안 그러면 이벤트 루프 정지).
+
+## 블로킹 코드 통합
+
+```java
+Mono<User> reactive = Mono.fromCallable(() -> jdbcRepository.find(id))
+    .subscribeOn(Schedulers.boundedElastic());
+```
+
+JDBC 같은 blocking을 reactive 컨텍스트에서 안전하게.
+
+## 에러 처리
+
+```java
+mono
+    .onErrorReturn(User.fallback())
+    .onErrorResume(NotFoundException.class, e -> Mono.just(User.guest()))
+    .onErrorMap(e -> new MyException(e))
+    .doOnError(e -> log.error("error", e));
+```
+
+## 백프레셔
+
+WebFlux는 backpressure 지원. 빠른 producer + 느린 consumer면 자동 조절.
+
+```java
+flux
+    .onBackpressureBuffer(100)
+    .onBackpressureDrop()
+    .onBackpressureLatest()
+```
+
+## 함정
+
+### 1. 블로킹 호출
+
+```java
+@GetMapping("/users")
+public Flux<User> list() {
+    return Flux.just(userRepository.findAllJdbc());    // JDBC! 이벤트 루프 정지
+}
+```
+
+reactive 라이브러리 또는 boundedElastic.
+
+### 2. subscribe 안 함
+
+```java
+mono.map(...).subscribe(...);    // 실제 동작
+mono.map(...);                    // 정의만 (cold publisher) → 실행 안 됨
+```
+
+controller에서 반환하면 Spring이 자동 subscribe.
+
+### 3. ContextHolder는 reactive 아님
+
+```java
+SecurityContextHolder.getContext().getAuthentication();
+// reactive 컨텍스트에선 잘못된 사용자 가능
+```
+
+```java
+ReactiveSecurityContextHolder.getContext()
+    .map(ctx -> ctx.getAuthentication())
+    .map(Authentication::getName);
+```
+
+reactive 버전 사용.
+
+### 4. JPA + WebFlux 불가
+
+JPA는 blocking. r2dbc 또는 JdbcTemplate + subscribeOn 사용.
+
+### 5. 디버깅 어려움
+
+스택 트레이스가 reactor 내부. `Hooks.onOperatorDebug()` 활성화:
+
+```java
+@Configuration
+public class ReactorConfig {
+    @PostConstruct
+    void enableDebug() {
+        Hooks.onOperatorDebug();
+    }
+}
+```
+
+성능 비용 있음. 프로덕션은 끄기.
+
+## 언제 WebFlux?
+
+| 상황 | 선택 |
+|------|------|
+| 일반 CRUD | Spring MVC |
+| 대량 동시 연결 (10K+) | WebFlux |
+| 외부 API 동시 호출 많음 | WebFlux |
+| SSE/WebSocket 스트리밍 | WebFlux |
+| JPA 의존 | Spring MVC |
+| 학습 곡선 | Spring MVC |
+
+WebFlux는 강력하나 학습 곡선 가파름. 진짜 필요할 때만.
+
+## Spring MVC + Kotlin coroutines
+
+WebFlux 대신 코루틴으로 비슷한 효과 (3.2+).
+
+```kotlin
+@GetMapping("/users")
+suspend fun list(): List<User> {
+    return userRepository.findAll()
+}
+```
+
+Kotlin이면 코루틴이 더 친화적인 경우 많음.
+
+## 참고
+
+- [Spring WebFlux](https://docs.spring.io/spring-framework/reference/web/webflux.html)
+- [Project Reactor](https://projectreactor.io/)
+- [Reactor Core docs](https://projectreactor.io/docs/core/release/reference/)
+- [R2DBC](https://r2dbc.io/)
+- [WebClient](https://docs.spring.io/spring-framework/reference/web/webflux-webclient.html)

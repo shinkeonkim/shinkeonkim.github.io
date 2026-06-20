@@ -1,0 +1,371 @@
+---
+title: "[Django] ORM 심화: N+1, prefetch, Subquery, Window"
+aliases: ["django orm advanced", "N+1 problem", "Subquery", "OuterRef", "Window function", "raw SQL", "select_related deep"]
+tags: [django, orm, optimization, sql]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django ORM은 SQL을 잘 모르는 개발자에게도 안전하지만 비효율을 숨기기 쉽다. N+1, 비효율 JOIN, 큰 결과셋 메모리 폭발이 흔한 함정. select_related/prefetch, Subquery, F/Q, annotate, Window 등으로 SQL 한 번에 의도한 작업을 끝내는 것이 목표.
+
+## N+1 문제
+
+```python
+# BAD: N+1
+for post in Post.objects.all():
+    print(post.author.username)    # 매 반복마다 SELECT users WHERE id = ...
+# 1 (posts) + N (author) 쿼리
+```
+
+### select_related (FK, OneToOne)
+
+```python
+for post in Post.objects.select_related("author"):
+    print(post.author.username)    # JOIN 한 번
+```
+
+SQL JOIN으로 한 번에. FK, OneToOne, parent_link 가능.
+
+체인:
+
+```python
+Post.objects.select_related("author__profile", "category")
+```
+
+`author` JOIN + `profile` JOIN + `category` JOIN. 깊이/너비 제한 없으나 너무 많으면 결과 row가 폭발.
+
+### prefetch_related (M2M, reverse FK)
+
+```python
+for post in Post.objects.prefetch_related("tags", "comments"):
+    print(post.tags.all())        # 추가 쿼리 1번 (전체 tag)
+    print(post.comments.all())     # 추가 쿼리 1번
+```
+
+별도 쿼리로 가져와 Python에서 매칭. M2M, 역방향 FK에 사용.
+
+### Prefetch: 세밀 제어
+
+```python
+from django.db.models import Prefetch
+
+Post.objects.prefetch_related(
+    Prefetch(
+        "comments",
+        queryset=Comment.objects.filter(approved=True).select_related("author"),
+        to_attr="approved_comments",
+    )
+)
+
+for post in posts:
+    for c in post.approved_comments:    # 미리 필터된 결과
+        print(c.author.username)
+```
+
+`to_attr`로 별도 속성 부여. 같은 관계를 여러 다른 조건으로 prefetch 가능.
+
+## annotate + Subquery
+
+```python
+from django.db.models import Subquery, OuterRef
+
+# 각 유저의 최신 글 제목
+latest_post = Post.objects.filter(
+    author=OuterRef("pk")
+).order_by("-created_at").values("title")[:1]
+
+User.objects.annotate(latest_post_title=Subquery(latest_post))
+```
+
+`OuterRef`로 외부 쿼리의 컬럼 참조. SQL subquery로 컴파일.
+
+## Exists
+
+```python
+from django.db.models import Exists, OuterRef
+
+has_comments = Comment.objects.filter(post=OuterRef("pk"))
+Post.objects.annotate(has_comments=Exists(has_comments))
+```
+
+EXISTS 절. `Subquery`보다 빠를 수 있음.
+
+## Conditional Expressions (Case/When)
+
+```python
+from django.db.models import Case, When, Value, IntegerField
+
+Post.objects.annotate(
+    priority=Case(
+        When(is_featured=True, then=Value(1)),
+        When(views__gt=1000, then=Value(2)),
+        default=Value(3),
+        output_field=IntegerField(),
+    )
+).order_by("priority")
+```
+
+SQL CASE WHEN. 우선순위 정렬 등.
+
+## F 표현식 심화
+
+DB 레벨 컬럼 참조·연산. race condition 방지.
+
+```python
+from django.db.models import F
+
+# 원자적 증가
+Post.objects.filter(id=1).update(views=F("views") + 1)
+
+# 두 컬럼 비교
+Post.objects.filter(updated_at__gt=F("created_at"))
+
+# 컬럼 간 연산
+Post.objects.annotate(net_views=F("views") - F("rejected_views"))
+```
+
+## Aggregation
+
+```python
+from django.db.models import Count, Sum, Avg, Max, Min, F
+
+# 전체 집계
+stats = Post.objects.aggregate(
+    total=Count("id"),
+    avg_views=Avg("views"),
+    max_views=Max("views"),
+)
+
+# annotate + group by
+User.objects.annotate(
+    post_count=Count("posts"),
+    total_views=Sum("posts__views"),
+    avg_views=Avg("posts__views"),
+).order_by("-post_count")
+```
+
+여러 관계 통과 annotate는 결과가 곱해질 수 있음 → distinct 또는 Subquery 활용.
+
+```python
+# 중복 집계 함정
+User.objects.annotate(
+    post_count=Count("posts"),
+    comment_count=Count("comments"),    # posts와 comments 카테시안 결합 → 잘못된 카운트
+)
+
+# 해결
+User.objects.annotate(
+    post_count=Count("posts", distinct=True),
+    comment_count=Count("comments", distinct=True),
+)
+# 또는 Subquery로 분리
+```
+
+## Window 함수 (3.2+)
+
+```python
+from django.db.models import Window, F
+from django.db.models.functions import Rank, DenseRank, RowNumber, Lag, Lead
+
+Post.objects.annotate(
+    rank=Window(
+        expression=Rank(),
+        partition_by=[F("author")],
+        order_by=F("views").desc(),
+    )
+).filter(rank__lte=3)    # 작성자별 top 3
+```
+
+SQL Window 함수. ROW_NUMBER, RANK, LAG, LEAD, NTILE 등.
+
+## raw SQL
+
+ORM으로 표현 어려운 쿼리.
+
+```python
+posts = Post.objects.raw(
+    "SELECT * FROM blog_post WHERE views > %s AND is_published = %s",
+    [100, True],
+)
+for p in posts:
+    print(p.title)
+```
+
+`%s` placeholder 권장 (SQL 인젝션 방지). 또는:
+
+```python
+from django.db import connection
+
+with connection.cursor() as cursor:
+    cursor.execute("SELECT count(*) FROM blog_post WHERE author_id = %s", [user_id])
+    count = cursor.fetchone()[0]
+```
+
+## extra (deprecated)
+
+3.0+ 권장 안 함. Subquery, RawSQL 사용.
+
+## transactions
+
+```python
+from django.db import transaction
+
+@transaction.atomic
+def transfer(from_user, to_user, amount):
+    from_user.balance -= amount
+    from_user.save()
+    to_user.balance += amount
+    to_user.save()
+# 예외 발생 시 자동 rollback
+
+# 컨텍스트 매니저
+with transaction.atomic():
+    ...
+
+# 중첩 (savepoint)
+with transaction.atomic():
+    ...
+    with transaction.atomic():
+        ...    # 내부 실패는 outer 전체 안 깸
+```
+
+ATOMIC_REQUESTS 설정으로 모든 view를 트랜잭션 안에서 실행 가능 (간단하나 트랜잭션 길어짐 단점).
+
+```python
+DATABASES = {
+    "default": {
+        ...,
+        "ATOMIC_REQUESTS": True,
+    }
+}
+```
+
+## select_for_update (락)
+
+```python
+with transaction.atomic():
+    user = User.objects.select_for_update().get(id=1)    # SELECT ... FOR UPDATE
+    user.balance -= 100
+    user.save()
+```
+
+행 잠금. 동시성 보호. `select_for_update(nowait=True)` 또는 `skip_locked=True` 옵션.
+
+## iterator(): 메모리 효율
+
+```python
+for p in Post.objects.all().iterator(chunk_size=2000):
+    process(p)
+```
+
+QuerySet은 기본적으로 결과를 메모리에 캐시. iterator는 서버 사이드 커서 + 청크.
+
+## values/values_list 활용
+
+```python
+# 객체 X, dict만
+Post.objects.values("id", "title")
+
+# 평면 리스트
+Post.objects.values_list("id", flat=True)
+
+# 빠른 in_bulk
+posts = Post.objects.in_bulk([1, 2, 3])    # {1: Post, 2: Post, 3: Post}
+```
+
+## ORM이 만든 SQL 보기
+
+```python
+print(qs.query)                       # SQL
+print(connection.queries[-5:])         # 최근 쿼리 (DEBUG=True 필요)
+
+# silk, django-debug-toolbar, querycount 미들웨어
+```
+
+`EXPLAIN`:
+
+```python
+print(qs.explain())
+print(qs.explain(verbose=True, analyze=True))    # PostgreSQL
+```
+
+## 함정 모음
+
+### 1. select_related로 너무 깊은 JOIN
+
+```python
+Post.objects.select_related("author__profile__country__continent")    # 4-level JOIN
+```
+
+행이 폭발 + 응답 시간 증가. 깊이 2 이하 권장.
+
+### 2. prefetch 안의 prefetch
+
+```python
+Post.objects.prefetch_related(
+    Prefetch("comments", queryset=Comment.objects.prefetch_related("replies"))
+)
+```
+
+`prefetch_related` 안에 또 prefetch 가능. 깊이 관리.
+
+### 3. count() vs len()
+
+```python
+Post.objects.count()        # SELECT COUNT(*) (빠름)
+len(Post.objects.all())     # 전부 로드 후 len (느리고 메모리)
+```
+
+### 4. distinct + order_by
+
+PostgreSQL에서 distinct 후 다른 컬럼 order_by 시 에러. `distinct("field")` 또는 동일 컬럼으로 order.
+
+### 5. select_related on M2M
+
+```python
+Post.objects.select_related("tags")    # ERROR
+```
+
+M2M은 prefetch_related만.
+
+### 6. update_fields
+
+```python
+post.title = "New"
+post.save(update_fields=["title"])    # title만 UPDATE
+```
+
+다른 필드 변경 안 함이 명확. 인덱스 hot path에 유용.
+
+## 자주 보는 패턴
+
+### Batched insert
+
+```python
+Post.objects.bulk_create(
+    [Post(title=f"T{i}") for i in range(10000)],
+    batch_size=500,
+    ignore_conflicts=True,    # PG: ON CONFLICT DO NOTHING
+)
+```
+
+### Upsert (4.1+)
+
+```python
+Post.objects.bulk_create(
+    objs,
+    update_conflicts=True,
+    update_fields=["views"],
+    unique_fields=["slug"],
+)
+```
+
+## 참고
+
+- [Database optimization](https://docs.djangoproject.com/en/stable/topics/db/optimization/)
+- [QuerySet API reference](https://docs.djangoproject.com/en/stable/ref/models/querysets/)
+- [Database functions](https://docs.djangoproject.com/en/stable/ref/models/database-functions/)
+- [Aggregation](https://docs.djangoproject.com/en/stable/topics/db/aggregation/)
+- [django-debug-toolbar](https://django-debug-toolbar.readthedocs.io/)
+- [silk profiler](https://github.com/jazzband/django-silk)

@@ -1,0 +1,329 @@
+---
+title: "[Django] QuerySet과 Manager"
+aliases: ["django queryset", "django manager", "objects.filter", "QuerySet API", "lazy queryset"]
+tags: [django, orm, queryset, manager]
+updated: 2026-06-20
+---
+
+## 정의
+
+**QuerySet**은 DB 쿼리를 **lazy하게 빌드**하는 객체. `.filter()`, `.exclude()` 같은 메서드를 체이닝해도 실제 SQL 실행은 평가 시점(`list()`, `iter`, `len`, slice 등)에 한 번 발생. **Manager**(`Model.objects`)가 QuerySet의 진입점.
+
+## 기본 쿼리
+
+```python
+Post.objects.all()                              # SELECT *
+Post.objects.filter(is_published=True)
+Post.objects.exclude(views=0)
+Post.objects.get(id=1)                          # 단일 객체, 없으면 DoesNotExist, 여러 개면 MultipleObjectsReturned
+Post.objects.first()
+Post.objects.last()
+Post.objects.count()
+Post.objects.exists()
+Post.objects.none()                             # 빈 QuerySet
+```
+
+`get` vs `filter`: get은 정확히 1개 기대. 0개나 2개 이상이면 예외. 안전한 처리:
+
+```python
+try:
+    post = Post.objects.get(id=1)
+except Post.DoesNotExist:
+    return Http404
+```
+
+또는 헬퍼:
+
+```python
+from django.shortcuts import get_object_or_404
+post = get_object_or_404(Post, id=1)
+```
+
+## 필드 룩업
+
+```python
+Post.objects.filter(title__iexact="hello")       # 대소문자 무시
+Post.objects.filter(title__icontains="django")
+Post.objects.filter(title__startswith="Re:")
+Post.objects.filter(title__endswith="?")
+Post.objects.filter(views__gt=100)               # >
+Post.objects.filter(views__gte=100)              # >=
+Post.objects.filter(views__lt=100)               # <
+Post.objects.filter(views__lte=100)              # <=
+Post.objects.filter(views__range=(10, 100))      # BETWEEN
+Post.objects.filter(views__in=[1, 2, 3])         # IN
+Post.objects.filter(slug__regex=r"^[a-z]+$")
+Post.objects.filter(body__isnull=True)
+
+# 날짜
+Post.objects.filter(created_at__year=2026)
+Post.objects.filter(created_at__month=6)
+Post.objects.filter(created_at__date=date(2026, 6, 20))
+Post.objects.filter(created_at__gte=timezone.now() - timedelta(days=7))
+```
+
+### 관계 룩업 (__로 따라가기)
+
+```python
+# Post에 ForeignKey author
+Post.objects.filter(author__username="alice")
+Post.objects.filter(author__profile__country="KR")    # 깊이 무관
+
+# ManyToMany
+Post.objects.filter(tags__name="python")
+Post.objects.filter(tags__name__in=["python", "django"]).distinct()
+```
+
+## Q 객체: 복합 조건
+
+OR, NOT 등.
+
+```python
+from django.db.models import Q
+
+Post.objects.filter(Q(title__icontains="django") | Q(body__icontains="django"))
+Post.objects.filter(Q(is_published=True) & ~Q(views=0))
+
+# 조건 동적 조합
+q = Q()
+if search:
+    q &= Q(title__icontains=search) | Q(body__icontains=search)
+if author:
+    q &= Q(author=author)
+Post.objects.filter(q)
+```
+
+## F 표현식: 컬럼 참조
+
+DB 레벨 연산. race condition 방지.
+
+```python
+from django.db.models import F
+
+Post.objects.filter(updated_at__gt=F("created_at"))      # 수정된 적 있음
+
+# 원자적 증가
+Post.objects.filter(id=1).update(views=F("views") + 1)
+# Python에서 post.views += 1; post.save()는 race condition
+```
+
+## 정렬
+
+```python
+Post.objects.order_by("-created_at")           # 내림차순
+Post.objects.order_by("title", "-created_at")  # 다중 정렬
+Post.objects.order_by("?")                      # 랜덤 (느림)
+Post.objects.order_by(F("views").desc(nulls_last=True))    # F + NULL 처리
+```
+
+## 슬라이싱
+
+```python
+Post.objects.all()[:10]              # SQL LIMIT 10
+Post.objects.all()[10:20]            # OFFSET 10 LIMIT 10
+Post.objects.all()[5]                 # 6번째 객체 (LIMIT 1 OFFSET 5)
+```
+
+음수 인덱스 미지원 (`[-1]` 안 됨). 대신 `last()` 또는 정렬 뒤집기.
+
+## values, values_list, only, defer
+
+```python
+# dict로
+Post.objects.values("id", "title")           # [{"id": 1, "title": "..."}]
+Post.objects.values("author__username")       # 관계도
+
+# tuple로
+Post.objects.values_list("id", "title")       # [(1, "..."), ...]
+Post.objects.values_list("id", flat=True)     # 단일 컬럼은 평탄 [1, 2, 3]
+
+# 일부 컬럼만 (객체로)
+Post.objects.only("title")                    # title만 로드, 다른 건 lazy
+Post.objects.defer("body")                    # body만 지연
+```
+
+큰 TextField 등 자주 안 쓰는 컬럼은 `defer()`로 미루면 메모리 절약.
+
+## annotate, aggregate
+
+```python
+from django.db.models import Count, Sum, Avg, Max, Min
+
+# 전체 집계
+Post.objects.aggregate(total=Count("id"), avg_views=Avg("views"))
+# {"total": 100, "avg_views": 42.5}
+
+# 그룹별 집계 (annotate)
+from django.db.models import Count
+authors = User.objects.annotate(post_count=Count("posts"))
+for a in authors:
+    print(a.username, a.post_count)
+```
+
+`annotate`로 각 row에 계산 컬럼 추가. SQL의 GROUP BY와 매핑.
+
+## select_related, prefetch_related: N+1 회피
+
+```python
+# 나쁨: N+1
+posts = Post.objects.all()
+for p in posts:
+    print(p.author.username)    # 매 반복마다 SQL
+
+# select_related: SQL JOIN (FK, OneToOne)
+posts = Post.objects.select_related("author")
+for p in posts:
+    print(p.author.username)    # JOIN 한 번
+
+# prefetch_related: 추가 쿼리 (M2M, 역방향)
+posts = Post.objects.prefetch_related("tags")
+for p in posts:
+    print([t.name for t in p.tags.all()])    # 쿼리 2번 (posts + tags)
+```
+
+| | select_related | prefetch_related |
+|---|----------------|------------------|
+| 관계 | FK, OneToOne | M2M, ReverseFK, 모든 것 |
+| SQL | 한 번 (JOIN) | 두 번 이상 |
+| 메모리 | 적음 | 많을 수도 |
+
+`Prefetch`로 prefetch 세밀 제어:
+
+```python
+from django.db.models import Prefetch
+
+posts = Post.objects.prefetch_related(
+    Prefetch("comments", queryset=Comment.objects.filter(approved=True))
+)
+```
+
+## Lazy 평가
+
+QuerySet은 평가 시점까지 SQL 실행 X.
+
+```python
+qs = Post.objects.filter(is_published=True)   # SQL 없음
+qs = qs.exclude(views=0)                       # SQL 없음
+qs = qs.order_by("-created_at")                # SQL 없음
+
+for p in qs:                                    # 여기서 SQL 1번
+    print(p.title)
+print(list(qs))                                 # 캐시 사용 (재실행 X)
+```
+
+QuerySet은 결과를 캐싱하지만 슬라이싱이나 새 메서드 체인은 새 쿼리.
+
+## update, delete
+
+```python
+# 일괄 update (signal 안 탐, save() 안 탐)
+Post.objects.filter(views__lt=10).update(is_featured=False)
+
+# 일괄 delete
+Post.objects.filter(is_published=False).delete()
+```
+
+대량 작업에 효율. 단 `save()`/`pre_save`/`post_save` 신호가 안 발생.
+
+## bulk_create, bulk_update
+
+```python
+posts = [Post(title=f"Post {i}", body="...") for i in range(1000)]
+Post.objects.bulk_create(posts, batch_size=500)
+
+# 업데이트
+for p in posts:
+    p.views = 0
+Post.objects.bulk_update(posts, ["views"], batch_size=500)
+```
+
+PK는 보장 안 됨 (PG는 보장). signal 안 탐.
+
+## get_or_create, update_or_create
+
+```python
+post, created = Post.objects.get_or_create(
+    slug="hello",
+    defaults={"title": "Hello", "body": "..."},
+)
+
+post, created = Post.objects.update_or_create(
+    slug="hello",
+    defaults={"title": "Updated"},
+)
+```
+
+upsert 패턴. 동시성 경계에선 IntegrityError 처리 필요.
+
+## 커스텀 Manager
+
+```python
+class PublishedManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_published=True)
+
+class Post(models.Model):
+    ...
+    objects = models.Manager()         # 기본
+    published = PublishedManager()      # 커스텀
+
+# 사용
+Post.published.all()                   # 발행된 것만
+```
+
+## 커스텀 QuerySet + Manager
+
+```python
+class PostQuerySet(models.QuerySet):
+    def published(self):
+        return self.filter(is_published=True)
+
+    def by_author(self, user):
+        return self.filter(author=user)
+
+class Post(models.Model):
+    ...
+    objects = PostQuerySet.as_manager()
+
+# 체이닝 가능
+Post.objects.published().by_author(user)
+```
+
+조합 가능한 메서드를 QuerySet에 정의 → 재사용성 높음.
+
+## 함정
+
+### 1. .get()의 다중 매치
+
+`get`이 2개 이상 반환하면 `MultipleObjectsReturned`. `unique=True` 또는 다른 조건 추가 필요.
+
+### 2. update의 signal 우회
+
+`Post.objects.update()`는 `pre_save`, `post_save` 신호를 발생시키지 않음. 신호 의존 로직 있으면 루프 + `save()` 필요.
+
+### 3. 큰 QuerySet 메모리
+
+```python
+for p in Post.objects.all():     # 모두 메모리에 로드
+    process(p)
+
+# 대안: iterator
+for p in Post.objects.all().iterator(chunk_size=2000):
+    process(p)
+```
+
+### 4. count vs len
+
+```python
+Post.objects.filter(...).count()    # SQL COUNT(*)
+len(Post.objects.filter(...))       # 전체 로드 후 len (느림)
+```
+
+체크 목적이면 `exists()`가 최적.
+
+## 참고
+
+- [QuerySet API reference](https://docs.djangoproject.com/en/stable/ref/models/querysets/)
+- [Field lookups](https://docs.djangoproject.com/en/stable/ref/models/lookups/)
+- [Aggregation](https://docs.djangoproject.com/en/stable/topics/db/aggregation/)
+- [Database optimization](https://docs.djangoproject.com/en/stable/topics/db/optimization/)

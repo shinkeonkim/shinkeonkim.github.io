@@ -1,0 +1,239 @@
+---
+title: "[Python] import 시스템과 패키지"
+aliases: ["python import", "python package", "__init__.py", "module path", "sys.path", "circular import"]
+tags: [python, import, module, package, basics]
+updated: 2026-06-20
+---
+
+## 정의
+
+Python `import` 시스템은 **모듈(.py 파일)과 패키지(디렉터리)**를 메모리에 로드하고 네임스페이스에 바인딩한다. CPython은 한 번 로드한 모듈을 `sys.modules` 캐시에 보관해 재import 시 디스크를 다시 읽지 않는다.
+
+## 모듈 vs 패키지
+
+- **모듈(module)**: 단일 `.py` 파일
+- **패키지(package)**: `__init__.py`를 포함한 디렉터리(또는 namespace package)
+- **namespace 패키지**: `__init__.py` 없이 디렉터리만 (PEP 420)
+
+```
+myapp/
+    __init__.py       # 일반 패키지
+    main.py
+    utils/
+        __init__.py
+        text.py
+        date.py
+```
+
+## import 구문 4가지
+
+```python
+import math                          # 모듈 전체
+import numpy as np                   # 별칭
+from collections import deque        # 특정 이름만
+from typing import List, Optional    # 여러 이름
+from os.path import *                # 별표 import (비권장)
+```
+
+`from M import x`는 M 모듈을 일단 로드한 후 그 안의 `x` 이름만 현재 네임스페이스에 바인딩한다. 모듈 자체는 `sys.modules`에 있지만 현재 스코프에서 접근 불가.
+
+## 검색 경로: sys.path
+
+import할 때 Python은 다음 순서로 모듈을 찾는다.
+
+1. 빌트인 모듈 (math, sys, …)
+2. `sys.path` 리스트의 각 디렉터리
+3. namespace 패키지 폴백
+
+```python
+import sys
+print(sys.path)
+# ['', '/path/to/script-dir', ...stdlib..., '...site-packages...']
+```
+
+`sys.path[0]`은 **스크립트의 디렉터리**(또는 REPL 시 `''` = 현재 디렉터리). 여기에 영향받아 import 동작이 달라진다.
+
+### PYTHONPATH 환경 변수
+
+```bash
+export PYTHONPATH=/extra/lib:$PYTHONPATH
+python myscript.py
+```
+
+설치 없이 임시 경로 추가 시 유용. 배포에는 권장 안 함.
+
+## import 메커니즘 (간략)
+
+1. `import M`이 실행되면 `sys.modules`에 `M`이 있는지 확인
+2. 있으면 그 객체 반환 (캐시 히트)
+3. 없으면 **finders → loaders** 체인을 통해 모듈을 찾고 로드
+4. `sys.modules[M]`에 등록
+5. 모듈 코드(전역 명령문들)를 위→아래로 실행
+6. 현재 네임스페이스에 `M` 바인딩
+
+```python
+import sys
+print("math" in sys.modules)    # 첫 import 후 True
+```
+
+## __init__.py 역할
+
+- 패키지를 일반 패키지로 표시 (없으면 namespace package)
+- 패키지 초기화 코드 (import 시 실행됨)
+- `__all__` 정의 (별표 import 노출 목록)
+- 편의 import 재노출
+
+```python
+# myapp/utils/__init__.py
+from .text import slugify, normalize
+from .date import to_iso, parse_iso
+
+__all__ = ["slugify", "normalize", "to_iso", "parse_iso"]
+```
+
+이렇게 하면 `from myapp.utils import slugify` 가능.
+
+## 절대 import vs 상대 import
+
+```python
+# 절대 import (권장)
+from myapp.utils.text import slugify
+
+# 상대 import (패키지 내부)
+from .text import slugify          # 같은 패키지
+from ..models import User           # 한 단계 위
+from ...common import config        # 두 단계 위
+```
+
+상대 import는 **패키지 안에서만** 동작. 스크립트로 직접 실행 시(`python utils/text.py`) `ImportError`.
+
+PEP 8은 명시성을 위해 **절대 import 권장**, 단 큰 코드베이스에선 상대가 리팩토링에 강함.
+
+## __main__
+
+스크립트로 실행되는지 import되는지 구분.
+
+```python
+# myapp/cli.py
+def main():
+    print("Running CLI")
+
+if __name__ == "__main__":
+    main()
+```
+
+`python -m myapp.cli`나 `python myapp/cli.py` 실행 시 `__name__ == "__main__"`. import 시는 모듈 이름.
+
+`python -m M`은 `M`을 모듈로 import 후 그 안의 `__main__` 블록 실행. 패키지에선 `__main__.py`를 본다.
+
+## __init__.py 부작용 함정
+
+```python
+# myapp/__init__.py
+print("loading myapp")    # import myapp만 해도 출력됨
+
+from .heavy_module import *  # 초기화가 느려짐
+```
+
+패키지 import 시 항상 실행되므로 **느린 / 부작용 있는 코드 금지**. 무거운 import는 함수 안으로 옮기거나 lazy 로딩.
+
+## 순환 import (Circular Import)
+
+```python
+# a.py
+from b import B
+class A: pass
+
+# b.py
+from a import A
+class B: pass
+```
+
+`import a`는 b를 import → b는 a를 import (아직 미완료) → 부분 모듈을 받음 → `A` 미정의 → `ImportError`.
+
+### 해결법
+
+1. **함수 안 import** (지연 평가):
+```python
+# a.py
+class A:
+    def use_b(self):
+        from b import B    # 함수 호출 시 import
+        return B()
+```
+
+2. **공통 모듈로 분리**:
+```python
+# common.py
+class Shared: pass
+
+# a.py, b.py
+from common import Shared
+```
+
+3. **인터페이스 분리**: ABC/Protocol로 의존 방향 뒤집기.
+
+## import 캐시 무효화
+
+```python
+import importlib
+import mymodule
+
+# 코드 수정 후 다시 로드 (REPL/주피터에서 유용)
+importlib.reload(mymodule)
+```
+
+테스트/디버깅 외엔 거의 안 씀. 진짜 자동 재로딩은 watcher 라이브러리 사용.
+
+## namespace 패키지 (PEP 420)
+
+`__init__.py` 없는 디렉터리도 import 가능. 여러 디렉터리를 같은 패키지 이름 아래 합칠 수 있음.
+
+```
+plugin_a/myapp/plugins/
+plugin_b/myapp/plugins/
+```
+
+`sys.path`에 둘 다 있으면 `myapp.plugins`에서 양쪽이 합쳐 보인다. 플러그인 시스템에 유용.
+
+## site-packages와 pip
+
+```bash
+pip install requests           # site-packages에 설치
+python -c "import requests; print(requests.__file__)"
+```
+
+`site-packages`는 sys.path에 자동으로 추가되는 디렉터리. 가상 환경(venv) 사용 시 환경별로 격리.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install requests
+```
+
+## 좋은 import 관례 (PEP 8)
+
+1. 파일 최상단에 모아두기
+2. 순서: 표준 라이브러리 → 서드파티 → 로컬, 각 그룹 사이 빈 줄
+3. 한 줄에 하나(여러 이름 import는 from 문으로)
+4. 절대 import 우선, 필요시 명시적 상대 import
+5. 별표 import(`from m import *`) 피하기
+
+```python
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from myapp.utils import slugify
+from myapp.models import User
+```
+
+## 참고
+
+- [Python tutorial: Modules](https://docs.python.org/3/tutorial/modules.html)
+- [The import system - Python Language Reference](https://docs.python.org/3/reference/import.html)
+- [PEP 328 – Imports: Multi-Line and Absolute/Relative](https://peps.python.org/pep-0328/)
+- [PEP 420 – Implicit Namespace Packages](https://peps.python.org/pep-0420/)

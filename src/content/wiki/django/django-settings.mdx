@@ -1,0 +1,374 @@
+---
+title: "[Django] settings 관리: 환경 분리, secrets, 12-factor"
+aliases: ["django settings", "settings split", "django-environ", "DJANGO_SETTINGS_MODULE", "production settings"]
+tags: [django, settings, configuration]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django settings는 단일 Python 파일에 모든 설정을 두는 게 기본이지만, **환경별 분리·비밀 정보 분리·12-factor** 원칙 적용이 실무 표준. 개발/스테이징/프로덕션 마다 다른 값을 안전하게 관리해야 한다.
+
+## 기본: 단일 settings.py
+
+```python
+# myproject/settings.py
+SECRET_KEY = "..."
+DEBUG = True
+DATABASES = {...}
+```
+
+매우 단순한 프로젝트면 충분. 그러나 다음 문제:
+- 비밀 정보가 코드와 함께 커밋됨
+- 개발/프로덕션 차이 무관 한 파일에 섞임
+- 환경 변수 의존 어려움
+
+## 패턴 1: 단일 파일 + 환경변수
+
+```python
+import os
+SECRET_KEY = os.environ["SECRET_KEY"]
+DEBUG = os.environ.get("DEBUG", "False") == "True"
+```
+
+간단하나 `bool`/`list` 변환 직접 처리, default 누락 시 KeyError.
+
+## 패턴 2: django-environ
+
+```bash
+pip install django-environ
+```
+
+```python
+# settings.py
+import environ
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+env = environ.Env(
+    DEBUG=(bool, False),
+    ALLOWED_HOSTS=(list, []),
+)
+environ.Env.read_env(BASE_DIR / ".env")
+
+SECRET_KEY = env("SECRET_KEY")
+DEBUG = env.bool("DEBUG")
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+
+DATABASES = {"default": env.db()}    # DATABASE_URL 파싱
+CACHES = {"default": env.cache()}    # CACHE_URL 파싱
+```
+
+`.env`:
+```
+SECRET_KEY=...
+DEBUG=False
+DATABASE_URL=postgres://user:pass@localhost/db
+REDIS_URL=redis://localhost:6379/0
+ALLOWED_HOSTS=example.com,www.example.com
+```
+
+`.env`는 `.gitignore`에 추가.
+
+## 패턴 3: 환경별 디렉터리
+
+```
+myproject/
+    settings/
+        __init__.py
+        base.py
+        development.py
+        staging.py
+        production.py
+        test.py
+```
+
+```python
+# base.py
+INSTALLED_APPS = [...]
+MIDDLEWARE = [...]
+TEMPLATES = [...]
+DATABASES = {"default": env.db()}
+
+# development.py
+from .base import *
+DEBUG = True
+ALLOWED_HOSTS = ["*"]
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+
+# production.py
+from .base import *
+DEBUG = False
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+SECURE_SSL_REDIRECT = True
+SECURE_HSTS_SECONDS = 31536000
+
+# test.py
+from .base import *
+DEBUG = False
+DATABASES["default"] = {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
+PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]    # 빠름
+```
+
+`DJANGO_SETTINGS_MODULE` 환경변수로 선택:
+
+```bash
+DJANGO_SETTINGS_MODULE=myproject.settings.production gunicorn ...
+DJANGO_SETTINGS_MODULE=myproject.settings.test pytest
+```
+
+`manage.py`에서 기본값:
+
+```python
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings.development")
+```
+
+## 12-factor 원칙
+
+- 코드와 설정 분리: 환경변수만 사용 (코드에 비밀 X)
+- 환경 동등성: 개발/스테이징/프로덕션 차이 최소
+- 무상태 프로세스
+- 빌드/릴리스/실행 분리
+
+Django에 적용:
+- 모든 비밀과 환경별 값은 환경변수
+- 코드 한 버전으로 모든 환경 동작
+- ENV에서 모든 설정 읽음
+
+## 비밀 정보 관리
+
+| 방법 | 적합 |
+|------|------|
+| `.env` 파일 (로컬) | 개발 |
+| 시스템 환경변수 | 컨테이너 |
+| AWS Secrets Manager | AWS |
+| HashiCorp Vault | 본격 |
+| GitHub Actions secrets | CI |
+| Docker secrets | docker swarm |
+| Kubernetes Secrets | k8s |
+
+절대 git에 커밋 X. `.env`는 `.gitignore`. `.env.example`은 커밋 (구조만).
+
+## DATABASES 구성
+
+```python
+# 단일 DB
+DATABASES = {"default": env.db()}
+
+# 다중 DB (read replica)
+DATABASES = {
+    "default": env.db("DATABASE_URL"),
+    "replica": env.db("REPLICA_URL"),
+}
+
+DATABASE_ROUTERS = ["myapp.routers.PrimaryReplicaRouter"]
+```
+
+라우터:
+
+```python
+class PrimaryReplicaRouter:
+    def db_for_read(self, model, **hints):
+        return "replica"
+
+    def db_for_write(self, model, **hints):
+        return "default"
+
+    def allow_relation(self, obj1, obj2, **hints):
+        return True
+
+    def allow_migrate(self, db, app_label, **hints):
+        return db == "default"
+```
+
+## CACHES 구성
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_URL"),
+    },
+    "sessions": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_SESSION_URL"),
+    },
+}
+
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+SESSION_CACHE_ALIAS = "sessions"
+```
+
+## LOGGING
+
+```python
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{asctime} {levelname} {name} {message}",
+            "style": "{",
+        },
+        "json": {
+            "()": "pythonjsonlogger.json.JsonFormatter",
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json" if not DEBUG else "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": env("LOG_LEVEL", default="INFO"),
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+}
+```
+
+## INSTALLED_APPS 확장
+
+```python
+# base.py
+INSTALLED_APPS = [
+    "django.contrib.admin",
+    ...
+    "myapp",
+]
+
+# development.py
+INSTALLED_APPS += ["debug_toolbar", "django_extensions"]
+MIDDLEWARE += ["debug_toolbar.middleware.DebugToolbarMiddleware"]
+INTERNAL_IPS = ["127.0.0.1"]
+```
+
+## 설정 검증
+
+```bash
+python manage.py check
+python manage.py check --deploy        # 프로덕션 권장 사항
+python manage.py diffsettings           # 기본값과 차이
+```
+
+## 자주 쓰는 보안 설정
+
+```python
+# production.py
+SECRET_KEY = env("SECRET_KEY")
+DEBUG = False
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS")
+
+# HTTPS
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = True
+
+# HSTS
+SECURE_HSTS_SECONDS = 31536000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+
+# 쿠키
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = True
+
+# 기타
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_BROWSER_XSS_FILTER = True
+
+# Trusted hosts (older Django)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024    # 5MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+```
+
+## 함정
+
+### 1. SECRET_KEY 기본값 사용
+
+`startproject`가 만든 기본 SECRET_KEY 그대로 배포 → 보안 위험. 항상 환경변수로.
+
+### 2. ALLOWED_HOSTS = ["*"]
+
+`*`로 두면 Host header injection 공격에 취약. 명시 도메인.
+
+### 3. settings 안에서 다른 settings 참조
+
+```python
+A = "foo"
+B = A + "bar"     # OK
+
+# 단 import 순서 문제: 다른 모듈이 A 변경한 후에 B 정의 등 주의
+```
+
+`override_settings`로 테스트 변경 시 종속된 다른 값은 안 바뀜.
+
+### 4. base.py가 import side effect
+
+```python
+# base.py
+from external_service import client    # 이걸로 client가 생성됨
+```
+
+settings import만으로 외부 호출 → 빌드 시간/테스트 시간 오류. settings엔 순수 값만.
+
+### 5. .env에 따옴표
+
+```
+SECRET_KEY="my-secret"        # 따옴표 포함되어 읽힘 (백엔드 따라)
+SECRET_KEY=my-secret           # 안전
+```
+
+`django-environ`은 따옴표 처리하지만 다른 도구는 다름.
+
+## 자주 보는 패턴
+
+### Feature flag
+
+```python
+FEATURES = {
+    "NEW_DASHBOARD": env.bool("FEATURE_NEW_DASHBOARD", False),
+    "AI_SUGGESTIONS": env.bool("FEATURE_AI_SUGGESTIONS", False),
+}
+
+# 코드
+if settings.FEATURES["NEW_DASHBOARD"]:
+    ...
+```
+
+`django-waffle` 같은 라이브러리가 사용자 단위 flag 제공.
+
+### 시작 시점 검증
+
+```python
+# apps.py
+class MyAppConfig(AppConfig):
+    name = "myapp"
+
+    def ready(self):
+        from django.conf import settings
+        required = ["SOME_API_KEY", "ANOTHER_KEY"]
+        missing = [k for k in required if not getattr(settings, k, None)]
+        if missing:
+            raise RuntimeError(f"Missing settings: {missing}")
+```
+
+## 참고
+
+- [Django settings reference](https://docs.djangoproject.com/en/stable/ref/settings/)
+- [Deployment checklist](https://docs.djangoproject.com/en/stable/howto/deployment/checklist/)
+- [django-environ](https://django-environ.readthedocs.io/)
+- [12-factor app](https://12factor.net/)
+- [django-split-settings](https://github.com/wemake-services/django-split-settings)

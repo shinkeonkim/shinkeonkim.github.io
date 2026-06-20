@@ -1,0 +1,245 @@
+---
+title: "[Rails] Active Record Encryption"
+aliases: ["rails encryption", "encrypts attribute", "deterministic encryption", "rails 7 encryption"]
+tags: [rails, encryption, security, active-record]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Active Record Encryption** (Rails 7.0+)은 모델 attribute 자동 암호화. 키 관리, 검색(deterministic), 마이그레이션 등 내장. 비밀번호는 `has_secure_password` (bcrypt), 일반 민감 데이터는 encrypts.
+
+## 초기 설정
+
+```bash
+bin/rails db:encryption:init
+```
+
+출력된 키를 credentials에 저장:
+
+```yaml
+# config/credentials.yml.enc (bin/rails credentials:edit)
+active_record_encryption:
+  primary_key: ...
+  deterministic_key: ...
+  key_derivation_salt: ...
+```
+
+또는 환경변수:
+
+```ruby
+config.active_record.encryption.primary_key = ENV["AR_PRIMARY_KEY"]
+config.active_record.encryption.deterministic_key = ENV["AR_DETERMINISTIC_KEY"]
+config.active_record.encryption.key_derivation_salt = ENV["AR_SALT"]
+```
+
+## 사용
+
+```ruby
+class User < ApplicationRecord
+  encrypts :ssn
+  encrypts :api_key
+  encrypts :credit_card, deterministic: true    # 검색 가능
+end
+
+user = User.create(ssn: "123-45-6789")
+user.ssn    # "123-45-6789" (자동 복호화)
+User.where(ssn: "123-45-6789")    # ERROR (non-deterministic)
+User.where(credit_card: "...")     # OK (deterministic)
+```
+
+DB에는 암호화된 값 저장.
+
+## Deterministic vs Non-deterministic
+
+| 옵션 | 검색 가능 | 보안 |
+|------|----------|------|
+| Default (random IV) | X | 강함 (같은 평문도 다른 ciphertext) |
+| `deterministic: true` | O | 약함 (같은 평문 → 같은 ciphertext) |
+
+가능하면 non-deterministic. 검색이 필수일 때만 deterministic.
+
+## Downcase
+
+```ruby
+encrypts :email, deterministic: true, downcase: true
+```
+
+검색 시 case-insensitive. `User.where(email: "Alice@Example.com")` 도 매치.
+
+## previous 키 (회전)
+
+키 회전 시 옛 키로 복호화 가능:
+
+```ruby
+class User < ApplicationRecord
+  encrypts :ssn, previous: [
+    { key: ENV["AR_OLD_PRIMARY_KEY"] },
+  ]
+end
+```
+
+새 키로 저장, 옛 키도 읽기. 데이터를 점진적으로 새 키로 마이그레이션:
+
+```bash
+bin/rails db:encryption:rotate
+```
+
+## 검증
+
+```ruby
+class User < ApplicationRecord
+  encrypts :ssn
+  validates :ssn, presence: true, format: { with: /\A\d{3}-\d{2}-\d{4}\z/ }
+end
+```
+
+검증은 평문에 대해 작동.
+
+## 인덱스
+
+```ruby
+add_index :users, :credit_card    # deterministic 컬럼만 의미 있음
+```
+
+non-deterministic은 인덱스 무용 (매번 다른 값).
+
+## 자주 보는 패턴
+
+### 개인정보
+
+```ruby
+class Customer < ApplicationRecord
+  encrypts :ssn
+  encrypts :birthday
+  encrypts :phone, deterministic: true    # 검색 필요
+end
+```
+
+### API 키
+
+```ruby
+class Integration < ApplicationRecord
+  encrypts :api_key
+  encrypts :api_secret
+end
+```
+
+### 외부 토큰
+
+```ruby
+class User < ApplicationRecord
+  encrypts :oauth_access_token
+  encrypts :oauth_refresh_token
+end
+```
+
+## 마이그레이션 (기존 데이터)
+
+```ruby
+# 마이그레이션
+class EncryptUserSsn < ActiveRecord::Migration[7.0]
+  def up
+    User.find_each do |user|
+      user.ssn = user.read_attribute(:ssn)    # 평문 읽기
+      user.save!    # 암호화 저장
+    end
+  end
+end
+```
+
+또는 별도 작업으로 점진적 변환.
+
+## 함정
+
+### 1. 인덱스 컬럼 길이
+
+```ruby
+encrypts :name    # 암호화 후 더 김
+```
+
+암호화된 값은 평문보다 큼 (base64). VARCHAR(255) → 부족할 수 있음. TEXT 권장 또는 확인.
+
+### 2. 비교
+
+```ruby
+user.ssn == "123-..."         # OK (메모리에서 복호화)
+User.where(ssn: "123-...")    # deterministic만 가능
+```
+
+### 3. 검색 + 정렬
+
+deterministic이라도 LIKE 검색은 의미 없음 (암호화된 substring 매치 X).
+
+```ruby
+User.where("ssn LIKE ?", "123%")    # 동작 안 함
+```
+
+검색 + 암호화는 별도 검색 인덱스 (Searchable encryption) 또는 별 필드.
+
+### 4. Rails 콘솔에서 평문 노출
+
+```ruby
+User.first.ssn    # 평문 출력!
+```
+
+`inspect`도. 필요 시 `attr_redact` (커스텀 helper).
+
+### 5. key 노출
+
+`config/credentials.yml.enc`는 git OK (암호화). `master.key`는 절대 X. 노출 시 즉시 회전.
+
+## 비밀번호는 다름
+
+```ruby
+class User < ApplicationRecord
+  has_secure_password    # bcrypt, irreversible
+end
+```
+
+비밀번호는 hash (해시) - 복호화 못 함. `encrypts`는 복호화 가능. 비밀번호엔 `has_secure_password`, 일반 민감 데이터엔 `encrypts`.
+
+## Audit / 로그 보호
+
+```ruby
+# config/initializers/filter_parameter_logging.rb
+Rails.application.config.filter_parameters += [
+  :ssn, :credit_card, :api_key,
+]
+```
+
+로그에 `[FILTERED]` 표시. 암호화 + 로그 필터 둘 다.
+
+## 외부 KMS
+
+```ruby
+config.active_record.encryption.key_provider = MyKmsKeyProvider.new
+```
+
+AWS KMS, Vault 등 통합. 키 회전, 권한 관리 위임.
+
+## 대안
+
+| 솔루션 | 특징 |
+|--------|------|
+| Active Record Encryption | Rails 표준 (7.0+) |
+| attr_encrypted | 옛 표준 (gem) |
+| lockbox | 활발 (gem) |
+| PG pgcrypto | DB 레벨 |
+| 어플리케이션 레벨 (Vault, KMS) | 강력 |
+
+Rails 7+ 신규 프로젝트는 내장 Encryption.
+
+## 보안 모범
+
+- 가능한 한 적게 암호화 (성능 + 복잡도)
+- 필드 단위 권한 (admin만 복호화)
+- 키 회전 정기
+- 백업도 암호화
+- 로그/응답에 비밀 X
+
+## 참고
+
+- [Active Record Encryption](https://guides.rubyonrails.org/active_record_encryption.html)
+- [Lockbox](https://github.com/ankane/lockbox)
+- [pg_search](https://github.com/Casecommons/pg_search) - 검색 가능 암호화 대안

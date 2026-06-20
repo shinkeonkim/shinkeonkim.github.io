@@ -1,0 +1,374 @@
+---
+title: "[Python] pytest: fixture, parametrize, mock"
+aliases: ["python pytest", "pytest fixture", "parametrize", "monkeypatch", "conftest"]
+tags: [python, pytest, testing]
+updated: 2026-06-20
+---
+
+## 정의
+
+`pytest`는 Python 표준 테스트 프레임워크의 사실상 표준(stdlib는 `unittest`이지만 pytest가 더 강력). 단순한 함수 `assert`로 시작해서 fixture, parametrize, plugin 시스템까지 확장 가능.
+
+## 설치와 기본
+
+```bash
+pip install pytest
+pytest                          # 현재 디렉터리 모든 테스트 실행
+pytest tests/                   # 디렉터리 지정
+pytest -k test_foo              # 이름 매칭
+pytest -x                       # 첫 실패에서 멈춤
+pytest -v                       # 자세히
+pytest --pdb                    # 실패 시 디버거
+pytest -s                       # print 출력 표시
+pytest -n 4                     # 4 worker 병렬 (pytest-xdist 필요)
+```
+
+## 기본 테스트
+
+```python
+# test_calc.py
+def add(a, b):
+    return a + b
+
+def test_add():
+    assert add(1, 2) == 3
+
+def test_negative():
+    assert add(-1, 1) == 0
+```
+
+`test_*` 함수만 자동 수집. 파일도 `test_*.py` 또는 `*_test.py`. 클래스로 묶을 땐 `Test*` (단 `__init__` 메서드 가지면 수집 X).
+
+assert 평가가 실패하면 pytest가 표현식을 분해해서 양쪽 값 표시 (assertion rewriting).
+
+## fixture
+
+테스트 간 공유되는 setup/teardown. `@pytest.fixture` 데코레이터.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pytest
+
+@pytest.fixture
+def db():
+    print("setup db")
+    conn = {"users": {}}
+    yield conn               # 테스트가 여기를 받음
+    print("teardown db")
+
+def test_insert(db):
+    db["users"][1] = "Alice"
+    assert 1 in db["users"]
+
+def test_empty(db):
+    assert not db["users"]   # 매번 새 db (independent)
+`}
+  output={`# 실행 시 출력:
+# setup db / teardown db / setup db / teardown db
+`}
+/>
+
+`yield` 전 = setup, 후 = teardown. 매 테스트가 fresh instance를 받음.
+
+### scope: 공유 범위
+
+```python
+@pytest.fixture(scope="function")    # 기본: 매 테스트
+@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
+@pytest.fixture(scope="package")
+@pytest.fixture(scope="session")     # 전체 실행 동안 1번
+```
+
+DB 커넥션 등 비싼 자원은 `session`, 매번 깨끗해야 하는 데이터는 `function`.
+
+### fixture가 fixture를 받음
+
+```python
+@pytest.fixture(scope="session")
+def db_engine():
+    return create_engine("sqlite://")
+
+@pytest.fixture
+def db_session(db_engine):
+    s = Session(db_engine)
+    yield s
+    s.rollback()
+```
+
+DI(의존성 주입)처럼 동작. pytest가 의존성 그래프를 자동 해결.
+
+### conftest.py
+
+같은 디렉터리(또는 하위)의 모든 테스트가 자동으로 import 없이 fixture 사용 가능.
+
+```
+tests/
+    conftest.py           # 공통 fixture
+    test_users.py
+    test_orders.py
+    api/
+        conftest.py       # api 디렉터리 전용 fixture
+        test_login.py
+```
+
+## parametrize
+
+같은 테스트를 여러 입력으로 반복.
+
+```python
+import pytest
+
+@pytest.mark.parametrize("a, b, expected", [
+    (1, 2, 3),
+    (0, 0, 0),
+    (-1, 1, 0),
+    (10, -5, 5),
+])
+def test_add(a, b, expected):
+    assert add(a, b) == expected
+```
+
+테스트 4개로 실행됨. CI 출력에서 각각 별도로 표시.
+
+### id 명시
+
+```python
+@pytest.mark.parametrize("a, b", [
+    pytest.param(1, 2, id="positive"),
+    pytest.param(-1, 1, id="mixed"),
+    pytest.param(0, 0, id="zero"),
+])
+def test_x(a, b): ...
+```
+
+기본 id는 값 자체. 복잡한 값은 id 명시 권장.
+
+### 다중 parametrize (cartesian product)
+
+```python
+@pytest.mark.parametrize("x", [1, 2, 3])
+@pytest.mark.parametrize("y", ["a", "b"])
+def test(x, y):
+    # 3 * 2 = 6번 실행
+    ...
+```
+
+## 예외 테스트
+
+```python
+import pytest
+
+def test_divide_by_zero():
+    with pytest.raises(ZeroDivisionError):
+        1 / 0
+
+def test_error_message():
+    with pytest.raises(ValueError, match=r"invalid.*"):
+        int("abc")
+```
+
+`match`는 메시지 정규식. 메시지 본문이 정확히 같지 않아도 됨.
+
+## monkeypatch: 일시적 변경
+
+테스트 동안 모듈/객체의 속성을 바꾸고 자동 복원.
+
+```python
+def test_env(monkeypatch):
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setattr("myapp.config.timeout", 0.1)
+    monkeypatch.delitem(my_dict, "key", raising=False)
+
+    run_test()
+# 테스트 종료 시 자동 복원
+```
+
+`unittest.mock.patch`보다 간결한 경우 많음.
+
+## tmp_path / tmp_path_factory
+
+테스트별 임시 디렉터리. 자동 정리.
+
+```python
+def test_file_io(tmp_path):
+    f = tmp_path / "data.txt"
+    f.write_text("hello")
+    assert f.read_text() == "hello"
+```
+
+`tmp_path`는 `pathlib.Path`. `tmpdir`(legacy)은 `py.path.local`.
+
+## capsys / capfd
+
+print 출력 캡처.
+
+```python
+def greet():
+    print("hello")
+
+def test_greet(capsys):
+    greet()
+    captured = capsys.readouterr()
+    assert captured.out == "hello\n"
+```
+
+## mark
+
+테스트에 메타데이터. CLI 필터에 사용.
+
+```python
+import pytest
+
+@pytest.mark.slow
+def test_heavy():
+    ...
+
+@pytest.mark.integration
+def test_db():
+    ...
+
+@pytest.mark.skip(reason="not yet")
+def test_future(): ...
+
+@pytest.mark.skipif(sys.platform == "win32", reason="unix only")
+def test_unix(): ...
+
+@pytest.mark.xfail
+def test_known_bug():
+    assert False  # 기대된 실패
+```
+
+```bash
+pytest -m "not slow"        # slow 제외
+pytest -m "integration"     # integration만
+```
+
+`pytest.ini` 또는 `pyproject.toml`에 marker 등록:
+
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow",
+    "integration: integration tests",
+]
+```
+
+## mock과 통합
+
+```python
+from unittest.mock import patch, MagicMock
+
+@patch("myapp.api.requests.get")
+def test_api(mock_get):
+    mock_get.return_value.json.return_value = {"id": 1}
+    result = call_api()
+    assert result["id"] == 1
+    mock_get.assert_called_once_with("https://api.example.com/users")
+```
+
+또는 fixture로:
+
+```python
+@pytest.fixture
+def mock_db(monkeypatch):
+    db = MagicMock()
+    db.query.return_value = []
+    monkeypatch.setattr("myapp.db", db)
+    return db
+
+def test_x(mock_db):
+    ...
+    mock_db.query.assert_called()
+```
+
+## coverage 통합
+
+```bash
+pip install pytest-cov
+pytest --cov=myapp --cov-report=term-missing
+pytest --cov=myapp --cov-report=html   # htmlcov/ 디렉터리 생성
+```
+
+`.coveragerc` 또는 `pyproject.toml`에 제외 패턴 설정.
+
+## 비동기 테스트
+
+```bash
+pip install pytest-asyncio
+```
+
+```python
+import pytest
+
+@pytest.mark.asyncio
+async def test_async():
+    result = await fetch()
+    assert result == ...
+```
+
+`pytest.ini`에서 `asyncio_mode = auto`로 모든 async 함수 자동 처리도 가능.
+
+## 베스트 프랙티스
+
+- AAA 패턴: Arrange, Act, Assert (각 섹션 빈 줄 분리)
+- 테스트 이름은 동작 묘사: `test_user_can_login_with_valid_credentials`
+- 한 테스트 = 하나의 동작 검증
+- fixture로 setup, parametrize로 반복
+- 외부 시스템(DB, API) 격리 (mock 또는 docker-compose)
+- 빠른 unit, 느린 integration 분리 → mark + CI 단계 다르게
+
+## 자주 보는 함정
+
+### 1. 테스트 간 상태 공유
+
+```python
+# WRONG: 모듈 변수
+USERS = []
+
+def test_add():
+    USERS.append("Alice")
+    assert len(USERS) == 1
+
+def test_count():
+    assert len(USERS) == 1    # 실행 순서에 의존, 깨지기 쉬움
+```
+
+→ fixture로 매번 새로.
+
+### 2. 너무 큰 fixture
+
+```python
+@pytest.fixture
+def setup_everything():
+    # DB, redis, S3 mock, 사용자 5명 ...
+    ...
+```
+
+→ 작은 fixture로 분리 후 조합.
+
+### 3. assertion 한 줄 묶기
+
+```python
+def test_user():
+    assert user.name == "Alice" and user.age == 30 and user.email == "a@x.com"
+    # 실패 시 어느 부분인지 불명
+```
+
+→ 개별 assert.
+
+```python
+def test_user():
+    assert user.name == "Alice"
+    assert user.age == 30
+    assert user.email == "a@x.com"
+```
+
+## 참고
+
+- [pytest documentation](https://docs.pytest.org/)
+- [pytest fixtures](https://docs.pytest.org/en/stable/explanation/fixtures.html)
+- [pytest-cov](https://pytest-cov.readthedocs.io/)
+- [pytest-asyncio](https://pytest-asyncio.readthedocs.io/)
+- [Effective Python Testing With Pytest – Real Python](https://realpython.com/pytest-python-testing/)

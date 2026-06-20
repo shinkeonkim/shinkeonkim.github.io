@@ -1,0 +1,405 @@
+---
+title: "[Spring] Bean Validation: @Valid, @NotBlank, custom"
+aliases: ["spring validation", "bean validation", "Jakarta validation", "@Valid", "@Validated", "custom validator"]
+tags: [spring, validation, bean-validation, jakarta]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring은 **Jakarta Bean Validation (JSR-380)**을 표준으로 사용. `@NotBlank`, `@Size`, `@Email` 등 어노테이션으로 선언적 검증. Spring MVC가 `@Valid`로 자동 통합.
+
+## 설정
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-validation")
+```
+
+Hibernate Validator (참조 구현)가 자동 포함.
+
+## 기본 어노테이션
+
+### 일반
+
+```java
+public record CreateUserDto(
+    @NotNull String name,
+    @NotBlank String email,      // null + 빈 문자열 거부
+    @NotEmpty List<String> tags, // 컬렉션이 비어있지 않음
+    @Null String forbidden       // null이어야 함
+) { }
+```
+
+### 문자열
+
+```java
+@Size(min = 1, max = 100)
+@Size(max = 1000)
+@Pattern(regexp = "^[a-z0-9]+$")
+@Email
+@URL    // Hibernate 확장
+```
+
+### 숫자
+
+```java
+@Min(0) @Max(150)
+@DecimalMin("0.0") @DecimalMax("100.0")
+@Positive @Negative
+@PositiveOrZero @NegativeOrZero
+@Digits(integer = 5, fraction = 2)
+```
+
+### 날짜
+
+```java
+@Past
+@PastOrPresent
+@Future
+@FutureOrPresent
+```
+
+## Controller에서 사용
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    @PostMapping
+    public User create(@RequestBody @Valid CreateUserDto dto) {
+        return userService.create(dto);
+    }
+
+    @GetMapping
+    public List<User> search(
+        @RequestParam @Size(max = 100) String q,
+        @RequestParam @Min(0) @Max(100) int page
+    ) {
+        return userService.search(q, page);
+    }
+}
+```
+
+검증 실패:
+- `@RequestBody @Valid`: `MethodArgumentNotValidException`
+- `@RequestParam @Valid`: `ConstraintViolationException` (클래스에 `@Validated` 필요)
+
+## @Valid vs @Validated
+
+```java
+@RestController
+@Validated    // 메서드 파라미터 검증 활성
+public class UserController {
+
+    @GetMapping("/{id}")
+    public User get(@PathVariable @Min(1) Long id) { ... }
+
+    @PostMapping
+    public User create(@RequestBody @Valid CreateUserDto dto) { ... }
+}
+```
+
+- `@Valid` (jakarta): nested 객체 검증
+- `@Validated` (Spring): 클래스 레벨, 그룹 지원
+
+## Nested validation
+
+```java
+public record OrderDto(
+    @NotBlank String customerName,
+    @Valid AddressDto shippingAddress,    // nested 검증
+    @Valid List<@Valid ItemDto> items     // collection element 검증
+) { }
+
+public record AddressDto(
+    @NotBlank String street,
+    @NotBlank String city,
+    @Pattern(regexp = "\\d{5}") String zipCode
+) { }
+```
+
+`@Valid` 없으면 nested 객체 안 검증.
+
+## ExceptionHandler
+
+```java
+@RestControllerAdvice
+public class ValidationExceptionHandler {
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ProblemDetail> handleValidation(MethodArgumentNotValidException ex) {
+        Map<String, String> errors = new HashMap<>();
+        ex.getBindingResult().getFieldErrors().forEach(err ->
+            errors.put(err.getField(), err.getDefaultMessage())
+        );
+
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        problem.setTitle("Validation failed");
+        problem.setProperty("errors", errors);
+        return ResponseEntity.badRequest().body(problem);
+    }
+
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<ProblemDetail> handleConstraint(ConstraintViolationException ex) {
+        Map<String, String> errors = ex.getConstraintViolations().stream()
+            .collect(Collectors.toMap(
+                cv -> cv.getPropertyPath().toString(),
+                ConstraintViolation::getMessage
+            ));
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        problem.setProperty("errors", errors);
+        return ResponseEntity.badRequest().body(problem);
+    }
+}
+```
+
+## 메시지
+
+```java
+@NotBlank(message = "이름은 필수입니다")
+@Size(min = 1, max = 100, message = "이름은 1~100자")
+@Email(message = "올바른 이메일 형식이 아닙니다")
+private String email;
+```
+
+### 메시지 properties
+
+```properties
+# src/main/resources/messages.properties
+notblank.name=이름은 필수입니다
+size.email.message=이메일 길이가 잘못됨
+```
+
+```java
+@NotBlank(message = "{notblank.name}")
+private String name;
+```
+
+다국어 지원.
+
+## 커스텀 Validator
+
+### 어노테이션 만들기
+
+```java
+@Target({ElementType.FIELD, ElementType.PARAMETER})
+@Retention(RetentionPolicy.RUNTIME)
+@Constraint(validatedBy = PhoneNumberValidator.class)
+public @interface PhoneNumber {
+    String message() default "유효하지 않은 전화번호";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+```
+
+```java
+public class PhoneNumberValidator implements ConstraintValidator<PhoneNumber, String> {
+
+    private static final Pattern PATTERN = Pattern.compile("^\\d{3}-\\d{4}-\\d{4}$");
+
+    @Override
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        return value == null || PATTERN.matcher(value).matches();
+    }
+}
+```
+
+사용:
+
+```java
+public record UserDto(
+    @NotBlank String name,
+    @PhoneNumber String phone
+) { }
+```
+
+### Cross-field validation
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Constraint(validatedBy = PasswordMatchValidator.class)
+public @interface PasswordMatch {
+    String message() default "비밀번호가 일치하지 않음";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+```
+
+```java
+public class PasswordMatchValidator implements ConstraintValidator<PasswordMatch, SignupDto> {
+
+    @Override
+    public boolean isValid(SignupDto dto, ConstraintValidatorContext context) {
+        if (dto.password() == null || !dto.password().equals(dto.passwordConfirm())) {
+            context.disableDefaultConstraintViolation();
+            context.buildConstraintViolationWithTemplate("{passwordMatch}")
+                .addPropertyNode("passwordConfirm")
+                .addConstraintViolation();
+            return false;
+        }
+        return true;
+    }
+}
+
+@PasswordMatch
+public record SignupDto(
+    @Email String email,
+    @Size(min = 8) String password,
+    String passwordConfirm
+) { }
+```
+
+## Validation Group
+
+같은 객체를 다른 시나리오로.
+
+```java
+public interface Create { }
+public interface Update { }
+
+public record UserDto(
+    @Null(groups = Create.class)
+    @NotNull(groups = Update.class)
+    Long id,
+
+    @NotBlank(groups = {Create.class, Update.class})
+    String name
+) { }
+```
+
+```java
+@PostMapping
+public User create(@RequestBody @Validated(Create.class) UserDto dto) { ... }
+
+@PutMapping("/{id}")
+public User update(@PathVariable Long id, @RequestBody @Validated(Update.class) UserDto dto) { ... }
+```
+
+## Service layer
+
+Controller 외부에서도 검증 가능.
+
+```java
+@Service
+@Validated
+public class UserService {
+
+    public User create(@Valid CreateUserDto dto) {
+        return userRepository.save(...);
+    }
+
+    public User update(@Min(1) Long id, @Valid UpdateUserDto dto) {
+        ...
+    }
+}
+```
+
+`ConstraintViolationException` 발생 시 직접 처리 또는 ControllerAdvice.
+
+## 직접 호출
+
+```java
+@Service
+public class MyService {
+    private final Validator validator;
+
+    public MyService(Validator validator) {
+        this.validator = validator;
+    }
+
+    public void doIt(SomeDto dto) {
+        Set<ConstraintViolation<SomeDto>> violations = validator.validate(dto);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
+        ...
+    }
+}
+```
+
+## 자주 보는 패턴
+
+### record + validation
+
+```java
+public record CreatePostDto(
+    @NotBlank @Size(max = 200) String title,
+    @NotBlank @Size(min = 10) String body,
+    @NotEmpty @Size(max = 10) List<@NotBlank @Size(max = 50) String> tags
+) { }
+```
+
+### 외부 검증 (DB lookup)
+
+```java
+@Constraint(validatedBy = UniqueEmailValidator.class)
+public @interface UniqueEmail { ... }
+
+@Component
+public class UniqueEmailValidator implements ConstraintValidator<UniqueEmail, String> {
+    private final UserRepository userRepository;
+
+    public UniqueEmailValidator(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    @Override
+    public boolean isValid(String email, ConstraintValidatorContext context) {
+        return email != null && !userRepository.existsByEmail(email);
+    }
+}
+```
+
+Validator도 Spring Bean으로 DI 가능.
+
+## 함정
+
+### 1. @Valid 빠뜨림
+
+```java
+public User create(@RequestBody CreateUserDto dto) { ... }    // 검증 안 됨
+public User create(@RequestBody @Valid CreateUserDto dto) { ... }    // OK
+```
+
+명시 필요.
+
+### 2. validation starter 없음
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-web")
+// validation은 별도
+```
+
+`@NotBlank` 등이 NoClassDefFoundError. `starter-validation` 추가.
+
+### 3. nested 안 검증
+
+```java
+public record OrderDto(
+    AddressDto address    // @Valid 없음 → 안 검증
+) { }
+```
+
+### 4. 메시지 보간
+
+```java
+@Size(min = 1, max = 100, message = "이름은 {min}자 이상 {max}자 이하")
+```
+
+`{min}`, `{max}`, `{value}` 등 자동 보간.
+
+### 5. group 누락
+
+```java
+@Validated    // group 명시 안 함 → Default group만
+@Validated(Create.class)
+```
+
+## 참고
+
+- [Jakarta Bean Validation](https://beanvalidation.org/)
+- [Hibernate Validator](https://hibernate.org/validator/)
+- [Spring Validation](https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html)
+- [ProblemDetail](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html)

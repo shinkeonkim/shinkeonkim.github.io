@@ -1,0 +1,438 @@
+---
+title: "[Rails] Controller: params, strong params, filters"
+aliases: ["rails controller", "strong parameters", "before_action", "respond_to", "ActionController"]
+tags: [rails, controller, action, mvc]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails Controller는 라우터가 전달한 요청을 받아 **Model 조작 + View 렌더링**을 조율한다. RESTful 7 action(index, show, new, create, edit, update, destroy) 패턴이 표준. ApplicationController가 모든 컨트롤러의 부모.
+
+## 기본
+
+```bash
+rails g controller Posts index show new create
+```
+
+```ruby
+# app/controllers/posts_controller.rb
+class PostsController < ApplicationController
+  def index
+    @posts = Post.published.order(created_at: :desc)
+  end
+
+  def show
+    @post = Post.find(params[:id])
+  end
+
+  def new
+    @post = Post.new
+  end
+
+  def create
+    @post = Post.new(post_params)
+    if @post.save
+      redirect_to @post, notice: "글이 작성되었습니다"
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+
+  def edit
+    @post = Post.find(params[:id])
+  end
+
+  def update
+    @post = Post.find(params[:id])
+    if @post.update(post_params)
+      redirect_to @post
+    else
+      render :edit, status: :unprocessable_entity
+    end
+  end
+
+  def destroy
+    Post.find(params[:id]).destroy
+    redirect_to posts_path, notice: "삭제됨"
+  end
+
+  private
+
+  def post_params
+    params.require(:post).permit(:title, :body, tag_ids: [])
+  end
+end
+```
+
+## Strong Parameters
+
+mass assignment 보호. `permit`된 키만 통과.
+
+```ruby
+params.require(:post).permit(:title, :body)
+params.require(:post).permit(:title, :body, tag_ids: [])    # 배열
+params.require(:post).permit(:title, address: [:street, :city])    # 중첩
+
+# 모두 허용 (위험!)
+params.permit!
+```
+
+require는 키 강제, permit는 허용 목록.
+
+### 예시
+
+```ruby
+# request body
+{
+  "post": {
+    "title": "Hello",
+    "body": "...",
+    "admin": true,        # 악성 입력
+    "tags": [1, 2]
+  }
+}
+
+params.require(:post).permit(:title, :body, tags: [])
+# => {title: "Hello", body: "...", tags: [1, 2]}
+# admin은 자동 제외
+```
+
+## params 접근
+
+```ruby
+params[:id]                    # URL 또는 form
+params[:post][:title]
+params.dig(:post, :tags, 0)
+params.permit(:q).fetch(:q, "default")
+
+# 쿼리스트링 (?key=value)
+params[:q]
+
+# JSON body
+params[:user][:name]    # JSON 자동 파싱
+
+# 파일
+params[:avatar]    # ActionDispatch::Http::UploadedFile
+```
+
+## render와 redirect
+
+```ruby
+# View 렌더링
+render :show                              # views/posts/show.html.erb
+render "other/template"
+render plain: "Hello"
+render json: @post
+render xml: @post
+render html: "<h1>Hi</h1>".html_safe
+render status: :not_found                  # 또는 404
+render layout: "admin"
+render partial: "post", locals: { post: @post }
+render template: "posts/index"
+
+# 리다이렉트
+redirect_to @post                          # post_path(@post)
+redirect_to posts_path
+redirect_to root_path, status: :see_other  # 303 (POST 후)
+redirect_to "/external", allow_other_host: true
+redirect_back fallback_location: root_path
+redirect_back_or_to root_path              # 7.0+
+```
+
+`render`와 `redirect_to`는 한 action에 한 번만. 두 번 호출 시 DoubleRenderError.
+
+## flash
+
+세션 1회용 메시지.
+
+```ruby
+# Controller
+redirect_to @post, notice: "저장됨"
+redirect_to @post, alert: "실패"
+flash[:custom] = "내용"
+flash.now[:warning] = "view에서만 표시 (redirect 안 함)"
+```
+
+```erb
+<%# View %>
+<% flash.each do |key, message| %>
+  <div class="<%= key %>"><%= message %></div>
+<% end %>
+
+<% if notice %>
+  <div class="notice"><%= notice %></div>
+<% end %>
+```
+
+`flash.now`는 redirect 안 하고 같은 request에서 표시.
+
+## Filter (before/after/around)
+
+```ruby
+class PostsController < ApplicationController
+  before_action :require_login, except: [:index, :show]
+  before_action :load_post, only: [:show, :edit, :update, :destroy]
+  before_action :require_owner, only: [:edit, :update, :destroy]
+  after_action :track_view, only: :show
+  around_action :log_timing
+
+  private
+
+  def require_login
+    redirect_to login_path unless current_user
+  end
+
+  def load_post
+    @post = Post.find(params[:id])
+  end
+
+  def require_owner
+    redirect_to root_path unless @post.author == current_user
+  end
+
+  def track_view
+    @post&.increment!(:views)
+  end
+
+  def log_timing
+    start = Time.current
+    yield
+    Rails.logger.info("took #{Time.current - start}")
+  end
+end
+```
+
+`only:` / `except:`로 적용 액션 제한.
+
+## skip_before_action
+
+상속받았는데 일부 액션엔 적용 안 하고 싶을 때.
+
+```ruby
+class ApplicationController < ActionController::Base
+  before_action :authenticate
+end
+
+class PublicController < ApplicationController
+  skip_before_action :authenticate, only: [:landing]
+end
+```
+
+## respond_to / format
+
+```ruby
+def show
+  @post = Post.find(params[:id])
+  respond_to do |format|
+    format.html              # show.html.erb
+    format.json { render json: @post }
+    format.xml { render xml: @post }
+    format.csv { send_data @post.to_csv, filename: "post.csv" }
+  end
+end
+```
+
+요청의 Accept 헤더 또는 URL 확장자(.json, .xml) 기반 분기.
+
+## API 컨트롤러
+
+```ruby
+class Api::V1::PostsController < ApplicationController
+  skip_forgery_protection    # CSRF 제외 (JWT 등)
+
+  def index
+    posts = Post.published.limit(20)
+    render json: posts
+  end
+
+  def create
+    post = Post.new(post_params.merge(author: current_user))
+    if post.save
+      render json: post, status: :created
+    else
+      render json: { errors: post.errors }, status: :unprocessable_entity
+    end
+  end
+end
+```
+
+또는 `ActionController::API` 베이스 (HTML 미들웨어 제외, 가벼움):
+
+```ruby
+class Api::ApplicationController < ActionController::API
+end
+```
+
+## 예외 처리
+
+```ruby
+class ApplicationController < ActionController::Base
+  rescue_from ActiveRecord::RecordNotFound, with: :record_not_found
+  rescue_from ActionController::ParameterMissing, with: :bad_request
+
+  private
+
+  def record_not_found(e)
+    render plain: "404", status: :not_found
+  end
+
+  def bad_request(e)
+    render json: { error: e.message }, status: :bad_request
+  end
+end
+```
+
+## helper_method
+
+view에서 사용 가능하게.
+
+```ruby
+class ApplicationController < ActionController::Base
+  helper_method :current_user
+
+  def current_user
+    @current_user ||= User.find_by(id: session[:user_id])
+  end
+end
+```
+
+view에서 `<%= current_user.name %>`.
+
+## Concerns
+
+여러 controller 공통 로직.
+
+```ruby
+# app/controllers/concerns/pagination.rb
+module Pagination
+  extend ActiveSupport::Concern
+
+  def paginate(scope)
+    page = params[:page] || 1
+    scope.page(page).per(20)
+  end
+end
+
+class PostsController < ApplicationController
+  include Pagination
+end
+```
+
+## 세션과 쿠키
+
+```ruby
+# 세션
+session[:user_id] = user.id
+session[:cart] = [1, 2, 3]
+reset_session
+
+# 쿠키
+cookies[:remember] = "value"
+cookies[:remember] = { value: "...", expires: 1.year.from_now, httponly: true }
+cookies.signed[:user_id] = user.id      # 서명 (조작 감지)
+cookies.encrypted[:secret] = "..."      # 암호화
+cookies.delete(:remember)
+```
+
+세션 저장: cookie store (기본, 작은 데이터), DB, Redis, Memcached.
+
+## 자주 보는 패턴
+
+### before_action으로 @resource 설정
+
+```ruby
+class PostsController < ApplicationController
+  before_action :set_post, only: %i[show edit update destroy]
+
+  def show; end
+  def edit; end
+  def update
+    if @post.update(post_params)
+      ...
+    end
+  end
+
+  private
+
+  def set_post
+    @post = Post.find(params[:id])
+  end
+end
+```
+
+scaffold가 생성하는 패턴.
+
+### Pundit/CanCanCan 인가
+
+```ruby
+def update
+  @post = Post.find(params[:id])
+  authorize @post    # Pundit policy 검사
+  @post.update(post_params)
+end
+```
+
+자세한 건 별도 페이지.
+
+### Pagy / Kaminari
+
+```ruby
+def index
+  @pagy, @posts = pagy(Post.all)    # pagy gem
+  # 또는
+  @posts = Post.page(params[:page]).per(20)    # kaminari
+end
+```
+
+## 함정
+
+### 1. permit 누락
+
+```ruby
+params.require(:post).permit(:title)
+# :body, :tag_ids 등은 무시됨
+```
+
+새 필드 추가 시 permit도 업데이트.
+
+### 2. params.require가 nil 이면 ParameterMissing
+
+```ruby
+params.require(:post)    # post 키 없으면 예외
+```
+
+`rescue_from`으로 처리 또는 `params[:post]&.permit(...)`.
+
+### 3. instance variable 안 설정
+
+```ruby
+def show
+  post = Post.find(params[:id])    # 로컬 변수
+end
+```
+
+view에서 `@post`로 접근 안 됨.
+
+### 4. authenticity_token
+
+POST 폼은 CSRF 토큰 필요. `form_with` 헬퍼가 자동 포함. 직접 폼 작성 시:
+
+```erb
+<form method="post">
+  <%= hidden_field_tag :authenticity_token, form_authenticity_token %>
+  ...
+</form>
+```
+
+### 5. redirect status
+
+POST 후 GET 리다이렉트는 303 see_other. 7.0+에서 기본 동작 변경.
+
+## 참고
+
+- [Rails Guides: Action Controller Overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [Rails Routing](https://guides.rubyonrails.org/routing.html)
+- [Strong Parameters](https://api.rubyonrails.org/classes/ActionController/StrongParameters.html)
+- [Pundit](https://github.com/varvet/pundit)
+- [Pagy](https://github.com/ddnexus/pagy)

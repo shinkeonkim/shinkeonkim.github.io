@@ -1,0 +1,285 @@
+---
+title: "[Python] csv, io: CSV와 텍스트 스트림"
+aliases: ["python csv", "csv.reader", "csv.DictReader", "io.StringIO", "io.BytesIO", "open"]
+tags: [python, csv, io, stdlib, file]
+updated: 2026-06-20
+---
+
+## 정의
+
+`csv`는 표준 라이브러리의 CSV 파서. `io`는 텍스트/바이너리 스트림 추상화. CSV 처리는 작은 파일이면 `csv` 모듈, 큰 데이터셋이면 `pandas.read_csv`나 `polars.read_csv`가 적합.
+
+## 기본 읽기
+
+```python
+import csv
+
+with open("data.csv", newline="") as f:
+    reader = csv.reader(f)
+    for row in reader:
+        print(row)         # ['col1', 'col2', 'col3'] 형태 list
+```
+
+**중요**: `open()`에 `newline=""` 권장. CSV 표준은 `\r\n` 종결인데 Python의 universal newline이 일부 케이스에서 파싱을 망친다. `csv` 모듈이 자체적으로 행 분리 처리하므로 `newline=""`으로 두는 게 안전.
+
+## DictReader: 헤더 기반
+
+```python
+import csv
+
+with open("data.csv", newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        print(row["name"], row["age"])
+```
+
+첫 줄이 헤더라고 가정. 각 행이 dict로 옴 (3.8+ 부터는 일반 dict, 이전엔 OrderedDict).
+
+## 쓰기
+
+```python
+import csv
+
+with open("out.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["name", "age"])
+    writer.writerows([
+        ["Alice", 30],
+        ["Bob", 25],
+    ])
+```
+
+`DictWriter`로 dict 쓰기:
+
+```python
+with open("out.csv", "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=["name", "age"])
+    writer.writeheader()
+    writer.writerow({"name": "Alice", "age": 30})
+    writer.writerows([{"name": "Bob", "age": 25}])
+```
+
+`extrasaction="ignore"`로 사전에 추가 키 있을 때 무시 가능.
+
+## Dialect: 구분자, 인용
+
+```python
+import csv
+
+# TSV
+csv.reader(f, delimiter="\t")
+
+# 세미콜론 (유럽)
+csv.reader(f, delimiter=";")
+
+# 인용 항상
+csv.writer(f, quoting=csv.QUOTE_ALL)
+
+# 인용 최소 (필요할 때만)
+csv.writer(f, quoting=csv.QUOTE_MINIMAL)   # 기본
+
+# 인용 비숫자
+csv.writer(f, quoting=csv.QUOTE_NONNUMERIC)
+```
+
+`Dialect`로 묶어서 재사용:
+
+```python
+csv.register_dialect("myapp", delimiter="|", quoting=csv.QUOTE_MINIMAL)
+csv.reader(f, dialect="myapp")
+```
+
+## Sniffer: 자동 감지
+
+```python
+import csv
+
+with open("unknown.csv", newline="") as f:
+    sample = f.read(2048)
+    f.seek(0)
+    dialect = csv.Sniffer().sniff(sample)
+    has_header = csv.Sniffer().has_header(sample)
+    reader = csv.reader(f, dialect)
+```
+
+완벽하지 않지만 알 수 없는 입력 처리 시 시작점으로 유용.
+
+## 큰 파일 스트리밍
+
+```python
+import csv
+
+with open("big.csv", newline="") as f:
+    reader = csv.reader(f)
+    next(reader)        # 헤더 건너뛰기
+    for row in reader:
+        if int(row[2]) > threshold:
+            process(row)
+```
+
+reader는 iterator라 메모리 일정 (한 행씩). 수십 GB도 처리 가능.
+
+배치 처리는 `itertools.batched`(3.12+) 와 결합:
+
+```python
+from itertools import batched
+
+with open("big.csv", newline="") as f:
+    reader = csv.reader(f)
+    next(reader)
+    for batch in batched(reader, 1000):
+        bulk_insert(batch)
+```
+
+## io 모듈: 메모리 내 파일
+
+`io.StringIO` / `io.BytesIO`로 디스크 없이 파일 인터페이스 객체 생성.
+
+```python
+import io
+import csv
+
+# 메모리에 CSV 쓰기
+buf = io.StringIO()
+writer = csv.writer(buf)
+writer.writerow(["a", "b"])
+writer.writerow([1, 2])
+
+result = buf.getvalue()
+print(result)
+# 'a,b\r\n1,2\r\n'
+
+# 메모리에서 CSV 읽기
+src = io.StringIO("name,age\nAlice,30\n")
+reader = csv.DictReader(src)
+for row in reader:
+    print(row)
+```
+
+테스트, HTTP 응답 생성, 메모리 내 변환에 유용.
+
+`BytesIO`는 바이너리 버전 (이미지, 파케이, gzip 등).
+
+```python
+import gzip
+import io
+
+# 메모리에서 gzip 압축
+buf = io.BytesIO()
+with gzip.open(buf, "wb") as gz:
+    gz.write(b"hello")
+compressed = buf.getvalue()
+
+# 메모리에서 압축 해제
+src = io.BytesIO(compressed)
+with gzip.open(src, "rb") as gz:
+    data = gz.read()
+```
+
+## 인코딩
+
+기본은 시스템 기본 (`locale.getpreferredencoding()`). 보통 utf-8이지만 항상 명시 권장.
+
+```python
+with open("data.csv", encoding="utf-8", newline="") as f:
+    ...
+
+# Windows에서 종종 cp949 / euc-kr 인코딩
+with open("data.csv", encoding="euc-kr", newline="") as f:
+    ...
+
+# BOM 처리
+with open("data.csv", encoding="utf-8-sig", newline="") as f:
+    ...
+```
+
+`utf-8-sig`는 BOM(`\ufeff`)을 자동으로 제거. Excel이 만든 CSV에 종종 있음.
+
+## CSV의 함정
+
+### 1. 큰따옴표 안의 콤마/줄바꿈
+
+```csv
+name,quote
+Alice,"hello, world"
+Bob,"line 1
+line 2"
+```
+
+표준 CSV는 큰따옴표로 escape. `csv.reader`가 자동 처리.
+
+### 2. 큰따옴표 안의 큰따옴표
+
+`""`로 escape. `csv.reader`가 자동 처리.
+
+```csv
+name,quote
+Alice,"she said ""hi"""
+```
+
+### 3. 숫자 vs 문자열
+
+CSV는 모든 값이 문자열. 변환은 직접.
+
+```python
+for row in reader:
+    age = int(row["age"])
+    price = float(row["price"])
+```
+
+또는 `csv.QUOTE_NONNUMERIC` (read 시 자동 float 변환, 깨지기 쉬움 - 권장 X).
+
+### 4. 빈 값 처리
+
+```csv
+name,age
+Alice,30
+Bob,
+```
+
+빈 셀은 `""` (빈 문자열)로 옴. `None`이 아님.
+
+```python
+age = int(row["age"]) if row["age"] else None
+```
+
+### 5. 한국어 + Windows + Excel
+
+가장 흔한 인코딩 문제. Windows Excel은 종종 `cp949`/`euc-kr` 또는 BOM 있는 UTF-8 출력. 입력은 일반 utf-8 못 읽음.
+
+해결:
+- 읽을 때 `encoding="utf-8-sig"` (BOM 자동 처리)
+- 쓸 때 Excel 호환 원하면 `encoding="utf-8-sig"` (BOM 포함)
+
+## pandas와 비교
+
+| | csv 모듈 | pandas |
+|---|---------|--------|
+| 메모리 | 일정 (스트리밍) | 전체 로드 |
+| 속도 (작은) | 빠름 | 약간 느림 |
+| 속도 (큰) | 느림 (Python 수준) | 빠름 (C) |
+| 타입 변환 | 직접 | 자동 추론 |
+| 정렬, 필터, 그룹화 | 직접 | 한 줄 |
+| 의존성 | stdlib | 무거움 |
+| 대용량 (수 GB) | OK (스트리밍) | 메모리 부족 가능 |
+
+규칙: 100MB 이하 + 분석 필요 → pandas. 스트리밍 + 단순 변환 → csv. 수 GB → polars 또는 csv 스트리밍 + 청크.
+
+## 대안
+
+- **polars**: 빠른 DataFrame 라이브러리. `pl.read_csv` 매우 빠름.
+- **pyarrow.csv**: 멀티스레드 CSV 파서. pandas보다 빠름.
+- **DuckDB**: SQL로 CSV 직접 쿼리 가능.
+
+```python
+import duckdb
+df = duckdb.sql("SELECT * FROM 'big.csv' WHERE age > 30").df()
+```
+
+## 참고
+
+- [`csv` documentation](https://docs.python.org/3/library/csv.html)
+- [`io` documentation](https://docs.python.org/3/library/io.html)
+- [RFC 4180 – Common Format and MIME Type for CSV](https://datatracker.ietf.org/doc/html/rfc4180)
+- [pandas read_csv](https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html)
+- [polars CSV docs](https://docs.pola.rs/user-guide/io/csv/)

@@ -1,0 +1,254 @@
+---
+title: "[Python] 가비지 컬렉션: refcount + 순환 GC"
+aliases: ["python gc", "garbage collection", "reference counting", "cyclic gc", "weakref", "__del__"]
+tags: [python, gc, memory, internals, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+CPython의 메모리 관리는 두 메커니즘의 조합이다.
+
+1. **Reference counting**: 모든 객체에 참조 카운트(`ob_refcnt`)가 있고, 카운트가 0이 되면 즉시 해제. 즉각적이지만 순환 참조 못 잡음.
+2. **Generational cyclic GC**: 순환 참조를 주기적으로 감지·해제. `gc` 모듈로 제어.
+
+PyPy, Jython 등 다른 구현은 다른 방식(tracing GC 위주) 사용.
+
+## Reference counting
+
+```python
+import sys
+
+a = [1, 2, 3]
+print(sys.getrefcount(a))    # 2 (a 변수 + getrefcount 인자)
+
+b = a
+print(sys.getrefcount(a))    # 3
+
+del b
+print(sys.getrefcount(a))    # 2
+```
+
+- 새 참조 만들 때 `Py_INCREF` (C 매크로)
+- 참조 사라질 때 `Py_DECREF`, 0이면 즉시 `__del__` 호출 후 해제
+
+장점: 즉시 해제 (메모리 평탄), 캐시 친화적.
+단점: 매 연산마다 카운터 갱신 비용, **순환 참조 못 잡음**.
+
+## 순환 참조
+
+```python
+a = []
+b = [a]
+a.append(b)
+# a → b → a (순환)
+
+del a, b
+# refcount 둘 다 0이 안 됨 → 메모리 누수
+```
+
+객체 안에 다른 객체 참조가 있고 그게 다시 자기 자신으로 돌아오는 구조.
+
+## Generational GC
+
+이 순환을 잡는 게 `gc` 모듈. **세대(generation) 0, 1, 2**로 객체를 분류해 새로 만들어진 객체일수록 자주 검사.
+
+```python
+import gc
+
+print(gc.get_threshold())     # (700, 10, 10)
+# gen 0이 700회 할당 후 GC 실행
+# gen 1은 gen 0 GC가 10번 일어날 때마다
+# gen 2는 gen 1 GC가 10번 일어날 때마다
+```
+
+세대 가정: 새 객체는 곧 죽거나 오래 산다. 오래 산 객체는 검사 빈도 낮춤.
+
+### GC 동작 확인
+
+```python
+import gc
+
+class Node:
+    pass
+
+gc.disable()
+
+a, b = Node(), Node()
+a.ref = b
+b.ref = a
+del a, b
+
+print(gc.collect())   # 회수된 객체 수
+gc.enable()
+```
+
+## 직접 조작
+
+```python
+gc.disable()         # 자동 GC 끄기
+gc.enable()
+gc.collect()         # 수동 실행
+gc.get_count()       # 현재 세대별 객체 수
+gc.get_objects()     # 모든 추적 중인 객체 (디버깅용)
+gc.set_threshold(0)  # 자동 GC 사실상 중단
+```
+
+대량 객체를 일시적으로 만들 때 GC를 잠시 꺼서 처리량 향상시키는 패턴 있음.
+
+## __del__
+
+객체가 해제될 때 호출. 의존하지 말 것.
+
+```python
+class Resource:
+    def __del__(self):
+        print("releasing")
+
+r = Resource()
+del r        # "releasing"
+
+# 그러나 순환 참조 안에 있으면 호출 시점 불확실
+```
+
+함정:
+- 호출 시점 보장 X (특히 순환 안에 있을 때)
+- `__del__` 안에서 예외 발생하면 무시됨 (stderr에 경고만)
+- C 확장 라이브러리에선 종종 호출 안 됨
+
+→ 자원 정리는 `__del__` 대신 **context manager + close 메서드** 권장.
+
+## weakref
+
+순환 참조 깨는 표준 방법. 약한 참조는 refcount를 증가시키지 않는다.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import weakref
+
+class Node:
+    def __init__(self, name):
+        self.name = name
+
+a = Node("A")
+ref = weakref.ref(a)
+print(ref())           # <Node 'A'>
+print(ref() is a)      # True
+
+del a
+print(ref())           # None (a 해제됨)`}
+  output={`<__main__.Node object at 0x...>
+True
+None`}
+/>
+
+### weakref 활용 사례
+
+```python
+import weakref
+
+class Parent:
+    def __init__(self):
+        self.children = []
+
+class Child:
+    def __init__(self, parent):
+        self.parent = weakref.ref(parent)   # 약한 참조
+
+p = Parent()
+c = Child(p)
+p.children.append(c)
+# 순환 없음 (p → c는 강, c → p는 약)
+```
+
+### WeakValueDictionary
+
+값을 약한 참조로. 다른 곳에서 참조가 사라지면 자동 제거.
+
+```python
+import weakref
+
+cache = weakref.WeakValueDictionary()
+obj = ExpensiveObject()
+cache["key"] = obj
+# obj가 외부에서 사라지면 cache에서도 자동 제거
+```
+
+## __slots__와 GC
+
+`__slots__` 클래스는 `__dict__`가 없어 메모리 절감(40-50%). GC 행동에는 영향 없음.
+
+```python
+class Tight:
+    __slots__ = ("x", "y")
+
+import sys
+print(sys.getsizeof(Tight()))    # 48
+class Loose: pass
+print(sys.getsizeof(Loose()))     # 16 + __dict__ 280 정도
+```
+
+## 자주 보는 메모리 패턴
+
+### 1. 대용량 자료 잡고 있는 함수 종료 후 GC
+
+```python
+def load_then_use():
+    data = load_huge_csv()    # 1GB
+    result = process(data)
+    del data                   # 즉시 풀어주기
+    gc.collect()               # 순환 참조 있다면
+    return summarize(result)
+```
+
+함수 종료 시 로컬 변수는 자동 해제되지만, 중간에 `del`로 빠르게 풀고 다른 큰 작업 시작 가능.
+
+### 2. 누수 디버깅
+
+```python
+import gc, sys
+
+# 의심되는 클래스의 인스턴스 추적
+gc.collect()
+instances = [o for o in gc.get_objects() if isinstance(o, MyClass)]
+print(len(instances))
+
+# 누구가 참조하는지
+print(gc.get_referrers(instances[0]))
+```
+
+`objgraph`, `tracemalloc` 라이브러리가 시각화에 유용.
+
+### 3. tracemalloc
+
+표준 라이브러리 메모리 프로파일러.
+
+```python
+import tracemalloc
+
+tracemalloc.start()
+load_huge_csv()
+snapshot = tracemalloc.take_snapshot()
+top = snapshot.statistics("lineno")[:10]
+for stat in top:
+    print(stat)
+```
+
+## free-threaded Python (3.13+)
+
+PEP 703에서 GIL을 제거하면서 refcount의 thread-safe 변형(biased reference counting)을 도입. GC 메커니즘은 본질적으로 유지되나 동기화 비용 증가. 자세한 건 `py-gil` 참고.
+
+## 다른 구현체
+
+- **PyPy**: 추적 기반 GC (refcount 없음). 단일 객체 해제 지연되지만 throughput 향상.
+- **Jython**: JVM GC 사용. 자동으로 모든 순환 처리, `__del__` 시점 더 예측 불가.
+- **MicroPython**: 임베디드용, mark-and-sweep + 작은 객체용 별도 풀.
+
+## 참고
+
+- [`gc` documentation](https://docs.python.org/3/library/gc.html)
+- [`weakref` documentation](https://docs.python.org/3/library/weakref.html)
+- [Garbage Collector Design – CPython Internals](https://devguide.python.org/internals/garbage-collector/)
+- [PEP 442 – Safe object finalization](https://peps.python.org/pep-0442/)
+- [Instagram Engineering: Dismissing Python Garbage Collection](https://engineering.fb.com/2017/01/30/production-engineering/dismissing-python-garbage-collection-at-instagram/)

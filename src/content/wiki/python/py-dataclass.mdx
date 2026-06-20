@@ -1,0 +1,241 @@
+---
+title: "[Python] dataclass: 자동 생성 메서드를 갖춘 데이터 클래스"
+aliases: ["python dataclass", "dataclass", "@dataclass", "frozen dataclass", "field"]
+tags: [python, dataclass, oop, data, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+`@dataclass`(3.7+, PEP 557)는 클래스에 `__init__`, `__repr__`, `__eq__` 등 **상용구 메서드를 자동 생성**해주는 데코레이터다. 데이터 컨테이너 클래스를 한 줄 데코레이터 + 필드 어노테이션만으로 만들 수 있다.
+
+## 기본 사용
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from dataclasses import dataclass
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+p = Point(3, 4)
+print(p)
+print(p == Point(3, 4))
+print(p.x, p.y)`}
+  output={`Point(x=3, y=4)
+True
+3 4`}
+/>
+
+자동 생성: `__init__(self, x, y)`, `__repr__`, `__eq__`. 수동 작성이라면 20줄 넘는 보일러플레이트.
+
+## 옵션
+
+```python
+@dataclass(
+    init=True,        # __init__ 생성 (기본 True)
+    repr=True,        # __repr__ 생성
+    eq=True,          # __eq__ 생성
+    order=False,      # __lt__/__le__/__gt__/__ge__ 생성
+    unsafe_hash=False,
+    frozen=False,     # 불변 (속성 변경 불가)
+    match_args=True,  # __match_args__ 생성 (3.10+, match 문 위치 매칭)
+    kw_only=False,    # 모든 필드를 키워드 전용으로 (3.10+)
+    slots=False,      # __slots__ 사용 (3.10+, 메모리 절감)
+)
+class C: ...
+```
+
+## frozen=True: 불변 dataclass
+
+```python
+@dataclass(frozen=True)
+class Point:
+    x: int
+    y: int
+
+p = Point(1, 2)
+p.x = 99    # FrozenInstanceError
+
+# hashable이 됨 → dict 키, set 원소 가능
+points = {Point(0, 0), Point(1, 1)}
+```
+
+`frozen=True`는 `__setattr__`을 가로채 예외를 던진다. `__hash__`도 자동 생성.
+
+## field() 함수
+
+기본값, 비교 제외, factory 등 세부 설정.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from dataclasses import dataclass, field
+from typing import List
+
+@dataclass
+class User:
+    name: str
+    age: int = 0
+    tags: List[str] = field(default_factory=list)   # 가변 기본값
+    id: int = field(init=False, default=-1)         # __init__ 인수 제외
+    cache: dict = field(default_factory=dict, repr=False, compare=False)
+
+u = User("Alice", 30)
+u.tags.append("admin")
+print(u)`}
+  output={`User(name='Alice', age=30, tags=['admin'], id=-1)`}
+/>
+
+가변 기본값(`list`, `dict`, `set`)은 **반드시 `default_factory`**. 직접 `tags: list = []`라고 쓰면 `ValueError` (dataclass가 검출).
+
+## __post_init__
+
+`__init__` 종료 직후 호출. 파생 필드 계산이나 검증.
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Rect:
+    width: float
+    height: float
+    area: float = 0.0    # 파생값
+
+    def __post_init__(self):
+        self.area = self.width * self.height
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("dimensions must be positive")
+
+r = Rect(3, 4)
+print(r)    # Rect(width=3, height=4, area=12)
+```
+
+## InitVar: __init__에만 쓰이는 필드
+
+```python
+from dataclasses import dataclass, field, InitVar
+
+@dataclass
+class User:
+    name: str
+    password: InitVar[str] = ""
+    password_hash: str = field(init=False, default="")
+
+    def __post_init__(self, password):
+        self.password_hash = hash_password(password)
+
+# password는 인스턴스 속성으로 저장되지 않음
+u = User("Alice", "secret")
+print(u.password_hash)
+```
+
+## order=True: 비교 연산자 자동 생성
+
+필드 순서대로 튜플 비교.
+
+```python
+@dataclass(order=True)
+class Version:
+    major: int
+    minor: int
+    patch: int
+
+v1 = Version(1, 2, 0)
+v2 = Version(1, 2, 3)
+print(v1 < v2)    # True
+print(sorted([v2, v1]))
+```
+
+비교에서 제외하려면 `field(compare=False)`.
+
+## slots=True (3.10+)
+
+`__slots__`를 자동 생성. 메모리 절감 + 속도 향상(약 20-30%) + 동적 속성 추가 차단.
+
+```python
+@dataclass(slots=True)
+class Point:
+    x: int
+    y: int
+
+p = Point(1, 2)
+p.z = 3    # AttributeError
+```
+
+3.10 이전엔 직접 `__slots__ = ("x", "y")` 작성 후 별도 dataclass와 결합 필요. 3.10+는 한 옵션으로 끝.
+
+## 상속
+
+```python
+@dataclass
+class Base:
+    a: int
+    b: int = 0
+
+@dataclass
+class Child(Base):
+    c: int = 0
+    # d: int   # ERROR: 기본값 있는 필드(b) 뒤에 기본값 없는 필드 불가
+```
+
+서브클래스가 부모 기본값 있는 필드 뒤에 무 기본값 필드를 추가하면 에러. 3.10+ `kw_only=True`로 회피 가능.
+
+```python
+@dataclass(kw_only=True)
+class Child(Base):
+    d: int    # OK: 모든 필드가 키워드 전용
+```
+
+## asdict / astuple / fields / replace
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from dataclasses import dataclass, asdict, astuple, fields, replace
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+p = Point(3, 4)
+print(asdict(p))
+print(astuple(p))
+print([f.name for f in fields(p)])
+
+# replace: 일부 필드만 바꾼 새 인스턴스 (frozen에서 특히 유용)
+q = replace(p, x=99)
+print(q)`}
+  output={`{'x': 3, 'y': 4}
+(3, 4)
+['x', 'y']
+Point(x=99, y=4)`}
+/>
+
+## dataclass vs namedtuple vs TypedDict
+
+| | dataclass | namedtuple | TypedDict |
+|---|----------|-----------|-----------|
+| 가변 | O (default) / X (frozen) | X | O (dict 기반) |
+| 메서드 정의 | O (편함) | O (별로) | X |
+| 메모리 | 보통 / slots: 적음 | 적음 | dict 만큼 |
+| 비교 | 자동 (eq, order) | 자동 (튜플) | 직접 |
+| 인덱싱 | X | O | X |
+| 용도 | 일반 데이터 클래스 | 불변 레코드 | API 페이로드 스키마 |
+
+## pydantic과의 차이
+
+- `dataclass`: 런타임 검증 없음, 타입 힌트는 문서 역할
+- `pydantic.BaseModel`: 런타임 검증, 직렬화, JSON 스키마 생성
+
+도메인 모델이나 API 입력 처리엔 pydantic, 내부 자료구조엔 dataclass.
+
+## 참고
+
+- [`dataclasses` documentation](https://docs.python.org/3/library/dataclasses.html)
+- [PEP 557 – Data Classes](https://peps.python.org/pep-0557/)
+- [PEP 681 – Data Class Transforms](https://peps.python.org/pep-0681/)

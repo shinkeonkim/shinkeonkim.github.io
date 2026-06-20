@@ -1,0 +1,256 @@
+---
+title: "[Python] Iterator, Generator, yield"
+aliases: ["python iterator", "python generator", "yield", "yield from", "iter", "next", "__iter__"]
+tags: [python, iterator, generator, yield, advanced]
+updated: 2026-06-20
+---
+
+## Iterator Protocol
+
+**Iterator**는 `__iter__()`와 `__next__()`를 구현한 객체. **Iterable**은 `__iter__()`만 가지면 된다 (iterator를 반환).
+
+```python
+class CountUp:
+    def __init__(self, start, end):
+        self.cur = start
+        self.end = end
+
+    def __iter__(self):
+        return self          # 자기 자신을 iterator로 반환
+
+    def __next__(self):
+        if self.cur >= self.end:
+            raise StopIteration
+        v = self.cur
+        self.cur += 1
+        return v
+
+for x in CountUp(0, 3):
+    print(x)               # 0 1 2
+```
+
+`for` 문은 내부적으로 `iter()`로 iterator를 얻고 `next()`를 반복 호출하다가 `StopIteration`에서 종료.
+
+```python
+it = iter([1, 2, 3])
+print(next(it))    # 1
+print(next(it))    # 2
+print(next(it))    # 3
+print(next(it))    # StopIteration
+```
+
+## Iterable vs Iterator
+
+| | Iterable | Iterator |
+|---|----------|----------|
+| 메서드 | `__iter__` | `__iter__` + `__next__` |
+| 다시 순회 | 가능 (새 iterator 생성) | 1회용 |
+| 예시 | list, str, dict, set, range | `iter(list)`, generator |
+
+```python
+xs = [1, 2, 3]                  # iterable
+it1 = iter(xs)                  # iterator
+it2 = iter(xs)                  # 또 다른 iterator (독립)
+
+next(it1)  # 1
+next(it2)  # 1 (독립)
+```
+
+## Generator: yield
+
+`def` 안에 `yield`가 하나라도 있으면 **generator function**이 된다. 호출하면 generator 객체(=iterator)를 반환.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`def count_up(start, end):
+    cur = start
+    while cur < end:
+        yield cur
+        cur += 1
+
+g = count_up(0, 3)
+print(type(g))
+print(list(g))           # iterator를 소진해서 리스트로
+
+# 한 번 소진하면 빈 상태
+print(list(g))`}
+  output={`<class 'generator'>
+[0, 1, 2]
+[]`}
+/>
+
+상태(`cur`)가 yield 사이에서 보존된다. 이전의 클래스 기반 iterator와 동등하지만 코드는 10배 짧음.
+
+## yield 동작 원리
+
+`yield`는 다음을 한다:
+1. 우측 값을 호출자에게 반환
+2. 함수 실행을 **일시 정지** (스택 프레임 보존)
+3. `next()` 호출 시 정지 지점에서 **재개**
+4. 함수가 return하거나 끝나면 `StopIteration` 발생
+
+```python
+def trace():
+    print("before yield 1")
+    yield 1
+    print("between")
+    yield 2
+    print("after yield 2")
+
+g = trace()
+print(next(g))   # before yield 1 / 1
+print(next(g))   # between / 2
+print(next(g))   # after yield 2 / StopIteration
+```
+
+## yield from: 서브 generator 위임
+
+다른 generator의 결과를 그대로 흘려보낸다.
+
+```python
+def chain(*iterables):
+    for it in iterables:
+        yield from it
+
+list(chain([1, 2], (3, 4), {5, 6}))    # [1, 2, 3, 4, 5, 6]
+
+# 트리 순회
+def walk(node):
+    yield node.value
+    for child in node.children:
+        yield from walk(child)
+```
+
+수동으로 `for x in it: yield x` 작성하는 것보다 빠르고, 양방향 통신(send, throw)도 위임된다.
+
+## Generator Expression
+
+`(expr for x in iter)` 형태. 메모리 효율적.
+
+```python
+gen = (x ** 2 for x in range(1000000))   # 거대 데이터 즉시 생성 안 함
+total = sum(gen)                         # 한 번에 소진하며 누적
+
+# 함수 단일 인자일 땐 괄호 생략 가능
+total = sum(x ** 2 for x in range(1000000))
+```
+
+## 무한 시퀀스
+
+generator는 무한 시퀀스를 자연스럽게 표현한다.
+
+```python
+def naturals():
+    n = 1
+    while True:
+        yield n
+        n += 1
+
+import itertools
+first_10 = list(itertools.islice(naturals(), 10))
+```
+
+`itertools` 모듈은 효율적인 무한/조합 iterator를 다수 제공 (`count`, `cycle`, `repeat`, `chain`, `tee`, `islice`, `groupby`, `product`, `combinations`, …).
+
+## send, throw, close (Coroutine 흔적)
+
+```python
+def echo():
+    while True:
+        received = yield
+        print("got:", received)
+
+g = echo()
+next(g)            # 첫 yield까지 진행 (priming)
+g.send("hello")    # got: hello
+g.send("world")    # got: world
+g.close()          # GeneratorExit 던짐
+```
+
+generator는 사실 양방향 통신이 가능한 **간단한 코루틴**이기도 하다. async/await가 표준이 된 지금은 거의 안 쓰지만 일부 라이브러리 내부에서 활용.
+
+## Iterator로 만들 수 있는 패턴
+
+### 파일 한 줄씩 처리
+
+```python
+def grep(pattern, path):
+    with open(path) as f:
+        for line in f:                     # 파일도 iterable
+            if pattern in line:
+                yield line.rstrip()
+
+for line in grep("ERROR", "app.log"):
+    print(line)
+```
+
+메모리에 전부 안 올리고 한 줄씩.
+
+### 파이프라인
+
+```python
+def take_evens(it):
+    for x in it:
+        if x % 2 == 0:
+            yield x
+
+def square(it):
+    for x in it:
+        yield x ** 2
+
+result = list(square(take_evens(range(10))))    # [0, 4, 16, 36, 64]
+```
+
+각 단계가 lazy → 메모리 효율적.
+
+## 함정
+
+### 1. generator는 한 번 소진하면 끝
+
+```python
+g = (x for x in range(3))
+print(list(g))    # [0, 1, 2]
+print(list(g))    # [] (소진됨)
+```
+
+재사용하려면 함수로 만들어 매번 호출하거나, `itertools.tee` 사용 (메모리 비용).
+
+### 2. for-else와 generator
+
+generator 안에서 break를 만나도 close 호출 시점이 늦어질 수 있다. 자원 관리는 `try/finally` 또는 `contextlib`.
+
+### 3. exception은 yield 지점에서
+
+```python
+def safe():
+    try:
+        yield 1
+        yield 2
+    finally:
+        print("cleanup")
+
+g = safe()
+next(g)      # 1
+g.close()    # cleanup (finally 실행)
+```
+
+## Iterator vs Iterable 체크
+
+```python
+from collections.abc import Iterator, Iterable
+
+isinstance([], Iterable)   # True
+isinstance([], Iterator)   # False
+
+isinstance(iter([]), Iterator)  # True
+isinstance(iter([]), Iterable)  # True (Iterator는 Iterable의 서브타입)
+```
+
+## 참고
+
+- [Python tutorial: Iterators](https://docs.python.org/3/tutorial/classes.html#iterators)
+- [Python tutorial: Generators](https://docs.python.org/3/tutorial/classes.html#generators)
+- [PEP 255 – Simple Generators](https://peps.python.org/pep-0255/)
+- [PEP 380 – Syntax for Delegating to a Subgenerator](https://peps.python.org/pep-0380/)
+- [`itertools` documentation](https://docs.python.org/3/library/itertools.html)

@@ -1,0 +1,338 @@
+---
+title: "[SQL] DCL TCL"
+aliases: ["SQL DCL TCL", "SQL DCL", "SQL TCL", "GRANT", "REVOKE", "Transaction", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "ACID"]
+tags: [sql, dcl, tcl, transaction, permission, security, database]
+updated: 2026-06-20
+---
+
+## 정의
+
+- **DCL** (Data Control Language): **권한**. `GRANT`, `REVOKE`.
+- **TCL** (Transaction Control Language): **트랜잭션 경계**. `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`.
+
+같이 묶어 다루는 이유, "보안"과 "원자성"은 운영의 두 기둥이고 SQL 의 나머지 (DDL/DML) 와 결이 다르다.
+
+전체 SQL 체계는 [[SQL]] 참고.
+
+## 트랜잭션과 ACID
+
+**트랜잭션** = 하나의 논리 단위로 묶인 SQL 문 집합. 전체가 성공하거나 (`COMMIT`), 전체가 취소되거나 (`ROLLBACK`).
+
+| 성질 | 의미 |
+|:---|:---|
+| **A**tomicity | 원자성, all-or-nothing |
+| **C**onsistency | 무결성 제약을 깨지 않음 |
+| **I**solation | 동시 트랜잭션이 서로 안 보임 (격리 수준 따라) |
+| **D**urability | 커밋된 변경은 영구 (장애에도 살아남음) |
+
+> Redis 의 트랜잭션은 ACID 가 아니다, 자세한 비교는 [[Redis]] 참고.
+
+## BEGIN / COMMIT / ROLLBACK
+
+```sql
+BEGIN;       -- 트랜잭션 시작 (PG)
+START TRANSACTION;   -- 표준 / MySQL
+
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+
+COMMIT;     -- 확정
+-- 또는
+ROLLBACK;   -- 취소, 둘 다 안 일어난 상태로
+```
+
+> [!IMPORTANT]
+> - PostgreSQL: **모든 statement 가 암묵적 트랜잭션**. `BEGIN` 명시하면 다중 statement 트랜잭션.
+> - MySQL: `autocommit=1` (기본). statement 마다 자동 커밋. `BEGIN`/`START TRANSACTION` 으로 묶거나 `SET autocommit=0` 후 명시 `COMMIT`.
+
+### autocommit 의 함정
+
+```sql
+-- MySQL 기본 (autocommit=1)
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+-- 즉시 커밋, 되돌릴 수 없음!
+
+-- 안전한 방법
+START TRANSACTION;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+SELECT balance FROM accounts WHERE id = 1;     -- 확인
+COMMIT;        -- 또는 ROLLBACK
+```
+
+운영 DB 에선 항상 명시적 트랜잭션. autocommit 끄는 습관 권장.
+
+## SAVEPOINT
+
+트랜잭션 안에서 부분 롤백 지점.
+
+```sql
+BEGIN;
+
+INSERT INTO logs (msg) VALUES ('start');
+
+SAVEPOINT before_risky;
+
+UPDATE inventory SET qty = qty - 5 WHERE id = 1;
+-- 이상 발견
+ROLLBACK TO SAVEPOINT before_risky;
+-- start log 는 살아 있고 inventory 변경만 취소
+
+INSERT INTO logs (msg) VALUES ('skipped risky op');
+
+COMMIT;
+```
+
+## 격리 수준 (Isolation Level)
+
+동시 트랜잭션 간 가시성. ANSI 표준 4 단계.
+
+| 수준 | Dirty Read | Non-repeatable Read | Phantom Read |
+|:---|:---:|:---:|:---:|
+| READ UNCOMMITTED | 가능 | 가능 | 가능 |
+| READ COMMITTED | 방지 | 가능 | 가능 |
+| REPEATABLE READ | 방지 | 방지 | 가능 (표준), 방지 (PG, MySQL InnoDB) |
+| SERIALIZABLE | 방지 | 방지 | 방지 |
+
+| 이상현상 | 의미 |
+|:---|:---|
+| Dirty Read | 커밋 안 된 데이터 읽음 |
+| Non-repeatable Read | 같은 쿼리 두 번 → 다른 값 |
+| Phantom Read | 같은 쿼리 두 번 → 새로 추가된 행 보임 |
+
+### dialect 기본값
+
+- **PostgreSQL**: `READ COMMITTED` 기본. `REPEATABLE READ`, `SERIALIZABLE` 사용 가능 (MVCC + SSI).
+- **MySQL InnoDB**: `REPEATABLE READ` 기본. Phantom 도 방지 (gap lock).
+
+```sql
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+BEGIN;
+-- ...
+COMMIT;
+```
+
+## MVCC, 잠금, 비교
+
+- **잠금 기반 (Lock-based)**: 읽는 동안 쓰기 차단. 단순하지만 짧은 쓰기에도 읽기가 막힘.
+- **MVCC** (Multi-Version Concurrency Control): 트랜잭션마다 자기 버전의 스냅샷을 본다. **읽기가 쓰기를 막지 않고, 쓰기가 읽기를 막지 않는다**. PostgreSQL, MySQL InnoDB, Oracle 의 기본.
+
+```sql
+-- 명시적 행 잠금
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE;     -- 쓰기 잠금
+SELECT * FROM accounts WHERE id = 1 FOR SHARE;      -- 읽기 잠금
+
+-- PG: 다른 트랜잭션 락 충돌 시 즉시 에러
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE SKIP LOCKED;     -- 큐 패턴
+```
+
+## 데드락
+
+서로의 락을 기다리는 두 트랜잭션. RDBMS 가 감지해서 한쪽을 강제 롤백.
+
+```text
+T1: UPDATE a; UPDATE b;
+T2: UPDATE b; UPDATE a;
+   → T1 이 a 잠그고 b 대기, T2 가 b 잠그고 a 대기 → deadlock
+```
+
+해법: **항상 같은 순서로 락 획득**, 또는 짧은 트랜잭션 유지, 또는 비관적 잠금 → 낙관적 잠금 (version 컬럼).
+
+## DCL: GRANT / REVOKE
+
+권한 부여/회수.
+
+### 사용자/역할
+
+```sql
+-- PostgreSQL
+CREATE USER alice WITH PASSWORD 'secret';
+CREATE ROLE app_reader;
+GRANT app_reader TO alice;
+
+-- MySQL
+CREATE USER 'alice'@'%' IDENTIFIED BY 'secret';
+CREATE ROLE 'app_reader';
+GRANT 'app_reader' TO 'alice'@'%';
+```
+
+PG 는 USER 와 ROLE 이 같은 개념 (USER 는 LOGIN 권한이 있는 ROLE), MySQL 도 8.0 부터 통합.
+
+### 권한 부여
+
+```sql
+-- 테이블 단위
+GRANT SELECT, INSERT ON users TO alice;
+GRANT ALL PRIVILEGES ON orders TO alice;
+
+-- 스키마 단위 (PostgreSQL)
+GRANT USAGE ON SCHEMA public TO alice;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO alice;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON TABLES TO alice;     -- 미래 테이블도 자동 적용
+
+-- 데이터베이스 단위 (MySQL)
+GRANT SELECT, INSERT ON mydb.* TO 'alice'@'%';
+
+-- 모든 데이터베이스 (위험)
+GRANT ALL PRIVILEGES ON *.* TO 'alice'@'%' WITH GRANT OPTION;
+```
+
+### 컬럼 단위 권한
+
+```sql
+GRANT SELECT (id, name) ON users TO alice;     -- 일부 컬럼만
+```
+
+salary 같은 민감 컬럼은 컬럼 단위 + 뷰로 격리하는 게 더 흔하다.
+
+### REVOKE
+
+```sql
+REVOKE INSERT ON users FROM alice;
+REVOKE ALL PRIVILEGES ON users FROM alice;
+```
+
+### 권한 확인
+
+```sql
+-- PostgreSQL
+\dp users
+SELECT * FROM information_schema.table_privileges WHERE grantee = 'alice';
+
+-- MySQL
+SHOW GRANTS FOR 'alice'@'%';
+```
+
+## RLS (Row Level Security, PostgreSQL)
+
+행 단위 권한, 같은 테이블이라도 사용자에 따라 보이는 행이 다르다.
+
+```sql
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY owner_only ON orders
+  FOR SELECT
+  USING (user_id = current_setting('app.user_id')::int);
+```
+
+세션 변수로 사용자 컨텍스트를 주고 RLS 가 자동으로 `WHERE` 추가. 멀티테넌트 SaaS 의 강력한 패턴.
+
+MySQL 은 RLS 가 없다, 뷰 + 권한으로 흉내 또는 애플리케이션 레벨.
+
+## 트랜잭션과 DDL
+
+dialect 큰 차이.
+
+| | PostgreSQL | MySQL |
+|:---|:---|:---|
+| `CREATE TABLE` 트랜잭션 안 | 롤백 가능 | 묵시적 커밋 (롤백 불가) |
+| `ALTER TABLE` 트랜잭션 안 | 롤백 가능 | 8.0 의 일부 atomic DDL 외엔 묵시적 커밋 |
+| `TRUNCATE` | 롤백 가능 | 묵시적 커밋 |
+
+PostgreSQL 마이그레이션 스크립트는 **전부 한 트랜잭션** 으로 묶을 수 있다, MySQL 은 중간에 멈추면 부분 적용 상태가 남는다.
+
+## 2-Phase Commit (분산 트랜잭션)
+
+여러 노드에 걸친 트랜잭션. PG `PREPARE TRANSACTION` / `COMMIT PREPARED`.
+
+```sql
+BEGIN;
+UPDATE ...;
+PREPARE TRANSACTION 'tx1';     -- 모든 노드가 prepare 성공이면
+
+COMMIT PREPARED 'tx1';
+-- 한 노드라도 실패면
+ROLLBACK PREPARED 'tx1';
+```
+
+운영에선 거의 안 쓴다 (느림, 잠금 길게 유지, 코디네이터 SPOF). Saga 패턴 등 분산 트랜잭션 대안 검토.
+
+## pandas 와 트랜잭션
+
+pandas 자체는 트랜잭션 개념이 없다. DB I/O 시 SQLAlchemy 의 connection 컨텍스트가 트랜잭션 역할.
+
+```python
+from sqlalchemy import create_engine, text
+engine = create_engine('postgresql://...')
+
+with engine.begin() as conn:        # 컨텍스트 종료 시 자동 commit, 예외 시 rollback
+    df1.to_sql('a', conn, if_exists='append', index=False)
+    df2.to_sql('b', conn, if_exists='append', index=False)
+# 둘 다 성공해야 commit, 한쪽 실패면 둘 다 rollback
+```
+
+자세한 [[Pandas read_sql]] 패턴 참고.
+
+## 함정
+
+### 1. 트랜잭션 너무 길게
+
+대용량 UPDATE 를 한 트랜잭션에 넣으면:
+
+- 락 점유 길어짐 → 동시성 저하
+- WAL/redo log 부피 증가
+- 롤백 시간 길어짐 (PG 의 dead tuple 누적)
+
+→ 청크 단위 배치, 짧은 트랜잭션 다발.
+
+### 2. SELECT 결과의 즉시성
+
+```sql
+SELECT COUNT(*) FROM t WHERE x = 1;     -- 100
+-- 다른 트랜잭션이 INSERT
+SELECT COUNT(*) FROM t WHERE x = 1;     -- 격리 수준에 따라 100 또는 101
+```
+
+REPEATABLE READ 면 같은 트랜잭션 내내 100, READ COMMITTED 면 변할 수 있다.
+
+### 3. 데드락은 정상
+
+운영 DB 에서 데드락은 발생한다, RDBMS 가 감지하고 롤백. 애플리케이션은 **재시도 로직** 을 가져야 한다.
+
+```python
+for attempt in range(3):
+    try:
+        with engine.begin() as conn:
+            do_work(conn)
+        break
+    except DeadlockError:
+        time.sleep(0.1 * (2 ** attempt))
+```
+
+### 4. 권한 누락
+
+```sql
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO alice;
+-- 이후 새로 만든 테이블에는 권한 없음
+-- → ALTER DEFAULT PRIVILEGES 같이
+```
+
+### 5. GRANT OPTION 의 전파
+
+```sql
+GRANT SELECT ON users TO alice WITH GRANT OPTION;
+-- alice 가 또 다른 사용자에게 GRANT 가능
+-- 추적 어려워짐, 운영에선 신중히
+```
+
+### 6. 최소 권한 원칙
+
+운영 앱 계정은 보통:
+- DDL 권한 없음 (CREATE/DROP)
+- SELECT/INSERT/UPDATE/DELETE 만, 필요한 테이블에만
+- 슈퍼유저는 마이그레이션 도구 전용 분리
+
+## 참고
+
+- [[SQL]]
+- [[SQL DDL]]
+- [[SQL DML]]
+- [[PostgreSQL]]
+- [[MySQL]]
+- [[Pandas read_sql]]
+- [[Redis]] (대비, NoSQL 의 트랜잭션 모델)
+- [PostgreSQL Transactions](https://www.postgresql.org/docs/current/tutorial-transactions.html)
+- [PostgreSQL Concurrency Control](https://www.postgresql.org/docs/current/mvcc.html)
+- [MySQL InnoDB Multi-Versioning](https://dev.mysql.com/doc/refman/8.0/en/innodb-multi-versioning.html)
+- [Jepsen, Isolation Levels](https://jepsen.io/consistency)

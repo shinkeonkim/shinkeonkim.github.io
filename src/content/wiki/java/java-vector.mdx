@@ -1,0 +1,140 @@
+---
+title: "[Java] Vector"
+aliases: ["Vector", "java.util.Vector", "Java Vector", "벡터", "Vector class"]
+tags: [java, collection, data-structure, list, legacy, synchronized]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.Vector`** 는 [[ArrayList]] 와 거의 동일한 동적 배열 기반 [[List]] 이지만, **모든 public 메서드가 `synchronized`** 로 묶여 있다. Java 1.0 (1996) 부터 존재하는 레거시 컬렉션.
+
+JDK 1.2 의 Collections Framework 도입 시 List 인터페이스에 retrofit 됐으며, 같은 인터페이스를 구현하는 [[ArrayList]] 가 등장했다. **새 코드에서는 거의 쓰지 않는다.**
+
+## 시각화
+
+```anim:java-vector-sync
+{}
+```
+
+## 내부 구조
+
+```java
+public class Vector<E> extends AbstractList<E>
+    implements List<E>, RandomAccess, Cloneable, java.io.Serializable {
+
+    protected Object[] elementData;
+    protected int elementCount;
+    protected int capacityIncrement;   // 0 이면 두 배씩 증가 (ArrayList 와 다름)
+
+    public synchronized boolean add(E e) { ... }
+    public synchronized E get(int index) { ... }
+    public synchronized E remove(int index) { ... }
+    // ... 거의 모든 메서드에 synchronized
+}
+```
+
+ArrayList 와의 두 가지 차이:
+
+1. **`capacityIncrement`**: 0 일 때 **두 배씩** 확장 (ArrayList 는 1.5 배).
+2. **모든 메서드가 `synchronized`**: 메서드 호출마다 `this` 의 모니터 락을 획득.
+
+## 주요 연산 비용
+
+복잡도 자체는 [[ArrayList]] 와 동일. 다만 **매 호출마다 락 acquire/release** 가 더해진다.
+
+| 메서드 | 시간 | 추가 비용 |
+|:---|:---:|:---|
+| `get(int i)` | O(1) | 락 acquire/release |
+| `add(E e)` | amortized O(1) | 락 acquire/release |
+| `add(int i, E e)` | O(n) | 락 acquire/release |
+| `remove(int i)` | O(n) | 락 acquire/release |
+| `size()` | O(1) | 락 acquire/release |
+
+단일 스레드 환경이라면 락은 무경합 (uncontended) 이라 비용이 매우 작지만, 그래도 ArrayList 대비 측정 가능한 오버헤드가 있다.
+
+## 메서드별 동기화의 한계
+
+각 메서드 호출은 atomic 하지만, **복합 연산** 은 race condition 의 여지가 그대로 남는다.
+
+```java
+Vector<Integer> v = new Vector<>();
+// ...
+
+// ❌ 각 메서드는 atomic 이지만 두 호출 사이에 다른 스레드가 끼어들 수 있다
+if (!v.contains(42)) {
+    v.add(42);   // 다른 스레드가 그 사이에 42 를 넣었을 수 있음
+}
+
+// ✅ 명시적 락으로 묶기
+synchronized (v) {
+    if (!v.contains(42)) {
+        v.add(42);
+    }
+}
+```
+
+> [!CAUTION]
+> **"Vector 가 thread-safe 하다" 는 오해다.** 단일 메서드는 thread-safe 지만, 두 개 이상의 메서드를 묶는 일관성은 호출자가 따로 보장해야 한다. 진정한 동시성 컬렉션은 [[CopyOnWriteArrayList]] 또는 `ConcurrentHashMap` 같은 `java.util.concurrent` 의 컬렉션.
+
+## iterator 의 fail-fast
+
+Vector 의 iterator 도 [[fail-fast iterator]]. 순회 도중 다른 스레드가 add/remove 하면 [[ConcurrentModificationException]]. 락으로 외부 동기화를 해야 안전한 순회가 가능하다.
+
+```java
+synchronized (v) {
+    for (Integer x : v) {
+        process(x);  // 이 블록 안에서는 다른 스레드 진입 불가
+    }
+}
+```
+
+## ArrayList vs Vector
+
+| 항목 | ArrayList | Vector |
+|:---|:---|:---|
+| 동기화 | ✗ | ✓ (메서드 단위) |
+| 도입 시점 | JDK 1.2 (1998) | JDK 1.0 (1996) |
+| 용량 증가 | 1.5 배 | **2 배** (또는 `capacityIncrement`) |
+| 메서드 호출 비용 | 작음 | + 락 비용 |
+| 복합 연산 안전성 | 외부 동기화 필요 | **여전히 외부 동기화 필요** |
+| 새 코드 권장 | ✓ | ✗ |
+
+## 왜 새 코드에서 쓰지 않는가
+
+1. **단일 스레드** 라면 락이 불필요한데도 비용을 낸다.
+2. **다중 스레드** 라도 메서드별 락만으로는 복합 연산이 안전하지 않다. 결국 외부 동기화가 필요하다.
+3. **진짜 동시성 컬렉션** ([[CopyOnWriteArrayList]], `ConcurrentLinkedQueue` 등) 이 훨씬 우수하다.
+4. **레거시 잔재**, JDK 가 retrofit 했으나 이상적인 컬렉션 설계는 아니다.
+
+## 그러면 언제 만나게 되나
+
+- **레거시 코드 유지보수**: 90 년대 후반 ~ 2000 년대 초 코드
+- **`Stack<E>` 사용 코드**: `Stack` 이 Vector 를 상속함. 새 코드에선 `Deque<E> = new ArrayDeque<>()` 권장
+- **AWT/Swing API**: `JTable`, `JList` 의 일부 모델이 Vector 사용
+
+## 대안
+
+| 의도 | 대안 |
+|:---|:---|
+| 단일 스레드 List | [[ArrayList]] |
+| 외부 동기화 List | `Collections.synchronizedList(new ArrayList<>())` |
+| 읽기 多, 쓰기 거의 없음 | [[CopyOnWriteArrayList]] |
+| 동시 큐/덱 | `ConcurrentLinkedDeque`, `LinkedBlockingDeque` |
+| 스택 | `Deque<E> = new ArrayDeque<>()` |
+
+## 참고
+
+- [[Object]]
+- [[Iterable]]
+- [[Collection]]
+- [[List]]
+- [[ArrayList]]
+- [[CopyOnWriteArrayList]]
+- [[ConcurrentHashMap]]
+- [[fail-fast iterator]]
+- [[ConcurrentModificationException]]
+- [[ReentrantLock]]
+- [[Blocking]]
+- Oracle, [Vector (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Vector.html)
+- Brian Goetz, *Java Concurrency in Practice*, §5 Building Blocks

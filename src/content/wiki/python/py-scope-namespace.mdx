@@ -1,0 +1,230 @@
+---
+title: "[Python] 스코프와 LEGB, global, nonlocal"
+aliases: ["python scope", "LEGB", "python global", "python nonlocal", "namespace", "변수 스코프"]
+tags: [python, scope, namespace, legb, global, nonlocal, basics]
+updated: 2026-06-20
+---
+
+## LEGB 규칙
+
+Python은 이름 해결 시 **L → E → G → B** 순서로 스코프를 탐색한다.
+
+| 단계 | 의미 | 예 |
+|------|------|---|
+| **L**ocal | 현재 함수 안 | `def f(): x = 1` 의 `x` |
+| **E**nclosing | 둘러싼 함수 (closure) | 중첩 함수에서 외부 함수의 변수 |
+| **G**lobal | 모듈 최상위 | 모듈 파일의 최상위 변수 |
+| **B**uiltin | 내장 | `print`, `len`, `range` 등 |
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`x = "global"
+
+def outer():
+    x = "enclosing"
+    def inner():
+        x = "local"
+        print(x)         # L
+    inner()
+    print(x)             # E (outer의 x)
+
+outer()
+print(x)                 # G`}
+  output={`local
+enclosing
+global`}
+/>
+
+이름이 어디서도 발견되지 않으면 `NameError`.
+
+## global 선언
+
+함수 내에서 **모듈 전역 변수에 재할당**하려면 `global` 선언이 필요하다.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`counter = 0
+
+def increment_wrong():
+    counter += 1         # UnboundLocalError: 로컬로 해석되는데 미할당
+
+def increment_ok():
+    global counter
+    counter += 1
+
+try:
+    increment_wrong()
+except UnboundLocalError as e:
+    print("Error:", e)
+
+increment_ok()
+increment_ok()
+print(counter)`}
+  output={`Error: cannot access local variable 'counter' where it is not associated with a value
+2`}
+/>
+
+**규칙**: 함수 본문 어디서든 변수에 **할당**이 있으면, 그 변수는 함수 내내 로컬로 취급된다. 읽기 전에 할당이 와도 마찬가지. `global`로 명시해야 전역 바인딩을 갱신.
+
+읽기만 한다면 `global` 불필요.
+
+```python
+counter = 0
+
+def read_only():
+    return counter * 2   # global 선언 없이 읽기 가능
+```
+
+## nonlocal 선언
+
+중첩 함수에서 **enclosing 스코프의 변수**에 재할당하려면 `nonlocal`.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`def make_counter():
+    count = 0
+    def increment():
+        nonlocal count
+        count += 1
+        return count
+    return increment
+
+c = make_counter()
+print(c(), c(), c())`}
+  output={`1 2 3`}
+/>
+
+`nonlocal` 없으면 `count += 1`이 새 로컬 변수를 만들려다 `UnboundLocalError`를 던진다.
+
+## global vs nonlocal
+
+| | global | nonlocal |
+|---|--------|----------|
+| 대상 | 모듈 최상위 변수 | 가장 가까운 enclosing 함수의 변수 |
+| 변수 없을 시 | 새로 생성 가능 | SyntaxError (반드시 존재해야) |
+| 사용 위치 | 함수 안 | 중첩 함수 안 |
+
+```python
+def outer():
+    x = 1
+    def middle():
+        def inner():
+            nonlocal x      # outer의 x를 가리킴
+            x += 1
+        inner()
+    middle()
+    return x
+
+print(outer())   # 2
+```
+
+`nonlocal`은 LEGB의 E를 따라 가장 가까운 enclosing 스코프부터 탐색해 첫 번째로 발견된 동일 이름에 바인딩.
+
+## 클래스 스코프의 특이점
+
+클래스 본문은 새 스코프를 만들지만 **메서드 안에서 보이지 않는다**. 메서드는 `self.x`나 `ClassName.x`로 접근해야.
+
+```python
+class Cls:
+    x = 1
+    def method(self):
+        return x          # NameError! (클래스 스코프 못 봄)
+        return self.x     # OK
+        return Cls.x      # OK
+```
+
+또한 클래스 본문 안의 컴프리헨션도 클래스 스코프를 못 본다.
+
+```python
+class C:
+    n = 5
+    nums = [x * n for x in range(3)]  # NameError: n
+```
+
+## 컴프리헨션 스코프 (3.x)
+
+컴프리헨션과 generator expression은 **자체 스코프**를 가진다.
+
+```python
+x = 99
+nums = [x for x in range(5)]
+print(x)    # 99 (덮어쓰지 않음)
+```
+
+Python 2에선 `x`가 누출됐지만 3에서 수정됨.
+
+## globals() / locals()
+
+현재 스코프의 이름 사전을 반환.
+
+```python
+x = 1
+print(globals()["x"])    # 1
+
+def f():
+    y = 2
+    print(locals())      # {'y': 2}
+f()
+```
+
+`locals()`는 함수 안에서 호출 시 **로컬 변수 사본**을 돌려준다. 변경해도 실제 로컬에 반영되지 않을 수 있다.
+
+## namespace 종류
+
+- 빌트인 namespace: 인터프리터 시작 시 생성, 종료까지 존재
+- 모듈 namespace: 각 모듈의 `__dict__`. import 시 생성
+- 함수 namespace: 호출 시 생성, 반환 시 폐기 (closure로 잡힌 변수는 살아남음)
+- 클래스 namespace: 클래스 본문 실행 시 생성
+
+```python
+import math
+math.__dict__["pi"]    # 3.141592...
+
+def f(): pass
+f.__globals__          # 함수가 속한 모듈의 globals
+```
+
+## 함정 모음
+
+### 1. for 변수 누출
+
+```python
+for i in range(3):
+    pass
+print(i)    # 2  (for 변수는 누출됨!)
+```
+
+루프 변수는 함수 스코프에 남는다(블록 스코프 없음).
+
+### 2. 함수 안에서 이름 그림자
+
+```python
+def f():
+    list = [1, 2]    # 빌트인 list 가림
+    list(...)         # TypeError: 'list' object is not callable
+
+# 빌트인 이름 사용 금지: list, dict, set, str, type, id, file, format ...
+```
+
+### 3. mutable global
+
+```python
+items = []
+
+def add(x):
+    items.append(x)    # global 불필요 (재할당이 아니라 변경)
+
+# 재할당하려면 필요
+def reset():
+    global items
+    items = []
+```
+
+## 참고
+
+- [Python tutorial: Scopes and Namespaces](https://docs.python.org/3/tutorial/classes.html#python-scopes-and-namespaces)
+- [Python Language Reference: Naming and binding](https://docs.python.org/3/reference/executionmodel.html#naming-and-binding)
+- [PEP 3104 – Access to Names in Outer Scopes](https://peps.python.org/pep-3104/)

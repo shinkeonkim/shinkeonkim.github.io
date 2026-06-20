@@ -1,0 +1,122 @@
+---
+title: "[Pandas] Categorical"
+aliases: ["Pandas Categorical", "pd.Categorical", "category dtype"]
+tags: [python, pandas, categorical, dtype]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Categorical** 은 **제한된 고유값** 만 가질 수 있는 dtype. 내부적으로 정수 코드로 저장되어 **메모리 절약** 과 **속도 향상**.
+
+## 사용
+
+```python
+df['city'] = df['city'].astype('category')
+
+# 정렬 가능한 카테고리
+df['grade'] = pd.Categorical(df['grade'], categories=['F','D','C','B','A'], ordered=True)
+```
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+import numpy as np
+np.random.seed(0)
+cities = np.random.choice(['Seoul','Busan','Daegu'], size=100000)
+df = pd.DataFrame({'city': cities})
+
+mem_object = df.memory_usage(deep=True).sum()
+df['city'] = df['city'].astype('category')
+mem_cat = df.memory_usage(deep=True).sum()
+print(f'object : {mem_object:>10,} bytes')
+print(f'category: {mem_cat:>10,} bytes')
+print(f'절감: {(1 - mem_cat/mem_object)*100:.1f}%')`}
+  output={`object :    6,300,128 bytes
+category:      100,468 bytes
+절감: 98.4%`}
+/>
+
+## 언제 유리한가
+
+- **고유값이 적고 반복이 많음** (예: 도시 3개 × 100만 행)
+- groupby / merge / sort 가 더 빠름
+- 명시적 카테고리 순서 가능
+
+## 언제 비효율
+
+- 거의 모든 값이 unique (ID, free-form text)
+- 자주 카테고리가 추가됨
+
+## ordered categorical
+
+```python
+grades = pd.Categorical(
+    df['grade'],
+    categories=['F','D','C','B','A'],
+    ordered=True,
+)
+df['grade'] = grades
+
+# 비교 연산 가능
+df[df['grade'] > 'C']        # 'D' > 'C' 가 False (사전순 아니라 정의 순)
+```
+
+## .cat accessor
+
+```python
+s = pd.Series(['low','high','med'], dtype='category')
+s.cat.categories                # Index(['high', 'low', 'med'])
+s.cat.codes                     # 정수 코드 [1, 0, 2]
+s.cat.rename_categories(['L','H','M'])
+s.cat.add_categories(['extra'])
+s.cat.remove_categories(['low'])
+s.cat.set_categories(['L','M','H'], ordered=True)
+```
+
+## groupby 의 성능
+
+```python
+df.groupby('city')['amount'].sum()
+# city 가 object → 매번 string 비교
+# city 가 category → 정수 비교, 훨씬 빠름
+```
+
+## 함정
+
+### 1. category 의 연산
+
+```python
+s = pd.Series([1, 2, 3], dtype='category')
+s + 10        # ❌ TypeError (category 는 산술 X)
+s.astype(int) + 10    # ✓
+```
+
+수치형 데이터는 보통 그대로 두는 것이 자연스러움. category 는 **저-cardinality 라벨용**.
+
+### 2. 새 값 할당 시 에러
+
+```python
+df['city'] = df['city'].astype('category')
+df.loc[0, 'city'] = 'NewCity'    # ❌ (categories 에 없음)
+
+# 해법: add_categories 먼저
+df['city'] = df['city'].cat.add_categories('NewCity')
+df.loc[0, 'city'] = 'NewCity'    # ✓
+```
+
+### 3. CSV 저장 시 dtype 소실
+
+```python
+df.astype({'city': 'category'}).to_csv('out.csv')
+# read_csv 로 다시 읽으면 object 가 됨
+# 명시: pd.read_csv('out.csv', dtype={'city': 'category'})
+```
+
+Parquet / Feather 는 dtype 보존.
+
+## 참고
+
+- [[Pandas DataFrame]]
+- 공식 문서, [Categorical data](https://pandas.pydata.org/docs/user_guide/categorical.html)

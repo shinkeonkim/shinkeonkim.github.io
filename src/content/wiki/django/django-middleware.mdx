@@ -1,0 +1,352 @@
+---
+title: "[Django] Middleware: 요청/응답 가로채기"
+aliases: ["django middleware", "middleware order", "process_view", "process_exception", "MIDDLEWARE setting"]
+tags: [django, middleware, http]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Middleware**는 모든 요청/응답을 가로채는 **체인 구조 처리기**. 요청은 위 → 아래, 응답은 아래 → 위로 흐른다. 인증, 세션, CSRF, gzip 압축, 보안 헤더 등이 모두 미들웨어로 구현.
+
+## settings.MIDDLEWARE
+
+```python
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+```
+
+**순서가 중요**. 요청 처리: 위에서 아래. 응답 처리: 아래에서 위.
+
+## 요청/응답 흐름
+
+```
+Request
+    ↓
+[Security]
+    ↓
+[Session]
+    ↓
+[CSRF]
+    ↓
+[Auth]
+    ↓
+... View ...
+    ↑
+[CSRF]
+    ↑
+[Session]
+    ↑
+[Security]
+    ↑
+Response
+```
+
+각 미들웨어가 들어올 땐 process_request, 나갈 땐 process_response를 호출.
+
+## 미들웨어 작성
+
+3.1+ 스타일 (callable 기반):
+
+```python
+class SimpleMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        # 요청 처리 (view 전)
+        request.start_time = time.time()
+
+        response = self.get_response(request)    # 다음 미들웨어 또는 view 호출
+
+        # 응답 처리 (view 후)
+        duration = time.time() - request.start_time
+        response["X-Process-Time"] = f"{duration:.3f}s"
+        return response
+```
+
+settings에 등록:
+
+```python
+MIDDLEWARE = [
+    ...,
+    "myapp.middleware.SimpleMiddleware",
+]
+```
+
+## 4가지 hook
+
+선택적으로 구현.
+
+### __call__ (필수)
+
+요청을 받아 응답을 반환. 위 예시.
+
+### process_view(request, view_func, view_args, view_kwargs)
+
+view 호출 직전.
+
+```python
+class ViewLogger:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        log.info(f"calling {view_func.__name__}")
+        # return None: 계속 진행
+        # return HttpResponse: view를 호출하지 않고 이 응답 반환
+```
+
+`process_view`가 응답 반환하면 view 자체 호출 안 됨.
+
+### process_exception(request, exception)
+
+view에서 예외 발생 시.
+
+```python
+class ExceptionLogger:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_exception(self, request, exception):
+        log.exception("view error")
+        # return None: Django 기본 처리
+        # return HttpResponse: 이 응답 반환
+```
+
+### process_template_response(request, response)
+
+`SimpleTemplateResponse` 인스턴스 반환 시.
+
+```python
+def process_template_response(self, request, response):
+    response.context_data["extra"] = "..."
+    return response
+```
+
+## 함수형 미들웨어
+
+```python
+def simple_middleware(get_response):
+    def middleware(request):
+        # before
+        response = get_response(request)
+        # after
+        return response
+    return middleware
+```
+
+`__init__` 한 번 호출 (서버 시작), `middleware`가 매 요청마다.
+
+## 자주 보는 빌트인 미들웨어
+
+| 미들웨어 | 역할 |
+|----------|------|
+| `SecurityMiddleware` | HTTPS 리다이렉트, HSTS, X-Content-Type-Options 등 보안 헤더 |
+| `SessionMiddleware` | request.session 활성화 |
+| `CommonMiddleware` | URL 정규화, ETag, GZip 일부 |
+| `CsrfViewMiddleware` | CSRF 토큰 검증 |
+| `AuthenticationMiddleware` | request.user 설정 |
+| `MessageMiddleware` | django.contrib.messages 활성화 |
+| `XFrameOptionsMiddleware` | Clickjacking 방지 (X-Frame-Options) |
+| `GZipMiddleware` | 응답 gzip 압축 |
+| `LocaleMiddleware` | i18n 언어 감지 |
+| `BrokenLinkEmailsMiddleware` | 404 알림 |
+
+## 활용 예제
+
+### 응답 시간 헤더
+
+```python
+import time
+
+class TimingMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        start = time.perf_counter()
+        response = self.get_response(request)
+        response["X-Response-Time-ms"] = f"{(time.perf_counter() - start) * 1000:.0f}"
+        return response
+```
+
+### 사용자 활동 로깅
+
+```python
+class AccessLogMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        log.info(
+            "%s %s %s %d",
+            request.META.get("REMOTE_ADDR"),
+            request.method,
+            request.path,
+            response.status_code,
+        )
+        return response
+```
+
+### 보안 헤더 추가
+
+```python
+class SecurityHeadersMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        response["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Referrer-Policy"] = "no-referrer-when-downgrade"
+        response["Permissions-Policy"] = "geolocation=(), microphone=()"
+        return response
+```
+
+### request id 주입
+
+```python
+import uuid
+
+class RequestIDMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        request.id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        response = self.get_response(request)
+        response["X-Request-ID"] = request.id
+        return response
+```
+
+로깅과 결합하면 분산 환경에서 요청 추적 가능.
+
+### 멀티 테넌시
+
+```python
+class TenantMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        host = request.get_host()
+        request.tenant = Tenant.objects.filter(domain=host).first()
+        if request.tenant is None:
+            return HttpResponseNotFound()
+        return self.get_response(request)
+```
+
+각 view에서 `request.tenant` 사용. 또는 `contextvars`로 전역 접근.
+
+### IP 화이트리스트
+
+```python
+class IPWhitelistMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.allowed = set(settings.ADMIN_ALLOWED_IPS)
+
+    def __call__(self, request):
+        if request.path.startswith("/admin/"):
+            ip = request.META.get("REMOTE_ADDR")
+            if ip not in self.allowed:
+                return HttpResponseForbidden()
+        return self.get_response(request)
+```
+
+### 비동기 미들웨어 (4.0+)
+
+```python
+class AsyncMiddleware:
+    sync_capable = True
+    async_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    async def __call__(self, request):
+        # async 처리
+        response = await self.get_response(request)
+        return response
+```
+
+동기/비동기 view 혼재 시 Django가 알아서 처리하지만 비동기 view 비율이 높으면 모든 미들웨어 비동기 가능하게 작성.
+
+## 함정
+
+### 1. 순서 잘못
+
+```python
+MIDDLEWARE = [
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",    # 잘못! Auth가 Session 의존
+]
+```
+
+Session → Auth 순. 기본 settings 순서 가급적 유지.
+
+### 2. 미들웨어 내 비싼 작업
+
+모든 요청을 가로채니 미들웨어 안의 SQL/외부 API 호출은 전체 응답 시간에 누적.
+
+### 3. 응답 변경 시 status 조회
+
+```python
+def __call__(self, request):
+    response = self.get_response(request)
+    if response.status_code == 500:    # 응답 객체로 검사
+        ...
+    return response
+```
+
+stream 응답(StreamingHttpResponse)은 status 확인까지 시간 걸릴 수 있음.
+
+### 4. 예외 전파
+
+```python
+class M:
+    def __call__(self, request):
+        try:
+            return self.get_response(request)
+        except Exception:
+            return HttpResponse("Error", status=500)    # 모든 예외 삼킴
+```
+
+너무 광범위. 로깅·메트릭은 하되 Django의 표준 에러 처리도 유지하려면 `raise`.
+
+### 5. 동기/비동기 혼합
+
+`async_capable = True`만 둔 미들웨어가 동기 view 만나면 자동 변환(`sync_to_async`/`async_to_sync`). 성능 손실.
+
+## 자주 보는 외부 미들웨어
+
+- **whitenoise**: 정적 파일 직접 서빙 (gunicorn 단독 배포)
+- **django-cors-headers**: CORS 헤더 처리
+- **django-debug-toolbar**: 개발용 디버그 정보
+- **django-querycount**: SQL 쿼리 카운트 (개발용)
+- **django-csp**: Content Security Policy
+- **sentry-sdk**: 에러 모니터링 미들웨어 자동 등록
+
+## 참고
+
+- [Middleware documentation](https://docs.djangoproject.com/en/stable/topics/http/middleware/)
+- [Writing custom middleware](https://docs.djangoproject.com/en/stable/topics/http/middleware/#writing-your-own-middleware)
+- [Built-in middleware](https://docs.djangoproject.com/en/stable/ref/middleware/)
+- [django-cors-headers](https://github.com/adamchainz/django-cors-headers)
+- [whitenoise](http://whitenoise.evans.io/)

@@ -1,0 +1,350 @@
+---
+title: "[Django] 배포: Gunicorn, Uvicorn, whitenoise, Docker"
+aliases: ["django deployment", "Gunicorn", "Uvicorn", "Daphne", "whitenoise", "static files", "DEBUG False"]
+tags: [django, deployment, gunicorn, docker]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django 프로덕션 배포는 **WSGI/ASGI 서버 + 리버스 프록시 + 정적 파일 + DB + 캐시 + 큐** 조합. runserver는 개발 전용. nginx + gunicorn이 전통, 컨테이너화는 표준.
+
+## 사전 체크리스트
+
+```python
+# settings/production.py
+DEBUG = False                                    # 반드시
+ALLOWED_HOSTS = ["example.com", "www.example.com"]
+SECRET_KEY = os.environ["SECRET_KEY"]            # 환경변수
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = True
+SECURE_HSTS_SECONDS = 31536000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+
+DATABASES = {
+    "default": dj_database_url.config(default=os.environ["DATABASE_URL"]),
+}
+
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_URL = "/static/"
+```
+
+`python manage.py check --deploy`로 점검.
+
+## Gunicorn (WSGI)
+
+```bash
+pip install gunicorn
+
+gunicorn myproject.wsgi:application \
+    --workers 4 \
+    --bind 0.0.0.0:8000 \
+    --timeout 30 \
+    --access-logfile - \
+    --error-logfile -
+```
+
+워커 수: `2 * CPU + 1` (단순 룰). 메모리 고려.
+
+`gunicorn.conf.py`:
+
+```python
+import multiprocessing
+
+bind = "0.0.0.0:8000"
+workers = multiprocessing.cpu_count() * 2 + 1
+worker_class = "sync"
+timeout = 30
+keepalive = 5
+max_requests = 1000           # 메모리 누수 방지
+max_requests_jitter = 100
+```
+
+## Uvicorn (ASGI)
+
+```bash
+pip install "uvicorn[standard]"
+
+uvicorn myproject.asgi:application \
+    --host 0.0.0.0 --port 8000 \
+    --workers 4
+```
+
+async view 활용 가능. gunicorn + uvicorn worker도 인기:
+
+```bash
+gunicorn myproject.asgi:application \
+    -k uvicorn.workers.UvicornWorker \
+    --workers 4
+```
+
+## 정적 파일
+
+```bash
+python manage.py collectstatic --noinput
+```
+
+`STATIC_ROOT`에 모든 정적 파일 수집. nginx 또는 CDN으로 서빙.
+
+### whitenoise: Python 직접 서빙
+
+```bash
+pip install whitenoise
+```
+
+```python
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",    # SecurityMiddleware 바로 다음
+    ...
+]
+
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+```
+
+nginx 없이도 gzip + cache header + immutable URL 자동. Heroku, Render 같은 PaaS에서 표준.
+
+### S3 + CloudFront
+
+```bash
+pip install django-storages boto3
+```
+
+```python
+STATICFILES_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
+AWS_STORAGE_BUCKET_NAME = "..."
+AWS_S3_CUSTOM_DOMAIN = "cdn.example.com"
+```
+
+대용량 / 글로벌 서비스에 적합.
+
+## nginx 리버스 프록시
+
+```nginx
+upstream django {
+    server 127.0.0.1:8000;
+}
+
+server {
+    listen 80;
+    server_name example.com;
+
+    location /static/ {
+        alias /app/staticfiles/;
+        expires 365d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location /media/ {
+        alias /app/media/;
+    }
+
+    location / {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+    }
+}
+```
+
+TLS는 nginx에서 종료 (Let's Encrypt + certbot).
+
+## Docker
+
+```dockerfile
+FROM python:3.13-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN python manage.py collectstatic --noinput
+
+EXPOSE 8000
+
+CMD ["gunicorn", "myproject.wsgi:application", "--bind", "0.0.0.0:8000"]
+```
+
+`.dockerignore`:
+```
+__pycache__
+*.pyc
+.git
+.env
+venv
+.pytest_cache
+node_modules
+```
+
+## docker-compose
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: myapp
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build: .
+    depends_on: [db, redis]
+    environment:
+      DATABASE_URL: postgres://myapp:${DB_PASSWORD}@db:5432/myapp
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: "False"
+    command: gunicorn myproject.wsgi:application --bind 0.0.0.0:8000
+    ports: ["8000:8000"]
+
+  celery:
+    build: .
+    depends_on: [db, redis]
+    command: celery -A myproject worker -l info
+
+volumes:
+  pg_data:
+```
+
+## 환경 변수 관리
+
+`python-decouple` 또는 `django-environ`:
+
+```bash
+pip install django-environ
+```
+
+```python
+# settings.py
+import environ
+env = environ.Env()
+environ.Env.read_env(BASE_DIR / ".env")
+
+SECRET_KEY = env("SECRET_KEY")
+DEBUG = env.bool("DEBUG", default=False)
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
+DATABASES = {"default": env.db()}    # DATABASE_URL 파싱
+```
+
+`.env` 파일은 절대 커밋 X.
+
+## 마이그레이션 자동화
+
+```bash
+# 컨테이너 entrypoint
+#!/bin/sh
+python manage.py migrate --noinput
+python manage.py collectstatic --noinput
+exec gunicorn myproject.wsgi:application --bind 0.0.0.0:8000
+```
+
+여러 인스턴스가 동시에 migrate 시도하면 race condition. `kubectl Job`이나 `helm hook`으로 단일 실행.
+
+## 헬스체크
+
+```python
+# urls.py
+from django.http import JsonResponse
+from django.db import connection
+
+def health(request):
+    try:
+        with connection.cursor() as c:
+            c.execute("SELECT 1")
+        return JsonResponse({"status": "ok"})
+    except Exception:
+        return JsonResponse({"status": "error"}, status=503)
+
+urlpatterns += [path("health/", health)]
+```
+
+Kubernetes liveness/readiness probe.
+
+## 모니터링
+
+- **Sentry**: 예외 추적
+- **Prometheus + Grafana**: 메트릭
+- **OpenTelemetry**: 트레이싱
+- **로그**: structlog, JSON 출력 → CloudWatch/Datadog
+
+```python
+# Sentry
+import sentry_sdk
+sentry_sdk.init(dsn=env("SENTRY_DSN"), traces_sample_rate=0.1)
+```
+
+## PaaS 옵션
+
+| 플랫폼 | 특징 |
+|--------|------|
+| Heroku | Procfile + buildpack, 비싸짐 |
+| Render | Heroku 대체, PostgreSQL 포함 |
+| Fly.io | 글로벌, 컨테이너 |
+| Railway | 깔끔한 UX |
+| DigitalOcean App | 안정적 |
+| AWS Elastic Beanstalk | AWS 통합 |
+
+작은 규모 + 빠른 배포 → PaaS. 본격 운영 → 직접 컨테이너 + k8s.
+
+## 보안 체크리스트
+
+- [ ] DEBUG=False
+- [ ] SECRET_KEY 환경 변수
+- [ ] ALLOWED_HOSTS 명시
+- [ ] HTTPS (SECURE_SSL_REDIRECT)
+- [ ] HSTS
+- [ ] SESSION_COOKIE_SECURE, CSRF_COOKIE_SECURE
+- [ ] X_FRAME_OPTIONS = "DENY"
+- [ ] DB password 환경 변수
+- [ ] 정적/미디어 파일 접근 권한
+- [ ] 외부 의존성 보안 업데이트 (`pip-audit`)
+- [ ] 정기 백업
+
+## 함정
+
+### 1. DEBUG=True로 배포
+
+비밀 키, 환경 변수, stacktrace 노출. 절대 금지.
+
+### 2. SECRET_KEY 변경 후 세션
+
+세션 데이터가 SECRET_KEY로 서명. 변경 시 모든 사용자 로그아웃.
+
+### 3. ALLOWED_HOSTS 빠뜨림
+
+DEBUG=False면 ALLOWED_HOSTS 미설정 시 400 Bad Request. 도메인 변경 시 업데이트.
+
+### 4. nginx 정적 캐싱과 collectstatic
+
+CDN/브라우저 캐싱 1년 → 새 정적 파일이 안 보임. `ManifestStaticFilesStorage`로 URL에 해시 (`main.abc123.css`).
+
+### 5. 워커 메모리 누수
+
+장시간 실행되는 gunicorn 워커는 메모리가 점진적으로 증가. `--max-requests 1000`으로 주기적 재시작.
+
+## 참고
+
+- [Deploying Django](https://docs.djangoproject.com/en/stable/howto/deployment/)
+- [Gunicorn settings](https://docs.gunicorn.org/en/stable/settings.html)
+- [whitenoise](http://whitenoise.evans.io/)
+- [django-environ](https://django-environ.readthedocs.io/)
+- [dj-database-url](https://github.com/jazzband/dj-database-url)
+- [Sentry Django](https://docs.sentry.io/platforms/python/integrations/django/)

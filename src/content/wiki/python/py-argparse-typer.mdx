@@ -1,0 +1,309 @@
+---
+title: "[Python] argparse, click, typer: CLI 만들기"
+aliases: ["python argparse", "python cli", "click", "typer", "command-line interface"]
+tags: [python, argparse, cli, click, typer, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+Python에서 CLI를 만드는 옵션은 세 가지가 주류:
+
+- **`argparse`** (stdlib): 표준, 외부 의존성 없음
+- **`click`** (third-party): 데코레이터 기반, 강력한 옵션 처리
+- **`typer`** (third-party): 타입 힌트로 자동 CLI 생성 (FastAPI 만든 사람이 만듦)
+
+## argparse 기본
+
+```python
+import argparse
+
+parser = argparse.ArgumentParser(
+    prog="my-tool",
+    description="Process some integers.",
+    epilog="See https://example.com for more.",
+)
+
+parser.add_argument("filename", help="Input file")           # 위치 인자
+parser.add_argument("-v", "--verbose", action="store_true")  # 플래그
+parser.add_argument("--count", type=int, default=1)          # 옵션
+parser.add_argument("--format", choices=["json", "csv"], default="json")
+
+args = parser.parse_args()
+print(args.filename, args.verbose, args.count, args.format)
+```
+
+실행:
+```bash
+my-tool data.csv -v --count 5 --format json
+```
+
+`args.filename`, `args.verbose` 처럼 attribute로 접근.
+
+## add_argument 옵션
+
+| 인자 | 의미 |
+|------|------|
+| `type=int` | 자동 형변환 |
+| `default=...` | 기본값 |
+| `required=True` | 필수 |
+| `nargs="?"` | 0 또는 1개 |
+| `nargs="+"` | 1개 이상 |
+| `nargs="*"` | 0개 이상 |
+| `nargs=3` | 정확히 3개 |
+| `action="store_true"` | 플래그 (값 없이 True) |
+| `action="count"` | 횟수 카운트 (`-vvv` → 3) |
+| `action="append"` | 리스트로 누적 |
+| `choices=[...]` | 허용 값 제한 |
+| `dest="..."` | 저장 attribute 이름 |
+| `help="..."` | 도움말 |
+
+## 서브 커맨드
+
+git처럼 `mytool init`, `mytool build` 등.
+
+```python
+import argparse
+
+parser = argparse.ArgumentParser()
+subs = parser.add_subparsers(dest="cmd", required=True)
+
+p_init = subs.add_parser("init", help="Initialize project")
+p_init.add_argument("--name", required=True)
+
+p_build = subs.add_parser("build", help="Build project")
+p_build.add_argument("--release", action="store_true")
+
+args = parser.parse_args()
+
+if args.cmd == "init":
+    init(args.name)
+elif args.cmd == "build":
+    build(release=args.release)
+```
+
+## 디스패치 패턴
+
+각 서브 커맨드 함수를 매핑.
+
+```python
+def cmd_init(args):
+    print(f"init {args.name}")
+
+def cmd_build(args):
+    print(f"build (release={args.release})")
+
+p_init.set_defaults(func=cmd_init)
+p_build.set_defaults(func=cmd_build)
+
+args = parser.parse_args()
+args.func(args)
+```
+
+## click
+
+데코레이터 기반. argparse보다 간결하고 검증·도움말이 더 부드럽다.
+
+```python
+import click
+
+@click.command()
+@click.argument("filename")
+@click.option("-v", "--verbose", is_flag=True)
+@click.option("--count", type=int, default=1)
+def main(filename, verbose, count):
+    """Process some integers."""
+    print(filename, verbose, count)
+
+if __name__ == "__main__":
+    main()
+```
+
+서브 커맨드:
+
+```python
+import click
+
+@click.group()
+def cli(): pass
+
+@cli.command()
+@click.option("--name", required=True)
+def init(name):
+    print(f"init {name}")
+
+@cli.command()
+@click.option("--release", is_flag=True)
+def build(release):
+    print(f"build {release}")
+
+if __name__ == "__main__":
+    cli()
+```
+
+`click.echo`, `click.confirm`, `click.prompt`, `click.progressbar` 같은 헬퍼가 많음.
+
+## typer
+
+`click` 기반인데 **타입 힌트로 CLI 자동 생성**. argparse가 가진 보일러플레이트 거의 없음.
+
+```python
+import typer
+
+app = typer.Typer()
+
+@app.command()
+def hello(name: str, count: int = 1, verbose: bool = False):
+    """Greet NAME COUNT times."""
+    for _ in range(count):
+        msg = f"Hello, {name}"
+        if verbose:
+            msg += " (verbose)"
+        typer.echo(msg)
+
+if __name__ == "__main__":
+    app()
+```
+
+실행:
+```bash
+python script.py hello Alice --count 3 --verbose
+python script.py hello --help    # 자동 생성된 도움말
+```
+
+`typer`는 함수 시그니처에서 옵션 이름·타입·기본값을 추출. `--name`은 인자 위치, `--count`는 키워드.
+
+### typer 서브 커맨드
+
+```python
+app = typer.Typer()
+
+@app.command()
+def init(name: str):
+    ...
+
+@app.command()
+def build(release: bool = False):
+    ...
+
+if __name__ == "__main__":
+    app()
+```
+
+복잡한 옵션은 `typer.Option`/`typer.Argument`로 메타데이터 추가.
+
+```python
+import typer
+
+def main(
+    name: str = typer.Argument(..., help="Your name"),
+    count: int = typer.Option(1, "--count", "-c", help="How many times"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    ...
+
+if __name__ == "__main__":
+    typer.run(main)
+```
+
+## 환경 변수 통합
+
+```python
+# argparse
+parser.add_argument("--api-key", default=os.environ.get("API_KEY"))
+
+# click
+@click.option("--api-key", envvar="API_KEY")
+
+# typer
+def main(api_key: str = typer.Option(..., envvar="API_KEY")):
+    ...
+```
+
+## 설치 파일과 entry point
+
+`pyproject.toml`에 진입점을 등록하면 `pip install` 후 시스템에서 명령어로 호출 가능.
+
+```toml
+[project.scripts]
+my-tool = "my_package.cli:main"
+```
+
+```bash
+pip install -e .
+my-tool --help
+```
+
+`my_package.cli:main`은 모듈 경로 + 호출할 함수.
+
+## 비교 표
+
+| 항목 | argparse | click | typer |
+|------|---------|-------|-------|
+| 의존성 | stdlib | 외부 | 외부 (click 위) |
+| 학습 곡선 | 중 | 낮 | 낮 |
+| 타입 힌트 활용 | X | X | O |
+| 검증 | 직접 작성 많음 | 내장 | 내장 |
+| 도움말 자동 생성 | 기본 | 풍부 | 풍부 |
+| 색상/프로그레스 | X | 내장 | 내장 |
+| 자동완성 | X | 옵션 | 자동 |
+
+작은 스크립트는 argparse, 다듬어진 CLI 도구는 click/typer 권장.
+
+## 함정
+
+### 1. argparse의 부정 가능한 플래그
+
+```python
+# 단방향만
+parser.add_argument("--verbose", action="store_true")
+
+# 양방향 (3.9+)
+parser.add_argument("--verbose", action=argparse.BooleanOptionalAction)
+# 이제 --verbose / --no-verbose 둘 다 지원
+```
+
+### 2. 위치 인자와 옵션 순서
+
+```python
+parser.add_argument("filename")
+parser.add_argument("--verbose", action="store_true")
+
+# OK
+mytool data.csv --verbose
+mytool --verbose data.csv
+
+# 단, nargs="+"인 위치 인자가 있으면 옵션은 그 앞에
+parser.add_argument("files", nargs="+")
+mytool --verbose a.csv b.csv    # OK
+mytool a.csv b.csv --verbose    # 모호함, 위치 인자에 흡수될 수 있음
+```
+
+### 3. choices와 type 동시
+
+```python
+parser.add_argument("--level", choices=[1, 2, 3], type=int)
+# 입력 문자열을 type으로 변환 후 choices 검사
+```
+
+순서 중요: type 적용 → choices 검사.
+
+### 4. 인수 파싱 후 검증
+
+argparse는 add_argument 단계 외에서 복잡한 cross-field 검증을 못 함. parse 후 직접 체크.
+
+```python
+args = parser.parse_args()
+if args.foo and args.bar:
+    parser.error("--foo and --bar are mutually exclusive")
+```
+
+또는 `add_mutually_exclusive_group()`.
+
+## 참고
+
+- [`argparse` documentation](https://docs.python.org/3/library/argparse.html)
+- [Argparse tutorial](https://docs.python.org/3/howto/argparse.html)
+- [`click` documentation](https://click.palletsprojects.com/)
+- [`typer` documentation](https://typer.tiangolo.com/)
+- [PEP 622 – Argparse Add Mutually Exclusive Group](https://docs.python.org/3/library/argparse.html#mutual-exclusion)

@@ -1,0 +1,249 @@
+---
+title: "[Python] pathlib: 객체지향 파일 시스템 경로"
+aliases: ["python pathlib", "Path", "PurePath", "os.path", "파일 경로"]
+tags: [python, pathlib, stdlib, filesystem]
+updated: 2026-06-20
+---
+
+## 정의
+
+`pathlib`(3.4+, PEP 428)는 파일 경로를 **객체**로 다루는 모듈. 기존 `os.path` 문자열 기반 API를 대체할 만큼 강력하고 가독성 좋다. 운영체제별 차이(`/` vs `\`)도 추상화.
+
+## 기본 사용
+
+```python
+from pathlib import Path
+
+p = Path("/Users/koa/projects/blog/posts/hello.md")
+
+print(p.name)        # 'hello.md'
+print(p.stem)        # 'hello'
+print(p.suffix)      # '.md'
+print(p.suffixes)    # ['.md']
+print(p.parent)      # Path('/Users/koa/projects/blog/posts')
+print(p.parents[1])  # Path('/Users/koa/projects/blog')
+print(p.parts)       # ('/', 'Users', 'koa', 'projects', 'blog', 'posts', 'hello.md')
+```
+
+## 경로 결합: `/` 연산자
+
+```python
+root = Path.home()              # /Users/koa
+config = root / ".config" / "myapp" / "settings.toml"
+# /Users/koa/.config/myapp/settings.toml
+
+# 동등
+config = root.joinpath(".config", "myapp", "settings.toml")
+```
+
+`/` 연산자가 가독성을 크게 높인다. 문자열 concat이나 `os.path.join`보다 명확.
+
+## 자주 쓰는 클래스 메서드
+
+```python
+Path.cwd()           # 현재 작업 디렉터리
+Path.home()          # 사용자 홈 디렉터리
+Path(__file__)       # 현재 스크립트 경로
+Path(__file__).resolve().parent    # 스크립트가 있는 디렉터리
+
+# 상대 ↔ 절대
+p.resolve()          # 절대 경로 + 심볼릭 링크 해석
+p.absolute()         # 절대 경로 (심볼릭 그대로)
+p.relative_to(other) # 상대 경로 (other 기준)
+```
+
+## 존재·종류 확인
+
+```python
+p.exists()
+p.is_file()
+p.is_dir()
+p.is_symlink()
+p.is_absolute()
+```
+
+존재 안 하면 모두 False (예외 없음).
+
+## 파일 I/O
+
+```python
+p = Path("hello.txt")
+
+# 전체 읽기/쓰기 (편의 메서드)
+text = p.read_text(encoding="utf-8")
+p.write_text("hello\n", encoding="utf-8")
+
+data = p.read_bytes()
+p.write_bytes(b"\\x00\\xff")
+
+# 더 세밀한 제어는 .open() 사용
+with p.open("a", encoding="utf-8") as f:
+    f.write("appended\n")
+```
+
+`read_text`/`write_text`는 file을 알아서 열고 닫는다. 작은 파일에 매우 편함.
+
+## 디렉터리 작업
+
+```python
+p = Path("project")
+
+p.mkdir(parents=True, exist_ok=True)   # 중간 디렉터리 자동 생성
+p.rmdir()                              # 빈 디렉터리만
+
+import shutil
+shutil.rmtree(p)                       # 트리 통째로 삭제
+```
+
+## glob: 패턴 매칭
+
+```python
+p = Path("src")
+
+list(p.glob("*.py"))            # src/ 직속 .py
+list(p.glob("**/*.py"))         # 재귀, 모든 .py
+list(p.rglob("*.py"))           # glob("**/*.py")와 동등
+
+# 여러 패턴
+for f in p.rglob("*"):
+    if f.suffix in (".py", ".mdx"):
+        process(f)
+```
+
+`*` 한 글자 이상, `?` 한 글자, `[abc]` 문자 집합. Unix와 동일.
+
+## 메타데이터
+
+```python
+p = Path("file.txt")
+st = p.stat()                # os.stat 결과 (namedtuple)
+print(st.st_size)            # 바이트
+print(st.st_mtime)           # 수정 시각 (UNIX timestamp)
+
+from datetime import datetime
+print(datetime.fromtimestamp(st.st_mtime))
+
+# 권한 변경
+p.chmod(0o644)
+```
+
+## 복사·이동·삭제
+
+```python
+import shutil
+
+shutil.copy(src, dst)        # 파일 복사
+shutil.copy2(src, dst)       # 메타데이터까지
+shutil.copytree(src, dst)    # 디렉터리 트리
+
+src.rename(dst)              # 같은 파일시스템 내 빠른 이동
+shutil.move(src, dst)        # 파일시스템 가로지름
+
+p.unlink()                   # 파일 삭제
+p.unlink(missing_ok=True)    # 없어도 OK (3.8+)
+```
+
+`Path.rename`은 동일 fs 내에서만 동작. 다른 fs 이동은 `shutil.move`.
+
+## PurePath: 파일 시스템 미접근
+
+I/O 없이 경로 문자열만 다룰 때.
+
+```python
+from pathlib import PurePath, PurePosixPath, PureWindowsPath
+
+p = PurePosixPath("/home/user/file.txt")
+print(p.parts)
+# Windows에서 실행해도 POSIX 의미로 다룸
+```
+
+테스트, 크로스 플랫폼 처리에 유용.
+
+## os.path와 매핑
+
+| os.path | pathlib |
+|---------|---------|
+| `os.path.join(a, b)` | `Path(a) / b` |
+| `os.path.basename(p)` | `Path(p).name` |
+| `os.path.dirname(p)` | `Path(p).parent` |
+| `os.path.splitext(p)` | `Path(p).stem`, `.suffix` |
+| `os.path.abspath(p)` | `Path(p).resolve()` |
+| `os.path.exists(p)` | `Path(p).exists()` |
+| `os.path.isfile(p)` | `Path(p).is_file()` |
+| `os.listdir(p)` | `Path(p).iterdir()` |
+| `glob.glob(pattern)` | `Path(...).glob(pattern)` |
+| `os.makedirs(p, exist_ok=True)` | `Path(p).mkdir(parents=True, exist_ok=True)` |
+
+## 함수에 Path 받기
+
+```python
+def process(path):
+    # 문자열도 Path도 받게
+    path = Path(path)
+    return path.read_text()
+
+# 타입 힌트
+def process(path: Path | str) -> str:
+    ...
+
+# 더 일반적: PathLike
+from os import PathLike
+def process(path: PathLike[str]) -> str:
+    ...
+```
+
+`os.PathLike` 프로토콜은 `__fspath__()` 메서드를 가진 모든 객체. `Path`도 구현.
+
+## 자주 보는 패턴
+
+### 스크립트 디렉터리 기반 경로
+
+```python
+HERE = Path(__file__).resolve().parent
+config = HERE / "config" / "settings.json"
+```
+
+### 디렉터리 재귀 탐색
+
+```python
+def find_python_files(root):
+    for p in Path(root).rglob("*.py"):
+        if "tests" not in p.parts:
+            yield p
+```
+
+### 안전한 임시 디렉터리
+
+```python
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    work_file = tmp / "data.json"
+    work_file.write_text(json.dumps(...))
+    process(work_file)
+# tmp 자동 정리
+```
+
+### URL 다운로드 후 저장
+
+```python
+import urllib.request
+from pathlib import Path
+
+dst = Path("downloads") / "data.csv"
+dst.parent.mkdir(parents=True, exist_ok=True)
+urllib.request.urlretrieve(url, dst)
+```
+
+## 성능
+
+- 메서드 호출 비용은 미미
+- 대량 stat 호출이 필요한 빅 디렉터리 스캔은 `os.scandir` 직접 사용이 더 빠를 수 있음 (메타데이터 캐싱)
+
+## 참고
+
+- [`pathlib` documentation](https://docs.python.org/3/library/pathlib.html)
+- [PEP 428 – The pathlib module – object-oriented filesystem paths](https://peps.python.org/pep-0428/)
+- [`os.path` vs `pathlib`](https://docs.python.org/3/library/pathlib.html#correspondence-to-tools-in-the-os-module)

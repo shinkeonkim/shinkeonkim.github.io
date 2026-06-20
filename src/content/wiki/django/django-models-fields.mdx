@@ -1,0 +1,322 @@
+---
+title: "[Django] Model과 Field 타입"
+aliases: ["django model", "Field types", "CharField", "ForeignKey", "models.Model"]
+tags: [django, model, orm, field]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django 모델은 **DB 테이블의 Python 표현**이다. `models.Model` 상속, 클래스 속성 = 컬럼, 메타 클래스 = 테이블 설정. 모델 정의 후 `makemigrations` + `migrate`로 DB 스키마 자동 생성.
+
+## 기본 정의
+
+```python
+from django.db import models
+
+class Post(models.Model):
+    title = models.CharField(max_length=200)
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_published = models.BooleanField(default=False)
+    views = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return self.title
+```
+
+`id` 컬럼은 자동 추가 (AutoField, PK).
+
+## Field 타입
+
+### 문자열
+
+| 타입 | 용도 |
+|------|------|
+| `CharField(max_length=N)` | 짧은 문자열 (필수 max_length) |
+| `TextField()` | 긴 문자열 |
+| `SlugField(max_length=50)` | URL 슬러그 |
+| `EmailField(max_length=254)` | 이메일 (검증 포함) |
+| `URLField()` | URL |
+| `UUIDField()` | UUID |
+| `FilePathField(path=...)` | 파일 시스템 경로 |
+
+### 수치
+
+| 타입 | 범위 |
+|------|------|
+| `IntegerField()` | -2147483648 ~ 2147483647 |
+| `BigIntegerField()` | 64비트 |
+| `SmallIntegerField()` | 16비트 |
+| `PositiveIntegerField()` | 0 이상 |
+| `PositiveSmallIntegerField()` | 0 ~ 32767 |
+| `FloatField()` | float |
+| `DecimalField(max_digits, decimal_places)` | 정밀 십진수 (금액) |
+| `AutoField()` | 자동 증가 (보통 PK) |
+| `BigAutoField()` | 64비트 자동 증가 (3.2+ 기본) |
+
+### 날짜/시간
+
+```python
+created_at = models.DateTimeField(auto_now_add=True)  # 생성 시 1회
+updated_at = models.DateTimeField(auto_now=True)       # 저장마다 갱신
+birthday = models.DateField()
+meeting_time = models.TimeField()
+duration = models.DurationField()
+```
+
+`auto_now`, `auto_now_add`는 편하지만 `.update()`로 우회되므로 비즈니스 로직엔 의존하지 말 것.
+
+### 불리언과 선택
+
+```python
+class Order(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("shipped", "Shipped"),
+        ("delivered", "Delivered"),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    is_paid = models.BooleanField(default=False)
+
+# 3.0+ TextChoices (권장)
+class Status(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SHIPPED = "shipped", "Shipped"
+    DELIVERED = "delivered", "Delivered"
+
+class Order(models.Model):
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+```
+
+### 파일
+
+```python
+class Profile(models.Model):
+    avatar = models.ImageField(upload_to="avatars/")
+    resume = models.FileField(upload_to="resumes/%Y/%m/")
+```
+
+`MEDIA_ROOT`, `MEDIA_URL` 설정 필요. `ImageField`는 Pillow 의존성.
+
+### JSON (1.9+)
+
+```python
+class Event(models.Model):
+    metadata = models.JSONField(default=dict)
+
+# 쿼리
+Event.objects.filter(metadata__user_id=42)
+Event.objects.filter(metadata__tags__contains=["urgent"])
+```
+
+PostgreSQL은 JSONB, 다른 DB는 텍스트로 저장 후 직렬화.
+
+## 관계 필드
+
+### ForeignKey
+
+```python
+class Post(models.Model):
+    author = models.ForeignKey(
+        "auth.User",
+        on_delete=models.CASCADE,
+        related_name="posts",
+    )
+```
+
+`on_delete` 옵션:
+
+| 값 | 동작 |
+|----|------|
+| `CASCADE` | 부모 삭제 시 자식도 삭제 |
+| `PROTECT` | 자식 있으면 부모 삭제 차단 (ProtectedError) |
+| `SET_NULL` | NULL로 (null=True 필요) |
+| `SET_DEFAULT` | default 값으로 (default 필요) |
+| `SET(value)` | 지정 값으로 |
+| `DO_NOTHING` | DB 레벨 처리 (FK 제약 없으면 오류) |
+| `RESTRICT` | PROTECT와 유사하나 다른 관계로 우회 가능 |
+
+`related_name`은 역방향 매니저 이름. 기본은 `<modelname>_set` (`post_set`).
+
+### ManyToMany
+
+```python
+class Tag(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+
+class Post(models.Model):
+    tags = models.ManyToManyField(Tag, related_name="posts")
+
+# 사용
+post.tags.add(tag1, tag2)
+post.tags.remove(tag1)
+post.tags.set([tag1, tag3])
+post.tags.clear()
+post.tags.all()
+tag.posts.all()    # 역방향
+```
+
+중간 테이블 자동 생성. 커스텀 데이터 필요 시 `through`:
+
+```python
+class PostTag(models.Model):
+    post = models.ForeignKey(Post, on_delete=models.CASCADE)
+    tag = models.ForeignKey(Tag, on_delete=models.CASCADE)
+    added_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey("auth.User", on_delete=models.CASCADE)
+
+class Post(models.Model):
+    tags = models.ManyToManyField(Tag, through=PostTag, related_name="posts")
+```
+
+### OneToOne
+
+```python
+class Profile(models.Model):
+    user = models.OneToOneField("auth.User", on_delete=models.CASCADE)
+    bio = models.TextField()
+
+# user.profile로 접근 (related_name이 모델명 소문자 기본)
+user.profile.bio
+```
+
+User 확장에 자주 사용.
+
+## Field 옵션
+
+```python
+title = models.CharField(
+    max_length=200,
+    blank=False,           # 폼 검증에서 빈 값 허용
+    null=False,            # DB에서 NULL 허용
+    default="Untitled",
+    unique=True,
+    db_index=True,
+    verbose_name="제목",
+    help_text="포스트 제목 (최대 200자)",
+    validators=[some_validator],
+    editable=True,
+    error_messages={"unique": "이미 존재하는 제목입니다"},
+)
+```
+
+**`null` vs `blank` 함정**:
+- `null=True` → DB 컬럼에 NULL 허용
+- `blank=True` → 폼에서 빈 값 허용
+
+문자열 필드(CharField, TextField)는 `null=True` 거의 안 씀 (빈 문자열 `""` 사용). 다른 타입은 `null=True` + `blank=True` 함께 자주.
+
+## Meta 옵션
+
+```python
+class Post(models.Model):
+    ...
+
+    class Meta:
+        ordering = ["-created_at"]               # 기본 정렬
+        verbose_name = "포스트"
+        verbose_name_plural = "포스트들"
+        db_table = "blog_posts"                  # 테이블 이름 (기본은 app_modelname)
+        unique_together = [["author", "slug"]]   # 다중 컬럼 유니크
+        constraints = [
+            models.UniqueConstraint(
+                fields=["author", "slug"], name="unique_author_slug",
+            ),
+            models.CheckConstraint(
+                check=models.Q(views__gte=0), name="views_non_negative",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["author", "created_at"]),
+            models.Index(fields=["-created_at"]),
+        ]
+        abstract = False    # True면 추상 모델 (자체 테이블 X)
+        permissions = [("can_publish", "Can publish post")]
+```
+
+## 모델 메서드
+
+```python
+class Post(models.Model):
+    ...
+
+    def __str__(self):
+        return self.title    # 관리자 화면, shell에서 표시
+
+    def get_absolute_url(self):
+        from django.urls import reverse
+        return reverse("post-detail", kwargs={"slug": self.slug})
+
+    def publish(self):
+        self.is_published = True
+        self.published_at = timezone.now()
+        self.save()
+```
+
+`get_absolute_url`은 관리자 "사이트에서 보기", 템플릿 `{{ post.get_absolute_url }}` 등에 자동 사용.
+
+## 추상 모델 (재사용)
+
+```python
+class TimeStamped(models.Model):
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+class Post(TimeStamped):
+    title = models.CharField(max_length=200)
+
+class Comment(TimeStamped):
+    body = models.TextField()
+```
+
+`abstract = True`는 자체 테이블 안 생기고 상속받는 모델에 필드 주입.
+
+## save() 오버라이드
+
+```python
+class Post(models.Model):
+    title = models.CharField(max_length=200)
+    slug = models.SlugField(unique=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+```
+
+대안: signal (`pre_save`) 또는 manager 메서드.
+
+## 함정
+
+### 1. AutoField → BigAutoField
+
+Django 3.2+ 기본 PK가 `BigAutoField`. 기존 프로젝트는 `DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"` 명시.
+
+### 2. choices 변경 시 마이그레이션
+
+`choices`만 바꿔도 마이그레이션 파일 생성됨 (DB 변경 없지만 메타데이터로). 무시하지 말고 적용.
+
+### 3. NULL vs ""
+
+문자열에 `null=True`는 NULL과 빈 문자열 두 상태 → 비교 복잡. 보통 `""`만 사용.
+
+### 4. unique_together vs UniqueConstraint
+
+4.0+ `UniqueConstraint` 권장 (조건부 unique 등 더 풍부).
+
+## 참고
+
+- [Django Model Field Reference](https://docs.djangoproject.com/en/stable/ref/models/fields/)
+- [Models documentation](https://docs.djangoproject.com/en/stable/topics/db/models/)
+- [Model Meta options](https://docs.djangoproject.com/en/stable/ref/models/options/)

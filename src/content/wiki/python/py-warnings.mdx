@@ -1,0 +1,285 @@
+---
+title: "[Python] warnings: 경고 발생과 필터링"
+aliases: ["python warnings", "DeprecationWarning", "FutureWarning", "warnings.warn", "warnings.filterwarnings", "stacklevel"]
+tags: [python, warnings, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`warnings` 모듈은 **에러보다 약한 경고**를 발생·필터링한다. 라이브러리가 deprecated API 알림, 잠재적 버그 신호, 권장하지 않는 사용 패턴 등을 사용자에게 전달할 때 사용.
+
+예외는 흐름을 중단하지만 경고는 메시지만 출력하고 계속 진행. 동작은 변경하지 않으면서 사용자에게 신호.
+
+## 경고 발생
+
+```python
+import warnings
+
+def old_api():
+    warnings.warn(
+        "old_api()는 deprecated. new_api() 사용",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return ...
+```
+
+기본적으로 stderr에 한 줄 출력. 같은 위치의 같은 경고는 한 번만 (필터 기본).
+
+### stacklevel
+
+`stacklevel=2`는 호출자 위치를 가리키게 함. 라이브러리 함수 내부 위치 대신 사용자 코드 위치 표시.
+
+```python
+def deprecated_fn():
+    warnings.warn("...", DeprecationWarning, stacklevel=2)
+    # stacklevel=1 (기본): warn() 호출 줄 표시
+    # stacklevel=2: deprecated_fn() 호출 줄 표시
+```
+
+대부분 라이브러리는 `stacklevel=2`.
+
+## 경고 카테고리
+
+| 카테고리 | 용도 |
+|----------|------|
+| `Warning` | 베이스 |
+| `UserWarning` | 일반 (기본) |
+| `DeprecationWarning` | 사용 중단 예정. 개발자 대상 (기본 숨김) |
+| `PendingDeprecationWarning` | 곧 deprecated 될 것 |
+| `FutureWarning` | 미래 동작 변경 예고. 최종 사용자 대상 (기본 표시) |
+| `RuntimeWarning` | 런타임 의심스러운 동작 |
+| `SyntaxWarning` | 의심스러운 문법 |
+| `ResourceWarning` | 자원 누수 (close 안 한 파일 등) |
+| `ImportWarning` | import 관련 |
+| `UnicodeWarning` | 유니코드 변환 문제 |
+
+### DeprecationWarning vs FutureWarning
+
+- **`DeprecationWarning`**: API가 사라질 예정. 개발자가 코드 고쳐야 함. 기본적으로 **숨김** (sys.path에서 직접 호출되는 코드만 표시).
+- **`FutureWarning`**: 동작이 바뀔 예정 (예: pandas의 기본값 변경). 사용자가 명시적 행동 필요. 기본 **표시**.
+
+```python
+# 함수 자체가 사라질 때
+warnings.warn("foo()는 1.0에서 제거됨, bar() 사용", DeprecationWarning, stacklevel=2)
+
+# 동작이 바뀔 때
+warnings.warn("sort()의 기본 ascending이 False로 바뀜", FutureWarning, stacklevel=2)
+```
+
+## 필터 (filterwarnings)
+
+경고를 어떻게 처리할지 결정.
+
+```python
+import warnings
+
+warnings.filterwarnings("ignore")                       # 모두 무시
+warnings.filterwarnings("ignore", category=DeprecationWarning)  # 카테고리 무시
+warnings.filterwarnings("always", category=UserWarning)         # 항상 표시
+warnings.filterwarnings("error", category=DeprecationWarning)   # 에러로 승격
+```
+
+액션:
+
+| 액션 | 동작 |
+|------|------|
+| `error` | 예외 변환 |
+| `ignore` | 무시 |
+| `always` | 항상 |
+| `default` | 위치별 1회 |
+| `module` | 모듈별 1회 |
+| `once` | 전역 1회 |
+
+### CLI / 환경변수
+
+```bash
+python -W ignore script.py
+python -W error::DeprecationWarning script.py
+PYTHONWARNINGS=error::DeprecationWarning python script.py
+```
+
+CI에서 `error::DeprecationWarning`을 두면 deprecated API 사용 시 빌드 실패 → 마이그레이션 시점 명확.
+
+## 컨텍스트 매니저
+
+```python
+import warnings
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    legacy_call()    # 경고 무시
+
+# 또는 모두 모으기
+with warnings.catch_warnings(record=True) as w:
+    warnings.simplefilter("always")
+    do_something()
+    for warning in w:
+        print(warning.category.__name__, warning.message)
+```
+
+테스트에서 경고 발생 검증에 유용.
+
+```python
+import warnings
+import pytest
+
+def test_deprecation():
+    with pytest.warns(DeprecationWarning, match="old_api"):
+        old_api()
+
+def test_no_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")    # 어떤 경고도 fail
+        new_api()
+```
+
+## 자주 보는 패턴
+
+### Deprecation 데코레이터
+
+```python
+import warnings
+import functools
+
+def deprecated(reason):
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            warnings.warn(
+                f"{fn.__name__}() is deprecated: {reason}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+@deprecated("use new_api() instead")
+def old_api():
+    return ...
+```
+
+### 인자 deprecation
+
+```python
+def fetch(url, *, timeout=None, deadline=None):
+    if deadline is not None:
+        warnings.warn(
+            "deadline= is deprecated, use timeout=",
+            DeprecationWarning, stacklevel=2,
+        )
+        timeout = deadline
+    ...
+```
+
+```python
+# 호출자 입장에서
+fetch(url, deadline=10)
+# DeprecationWarning: deadline= is deprecated, use timeout=
+```
+
+### 클래스 deprecation
+
+```python
+class OldClass:
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "OldClass is deprecated, use NewClass",
+            DeprecationWarning, stacklevel=2,
+        )
+        # 그래도 동작은 함
+        ...
+```
+
+또는 메타클래스로 자동:
+
+```python
+class DeprecatedMeta(type):
+    def __call__(cls, *args, **kwargs):
+        warnings.warn(f"{cls.__name__} deprecated", DeprecationWarning, stacklevel=2)
+        return super().__call__(*args, **kwargs)
+```
+
+## 함정
+
+### 1. stacklevel 누락
+
+```python
+def foo():
+    warnings.warn("...", DeprecationWarning)
+    # stacklevel 기본 1 → foo() 내부 위치 표시
+```
+
+라이브러리 사용자는 자기 코드 위치를 보고 싶음 → `stacklevel=2` 명시.
+
+데코레이터/체인이 있으면 더 깊게 (`stacklevel=3, 4` 등).
+
+### 2. DeprecationWarning 기본 숨김
+
+```python
+# user_code.py
+import some_lib
+some_lib.old_api()    # DeprecationWarning이 발생해도 안 보일 수 있음
+```
+
+`some_lib` 내부에서 발생하는 DeprecationWarning은 기본적으로 표시 안 됨. 사용자가 명시적으로 활성화하거나, 라이브러리가 `FutureWarning`을 쓰는 게 더 눈에 띈다.
+
+3.7+ pytest는 자동으로 모든 경고 표시. 테스트 중엔 잡힘.
+
+### 3. 너무 많은 경고
+
+라이브러리가 매 호출마다 경고 → 사용자 콘솔 도배. 한 번만 또는 처음 import 시.
+
+```python
+_warned = False
+
+def deprecated_fn():
+    global _warned
+    if not _warned:
+        warnings.warn(...)
+        _warned = True
+```
+
+또는 기본 필터 `default` (위치별 1회)를 신뢰.
+
+### 4. catch_warnings의 비스레드 안전
+
+`catch_warnings`는 **글로벌 필터를 일시 수정**. 멀티스레드에선 다른 스레드의 경고에 영향.
+
+```python
+# 스레드별 격리 안 됨, 주의
+with warnings.catch_warnings():
+    ...
+```
+
+## 로깅과 통합
+
+```python
+import logging
+
+logging.captureWarnings(True)
+# warnings.warn() → logging의 "py.warnings" 로거로 라우팅
+```
+
+로그 인프라(파일, syslog, 모니터링)로 자동 전송. 메시지 + stacktrace 보존.
+
+## 경고 vs 예외 vs print
+
+| 상황 | 선택 |
+|------|------|
+| 호출 실패 (계속 진행 불가) | 예외 |
+| 호출 성공이나 신호 필요 | warning |
+| 디버그 출력 | logger.debug |
+| 정보 출력 | logger.info |
+| 사용자 진행 메시지 | print 또는 progress bar |
+
+규칙: 동작에 영향 없고 메시지만 필요하면 warning.
+
+## 참고
+
+- [`warnings` documentation](https://docs.python.org/3/library/warnings.html)
+- [PEP 565 – Show DeprecationWarning in __main__](https://peps.python.org/pep-0565/)
+- [Pytest warnings docs](https://docs.pytest.org/en/stable/how-to/capture-warnings.html)
+- [`warnings.filterwarnings`](https://docs.python.org/3/library/warnings.html#warnings.filterwarnings)

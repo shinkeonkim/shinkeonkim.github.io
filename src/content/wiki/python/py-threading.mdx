@@ -1,0 +1,354 @@
+---
+title: "[Python] threading: Thread, Lock, Event"
+aliases: ["python threading", "Thread", "Lock", "RLock", "Event", "Condition", "Barrier", "GIL"]
+tags: [python, threading, concurrency, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`threading`은 OS 스레드 기반 동시성 모듈. **GIL 때문에 CPU 바운드 작업은 가속되지 않으나** I/O 바운드(네트워크, 디스크) 작업의 병렬화는 가능. 3.13+ free-threaded 빌드(PEP 703)에선 GIL이 옵션이라 진정한 병렬 CPU도 가능.
+
+CPU 병렬은 `multiprocessing` 또는 `concurrent.futures.ProcessPoolExecutor`.
+
+## Thread 생성
+
+```python
+import threading
+import time
+
+def worker(name, delay):
+    print(f"{name} start")
+    time.sleep(delay)
+    print(f"{name} done")
+
+t1 = threading.Thread(target=worker, args=("A", 1))
+t2 = threading.Thread(target=worker, args=("B", 2))
+
+t1.start()
+t2.start()
+t1.join()
+t2.join()
+print("all done")
+```
+
+`start()`로 실행, `join()`으로 완료 대기. join 안 하면 main이 먼저 끝나 daemon 스레드는 강제 종료.
+
+## 클래스 기반
+
+```python
+class Worker(threading.Thread):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+    def run(self):
+        print(f"{self.name} running")
+
+w = Worker("A")
+w.start()
+w.join()
+```
+
+`run()` 오버라이드. start가 내부적으로 호출.
+
+## Lock
+
+공유 자원 보호. 가장 기본적인 동기화.
+
+```python
+import threading
+
+counter = 0
+lock = threading.Lock()
+
+def increment():
+    global counter
+    for _ in range(100_000):
+        with lock:
+            counter += 1
+
+threads = [threading.Thread(target=increment) for _ in range(10)]
+for t in threads: t.start()
+for t in threads: t.join()
+
+print(counter)    # 1_000_000 보장
+```
+
+lock 없으면 race condition으로 값 손실. `with lock:` 패턴이 try/finally 자동.
+
+## RLock (재진입 가능)
+
+같은 스레드가 여러 번 acquire 가능.
+
+```python
+import threading
+
+lock = threading.RLock()
+
+def outer():
+    with lock:
+        inner()
+
+def inner():
+    with lock:    # 같은 스레드라 deadlock 없음
+        ...
+```
+
+일반 `Lock`은 같은 스레드라도 두 번째 acquire에서 데드락.
+
+## Event
+
+스레드 간 신호.
+
+```python
+import threading
+import time
+
+event = threading.Event()
+
+def waiter():
+    print("waiting")
+    event.wait()         # 신호까지 블록
+    print("got signal")
+
+def notifier():
+    time.sleep(2)
+    event.set()          # 모든 waiter 깨움
+
+threading.Thread(target=waiter).start()
+threading.Thread(target=notifier).start()
+```
+
+`event.clear()`로 다시 미신호 상태. 1회성이 아니라 반복적이면 `Condition` 또는 `Queue`.
+
+## Condition
+
+복잡한 대기 조건. producer-consumer.
+
+```python
+import threading
+
+condition = threading.Condition()
+items = []
+
+def producer():
+    with condition:
+        items.append("data")
+        condition.notify()
+
+def consumer():
+    with condition:
+        while not items:
+            condition.wait()
+        item = items.pop()
+        print(item)
+```
+
+`wait()`는 lock을 풀고 대기, notify 받으면 lock 다시 잡고 반환. 보통 `queue.Queue`가 더 간단.
+
+## Semaphore
+
+동시 접근 수 제한.
+
+```python
+import threading
+
+sem = threading.Semaphore(3)   # 최대 3개 동시
+
+def worker(id):
+    with sem:
+        print(f"worker {id} running")
+        time.sleep(1)
+
+for i in range(10):
+    threading.Thread(target=worker, args=(i,)).start()
+# 동시 최대 3개만 진행
+```
+
+DB 커넥션 풀, API rate limit 등에 유용.
+
+## Barrier
+
+N개 스레드가 모두 도착할 때까지 대기.
+
+```python
+import threading
+
+barrier = threading.Barrier(3)
+
+def worker(id):
+    print(f"{id} arrived")
+    barrier.wait()        # 3개 모이면 동시 출발
+    print(f"{id} go")
+
+for i in range(3):
+    threading.Thread(target=worker, args=(i,)).start()
+```
+
+병렬 알고리즘의 페이즈 동기화에.
+
+## Queue (thread-safe)
+
+`queue` 모듈은 thread-safe 큐 제공. 락 직접 관리할 필요 없음.
+
+```python
+import queue
+import threading
+
+q = queue.Queue(maxsize=10)
+
+def producer():
+    for i in range(20):
+        q.put(i)
+    q.put(None)    # 종료 신호
+
+def consumer():
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        process(item)
+        q.task_done()
+
+threading.Thread(target=producer).start()
+threading.Thread(target=consumer).start()
+```
+
+`queue.Queue` (FIFO), `LifoQueue` (스택), `PriorityQueue` (heap) 제공.
+
+## ThreadLocal
+
+스레드별 독립 데이터.
+
+```python
+import threading
+
+local = threading.local()
+
+def worker(name):
+    local.name = name
+    print(f"this thread is {local.name}")
+```
+
+각 스레드에서 `local.name`이 독립. 컨텍스트 저장(현재 사용자, DB 트랜잭션 등)에.
+
+비동기 코드는 `contextvars.ContextVar`가 대안.
+
+## GIL과 성능
+
+```python
+import time
+import threading
+
+def cpu_bound():
+    sum(i * i for i in range(10_000_000))
+
+# 직렬
+start = time.perf_counter()
+cpu_bound()
+cpu_bound()
+print(f"serial: {time.perf_counter() - start:.2f}s")
+
+# 스레드
+start = time.perf_counter()
+t1 = threading.Thread(target=cpu_bound)
+t2 = threading.Thread(target=cpu_bound)
+t1.start(); t2.start()
+t1.join(); t2.join()
+print(f"thread: {time.perf_counter() - start:.2f}s")    # 거의 동일
+```
+
+GIL이 한 번에 한 스레드만 Python 바이트코드 실행 허용. CPU 작업은 직렬보다도 약간 느려질 수 있음(컨텍스트 스위치 비용).
+
+**I/O 작업은 다름**: GIL이 I/O syscall 동안 풀려 다른 스레드 진행 가능.
+
+```python
+import requests
+import threading
+
+def fetch(url):
+    requests.get(url)
+
+urls = ["https://example.com"] * 10
+
+# 직렬: 10초
+for u in urls: fetch(u)
+
+# 스레드: ~1초 (병렬)
+threads = [threading.Thread(target=fetch, args=(u,)) for u in urls]
+for t in threads: t.start()
+for t in threads: t.join()
+```
+
+## 함정
+
+### 1. join 안 함
+
+main이 먼저 끝나 데몬 스레드는 강제 종료. 작업 결과 손실.
+
+```python
+t = threading.Thread(target=work)
+t.start()
+# join 없이 main 종료 → t 결과 모름
+```
+
+### 2. shared mutable state without lock
+
+```python
+data = []
+
+def add():
+    data.append(...)    # list.append 자체는 atomic이지만 복합 연산은 X
+
+# 안전한 컬렉션: queue.Queue, collections.deque (append/popleft가 thread-safe)
+```
+
+### 3. Lock 해제 안 함
+
+```python
+lock.acquire()
+do_work()    # 예외 발생 시 lock 영원히 잡힘
+lock.release()
+
+# 안전
+with lock:
+    do_work()
+```
+
+### 4. Thread 직접 종료 불가
+
+Python은 외부에서 스레드 강제 종료 API 없음. 자체 종료 플래그 + 폴링.
+
+```python
+class Worker(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        while not self._stop.is_set():
+            do_work()
+```
+
+## 언제 threading vs asyncio vs multiprocessing
+
+| 작업 종류 | 권장 |
+|-----------|------|
+| 적은 I/O 작업 | threading (간단) |
+| 대량 I/O 동시 (수천+) | asyncio |
+| CPU 집약 | multiprocessing |
+| 라이브러리가 비동기 미지원 | threading |
+| 새 코드, async DB 드라이버 있음 | asyncio |
+| 3.13+ free-threaded | threading도 진정한 병렬 |
+
+## 참고
+
+- [`threading` documentation](https://docs.python.org/3/library/threading.html)
+- [`queue` documentation](https://docs.python.org/3/library/queue.html)
+- [GIL discussion](https://docs.python.org/3/glossary.html#term-global-interpreter-lock)
+- [PEP 703 – Making the GIL Optional](https://peps.python.org/pep-0703/)
+- [`concurrent.futures`](https://docs.python.org/3/library/concurrent.futures.html) - 고수준 래퍼

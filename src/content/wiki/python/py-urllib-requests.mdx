@@ -1,0 +1,360 @@
+---
+title: "[Python] urllib, requests, httpx: HTTP 클라이언트"
+aliases: ["python urllib", "requests", "httpx", "urlopen", "HTTP client", "url parsing"]
+tags: [python, urllib, requests, httpx, http, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+Python에서 HTTP 통신 옵션:
+
+- **`urllib`** (stdlib): 외부 의존성 없는 기본 클라이언트. 다소 장황.
+- **`requests`** (third-party): 사실상 표준 HTTP 클라이언트. 간결한 API.
+- **`httpx`** (third-party): async 지원 + requests 호환 API. 현대 권장.
+- **`aiohttp`** (third-party): asyncio 네이티브 (서버도 포함).
+
+## urllib 기본
+
+```python
+from urllib.request import urlopen, Request
+from urllib.parse import urlencode, urlparse
+
+# GET
+with urlopen("https://api.github.com/users/python") as resp:
+    print(resp.status)
+    data = resp.read().decode()
+
+# POST with headers
+req = Request(
+    "https://httpbin.org/post",
+    data=urlencode({"name": "Alice"}).encode(),
+    headers={"User-Agent": "myapp/1.0", "Content-Type": "application/x-www-form-urlencoded"},
+    method="POST",
+)
+with urlopen(req) as resp:
+    print(resp.read().decode())
+```
+
+응답 객체는 `http.client.HTTPResponse`. 컨텍스트 매니저로 닫는다.
+
+### urlencode / urlparse
+
+```python
+from urllib.parse import urlencode, urlparse, parse_qs, urljoin
+
+# 쿼리 인코딩
+q = urlencode({"name": "Alice", "tags": ["a", "b"]}, doseq=True)
+print(q)    # 'name=Alice&tags=a&tags=b'
+
+# URL 파싱
+u = urlparse("https://example.com:8080/path?q=1#frag")
+print(u.scheme, u.netloc, u.path, u.query, u.fragment)
+# 'https', 'example.com:8080', '/path', 'q=1', 'frag'
+
+# 쿼리 파싱
+print(parse_qs("a=1&b=2&b=3"))   # {'a': ['1'], 'b': ['2', '3']}
+
+# 상대 URL 합치기
+print(urljoin("https://example.com/a/b/", "../c"))    # 'https://example.com/a/c'
+```
+
+`urlparse`/`urlencode`는 자주 쓰임. 라이브러리에서도 활용.
+
+### urllib 단점
+
+- 헤더, 쿠키, 세션 관리 장황
+- HTTPS 인증서 검증 기본 X (3.4.3+ 부터 기본 O)
+- 자동 retry, connection pooling 없음
+- json 처리 수동
+
+## requests
+
+```bash
+pip install requests
+```
+
+```python
+import requests
+
+r = requests.get("https://api.github.com/users/python")
+print(r.status_code)
+print(r.json())         # 자동 JSON 파싱
+print(r.headers["content-type"])
+
+# 쿼리, 헤더
+r = requests.get(
+    "https://api.example.com/search",
+    params={"q": "python", "limit": 10},
+    headers={"Authorization": "Bearer xxx"},
+    timeout=10,
+)
+
+# POST
+r = requests.post(
+    "https://api.example.com/users",
+    json={"name": "Alice", "age": 30},
+)
+
+# 파일 업로드
+with open("photo.jpg", "rb") as f:
+    r = requests.post("https://api.example.com/upload", files={"image": f})
+```
+
+## Session
+
+연결 풀링, 쿠키, 기본 헤더 공유.
+
+```python
+import requests
+
+with requests.Session() as s:
+    s.headers["Authorization"] = "Bearer xxx"
+    s.headers["User-Agent"] = "myapp/1.0"
+
+    r1 = s.get("https://api.example.com/users")
+    r2 = s.get("https://api.example.com/posts")
+    # 같은 TCP 연결 재사용
+```
+
+**여러 요청 시 항상 Session 사용**. 매번 `requests.get` 호출은 매번 새 TCP/TLS 핸드셰이크.
+
+## 타임아웃, 재시도
+
+```python
+# timeout 명시 (기본 무한 대기 → 위험)
+r = requests.get(url, timeout=10)
+r = requests.get(url, timeout=(3, 10))    # (connect, read)
+
+# 재시도 (urllib3 활용)
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+retry = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[500, 502, 503, 504],
+)
+adapter = HTTPAdapter(max_retries=retry)
+
+with requests.Session() as s:
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    r = s.get(url)
+```
+
+**timeout 절대 빠뜨리지 말 것**. 외부 API가 느려지면 앱 전체 멈춤.
+
+## 스트리밍 (큰 응답)
+
+```python
+with requests.get(url, stream=True) as r:
+    r.raise_for_status()
+    with open("download.bin", "wb") as f:
+        for chunk in r.iter_content(chunk_size=64 * 1024):
+            f.write(chunk)
+```
+
+`stream=True`는 응답 본문을 즉시 읽지 않음. 큰 파일 다운로드에 필수.
+
+## 인증
+
+```python
+# Basic Auth
+r = requests.get(url, auth=("user", "pass"))
+
+# Bearer (직접 헤더)
+r = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+
+# OAuth (requests-oauthlib)
+from requests_oauthlib import OAuth2Session
+
+oauth = OAuth2Session(client_id, redirect_uri=...)
+authorization_url, state = oauth.authorization_url(authorization_base_url)
+```
+
+## 에러 처리
+
+```python
+import requests
+
+try:
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()    # 4xx/5xx에서 HTTPError
+    data = r.json()
+except requests.exceptions.Timeout:
+    print("timeout")
+except requests.exceptions.ConnectionError:
+    print("network error")
+except requests.exceptions.HTTPError as e:
+    print(f"http {e.response.status_code}")
+except requests.exceptions.JSONDecodeError:
+    print("not JSON")
+except requests.exceptions.RequestException as e:
+    print(f"other error: {e}")
+```
+
+## httpx: 현대 권장
+
+```bash
+pip install httpx
+```
+
+requests와 거의 동일한 API + async 지원 + HTTP/2.
+
+```python
+import httpx
+
+# 동기
+with httpx.Client(timeout=10.0) as client:
+    r = client.get(url)
+    print(r.json())
+
+# 비동기
+import asyncio
+
+async def main():
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url)
+        print(r.json())
+
+        # 병렬
+        responses = await asyncio.gather(*[client.get(u) for u in urls])
+
+asyncio.run(main())
+```
+
+신규 프로젝트는 httpx 권장. requests는 안정적이지만 async 미지원.
+
+## aiohttp
+
+순수 asyncio 네이티브. 서버도 포함.
+
+```bash
+pip install aiohttp
+```
+
+```python
+import aiohttp
+import asyncio
+
+async def fetch(session, url):
+    async with session.get(url) as r:
+        return await r.json()
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch(session, u) for u in urls]
+        results = await asyncio.gather(*tasks)
+
+asyncio.run(main())
+```
+
+대량 동시 요청에 강하나 API가 다소 거침. httpx가 더 친화적.
+
+## 자주 보는 패턴
+
+### REST API 클라이언트 클래스
+
+```python
+import requests
+
+class GitHubClient:
+    def __init__(self, token, timeout=10):
+        self.s = requests.Session()
+        self.s.headers["Authorization"] = f"Bearer {token}"
+        self.s.headers["Accept"] = "application/vnd.github+json"
+        self.timeout = timeout
+
+    def get_user(self, login):
+        r = self.s.get(f"https://api.github.com/users/{login}", timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def list_repos(self, org):
+        r = self.s.get(f"https://api.github.com/orgs/{org}/repos", timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def __del__(self):
+        self.s.close()
+```
+
+### 페이지네이션
+
+```python
+def fetch_all_pages(client, url):
+    while url:
+        r = client.get(url)
+        r.raise_for_status()
+        for item in r.json()["items"]:
+            yield item
+        # GitHub은 Link 헤더로 next URL 제공
+        url = r.links.get("next", {}).get("url")
+```
+
+### Rate limit 대응
+
+```python
+import time
+
+def with_rate_limit(client, url):
+    while True:
+        r = client.get(url)
+        if r.status_code == 429:
+            retry_after = int(r.headers.get("Retry-After", 60))
+            time.sleep(retry_after)
+            continue
+        r.raise_for_status()
+        return r
+```
+
+### 파일 업로드 진행률
+
+```python
+from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
+
+def progress(monitor):
+    print(f"{monitor.bytes_read}/{monitor.len}")
+
+encoder = MultipartEncoder({"file": ("name.bin", open("big.bin", "rb"))})
+monitor = MultipartEncoderMonitor(encoder, progress)
+requests.post(url, data=monitor, headers={"Content-Type": monitor.content_type})
+```
+
+## URL parsing 함정
+
+```python
+from urllib.parse import quote, unquote
+
+# 안전한 URL 구성
+path = quote("한글/파일 이름.txt")    # 인코딩
+url = f"https://example.com/files/{path}"
+
+# 디코딩
+print(unquote("%ED%95%9C%EA%B8%80"))  # '한글'
+
+# 쿼리 인코딩은 quote_plus (공백 → +)
+from urllib.parse import quote_plus
+quote_plus("a b c")    # 'a+b+c'
+quote("a b c")          # 'a%20b%20c'
+```
+
+쿼리/경로에 따라 적절한 함수 선택.
+
+## 보안
+
+- HTTPS 사용 (`verify=False`로 인증서 검증 끄지 말 것)
+- 신뢰할 수 없는 URL에 `requests.get` 직접 호출 X (SSRF)
+- 응답 크기 제한 (`r.iter_content` + 크기 검사)
+- timeout 항상 설정
+- 비밀 키는 환경변수 / Vault, 코드 X
+
+## 참고
+
+- [`urllib` documentation](https://docs.python.org/3/library/urllib.html)
+- [`urllib.parse`](https://docs.python.org/3/library/urllib.parse.html)
+- [`requests` documentation](https://requests.readthedocs.io/)
+- [`httpx` documentation](https://www.python-httpx.org/)
+- [`aiohttp` documentation](https://docs.aiohttp.org/)
+- [`urllib3`](https://urllib3.readthedocs.io/) - requests의 베이스

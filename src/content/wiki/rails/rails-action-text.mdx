@@ -1,0 +1,221 @@
+---
+title: "[Rails] Action Text & Active Storage 통합"
+aliases: ["action text", "rich text", "trix editor", "has_rich_text", "rails wysiwyg"]
+tags: [rails, action-text, trix, rich-text]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Action Text** (Rails 6+)는 Trix 에디터 + Active Storage 통합 + 안전한 HTML 저장으로 rich text 콘텐츠 처리. 댓글, 게시글, 메모 등에 WYSIWYG 에디터 즉시 추가 가능.
+
+## 설치
+
+```bash
+bin/rails action_text:install
+bin/rails db:migrate
+```
+
+생성:
+- `app/assets/stylesheets/actiontext.css`
+- `action_text_rich_texts`, `action_text_embeds` 테이블
+- Trix 에디터 자산
+
+`importmap.rb` 또는 `package.json`에 trix 자동 추가.
+
+## 모델
+
+```ruby
+class Post < ApplicationRecord
+  has_rich_text :body
+end
+```
+
+마이그레이션 없음 (polymorphic 별도 테이블). `post.body`로 rich text 접근.
+
+## 폼
+
+```erb
+<%= form_with model: @post do |form| %>
+  <%= form.label :title %>
+  <%= form.text_field :title %>
+
+  <%= form.label :body %>
+  <%= form.rich_text_area :body %>
+
+  <%= form.submit %>
+<% end %>
+```
+
+자동으로 Trix 에디터 렌더링 (toolbar, 굵게, 기울임, 링크, 첨부 등).
+
+## 출력
+
+```erb
+<article>
+  <h1><%= @post.title %></h1>
+  <%= @post.body %>
+</article>
+```
+
+자동으로 HTML 출력 + Active Storage 첨부 변환 + sanitization.
+
+## 첨부 (drag & drop)
+
+Trix 에디터에 이미지 드래그하면 자동으로 Active Storage에 업로드 + HTML에 embed.
+
+### Variant
+
+```erb
+<%= @post.body.body.attachables.each do |attachable| %>
+  <%= image_tag attachable.variant(resize_to_limit: [800, 800]) %>
+<% end %>
+```
+
+또는 글로벌 설정:
+
+```ruby
+# config/initializers/action_text.rb
+ActiveSupport.on_load(:action_text_content) do
+  attr_writer :default_attachment_variant
+end
+```
+
+## Sanitization
+
+Action Text는 기본적으로 XSS 방지. 허용 태그·속성만 통과.
+
+```ruby
+# config/initializers/action_text.rb
+ActionText::ContentHelper.allowed_tags = %w[h1 h2 h3 p ul ol li b i strong em a img blockquote code pre]
+ActionText::ContentHelper.allowed_attributes = %w[href src alt class]
+```
+
+기본값으로도 안전. 필요한 태그만 추가.
+
+## Plain text 추출
+
+```ruby
+post.body.to_plain_text    # HTML 제거
+post.body.body.to_s        # raw HTML
+```
+
+검색 인덱싱, 미리보기, 이메일 텍스트 버전에 활용.
+
+## 검색
+
+```ruby
+class Post < ApplicationRecord
+  has_rich_text :body
+
+  scope :search, ->(q) {
+    joins(:rich_text_body)
+      .where("action_text_rich_texts.body LIKE ?", "%#{q}%")
+  }
+end
+
+Post.search("Rails")
+```
+
+본격 검색은 Elasticsearch / Meilisearch / pg_trgm.
+
+## 자주 보는 패턴
+
+### Comment with rich text
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post
+  has_rich_text :content
+end
+
+# form
+<%= form.rich_text_area :content, placeholder: "댓글..." %>
+```
+
+### Custom toolbar
+
+```erb
+<%= form.rich_text_area :body, data: { trix: '{"toolbar": "minimal"}' } %>
+```
+
+또는 JS로 Trix 설정.
+
+### 다른 첨부 가능 객체
+
+```ruby
+class Post < ApplicationRecord
+  has_rich_text :body
+end
+
+# Custom attachable
+class Hashtag
+  include ActiveModel::Model
+  include ActionText::Attachable
+
+  def to_trix_content_attachment_partial_path
+    "hashtags/attachment"
+  end
+end
+```
+
+`#tag` 같은 커스텀 임베드 가능.
+
+### Markdown 대체
+
+Markdown 편집기 원하면 `redcarpet` + `easymde`/`stackedit` 같은 별도 솔루션. Action Text는 WYSIWYG 우선.
+
+## 함정
+
+### 1. n+1
+
+```erb
+<% @posts.each do |post| %>
+  <%= post.body %>    <%# 매번 SQL #}
+<% end %>
+```
+
+```ruby
+@posts = Post.with_rich_text_body.includes(rich_text_body: { embeds_attachments: :blob })
+```
+
+### 2. body가 nil
+
+```ruby
+post.body.to_plain_text    # post.body 가 ActionText::RichText 객체, body 안에 또 body
+post.body.body.to_s         # raw HTML
+```
+
+이름 헷갈림. `has_rich_text :content`로 명명 변경하면 `post.content.to_plain_text`.
+
+### 3. 마이그레이션 누락
+
+`bin/rails action_text:install` 안 하면 polymorphic 테이블 없어 저장 실패.
+
+### 4. CSP 충돌
+
+Trix가 inline style 사용. CSP 엄격하면 `'unsafe-inline'` 또는 hash/nonce 허용.
+
+### 5. 큰 콘텐츠
+
+거대 HTML 저장 시 DB 부담. text 컬럼 (~ TEXT). 이미지는 첨부로 분리되어 OK.
+
+## 대안
+
+| 솔루션 | 특징 |
+|--------|------|
+| Action Text | Rails 표준, 통합 |
+| Trix 직접 | 더 가벼움 |
+| TinyMCE | 풍부, 무거움 |
+| CKEditor | 엔터프라이즈 |
+| Tiptap | 모던 (Vue/React) |
+| ProseMirror | 저수준 |
+| EditorJS | 블록 기반 |
+| MDX (Markdown + React) | 개발자 친화 |
+
+## 참고
+
+- [Action Text Overview](https://guides.rubyonrails.org/action_text_overview.html)
+- [Trix Editor](https://trix-editor.org/)
+- [Active Storage](https://guides.rubyonrails.org/active_storage_overview.html)
+- [Sanitization](https://api.rubyonrails.org/classes/ActionText/ContentHelper.html)

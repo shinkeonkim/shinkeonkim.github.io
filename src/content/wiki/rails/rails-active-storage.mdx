@@ -1,0 +1,326 @@
+---
+title: "[Rails] Active Storage: 파일 업로드와 attachment"
+aliases: ["active storage", "has_one_attached", "has_many_attached", "blob", "S3 storage", "image variant"]
+tags: [rails, active-storage, upload, file, s3]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Active Storage**는 Rails 5.2+ 표준 파일 업로드 솔루션. S3, GCS, Azure, 로컬 디스크를 균일한 API로. 이미지 variant(크기 변환), 파일 검증, 미리보기, direct upload(클라이언트 → S3) 지원.
+
+## 설치
+
+```bash
+bin/rails active_storage:install
+bin/rails db:migrate
+# active_storage_blobs, active_storage_attachments, active_storage_variant_records 생성
+```
+
+`config/storage.yml`:
+
+```yaml
+local:
+  service: Disk
+  root: <%= Rails.root.join("storage") %>
+
+amazon:
+  service: S3
+  access_key_id: <%= ENV["AWS_ACCESS_KEY_ID"] %>
+  secret_access_key: <%= ENV["AWS_SECRET_ACCESS_KEY"] %>
+  region: ap-northeast-2
+  bucket: my-bucket
+
+google:
+  service: GCS
+  project: my-project
+  credentials: <%= Rails.root.join("config/gcs.json") %>
+  bucket: my-bucket
+
+azure:
+  service: AzureStorage
+  ...
+```
+
+```ruby
+# config/environments/production.rb
+config.active_storage.service = :amazon
+```
+
+## 모델 연결
+
+```ruby
+class User < ApplicationRecord
+  has_one_attached :avatar
+  has_many_attached :photos
+end
+
+class Post < ApplicationRecord
+  has_many_attached :images
+  has_one_attached :pdf
+end
+```
+
+마이그레이션 불필요. 별도 테이블에 polymorphic 저장.
+
+## 첨부
+
+```ruby
+# 직접
+user.avatar.attach(io: File.open("avatar.png"), filename: "avatar.png", content_type: "image/png")
+
+# Form에서
+user.avatar.attach(params[:avatar])    # ActionDispatch::Http::UploadedFile
+user.photos.attach(params[:photos])    # array
+```
+
+## 폼
+
+```erb
+<%= form_with model: @user do |form| %>
+  <%= form.file_field :avatar %>
+  <%= form.file_field :photos, multiple: true %>
+  <%= form.submit %>
+<% end %>
+```
+
+```ruby
+def user_params
+  params.require(:user).permit(:name, :avatar, photos: [])
+end
+```
+
+`avatar` (single), `photos: []` (multiple).
+
+## 조회
+
+```ruby
+user.avatar.attached?
+user.avatar.filename
+user.avatar.byte_size
+user.avatar.content_type
+user.avatar.download    # 바이트 전체 (큰 파일 위험)
+user.avatar.open { |file| ... }    # tmp file
+user.avatar.purge      # 첨부 삭제
+user.avatar.purge_later    # background로 삭제
+```
+
+## 표시
+
+```erb
+<%= image_tag @user.avatar %>
+<%= image_tag @user.avatar.variant(resize_to_limit: [200, 200]) %>
+
+<%= link_to "다운로드", rails_blob_url(@user.avatar) %>
+<%= url_for(@user.avatar) %>
+
+<% @post.images.each do |image| %>
+  <%= image_tag image.variant(resize_to_fill: [400, 400]) %>
+<% end %>
+```
+
+`rails_blob_url`은 Rails가 프록시. CDN URL은 direct service URL.
+
+## Variants (이미지 변환)
+
+```ruby
+user.avatar.variant(resize_to_limit: [200, 200])
+user.avatar.variant(resize_to_fill: [400, 400])
+user.avatar.variant(resize_to_fit: [800, 600])
+user.avatar.variant(format: :webp, quality: 80)
+user.avatar.variant(resize_and_pad: [400, 400, gravity: "center"])
+```
+
+요구사항:
+```bash
+brew install vips    # 또는 imagemagick
+```
+
+```ruby
+# config/application.rb
+config.active_storage.variant_processor = :vips    # 또는 :mini_magick
+```
+
+variant는 첫 호출 시 생성 → 저장. 이후 캐시.
+
+### 사전 정의 variants (6.1+)
+
+```ruby
+class User < ApplicationRecord
+  has_one_attached :avatar do |attachable|
+    attachable.variant :thumb, resize_to_limit: [100, 100]
+    attachable.variant :medium, resize_to_fill: [400, 400]
+  end
+end
+
+<%= image_tag @user.avatar.variant(:thumb) %>
+<%= image_tag @user.avatar.variant(:medium) %>
+```
+
+## Preview (PDF, video)
+
+```ruby
+@post.pdf.preview(resize_to_limit: [800, 800])    # 첫 페이지 이미지
+@video.preview(resize_to_limit: [800, 800])
+```
+
+requirements: `mutool` (PDF), `ffmpeg` (video).
+
+## Direct Upload (브라우저 → S3)
+
+큰 파일을 서버 거치지 않고 직접.
+
+```erb
+<%= form.file_field :avatar, direct_upload: true %>
+```
+
+```javascript
+// app/javascript/application.js
+import * as ActiveStorage from "@rails/activestorage"
+ActiveStorage.start()
+```
+
+JS가 자동으로 presigned URL 받아 S3에 PUT.
+
+```ruby
+# CORS 설정 (S3 측)
+[{
+  "AllowedHeaders": ["*"],
+  "AllowedMethods": ["PUT", "POST"],
+  "AllowedOrigins": ["https://example.com"],
+  "ExposeHeaders": ["Origin", "Content-Type", "Content-MD5", "Content-Disposition"],
+  "MaxAgeSeconds": 3600
+}]
+```
+
+## 검증 (active_storage_validations gem)
+
+표준 라이브러리엔 검증 미포함. gem 사용:
+
+```ruby
+gem "active_storage_validations"
+```
+
+```ruby
+class User < ApplicationRecord
+  has_one_attached :avatar
+  validates :avatar, content_type: ["image/png", "image/jpeg"], size: { less_than: 5.megabytes }
+end
+```
+
+또는 수동:
+
+```ruby
+validate :avatar_format
+
+def avatar_format
+  return unless avatar.attached?
+  unless avatar.blob.content_type.start_with?("image/")
+    errors.add(:avatar, "이미지만")
+  end
+  if avatar.blob.byte_size > 5.megabytes
+    errors.add(:avatar, "5MB 이하")
+  end
+end
+```
+
+## URL 유효 기간
+
+```ruby
+url_for(@user.avatar)             # 5분 (기본)
+rails_blob_url(@user.avatar, disposition: "attachment")
+```
+
+S3 presigned URL은 만료 시간 짧음. 영구 공개 URL은 `public: true` service 설정.
+
+```yaml
+amazon_public:
+  service: S3
+  ...
+  public: true
+```
+
+또는 CloudFront/CDN 앞단.
+
+## 메타데이터
+
+```ruby
+user.avatar.metadata       # { width: 200, height: 200, identified: true }
+user.avatar.analyzed?      # 메타데이터 추출 완료?
+user.avatar.analyze        # 강제
+```
+
+이미지 dimensions, audio length 등 자동 추출 (analyze job).
+
+## 함정
+
+### 1. n+1 attachment
+
+```ruby
+@users.each { |u| u.avatar.variant(:thumb) }    # N+1 SQL + N+1 storage call
+```
+
+```ruby
+User.with_attached_avatar.each { ... }
+```
+
+### 2. variant 생성 비용
+
+첫 호출 시 이미지 처리 → 큰 이미지면 응답 지연. preprocessed variant (사전 생성) 또는 background job.
+
+### 3. 큰 파일 download
+
+```ruby
+@user.avatar.download    # 전체 메모리 로드, OOM 위험
+```
+
+```ruby
+@user.avatar.open { |file| process(file) }    # tmp 파일
+# 또는 stream
+```
+
+### 4. 첨부 삭제
+
+```ruby
+user.destroy    # avatar도 함께 삭제 (purge_later 자동)
+user.avatar.purge_later
+```
+
+cloud storage의 파일도 함께 삭제. 모르고 purge하면 복구 어려움.
+
+### 5. service URL vs proxy URL
+
+```ruby
+rails_blob_url(blob)              # Rails 통해 proxy (인증 가능)
+rails_blob_path(blob)
+blob.service_url                   # S3 직접 URL (만료 있음)
+```
+
+용도에 따라 선택.
+
+## 대안
+
+| 솔루션 | 특징 |
+|--------|------|
+| Active Storage | Rails 표준, 통합 |
+| CarrierWave | 옛 표준, 강력 |
+| Shrine | 모듈식, 유연 |
+| Paperclip | Deprecated |
+
+새 프로젝트는 Active Storage. 복잡한 처리는 Shrine.
+
+## 보안
+
+- 업로드 파일 MIME 검증 (확장자만 X)
+- 파일명 sanitize (path traversal)
+- 실행 권한 분리 storage
+- 인증된 사용자만 첨부
+- size 제한
+- 악성 SVG (XSS), exif 데이터 (privacy)
+
+## 참고
+
+- [Active Storage Overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [active_storage_validations](https://github.com/igorkasyanchuk/active_storage_validations)
+- [Direct uploads](https://edgeguides.rubyonrails.org/active_storage_overview.html#direct-uploads)
+- [Shrine](https://shrinerb.com/)

@@ -1,0 +1,393 @@
+---
+title: "[Rails] I18n: 다국어와 지역화"
+aliases: ["rails i18n", "rails translations", "I18n.t", "rails-i18n gem", "locale files"]
+tags: [rails, i18n, locale, translation]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails I18n은 **로케일별 번역, 숫자/날짜 포맷, 시간대, 복수형, 통화** 등을 통합 처리. `config/locales/*.yml`에 번역 저장, `I18n.t`로 조회. View, controller, model 어디서나 사용 가능.
+
+## 기본 설정
+
+```ruby
+# config/application.rb
+config.i18n.default_locale = :ko
+config.i18n.available_locales = [:ko, :en, :ja]
+config.i18n.fallbacks = true    # 미번역 시 default_locale 사용
+config.i18n.load_path += Dir[Rails.root.join("config/locales/**/*.{rb,yml}")]
+```
+
+```ruby
+# Gemfile
+gem "rails-i18n"    # ko, en, ja 등 70+ 언어의 Rails 기본 번역
+```
+
+## 로케일 파일
+
+```yaml
+# config/locales/ko.yml
+ko:
+  welcome: "환영합니다"
+  hello: "%{name}님, 안녕하세요"
+  posts:
+    title: "포스트"
+    new: "새 포스트"
+    edit: "수정"
+    deleted: "%{count}개 삭제됨"
+  errors:
+    blank: "필수 항목입니다"
+
+# config/locales/en.yml
+en:
+  welcome: "Welcome"
+  hello: "Hello, %{name}"
+  posts:
+    title: "Posts"
+    new: "New post"
+    edit: "Edit"
+    deleted: "%{count} deleted"
+```
+
+## 사용
+
+```erb
+<%# 뷰 %>
+<h1><%= t("welcome") %></h1>
+<p><%= t("hello", name: current_user.name) %></p>
+<h2><%= t("posts.title") %></h2>
+
+<%# 컨트롤러 %>
+flash[:notice] = t("posts.created")
+
+<%# 모델 %>
+class Post < ApplicationRecord
+  validates :title, presence: { message: I18n.t("errors.blank") }
+end
+```
+
+## 로케일 전환
+
+```ruby
+# 미들웨어/before_action으로 자동 감지
+class ApplicationController < ActionController::Base
+  around_action :switch_locale
+
+  private
+
+  def switch_locale(&action)
+    locale = extract_locale || I18n.default_locale
+    I18n.with_locale(locale, &action)
+  end
+
+  def extract_locale
+    params[:locale] ||
+      session[:locale] ||
+      cookies[:locale] ||
+      browser_locale ||
+      current_user&.locale
+  end
+
+  def browser_locale
+    request.env["HTTP_ACCEPT_LANGUAGE"]&.scan(/^[a-z]{2}/)&.first
+  end
+end
+```
+
+## URL prefix
+
+```ruby
+# config/routes.rb
+scope "(:locale)", locale: /en|ko|ja/ do
+  resources :posts
+  resources :users
+  root "home#index"
+end
+```
+
+URL: `/posts`, `/en/posts`, `/ko/posts`.
+
+`url_for(locale: I18n.locale)` 자동 추가.
+
+## 복수형 (pluralization)
+
+```yaml
+ko:
+  items:
+    one: "%{count}개의 항목"
+    other: "%{count}개의 항목들"
+
+en:
+  items:
+    zero: "no items"
+    one: "1 item"
+    other: "%{count} items"
+```
+
+```erb
+<%= t("items", count: 0) %>    # "no items"
+<%= t("items", count: 1) %>    # "1 item"
+<%= t("items", count: 5) %>    # "5 items"
+```
+
+언어별 복수형 규칙 (영어 1/many, 슬라브어 1/2-4/5+ 등) 자동.
+
+## 날짜 / 시간
+
+```erb
+<%= l(Date.today) %>                        # "2026. 06. 20."
+<%= l(Date.today, format: :long) %>          # "2026년 6월 20일"
+<%= l(Time.current, format: :short) %>       # "06. 20. 14:30"
+```
+
+```yaml
+ko:
+  date:
+    formats:
+      default: "%Y. %m. %d."
+      long: "%Y년 %-m월 %-d일"
+      short: "%m. %d."
+  time:
+    formats:
+      default: "%Y년 %-m월 %-d일 %H:%M"
+      short: "%m. %d. %H:%M"
+```
+
+`rails-i18n` gem이 기본 제공.
+
+## 숫자 / 통화
+
+```erb
+<%= number_to_currency(1234567) %>           # "₩1,234,567" (ko) / "$1,234,567" (en)
+<%= number_with_delimiter(1234567) %>         # "1,234,567"
+<%= number_to_percentage(0.1234) %>           # "12.34%"
+<%= number_to_human_size(1024 * 1024) %>      # "1 MB"
+<%= number_to_human(1500) %>                  # "1.5 천" / "1.5 Thousand"
+```
+
+설정:
+```yaml
+ko:
+  number:
+    currency:
+      format:
+        unit: "₩"
+        precision: 0
+        delimiter: ","
+        format: "%u%n"
+```
+
+## 모델 / Attribute 번역
+
+```yaml
+ko:
+  activerecord:
+    models:
+      post: "포스트"
+      user:
+        one: "사용자"
+        other: "사용자들"
+    attributes:
+      post:
+        title: "제목"
+        body: "본문"
+        author: "작성자"
+    errors:
+      models:
+        post:
+          attributes:
+            title:
+              blank: "제목을 입력해주세요"
+```
+
+`Post.model_name.human` → "포스트"
+`Post.human_attribute_name(:title)` → "제목"
+
+폼 라벨, 에러 메시지가 자동 한글화.
+
+## View helpers
+
+```erb
+<%= form_with model: @post do |form| %>
+  <%# label은 자동으로 t("activerecord.attributes.post.title") 사용 %>
+  <%= form.label :title %>
+  <%= form.text_field :title %>
+
+  <%# button.create / button.update %>
+  <%= form.submit %>
+<% end %>
+```
+
+```yaml
+ko:
+  helpers:
+    submit:
+      create: "%{model} 만들기"
+      update: "%{model} 수정"
+    label:
+      post:
+        title: "제목"
+```
+
+## 메일러 다국어
+
+```ruby
+class UserMailer < ApplicationMailer
+  def welcome(user)
+    I18n.with_locale(user.locale) do
+      mail(to: user.email, subject: t("mailer.welcome.subject"))
+    end
+  end
+end
+```
+
+뷰도 `welcome.ko.html.erb`, `welcome.en.html.erb`로 자동 선택.
+
+## 시간대
+
+```ruby
+# config/application.rb
+config.time_zone = "Asia/Seoul"
+config.active_record.default_timezone = :utc    # DB는 UTC
+```
+
+```ruby
+Time.current               # Asia/Seoul (활성 TZ)
+Time.zone.now              # 동일
+Time.zone.parse("2026-06-20")
+1.day.from_now             # TZ aware
+
+# 사용자별
+Time.use_zone(user.timezone) do
+  ...
+end
+```
+
+## 자주 보는 패턴
+
+### Lazy lookup
+
+```erb
+<%# views/posts/index.html.erb %>
+<h1><%= t(".title") %></h1>    # 자동으로 "posts.index.title"
+```
+
+```yaml
+ko:
+  posts:
+    index:
+      title: "포스트 목록"
+```
+
+### 누락 번역 확인
+
+```ruby
+# config/environments/test.rb
+config.i18n.raise_on_missing_translations = true
+```
+
+또는 `i18n-tasks` gem:
+
+```bash
+gem install i18n-tasks
+i18n-tasks missing
+i18n-tasks unused
+i18n-tasks normalize
+```
+
+CI 단계에 추가하면 누락 즉시 감지.
+
+### 모델 enum 번역
+
+```ruby
+class Post < ApplicationRecord
+  enum :status, { draft: 0, published: 1, archived: 2 }
+end
+```
+
+```yaml
+ko:
+  activerecord:
+    attributes:
+      post:
+        statuses:
+          draft: "임시저장"
+          published: "발행됨"
+          archived: "보관됨"
+```
+
+```erb
+<%= t("activerecord.attributes.post.statuses.#{post.status}") %>
+```
+
+또는 `enum_help` gem.
+
+## 함정
+
+### 1. fallbacks 미설정
+
+번역 누락 시 `translation missing: ...` 표시. fallbacks 켜면 default_locale로 자동.
+
+### 2. yaml 들여쓰기
+
+```yaml
+ko:
+  posts:
+   title: "..."     # 들여쓰기 1칸 → 적용 안 될 수 있음
+```
+
+들여쓰기 일관. 2칸 권장.
+
+### 3. 변수 보간
+
+```yaml
+hello: "Hello, %{name}"
+```
+
+```erb
+<%= t("hello", name: "Alice") %>    # ":name => "Alice""도 가능
+```
+
+`name:` 대신 `:name`도. 누락 시 raises (default_value 제공 가능).
+
+### 4. 시간대 혼동
+
+```ruby
+Time.now       # 시스템 TZ (서버 TZ)
+Time.current   # Rails config.time_zone
+Time.zone.now  # 동일
+```
+
+`Time.current` 일관 사용.
+
+### 5. 키 충돌
+
+```yaml
+ko:
+  posts:
+    new: "새 포스트"
+
+# 다른 파일
+ko:
+  posts:
+    new: "신규"   # 덮어쓰기
+```
+
+i18n-tasks로 detect.
+
+## 외부 도구
+
+- `i18n-tasks`: 누락/미사용/normalize
+- `Lokalise`, `POEditor`, `Crowdin`: 번역가 협업 SaaS
+- `tolk`: 셀프호스팅 번역 UI
+- `globalize`: 모델 다국어 (제목/내용을 언어별 row로)
+- `mobility`: Globalize 대안, 더 유연
+
+## 참고
+
+- [Rails Internationalization](https://guides.rubyonrails.org/i18n.html)
+- [rails-i18n](https://github.com/svenfuchs/rails-i18n)
+- [i18n-tasks](https://github.com/glebm/i18n-tasks)
+- [globalize](https://github.com/globalize/globalize)
+- [mobility](https://github.com/shioyama/mobility)

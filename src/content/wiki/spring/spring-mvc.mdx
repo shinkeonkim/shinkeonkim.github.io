@@ -1,0 +1,394 @@
+---
+title: "[Spring] Spring MVC: @RestController, @RequestMapping"
+aliases: ["spring mvc", "RestController", "RequestMapping", "PathVariable", "RequestBody", "ResponseEntity"]
+tags: [spring, mvc, web, rest]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring MVC**는 Servlet 기반 동기 웹 프레임워크. `DispatcherServlet`이 요청을 받아 핸들러(컨트롤러 메서드)에 라우팅. REST API와 전통 MVC(HTML) 모두 지원. WebFlux는 reactive 대안.
+
+## 기본 컨트롤러
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    private final UserService userService;
+
+    public UserController(UserService userService) {
+        this.userService = userService;
+    }
+
+    @GetMapping
+    public List<User> list() {
+        return userService.findAll();
+    }
+
+    @GetMapping("/{id}")
+    public User get(@PathVariable Long id) {
+        return userService.findById(id);
+    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public User create(@RequestBody @Valid CreateUserDto dto) {
+        return userService.create(dto);
+    }
+
+    @PatchMapping("/{id}")
+    public User update(@PathVariable Long id, @RequestBody @Valid UpdateUserDto dto) {
+        return userService.update(id, dto);
+    }
+
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id) {
+        userService.delete(id);
+    }
+}
+```
+
+`@RestController` = `@Controller` + `@ResponseBody` (반환값을 응답 본문으로 직렬화).
+
+## Mapping 어노테이션
+
+`@RequestMapping`의 단축형:
+- `@GetMapping`, `@PostMapping`, `@PutMapping`, `@PatchMapping`, `@DeleteMapping`
+
+```java
+@RequestMapping(value = "/users", method = RequestMethod.GET, produces = "application/json")
+@GetMapping(value = "/users", produces = "application/json")    // 동등
+```
+
+## 파라미터
+
+```java
+@GetMapping("/users/{id}")
+public User get(@PathVariable Long id) { ... }
+
+@GetMapping("/users/{userId}/posts/{postId}")
+public Post getPost(@PathVariable Long userId, @PathVariable Long postId) { ... }
+
+// path variable 이름 다르면
+public User get(@PathVariable("id") Long userId) { ... }
+
+// 쿼리스트링
+@GetMapping("/search")
+public List<User> search(
+    @RequestParam String q,
+    @RequestParam(defaultValue = "1") int page,
+    @RequestParam(required = false) String sort,
+    @RequestParam Map<String, String> all
+) { ... }
+
+// 헤더
+@GetMapping("/me")
+public User me(@RequestHeader("Authorization") String auth) { ... }
+
+// 쿠키
+public ... (@CookieValue("session") String session) { ... }
+
+// JSON body
+@PostMapping("/users")
+public User create(@RequestBody CreateUserDto dto) { ... }
+
+// 폼
+@PostMapping("/login")
+public void login(@ModelAttribute LoginForm form) { ... }
+```
+
+## Validation
+
+```java
+@PostMapping
+public User create(@RequestBody @Valid CreateUserDto dto) { ... }
+
+public record CreateUserDto(
+    @NotBlank @Email String email,
+    @NotBlank @Size(min = 1, max = 100) String name,
+    @Min(0) @Max(150) Integer age
+) { }
+```
+
+검증 실패 시 `MethodArgumentNotValidException`. `@ControllerAdvice`로 422/400 응답.
+
+## ResponseEntity
+
+상태 코드, 헤더 명시 제어.
+
+```java
+@GetMapping("/{id}")
+public ResponseEntity<User> get(@PathVariable Long id) {
+    return userService.findOptional(id)
+        .map(ResponseEntity::ok)
+        .orElseGet(() -> ResponseEntity.notFound().build());
+}
+
+@PostMapping
+public ResponseEntity<User> create(@RequestBody CreateUserDto dto) {
+    User user = userService.create(dto);
+    URI location = URI.create("/users/" + user.id());
+    return ResponseEntity.created(location).body(user);
+}
+
+@DeleteMapping("/{id}")
+public ResponseEntity<Void> delete(@PathVariable Long id) {
+    userService.delete(id);
+    return ResponseEntity.noContent().build();
+}
+```
+
+## 예외 처리: @ControllerAdvice
+
+전역 예외 핸들러.
+
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(EntityNotFoundException.class)
+    public ResponseEntity<ProblemDetail> notFound(EntityNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage()));
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ProblemDetail> validation(MethodArgumentNotValidException ex) {
+        var errors = ex.getBindingResult().getFieldErrors().stream()
+            .map(e -> e.getField() + ": " + e.getDefaultMessage())
+            .toList();
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Validation failed");
+        problem.setProperty("errors", errors);
+        return ResponseEntity.badRequest().body(problem);
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ProblemDetail> generic(Exception ex) {
+        log.error("unexpected error", ex);
+        return ResponseEntity.internalServerError()
+            .body(ProblemDetail.forStatus(HttpStatus.INTERNAL_SERVER_ERROR));
+    }
+}
+```
+
+## ProblemDetail (RFC 7807)
+
+3.0+ 표준 에러 응답.
+
+```java
+ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Invalid input");
+pd.setType(URI.create("https://example.com/probs/validation"));
+pd.setProperty("errors", List.of(...));
+```
+
+응답:
+```json
+{
+  "type": "https://example.com/probs/validation",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Invalid input",
+  "instance": "/api/users",
+  "errors": [...]
+}
+```
+
+`Content-Type: application/problem+json`.
+
+## 파일 업로드
+
+```java
+@PostMapping("/upload")
+public String upload(@RequestParam("file") MultipartFile file) throws IOException {
+    Path target = Paths.get("uploads/" + file.getOriginalFilename());
+    Files.copy(file.getInputStream(), target);
+    return "uploaded";
+}
+
+@PostMapping("/upload-multi")
+public List<String> uploadMulti(@RequestParam("files") MultipartFile[] files) {
+    return Arrays.stream(files)
+        .map(MultipartFile::getOriginalFilename)
+        .toList();
+}
+```
+
+application.yml:
+```yaml
+spring:
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 50MB
+```
+
+## Content negotiation
+
+```java
+@GetMapping(value = "/users/{id}", produces = {"application/json", "application/xml"})
+public User get(@PathVariable Long id) { ... }
+```
+
+Accept 헤더 또는 URL 확장자로 분기.
+
+## CORS
+
+```java
+@RestController
+@CrossOrigin(origins = "https://app.example.com")
+public class UserController { ... }
+
+@GetMapping("/users")
+@CrossOrigin
+public List<User> list() { ... }
+
+// 전역
+@Configuration
+public class CorsConfig implements WebMvcConfigurer {
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/api/**")
+            .allowedOrigins("https://app.example.com")
+            .allowedMethods("GET", "POST", "PUT", "DELETE")
+            .allowCredentials(true);
+    }
+}
+```
+
+## Interceptor
+
+```java
+public class AuditInterceptor implements HandlerInterceptor {
+    @Override
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse res, Object handler) {
+        log.info("{} {}", req.getMethod(), req.getRequestURI());
+        return true;    // false면 요청 중단
+    }
+}
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(new AuditInterceptor());
+    }
+}
+```
+
+Filter와 비슷하나 Spring MVC 컨텍스트에서 동작.
+
+## 정적 리소스
+
+기본적으로 `src/main/resources/static/`, `public/`, `META-INF/resources/`가 자동 서빙.
+
+```yaml
+spring:
+  web:
+    resources:
+      static-locations: classpath:/static/, file:./uploads/
+      cache:
+        period: 1d
+```
+
+## 자주 보는 패턴
+
+### DTO 변환
+
+```java
+@PostMapping
+public UserResponse create(@RequestBody @Valid CreateUserDto dto) {
+    User user = userService.create(dto.toEntity());
+    return UserResponse.from(user);
+}
+```
+
+엔티티 직접 노출 X. DTO로.
+
+### Pagination
+
+```java
+@GetMapping
+public Page<User> list(Pageable pageable) {
+    return userRepository.findAll(pageable);
+}
+```
+
+쿼리: `?page=0&size=20&sort=name,asc`.
+
+Spring Data가 자동.
+
+### Bulk
+
+```java
+@PostMapping("/bulk")
+public List<User> bulkCreate(@RequestBody @Valid List<@Valid CreateUserDto> dtos) {
+    return userService.bulkCreate(dtos);
+}
+```
+
+### Streaming
+
+```java
+@GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public SseEmitter stream() {
+    SseEmitter emitter = new SseEmitter();
+    executor.submit(() -> {
+        for (int i = 0; i < 10; i++) {
+            emitter.send("event " + i);
+            Thread.sleep(1000);
+        }
+        emitter.complete();
+    });
+    return emitter;
+}
+```
+
+SSE. WebFlux의 Flux가 더 자연스러움.
+
+## 함정
+
+### 1. @RequestBody는 한 번만 읽음
+
+`HttpServletRequest`의 input stream은 1회. 같은 요청을 여러 곳에서 읽으면 빈 결과.
+
+### 2. @PathVariable 이름
+
+```java
+@GetMapping("/users/{id}")
+public User get(@PathVariable Long id) { ... }    // 컴파일 시 -parameters 옵션
+public User get(@PathVariable("id") Long userId) { ... }    // 명시
+```
+
+`-parameters` 컴파일러 옵션이 없으면 명시 필요.
+
+### 3. JSON 역직렬화
+
+Jackson 기본. record 같이 final 필드는 `@JsonCreator` 또는 builder 필요한 경우 있음.
+
+```java
+public record CreateUserDto(String email, String name) { }    // OK
+```
+
+### 4. 트랜잭션과 controller
+
+`@Transactional`은 service에. controller에 두면 view 렌더링까지 트랜잭션 → lazy loading 문제.
+
+### 5. exception handler 순서
+
+```java
+@ExceptionHandler(Exception.class)         // 가장 일반
+@ExceptionHandler(RuntimeException.class)
+@ExceptionHandler(EntityNotFoundException.class)    // 가장 구체
+```
+
+가장 구체적인 핸들러가 먼저 매치. Spring이 알아서 처리.
+
+## 참고
+
+- [Spring MVC](https://docs.spring.io/spring-framework/reference/web/webmvc.html)
+- [RestController](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-restcontroller.html)
+- [Exception Handling](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-exceptionhandler.html)
+- [ProblemDetail](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html)
+- [Validation](https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html)

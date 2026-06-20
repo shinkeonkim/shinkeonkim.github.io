@@ -1,0 +1,455 @@
+---
+title: "[Spring] AMQP / RabbitMQ"
+aliases: ["spring amqp", "rabbittemplate", "@RabbitListener", "exchange", "queue binding"]
+tags: [spring, amqp, rabbitmq, messaging]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring AMQP**는 RabbitMQ 등 AMQP 0-9-1 호환 브로커의 Spring 통합. `RabbitTemplate` (publisher), `@RabbitListener` (consumer), exchange/queue 자동 선언, retry, DLQ 등. Kafka보다 가벼운 메시지 큐. Pub/Sub, work queue, RPC 패턴.
+
+## 설정
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-amqp")
+```
+
+```yaml
+spring:
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    virtual-host: /
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 10
+        concurrency: 3
+        max-concurrency: 10
+        retry:
+          enabled: true
+          initial-interval: 1s
+          max-attempts: 3
+```
+
+## Exchange / Queue 선언
+
+```java
+@Configuration
+public class RabbitConfig {
+
+    public static final String ORDER_EXCHANGE = "orders.exchange";
+    public static final String ORDER_QUEUE = "orders.queue";
+
+    @Bean
+    public TopicExchange orderExchange() {
+        return new TopicExchange(ORDER_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public Queue orderQueue() {
+        return QueueBuilder.durable(ORDER_QUEUE)
+            .withArgument("x-dead-letter-exchange", "orders.dlx")
+            .withArgument("x-message-ttl", 60000)
+            .build();
+    }
+
+    @Bean
+    public Binding orderBinding() {
+        return BindingBuilder.bind(orderQueue())
+            .to(orderExchange())
+            .with("order.created");
+    }
+
+    @Bean
+    public MessageConverter messageConverter(ObjectMapper objectMapper) {
+        return new Jackson2JsonMessageConverter(objectMapper);
+    }
+}
+```
+
+Exchange 종류:
+- **Direct**: 정확한 routing key
+- **Topic**: 와일드카드 (`order.*`, `user.#`)
+- **Fanout**: 모든 binding queue에 broadcast
+- **Headers**: 헤더 기반 (드물게)
+
+## Publisher
+
+```java
+@Service
+public class OrderPublisher {
+
+    private final RabbitTemplate rabbitTemplate;
+
+    public void publish(OrderCreatedEvent event) {
+        rabbitTemplate.convertAndSend(
+            RabbitConfig.ORDER_EXCHANGE,
+            "order.created",
+            event
+        );
+    }
+
+    public void publishWithDelay(OrderCreatedEvent event, int delayMs) {
+        rabbitTemplate.convertAndSend(
+            RabbitConfig.ORDER_EXCHANGE,
+            "order.created",
+            event,
+            message -> {
+                message.getMessageProperties().setHeader("x-delay", delayMs);
+                return message;
+            }
+        );
+    }
+
+    // RPC (request-reply)
+    public OrderResult requestProcess(OrderRequest request) {
+        return (OrderResult) rabbitTemplate.convertSendAndReceive(
+            "rpc.exchange",
+            "rpc.process",
+            request
+        );
+    }
+}
+```
+
+## Consumer
+
+```java
+@Component
+public class OrderListener {
+
+    @RabbitListener(queues = RabbitConfig.ORDER_QUEUE)
+    public void handleOrder(OrderCreatedEvent event) {
+        log.info("Processing order: {}", event.orderId());
+        process(event);
+    }
+
+    @RabbitListener(queues = "high.priority.queue", concurrency = "5-10")
+    public void handleHighPriority(Message message) {
+        // 5~10 컨슈머 동시
+    }
+
+    @RabbitListener(queues = "manual.ack.queue")
+    public void handleManual(
+        OrderCreatedEvent event,
+        Channel channel,
+        @Header(AmqpHeaders.DELIVERY_TAG) long tag
+    ) throws IOException {
+        try {
+            process(event);
+            channel.basicAck(tag, false);
+        } catch (Exception e) {
+            channel.basicNack(tag, false, true);    // requeue
+        }
+    }
+}
+```
+
+## Manual / Auto ack
+
+```yaml
+spring:
+  rabbitmq:
+    listener:
+      simple:
+        acknowledge-mode: manual    # 또는 auto, none
+```
+
+- **auto** (기본): 메서드 종료 시 자동 ack
+- **manual**: `channel.basicAck/Nack` 명시
+- **none**: ack 안 함 (메시지 손실 위험)
+
+manual은 예외 시 정밀 처리 가능.
+
+## Dead Letter Queue
+
+```java
+@Bean
+public Queue ordersQueue() {
+    return QueueBuilder.durable("orders.queue")
+        .withArgument("x-dead-letter-exchange", "orders.dlx")
+        .withArgument("x-dead-letter-routing-key", "orders.failed")
+        .withArgument("x-message-ttl", 60000)
+        .build();
+}
+
+@Bean
+public TopicExchange dlxExchange() {
+    return new TopicExchange("orders.dlx");
+}
+
+@Bean
+public Queue dlqQueue() {
+    return new Queue("orders.dlq");
+}
+
+@Bean
+public Binding dlqBinding() {
+    return BindingBuilder.bind(dlqQueue()).to(dlxExchange()).with("orders.failed");
+}
+
+@RabbitListener(queues = "orders.dlq")
+public void handleDeadLetter(OrderCreatedEvent event,
+                              @Header("x-death") List<Map<String, ?>> deaths) {
+    log.error("DLQ: {}, reason: {}", event, deaths);
+    // 영구 실패 처리 (알림, 수동 검토 등)
+}
+```
+
+리트라이 후에도 실패한 메시지가 DLQ로.
+
+## Retry
+
+### 자동 (RetryTemplate)
+
+```yaml
+spring:
+  rabbitmq:
+    listener:
+      simple:
+        retry:
+          enabled: true
+          initial-interval: 1s
+          max-attempts: 3
+          multiplier: 2
+          max-interval: 10s
+```
+
+3회 시도 후 DLQ.
+
+### Manual
+
+```java
+@RabbitListener(queues = "orders.queue")
+public void handle(OrderCreatedEvent event, Message message) {
+    try {
+        process(event);
+    } catch (RetryableException e) {
+        throw e;    // 자동 재시도
+    } catch (Exception e) {
+        log.error("Permanent failure", e);
+        // ack 후 별도 DLQ로 publish
+    }
+}
+```
+
+## Topic exchange 패턴
+
+```java
+@Bean
+public Binding userCreatedBinding() {
+    return BindingBuilder.bind(userQueue()).to(eventsExchange()).with("user.created");
+}
+
+@Bean
+public Binding userAnyBinding() {
+    return BindingBuilder.bind(auditQueue()).to(eventsExchange()).with("user.#");
+}
+
+@Bean
+public Binding allBinding() {
+    return BindingBuilder.bind(allQueue()).to(eventsExchange()).with("#");
+}
+```
+
+- `user.created` → user binding
+- `user.deleted` → user.# binding
+- 모든 메시지 → # binding
+
+## 트랜잭션
+
+```java
+@Bean
+public RabbitTransactionManager rabbitTxManager(ConnectionFactory cf) {
+    return new RabbitTransactionManager(cf);
+}
+
+@Transactional("rabbitTxManager")
+public void send(Event event) {
+    rabbitTemplate.convertAndSend(...);
+    rabbitTemplate.convertAndSend(...);
+    // 둘 다 commit or rollback
+}
+```
+
+DB와 결합:
+
+```java
+@Transactional
+public void save(Order order) {
+    orderRepository.save(order);
+    rabbitTemplate.convertAndSend("orders.exchange", "order.created", new OrderCreatedEvent(order));
+}
+```
+
+JDBC + AMQP 트랜잭션 함께 (best-effort 1PC, 또는 outbox pattern).
+
+## 자주 보는 패턴
+
+### Work queue (작업 분산)
+
+```java
+// Producer
+@Service
+public class TaskPublisher {
+    public void submit(Task task) {
+        rabbitTemplate.convertAndSend("tasks.queue", task);
+    }
+}
+
+// Multiple consumers (round-robin)
+@RabbitListener(queues = "tasks.queue", concurrency = "5")
+public void process(Task task) { ... }
+```
+
+여러 인스턴스/스레드가 메시지 분담.
+
+### Pub/Sub (이벤트)
+
+```java
+// fanout 또는 topic exchange
+rabbitTemplate.convertAndSend("events.exchange", "user.signup", event);
+
+// 여러 consumer가 각자 queue에서 받음
+@RabbitListener(queues = "email.queue")
+public void onSignupForEmail(UserSignupEvent e) { sendEmail(e); }
+
+@RabbitListener(queues = "analytics.queue")
+public void onSignupForAnalytics(UserSignupEvent e) { track(e); }
+```
+
+### RPC
+
+```java
+// Server
+@RabbitListener(queues = "rpc.queue")
+public Result process(Request request) {
+    return doProcess(request);
+}
+
+// Client
+Result result = (Result) rabbitTemplate.convertSendAndReceive(
+    "", "rpc.queue", request
+);
+```
+
+reply queue 자동 관리.
+
+### Delayed message
+
+```bash
+# RabbitMQ delayed message exchange plugin
+docker exec rabbitmq rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+```
+
+```java
+@Bean
+public CustomExchange delayedExchange() {
+    Map<String, Object> args = new HashMap<>();
+    args.put("x-delayed-type", "topic");
+    return new CustomExchange("delayed.exchange", "x-delayed-message", true, false, args);
+}
+
+rabbitTemplate.convertAndSend("delayed.exchange", "order.process", message,
+    msg -> {
+        msg.getMessageProperties().setHeader("x-delay", 300000);    // 5분 후
+        return msg;
+    });
+```
+
+## Spring Cloud Stream 추상화
+
+```yaml
+spring:
+  cloud:
+    stream:
+      bindings:
+        processOrder-in-0:
+          destination: orders
+        publish-out-0:
+          destination: events
+      rabbit:
+        binder:
+          ...
+```
+
+Kafka, RabbitMQ 통일 인터페이스. RabbitMQ 특화 기능은 못 씀.
+
+## 함정
+
+### 1. message converter
+
+```java
+@Bean
+public MessageConverter messageConverter() {
+    return new Jackson2JsonMessageConverter();
+}
+```
+
+없으면 byte[] 직렬화. JSON 권장.
+
+### 2. queue 변경
+
+declared queue는 변경 시 `RESOURCE_LOCKED` 에러. 다른 이름으로 새 큐 생성 후 마이그레이션.
+
+### 3. prefetch
+
+```yaml
+listener:
+  simple:
+    prefetch: 1    # 한 번에 1개만 받음 (느림)
+    prefetch: 100  # 100개 미리 (메모리 부담)
+```
+
+처리 시간 + 메모리 trade-off. 5-20이 일반적.
+
+### 4. requeue 무한 루프
+
+```java
+channel.basicNack(tag, false, true);    // requeue
+```
+
+처리 실패 → requeue → 같은 메시지 → 다시 실패 → 무한. retry count + DLQ 사용.
+
+### 5. 트랜잭션 + ack
+
+```java
+@Transactional
+@RabbitListener(...)
+public void handle(...) {
+    // DB 작업
+    // 예외 시 DB rollback + 메시지 requeue
+}
+```
+
+DB와 AMQP 트랜잭션이 별개. XA 또는 outbox pattern으로 정합성.
+
+## Kafka vs RabbitMQ
+
+| | Kafka | RabbitMQ |
+|---|-------|----------|
+| 모델 | 로그 (consumer offset) | 큐 (delete on ack) |
+| 처리량 | 매우 높음 | 보통 |
+| latency | 낮음 | 낮음 |
+| 메시지 영속 | 디스크 (기간 설정) | ack까지 |
+| 복잡한 라우팅 | 약함 | 강함 (exchange) |
+| 재생 (replay) | O | X (수동 publish) |
+| 학습 곡선 | 가파름 | 부드러움 |
+| 적합 | 이벤트 스트리밍, log | task queue, RPC, pub/sub |
+
+## 모니터링
+
+- RabbitMQ Management UI (http://host:15672)
+- Prometheus exporter
+- Spring Boot Actuator metrics
+
+## 참고
+
+- [Spring AMQP Reference](https://docs.spring.io/spring-amqp/reference/)
+- [RabbitMQ Tutorials](https://www.rabbitmq.com/tutorials/)
+- [AMQP 0-9-1 모델](https://www.rabbitmq.com/tutorials/amqp-concepts)
+- [Delayed Message Plugin](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange)

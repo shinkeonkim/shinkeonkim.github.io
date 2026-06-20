@@ -1,0 +1,335 @@
+---
+title: "[Django] Email: send_mail, EmailMessage, 템플릿"
+aliases: ["django email", "send_mail", "EmailMultiAlternatives", "django mailer", "SMTP", "anymail"]
+tags: [django, email, smtp, mailgun, sendgrid]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django의 `django.core.mail`은 **SMTP, 콘솔, 파일, 메모리, dummy** 등 다양한 백엔드를 통합한 이메일 전송 API. 외부 서비스(SendGrid, Mailgun, AWS SES, Postmark)는 `django-anymail`로 통일된 인터페이스 제공.
+
+## 설정
+
+```python
+# settings.py
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = "user@example.com"
+EMAIL_HOST_PASSWORD = "..."         # 환경변수 권장
+DEFAULT_FROM_EMAIL = "noreply@example.com"
+SERVER_EMAIL = "alerts@example.com"  # 관리자 에러 알림용
+```
+
+### 백엔드 옵션
+
+| 백엔드 | 용도 |
+|--------|------|
+| `smtp.EmailBackend` | 실제 SMTP 전송 |
+| `console.EmailBackend` | 개발: 콘솔에 출력 |
+| `filebased.EmailBackend` | 파일에 저장 |
+| `locmem.EmailBackend` | 테스트: 메모리 |
+| `dummy.EmailBackend` | 무시 (안 보냄) |
+
+```python
+# 개발
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+
+# 테스트
+EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+```
+
+## send_mail (단순)
+
+```python
+from django.core.mail import send_mail
+
+send_mail(
+    subject="환영합니다",
+    message="안녕하세요!",
+    from_email="noreply@example.com",
+    recipient_list=["alice@example.com"],
+    fail_silently=False,
+)
+```
+
+빠르고 간단. HTML, 첨부, CC/BCC 필요하면 `EmailMessage`.
+
+## EmailMessage
+
+```python
+from django.core.mail import EmailMessage
+
+email = EmailMessage(
+    subject="...",
+    body="...",
+    from_email="noreply@example.com",
+    to=["alice@example.com"],
+    cc=["bob@example.com"],
+    bcc=["audit@example.com"],
+    reply_to=["support@example.com"],
+    headers={"Message-ID": "..."},
+)
+
+email.attach("invoice.pdf", pdf_bytes, "application/pdf")
+email.attach_file("/path/to/file.pdf")
+
+email.send()
+```
+
+## HTML + 텍스트 (EmailMultiAlternatives)
+
+```python
+from django.core.mail import EmailMultiAlternatives
+from django.template.loader import render_to_string
+
+context = {"user": user, "url": activation_url}
+text_body = render_to_string("emails/welcome.txt", context)
+html_body = render_to_string("emails/welcome.html", context)
+
+email = EmailMultiAlternatives(
+    subject="환영합니다",
+    body=text_body,                # 평문 (필수)
+    from_email="noreply@example.com",
+    to=[user.email],
+)
+email.attach_alternative(html_body, "text/html")
+email.send()
+```
+
+이메일 클라이언트가 HTML 못 받으면 텍스트 fallback. 둘 다 항상 제공이 모범 사례.
+
+## 템플릿
+
+```html
+{# templates/emails/welcome.html #}
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+    <h1>{{ user.name }}님, 환영합니다!</h1>
+    <p>아래 링크를 눌러 가입을 완료하세요:</p>
+    <p><a href="{{ url }}">계정 활성화</a></p>
+</body>
+</html>
+```
+
+```
+{# templates/emails/welcome.txt #}
+{{ user.name }}님, 환영합니다!
+
+가입 완료 링크: {{ url }}
+```
+
+## 다중 전송
+
+```python
+from django.core.mail import send_mass_mail
+
+send_mass_mail((
+    ("Subject 1", "Body 1", "from@x.com", ["a@x.com"]),
+    ("Subject 2", "Body 2", "from@x.com", ["b@x.com"]),
+), fail_silently=False)
+```
+
+각 메시지에 같은 SMTP 연결 재사용 → 더 효율. 또는:
+
+```python
+from django.core.mail import get_connection
+
+with get_connection() as connection:
+    for user in users:
+        EmailMessage(..., connection=connection).send()
+```
+
+## 관리자 알림
+
+서버 에러 자동 이메일 (DEBUG=False).
+
+```python
+ADMINS = [("Alice", "alice@example.com")]
+SERVER_EMAIL = "alerts@example.com"
+```
+
+`AdminEmailHandler` 로깅 기본 포함. 예외 발생 시 ADMINS에 이메일.
+
+```python
+from django.core.mail import mail_admins, mail_managers
+
+mail_admins("Site error", "Something went wrong")
+mail_managers("Report", "...")    # MANAGERS = [...]
+```
+
+## 비동기 전송 (Celery)
+
+이메일은 외부 API 호출이라 view에서 즉시 보내면 느림. Celery로 위임.
+
+```python
+# tasks.py
+from celery import shared_task
+from django.core.mail import send_mail
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=5)
+def send_email_async(subject, body, recipients):
+    send_mail(subject, body, "noreply@example.com", recipients)
+
+# view
+send_email_async.delay("환영", "...", [user.email])
+```
+
+`django-anymail`도 자체 비동기 옵션.
+
+## django-anymail (외부 서비스)
+
+```bash
+pip install "django-anymail[sendgrid]"
+# 또는 mailgun, ses, postmark, mailjet, sparkpost
+```
+
+```python
+EMAIL_BACKEND = "anymail.backends.sendgrid.EmailBackend"
+ANYMAIL = {
+    "SENDGRID_API_KEY": env("SENDGRID_API_KEY"),
+}
+```
+
+기존 `send_mail`/`EmailMessage` 코드 변경 없음. anymail 확장 기능(tags, metadata, bounces, opens)도 가능.
+
+```python
+from anymail.message import AnymailMessage
+
+email = AnymailMessage(
+    subject="...",
+    body="...",
+    to=["alice@example.com"],
+    metadata={"user_id": "42"},
+    tags=["welcome"],
+    track_opens=True,
+    track_clicks=True,
+)
+email.send()
+```
+
+## 자주 보는 패턴
+
+### 비밀번호 재설정
+
+Django 내장 `PasswordResetView`가 이메일 자동 전송.
+
+```python
+# urls.py
+from django.contrib.auth import views as auth_views
+
+urlpatterns = [
+    path("password_reset/", auth_views.PasswordResetView.as_view(
+        email_template_name="emails/password_reset.html",
+        subject_template_name="emails/password_reset_subject.txt",
+        success_url="/password_reset/done/",
+    )),
+    ...
+]
+```
+
+### 가입 인증
+
+```python
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_encode
+from django.utils.encoding import force_bytes
+
+def send_activation_email(user):
+    token = default_token_generator.make_token(user)
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    activation_url = f"https://example.com/activate/{uid}/{token}/"
+
+    send_mail(
+        "가입 인증",
+        f"링크: {activation_url}",
+        "noreply@example.com",
+        [user.email],
+    )
+```
+
+### 알림 모음 (daily digest)
+
+```python
+@shared_task
+def send_daily_digest():
+    for user in User.objects.filter(daily_digest=True):
+        if items := user.unread_notifications():
+            send_mail(
+                f"오늘의 알림 {len(items)}건",
+                render_to_string("emails/digest.txt", {"items": items}),
+                "noreply@example.com",
+                [user.email],
+            )
+```
+
+## 테스트
+
+```python
+from django.core import mail
+from django.test import TestCase
+
+class EmailTest(TestCase):
+    def test_welcome(self):
+        send_mail("subject", "body", "from@x.com", ["to@x.com"])
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, "subject")
+        self.assertEqual(mail.outbox[0].to, ["to@x.com"])
+```
+
+`locmem` 백엔드는 `mail.outbox`에 누적. 테스트 후 자동 비움.
+
+## 함정
+
+### 1. SMTP 인증 실패
+
+Gmail은 OAuth 또는 App Password 필요. 일반 비밀번호 X.
+
+### 2. 동기 전송으로 view 지연
+
+```python
+def signup(request):
+    user.save()
+    send_mail(...)    # 1-3초 대기
+    return redirect(...)
+```
+
+→ Celery 또는 `transaction.on_commit + threading`.
+
+### 3. From 도메인 / SPF / DKIM
+
+`from=noreply@example.com` 보내려면 `example.com` 도메인에 SPF/DKIM 설정 필요. 안 그러면 스팸함 직행.
+
+### 4. 첨부 파일 인코딩
+
+```python
+email.attach("한글파일.pdf", pdf_bytes, "application/pdf")
+```
+
+UTF-8 파일명은 일부 클라이언트 깨짐. 영문 + 헤더 별도 설정 또는 Anymail 같은 라이브러리.
+
+### 5. 메일 폭주
+
+루프에서 `send_mail` 호출하면 SMTP rate limit 걸림. `send_mass_mail` 또는 큐.
+
+## 모니터링
+
+- 전송 실패율
+- bounce / complaint 율
+- open / click (마케팅 이메일)
+- spam score (mail-tester.com)
+
+SendGrid/Mailgun 대시보드 또는 anymail webhooks.
+
+## 참고
+
+- [Sending email](https://docs.djangoproject.com/en/stable/topics/email/)
+- [django-anymail](https://anymail.readthedocs.io/)
+- [Celery](https://docs.celeryq.dev/)
+- [SPF/DKIM/DMARC 가이드](https://mxtoolbox.com/dmarc/details/)
+- [Mail-tester.com](https://www.mail-tester.com/)

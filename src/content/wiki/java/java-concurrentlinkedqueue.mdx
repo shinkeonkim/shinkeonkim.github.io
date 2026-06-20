@@ -1,0 +1,133 @@
+---
+title: "[Java] ConcurrentLinkedQueue"
+aliases: ["ConcurrentLinkedQueue", "java.util.concurrent.ConcurrentLinkedQueue", "CLQ", "lock-free queue"]
+tags: [java, concurrent, queue, lock-free, michael-scott]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.ConcurrentLinkedQueue<E>`** 는 **lock-free** 로 구현된 unbounded thread-safe [[Queue]]. Michael & Scott 의 non-blocking queue 알고리즘 (1996) 기반.
+
+[[BlockingQueue]] 가 아닌 단순 큐. 큐가 비어 있으면 `poll()` 이 즉시 `null` 반환 (block 하지 않음).
+
+## 시각화
+
+```anim:java-concurrentlinkedqueue-ms
+{}
+```
+
+## 내부 구조
+
+```java
+public class ConcurrentLinkedQueue<E> ... {
+    private transient volatile Node<E> head;
+    private transient volatile Node<E> tail;
+
+    static final class Node<E> {
+        volatile E item;
+        volatile Node<E> next;
+    }
+}
+```
+
+`head`, `tail`, `item`, `next` 모두 `volatile`. 모든 갱신이 [[volatile]] write/CAS 로 수행돼 lock-free.
+
+## offer 의 흐름 (Michael & Scott)
+
+```text
+offer(x):
+  newNode = Node(x)
+  loop:
+    t = tail
+    next = t.next
+    if (next == null) {
+      // tail 의 next 가 비어있음, 여기에 CAS
+      if (CAS(t.next, null, newNode)) {
+        CAS(tail, t, newNode)         // tail 이동 (best-effort)
+        return
+      }
+    } else {
+      // 다른 스레드가 추가했지만 tail 이 아직 안 옮겨짐
+      CAS(tail, t, next)               // 도와서 tail 이동
+    }
+```
+
+핵심: **tail 이동이 best-effort**, 즉 다른 스레드가 도와서 옮길 수 있다. 따라서 어떤 스레드든 큐의 일관성을 유지.
+
+## poll 의 흐름
+
+```text
+poll():
+  loop:
+    h = head
+    next = h.next
+    if (next == null) return null     // 비어 있음
+    if (CAS(head, h, next)) {
+      e = next.item
+      next.item = null                // GC 친화
+      return e
+    }
+```
+
+## 복잡도
+
+| 작업 | 시간 | 동시성 |
+|:---|:---:|:---|
+| `offer(e)` | amortized O(1) | lock-free, CAS 재시도 |
+| `poll()` | amortized O(1) | lock-free, CAS 재시도 |
+| `peek()` | O(1) | volatile read |
+| `size()` | **O(n)** | 약함, 정확하지 않을 수 있음 |
+| `contains` | O(n) | 약함 |
+| 순회 | O(n) | weakly consistent |
+
+> [!IMPORTANT]
+> **`size()` 가 O(n) 이고 부정확하다.** 동시 수정 중에는 정확한 카운트 보장 안 됨. 정확한 개수가 필요하면 외부 카운터.
+
+## BlockingQueue 와의 차이
+
+| 항목 | ConcurrentLinkedQueue | [[BlockingQueue]] (LinkedBlockingQueue 등) |
+|:---|:---|:---|
+| 비어 있을 때 poll | **즉시 null** | (take 는) block |
+| 가득 차 있을 때 offer | (unbounded 라 발생 X) | (put 은) block |
+| 락 | lock-free (CAS) | ReentrantLock |
+| 백프레셔 | ✗ (unbounded) | ✓ |
+| 메모리 보호 | ✗ (OOM 가능) | ✓ (bounded 설정 가능) |
+
+생산자-소비자 같은 패턴에는 **[[BlockingQueue]] 가 보통 더 적합**. CLQ 는 polling 기반 처리, 비어 있을 때 다른 일 하는 패턴에 적합.
+
+## 사용 예
+
+### 작업 큐 (polling)
+
+```java
+Queue<Task> queue = new ConcurrentLinkedQueue<>();
+
+// Producer
+queue.offer(new Task());
+
+// Consumer (polling)
+while (running) {
+    Task t = queue.poll();
+    if (t == null) {
+        Thread.sleep(10);    // 잠시 쉬고 다시
+        continue;
+    }
+    process(t);
+}
+```
+
+비어 있을 때 즉시 반환되므로 polling 으로 직접 backoff 가능.
+
+## 참고
+
+- [[Object]]
+- [[Iterable]]
+- [[Collection]]
+- [[Queue]]
+- [[ConcurrentLinkedDeque]]
+- [[BlockingQueue]]
+- [[volatile]]
+- [[Non-Blocking]]
+- Oracle, [ConcurrentLinkedQueue (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentLinkedQueue.html)
+- Maged M. Michael & Michael L. Scott, "Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms" (PODC 1996)

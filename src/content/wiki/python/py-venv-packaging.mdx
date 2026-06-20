@@ -1,0 +1,307 @@
+---
+title: "[Python] 가상환경, pyproject.toml, packaging"
+aliases: ["python venv", "virtualenv", "pip", "pyproject.toml", "python packaging", "wheel", "PEP 517", "PEP 621", "uv", "poetry"]
+tags: [python, packaging, venv, pip, pyproject, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+Python 프로젝트의 격리·의존성·배포는 세 축이 있다.
+
+- **가상환경 (venv, virtualenv, uv, conda)**: 프로젝트별 의존성 격리
+- **패키지 매니저 (pip, uv, poetry, pdm)**: 의존성 설치/관리
+- **빌드 시스템 (setuptools, hatchling, poetry-core)**: 라이브러리 배포
+
+표준 정의는 `pyproject.toml` (PEP 518, 621, 631).
+
+## venv
+
+표준 라이브러리. 외부 도구 없이 가상환경 생성.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # macOS/Linux
+.venv\Scripts\activate.bat         # Windows
+
+pip install requests
+python -c "import requests; print(requests.__version__)"
+
+deactivate
+```
+
+`.venv/` 폴더는 Python 인터프리터 + site-packages 격리.
+
+`.gitignore`에 `.venv/`, `__pycache__/`, `*.pyc` 추가는 표준.
+
+## pip 기본
+
+```bash
+pip install requests                # 최신
+pip install "requests>=2.30,<3.0"   # 버전 제약
+pip install -r requirements.txt     # 요구사항 파일
+pip install -e .                    # 현재 디렉터리를 editable 모드로
+pip install --upgrade requests
+pip uninstall requests
+pip list
+pip show requests
+pip freeze > requirements.txt       # 현재 환경 직렬화
+```
+
+`pip install -e .`는 개발 중인 패키지를 import 가능하게 link만 만들고 코드 변경이 즉시 반영. 라이브러리 개발에 필수.
+
+## requirements.txt
+
+```
+requests>=2.30,<3.0
+fastapi==0.115.0
+psycopg2-binary
+django>=5.0; python_version >= "3.10"
+```
+
+단점: 직접 의존성과 전이 의존성 구분 없음, 버전 잠금 없음. **현대 프로젝트는 `pyproject.toml` 권장**.
+
+## pyproject.toml (PEP 518, 621)
+
+표준 프로젝트 메타데이터.
+
+```toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "myapp"
+version = "0.1.0"
+description = "My awesome app"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Alice", email = "alice@example.com"},
+]
+dependencies = [
+    "requests>=2.30,<3.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "mypy>=1.5", "ruff>=0.5"]
+docs = ["sphinx>=7.0"]
+
+[project.scripts]
+my-tool = "myapp.cli:main"
+
+[project.urls]
+Homepage = "https://example.com"
+Repository = "https://github.com/me/myapp"
+
+[tool.ruff]
+line-length = 100
+```
+
+`pip install .`이면 dependencies 설치. `pip install .[dev]`이면 dev extras까지.
+
+## entry point: CLI 도구
+
+```toml
+[project.scripts]
+my-tool = "myapp.cli:main"
+```
+
+`pip install -e .` 후 시스템 어디서나 `my-tool` 실행 가능. 진입점은 `myapp/cli.py`의 `main()` 함수.
+
+## 빌드와 배포
+
+```bash
+pip install build twine
+
+python -m build                    # dist/myapp-0.1.0.tar.gz, .whl 생성
+python -m twine upload dist/*      # PyPI 업로드
+```
+
+`twine`은 보안적으로 권장되는 업로드 도구. 직접 setuptools로 업로드는 비권장.
+
+## wheel vs sdist
+
+- **sdist** (`.tar.gz`): 소스 배포. C 확장 있으면 사용자가 빌드
+- **wheel** (`.whl`): 미리 빌드된 바이너리 + 메타데이터. 설치 빠름
+
+PyPI는 보통 둘 다 올림. wheel만 있으면 더 좋음 (Linux는 manylinux, Apple Silicon은 universal2 등).
+
+## 잠금 파일 (lockfile)
+
+`requirements.txt`나 `pyproject.toml`은 버전 범위. 재현 빌드를 위해선 정확한 버전(+ 해시) 잠금.
+
+- **pip**: `pip-tools` 또는 `pip freeze`
+- **poetry**: `poetry.lock`
+- **pdm**: `pdm.lock`
+- **uv**: `uv.lock`
+
+```bash
+# pip-tools 예시
+pip install pip-tools
+pip-compile pyproject.toml         # requirements.txt 자동 생성 (해시 포함)
+pip-sync requirements.txt          # 정확한 상태 동기화
+```
+
+## uv: 신세대 통합 도구
+
+Rust로 작성된 빠른 Python 패키지/프로젝트 매니저. pip + venv + pip-tools + virtualenv를 통합. 2024년 이후 빠르게 표준화.
+
+```bash
+# 설치
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 프로젝트 초기화
+uv init myapp
+cd myapp
+
+# 의존성 추가
+uv add requests fastapi
+uv add --dev pytest mypy
+
+# 실행
+uv run python -m myapp
+uv run pytest
+
+# 의존성 동기화 (잠금 기반)
+uv sync
+
+# 가상환경 정보
+uv venv
+```
+
+pip 대비 10~100x 빠름. `uv.lock` 자동 생성/관리. 점차 신규 프로젝트의 표준.
+
+## poetry
+
+좀 더 전통적인 통합 도구. PEP 621 호환 옵션 있으나 자체 섹션도 사용.
+
+```bash
+poetry init
+poetry add requests
+poetry install
+poetry run python script.py
+poetry build
+poetry publish
+```
+
+`pyproject.toml`에 `[tool.poetry]` 섹션. 잠금 파일은 `poetry.lock`.
+
+## namespace 패키지 vs 일반
+
+```
+myapp/                  # 일반 패키지
+    __init__.py
+    foo.py
+
+myapp/                  # namespace 패키지 (__init__.py 없음)
+    foo.py
+```
+
+namespace 패키지는 여러 디렉터리를 같은 패키지 이름으로 합칠 수 있음. 플러그인 시스템에 유용.
+
+## __version__과 importlib.metadata
+
+```python
+# myapp/__init__.py
+from importlib.metadata import version
+__version__ = version("myapp")
+```
+
+설치된 패키지 메타데이터에서 버전 자동 추출. `pyproject.toml`의 version과 동기화.
+
+## 자주 보는 함정
+
+### 1. 시스템 Python에 설치
+
+```bash
+# 위험: 시스템 Python에 직접
+pip install requests
+
+# 안전: venv 또는 pipx
+python -m venv .venv && source .venv/bin/activate && pip install requests
+# CLI 도구는 pipx
+pipx install black
+```
+
+시스템 Python에 직접 설치는 OS 패키지와 충돌 가능. macOS/Linux는 PEP 668로 점점 차단됨.
+
+### 2. 의존성 변경 시 lock 갱신 안 함
+
+```bash
+# pyproject.toml에 새 의존성 추가
+uv add new-package
+
+# WRONG: lock 갱신 잊고 커밋
+git add pyproject.toml
+# uv.lock도 같이 커밋해야 팀원 환경 깨지지 않음
+```
+
+### 3. setup.py 사용
+
+레거시. 새 프로젝트는 `pyproject.toml`만. 기존 `setup.py`는 점진적 마이그레이션.
+
+```toml
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "..."
+# setup.py에 있던 메타데이터를 여기로
+```
+
+### 4. 의존성 충돌
+
+```
+A requires B>=2.0
+C requires B<2.0
+```
+
+해결 불가능 시 lock 단계에서 실패. 해결책:
+- A 또는 C 버전 변경
+- B의 다른 버전 호환되는 fork 찾기
+- 가능하면 의존성 중 하나 제거
+
+## 라이브러리 vs 애플리케이션
+
+| | 라이브러리 | 애플리케이션 |
+|---|----------|------------|
+| 버전 잠금 | 느슨 (`>=`) | 엄격 (lock file) |
+| 배포 | PyPI | Docker, deb, exe 등 |
+| pyproject 필요 | O | O |
+| optional deps | extras | 환경별 |
+| lock 커밋 | X (또는 dev용만) | O |
+
+라이브러리는 사용자가 다른 의존성 환경에 설치하므로 버전 범위를 넓게. 앱은 재현 가능한 환경 우선.
+
+## Docker 통합
+
+```dockerfile
+FROM python:3.13-slim
+
+# uv 설치
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY . .
+CMD ["uv", "run", "python", "-m", "myapp"]
+```
+
+`--frozen`은 lock 파일과 정확히 일치 강제. CI/배포 환경 권장.
+
+## 참고
+
+- [Python Packaging User Guide](https://packaging.python.org/)
+- [PEP 518 – Specifying Minimum Build System Requirements](https://peps.python.org/pep-0518/)
+- [PEP 621 – Storing project metadata in pyproject.toml](https://peps.python.org/pep-0621/)
+- [PEP 631 – Dependency specification](https://peps.python.org/pep-0631/)
+- [PEP 668 – Marking Python base environments as externally managed](https://peps.python.org/pep-0668/)
+- [`uv` documentation](https://docs.astral.sh/uv/)
+- [`poetry` documentation](https://python-poetry.org/)
+- [`pip-tools`](https://github.com/jazzband/pip-tools)

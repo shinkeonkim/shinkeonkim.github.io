@@ -1,0 +1,395 @@
+---
+title: "[Python] pydantic: 런타임 타입 검증과 직렬화"
+aliases: ["python pydantic", "BaseModel", "validators", "FastAPI", "data validation"]
+tags: [python, pydantic, validation, third-party, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+`pydantic`은 **타입 힌트 기반 런타임 검증 + 직렬화** 라이브러리. FastAPI, LangChain, Hugging Face 등 수많은 라이브러리의 기반. v2부터 Rust 코어로 빠름.
+
+`dataclass`가 단순 데이터 컨테이너라면 `pydantic`은 **검증·직렬화·문서 자동 생성**까지.
+
+## 설치
+
+```bash
+pip install pydantic
+```
+
+3.x v2는 v1과 API 일부 다름. 새 코드는 v2 (pydantic >= 2.0) 권장.
+
+## BaseModel 기본
+
+```python
+from pydantic import BaseModel
+
+class User(BaseModel):
+    id: int
+    name: str
+    age: int = 0
+    email: str | None = None
+
+u = User(id=1, name="Alice", age=30, email="a@x.com")
+print(u)
+print(u.name)
+
+# 검증 실패 시 예외
+try:
+    User(id="not-int", name=42)
+except ValidationError as e:
+    print(e)
+```
+
+타입 힌트가 검증 규칙. 변환 가능한 타입은 자동 캐스팅 (`"30"` → `30`).
+
+## 직렬화
+
+```python
+u = User(id=1, name="Alice", age=30)
+
+print(u.model_dump())         # dict
+print(u.model_dump_json())    # JSON 문자열
+
+# 일부 필드만
+print(u.model_dump(include={"id", "name"}))
+print(u.model_dump(exclude={"email"}))
+```
+
+v1에서는 `.dict()`, `.json()`. 마이그레이션 시 주의.
+
+## 역직렬화
+
+```python
+data = {"id": "1", "name": "Alice", "age": "30"}
+u = User(**data)
+# 또는
+u = User.model_validate(data)
+# JSON에서
+u = User.model_validate_json('{"id": 1, "name": "Alice"}')
+```
+
+## 필드 검증: Field
+
+```python
+from pydantic import BaseModel, Field, EmailStr
+
+class User(BaseModel):
+    id: int = Field(..., gt=0)                            # 필수, > 0
+    name: str = Field(min_length=1, max_length=100)
+    age: int = Field(default=0, ge=0, le=150)
+    email: EmailStr                                        # 이메일 형식
+    tags: list[str] = Field(default_factory=list, max_length=10)
+
+User(id=1, name="A", age=200, email="x")
+# ValidationError: age must be <= 150, email is invalid
+```
+
+제약:
+- `gt`, `ge`, `lt`, `le`: 수치 비교
+- `min_length`, `max_length`: 길이
+- `pattern`: 정규식
+- `multiple_of`: 배수
+- `examples`: OpenAPI 예시
+
+`EmailStr`, `HttpUrl`, `IPvAnyAddress`, `PositiveInt`, `NonNegativeInt` 등 사전 정의 타입 다수.
+
+## 커스텀 검증: field_validator
+
+```python
+from pydantic import BaseModel, field_validator
+
+class User(BaseModel):
+    name: str
+    age: int
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_empty(cls, v):
+        if not v.strip():
+            raise ValueError("name cannot be empty")
+        return v.strip().title()    # 변환도 가능
+
+    @field_validator("age")
+    @classmethod
+    def age_must_be_adult(cls, v):
+        if v < 18:
+            raise ValueError("must be 18+")
+        return v
+```
+
+`mode="before"`로 raw 입력 처리, 기본은 `"after"` (캐스팅 후).
+
+## model_validator (모델 단위)
+
+```python
+from pydantic import BaseModel, model_validator
+
+class Range(BaseModel):
+    start: int
+    end: int
+
+    @model_validator(mode="after")
+    def check_range(self):
+        if self.start >= self.end:
+            raise ValueError("start must be < end")
+        return self
+```
+
+여러 필드의 관계 검증. mode="before"는 dict 자체에, "after"는 인스턴스에.
+
+## 중첩 모델
+
+```python
+from pydantic import BaseModel
+from typing import Optional
+
+class Address(BaseModel):
+    street: str
+    city: str
+
+class User(BaseModel):
+    name: str
+    address: Address
+    friends: list["User"] = []     # 전방 참조
+
+# self-reference 등록 (v2)
+User.model_rebuild()
+
+u = User(
+    name="Alice",
+    address={"street": "Main St", "city": "Seoul"},
+    friends=[{"name": "Bob", "address": {"street": "B", "city": "C"}}],
+)
+print(u.address.city)
+```
+
+dict로 받아도 자동으로 `Address`/`User` 인스턴스로 변환.
+
+## ConfigDict
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+class StrictUser(BaseModel):
+    model_config = ConfigDict(
+        strict=True,                # 타입 강제 (str → int 변환 안 함)
+        frozen=True,                # immutable
+        extra="forbid",             # 모르는 필드 거부
+        str_strip_whitespace=True,  # 자동 strip
+        populate_by_name=True,
+        # alias 설정 등
+    )
+
+    name: str
+    age: int
+```
+
+`extra="ignore"` (기본), `"allow"` (받아서 보존), `"forbid"` (예외).
+
+## alias: 외부 키와 내부 이름 매핑
+
+```python
+from pydantic import BaseModel, Field
+
+class GitHubUser(BaseModel):
+    login: str
+    user_id: int = Field(alias="id")
+    avatar: str = Field(alias="avatar_url")
+
+# JSON: {"login": "alice", "id": 1, "avatar_url": "..."}
+data = {"login": "alice", "id": 1, "avatar_url": "..."}
+u = GitHubUser(**data)
+print(u.user_id, u.avatar)
+
+# 직렬화 시 alias 또는 원래 이름 선택
+u.model_dump(by_alias=True)    # {"login": "alice", "id": 1, "avatar_url": "..."}
+```
+
+API 응답이 JavaScript camelCase일 때 Python snake_case로 변환.
+
+## RootModel: dict/list 자체
+
+```python
+from pydantic import RootModel
+
+class StringList(RootModel[list[str]]):
+    pass
+
+s = StringList(["a", "b", "c"])
+print(s.root)
+```
+
+list/dict 자체에 검증을 입히고 싶을 때.
+
+## 직렬화 커스텀
+
+```python
+from pydantic import BaseModel, field_serializer
+from datetime import datetime
+
+class Event(BaseModel):
+    name: str
+    when: datetime
+
+    @field_serializer("when")
+    def serialize_when(self, v: datetime) -> str:
+        return v.isoformat()
+
+e = Event(name="meeting", when=datetime.now())
+print(e.model_dump())
+# {'name': 'meeting', 'when': '2026-06-20T14:30:00'}
+```
+
+## JSON Schema 생성
+
+```python
+print(User.model_json_schema(indent=2))
+```
+
+OpenAPI 스펙으로 그대로 활용. FastAPI가 이걸 자동으로 OpenAPI docs로 만듬.
+
+## pydantic-settings
+
+환경변수, .env, secrets 자동 로드 + 검증.
+
+```bash
+pip install pydantic-settings
+```
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="APP_",
+        env_nested_delimiter="__",
+    )
+
+    debug: bool = False
+    database_url: str
+    api_key: str
+
+settings = Settings()    # 환경에서 자동
+# APP_DEBUG=1 APP_DATABASE_URL=... APP_API_KEY=...
+```
+
+대규모 앱 설정 관리의 표준.
+
+## v1 vs v2 마이그레이션
+
+| v1 | v2 |
+|----|----|
+| `class Config:` | `model_config = ConfigDict(...)` |
+| `.dict()` | `.model_dump()` |
+| `.json()` | `.model_dump_json()` |
+| `.parse_obj(d)` | `.model_validate(d)` |
+| `@validator` | `@field_validator` |
+| `@root_validator` | `@model_validator` |
+| `Config.allow_mutation` | `model_config["frozen"]` |
+
+v2는 Rust 코어로 5-50x 빠름. 마이그레이션 가치 큼.
+
+## 자주 보는 패턴
+
+### API 입출력 모델
+
+```python
+class UserCreate(BaseModel):
+    name: str
+    email: EmailStr
+    password: str = Field(min_length=8)
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    # password 제외 (보안)
+
+@app.post("/users", response_model=UserResponse)
+def create_user(data: UserCreate):
+    user = ...
+    return user
+```
+
+FastAPI 사용 시 자동으로 검증·직렬화·docs.
+
+### 설정 클래스
+
+```python
+class DatabaseConfig(BaseModel):
+    host: str = "localhost"
+    port: int = 5432
+    pool_size: int = Field(default=10, ge=1, le=100)
+
+class AppConfig(BaseModel):
+    debug: bool = False
+    database: DatabaseConfig = DatabaseConfig()
+
+config = AppConfig.model_validate(yaml.safe_load(open("config.yaml")))
+```
+
+### dataclass 대안
+
+```python
+from pydantic.dataclasses import dataclass    # 검증 있는 dataclass
+
+@dataclass
+class Point:
+    x: float
+    y: float
+
+p = Point(x="3.14", y=4)    # 자동 변환
+```
+
+`@dataclass`보다 강하고 `BaseModel`보다 가벼움.
+
+## dataclass / TypedDict / pydantic 비교
+
+| | dataclass | TypedDict | pydantic |
+|---|----------|-----------|----------|
+| 런타임 검증 | X | X | O |
+| 직렬화 | asdict | dict 그대로 | model_dump |
+| JSON Schema | X | X | O |
+| 변환 | X | X | O (str→int 등) |
+| 메모리 | 작음 | dict | 중간 |
+| 속도 | 빠름 | 빠름 | 빠름 (v2 Rust) |
+| 추천 | 내부 데이터 | 외부 dict 타입 명시 | 검증 필요 시 |
+
+## 함정
+
+### 1. 변환 vs strict
+
+기본은 변환 시도. `"30"` → `30` 통과. 의도와 다르면 `strict=True`.
+
+```python
+class User(BaseModel):
+    model_config = ConfigDict(strict=True)
+    age: int
+
+User(age="30")    # ValidationError
+```
+
+### 2. mutable default
+
+```python
+class C(BaseModel):
+    items: list = []    # 안전 (pydantic이 처리)
+
+# dataclass였다면 함정 (모든 인스턴스 공유)
+```
+
+pydantic은 deep copy로 안전 처리.
+
+### 3. v1 ↔ v2 혼용
+
+같은 프로젝트에 v1 모델과 v2 모델 혼재 시 `model_dump` vs `.dict()` 같은 메서드 이름이 다름. 의존성 통일.
+
+## 참고
+
+- [pydantic documentation](https://docs.pydantic.dev/)
+- [pydantic v2 migration](https://docs.pydantic.dev/latest/migration/)
+- [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+- [FastAPI + pydantic](https://fastapi.tiangolo.com/)
+- [pydantic vs dataclass vs attrs benchmark](https://docs.pydantic.dev/latest/concepts/performance/)

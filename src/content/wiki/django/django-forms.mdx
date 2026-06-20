@@ -1,0 +1,351 @@
+---
+title: "[Django] Form과 ModelForm"
+aliases: ["django form", "ModelForm", "form validation", "django widget", "formset"]
+tags: [django, form, modelform, validation]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django Form은 **사용자 입력 정의·검증·렌더링·바인딩**을 통합. 일반 `Form`은 임의 필드, `ModelForm`은 모델 자동 매핑. 검증과 보안(CSRF, SQL 인젝션 방지) 내장.
+
+## Form 기본
+
+```python
+# blog/forms.py
+from django import forms
+
+class ContactForm(forms.Form):
+    name = forms.CharField(max_length=100)
+    email = forms.EmailField()
+    message = forms.CharField(widget=forms.Textarea, min_length=10)
+    subscribe = forms.BooleanField(required=False)
+```
+
+View에서 사용:
+
+```python
+def contact(request):
+    if request.method == "POST":
+        form = ContactForm(request.POST)
+        if form.is_valid():
+            # 검증 통과: cleaned_data로 안전한 값
+            name = form.cleaned_data["name"]
+            email = form.cleaned_data["email"]
+            send_message(name, email, form.cleaned_data["message"])
+            return redirect("thanks")
+    else:
+        form = ContactForm()
+
+    return render(request, "contact.html", {"form": form})
+```
+
+## ModelForm: 모델과 자동 연결
+
+```python
+from django import forms
+from .models import Post
+
+class PostForm(forms.ModelForm):
+    class Meta:
+        model = Post
+        fields = ["title", "body", "tags"]
+        # 또는 "__all__" (모든 필드), 또는 exclude=["author", "created_at"]
+
+        widgets = {
+            "body": forms.Textarea(attrs={"rows": 10, "class": "prose"}),
+        }
+        labels = {"body": "본문"}
+        help_texts = {"title": "제목을 명확히 작성하세요"}
+        error_messages = {
+            "title": {"required": "제목은 필수입니다"},
+        }
+```
+
+View:
+
+```python
+def post_create(request):
+    if request.method == "POST":
+        form = PostForm(request.POST)
+        if form.is_valid():
+            post = form.save(commit=False)
+            post.author = request.user
+            post.save()
+            form.save_m2m()       # M2M은 commit=False 후 별도 호출
+            return redirect(post)
+    else:
+        form = PostForm()
+    return render(request, "blog/post_form.html", {"form": form})
+```
+
+`commit=False`로 저장 전 인스턴스 받아 추가 처리 가능.
+
+## Field 타입
+
+| Form Field | 용도 |
+|-----------|------|
+| `CharField` | 텍스트 |
+| `IntegerField` | 정수 |
+| `FloatField`, `DecimalField` | 실수 |
+| `BooleanField` | 체크박스 |
+| `EmailField` | 이메일 검증 |
+| `URLField` | URL |
+| `SlugField` | slug |
+| `UUIDField` | UUID |
+| `DateField`, `DateTimeField`, `TimeField` | 날짜/시간 |
+| `ChoiceField` | 단일 선택 |
+| `MultipleChoiceField` | 다중 선택 |
+| `ModelChoiceField` | DB 객체 선택 (FK 용) |
+| `ModelMultipleChoiceField` | 다중 DB 객체 (M2M) |
+| `FileField`, `ImageField` | 파일 |
+| `JSONField` | JSON |
+
+```python
+class MyForm(forms.Form):
+    rating = forms.ChoiceField(choices=[(1, "Bad"), (2, "OK"), (3, "Good")])
+    interests = forms.MultipleChoiceField(
+        choices=[("tech", "Tech"), ("design", "Design")],
+        widget=forms.CheckboxSelectMultiple,
+    )
+    category = forms.ModelChoiceField(queryset=Category.objects.all())
+    tags = forms.ModelMultipleChoiceField(
+        queryset=Tag.objects.all(),
+        widget=forms.CheckboxSelectMultiple,
+    )
+```
+
+## Widget
+
+Field가 데이터 타입, Widget이 HTML 표현. 기본 widget이 있지만 변경 가능.
+
+```python
+class PostForm(forms.ModelForm):
+    class Meta:
+        model = Post
+        fields = ["title", "body", "tags"]
+        widgets = {
+            "title": forms.TextInput(attrs={
+                "class": "form-control",
+                "placeholder": "제목 입력",
+                "autofocus": True,
+            }),
+            "body": forms.Textarea(attrs={"rows": 10}),
+            "tags": forms.CheckboxSelectMultiple,
+        }
+```
+
+자주 쓰는 widget:
+- `TextInput`, `Textarea`, `EmailInput`, `URLInput`, `NumberInput`
+- `Select`, `SelectMultiple`, `RadioSelect`, `CheckboxSelectMultiple`
+- `DateInput`, `DateTimeInput`, `TimeInput`
+- `PasswordInput`
+- `HiddenInput`
+- `FileInput`, `ClearableFileInput`
+
+## 검증
+
+### 빌트인
+
+각 Field가 기본 검증 (max_length, required, type 등).
+
+### clean_&lt;field&gt;
+
+특정 필드 추가 검증.
+
+```python
+class PostForm(forms.ModelForm):
+    class Meta:
+        model = Post
+        fields = ["title", "body"]
+
+    def clean_title(self):
+        title = self.cleaned_data["title"]
+        if "스팸" in title:
+            raise forms.ValidationError("부적절한 단어 포함")
+        return title.strip()
+```
+
+### clean (전체)
+
+여러 필드의 관계 검증.
+
+```python
+class RegistrationForm(forms.Form):
+    password = forms.CharField(widget=forms.PasswordInput)
+    password_confirm = forms.CharField(widget=forms.PasswordInput)
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("password") != cleaned.get("password_confirm"):
+            raise forms.ValidationError("비밀번호가 일치하지 않습니다")
+        return cleaned
+```
+
+### validators 인자
+
+```python
+from django.core.validators import MinValueValidator, MaxValueValidator, RegexValidator
+
+class MyForm(forms.Form):
+    age = forms.IntegerField(validators=[MinValueValidator(0), MaxValueValidator(150)])
+    phone = forms.CharField(validators=[
+        RegexValidator(r"^\d{3}-\d{4}-\d{4}$", "010-1234-5678 형식")
+    ])
+```
+
+## 에러 표시
+
+```html
+<form method="post">
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+        <div class="errors">
+            {{ form.non_field_errors }}
+        </div>
+    {% endif %}
+
+    {% for field in form %}
+        <div class="form-group">
+            {{ field.label_tag }}
+            {{ field }}
+            {% for error in field.errors %}
+                <div class="error">{{ error }}</div>
+            {% endfor %}
+        </div>
+    {% endfor %}
+
+    <button type="submit">저장</button>
+</form>
+```
+
+`form.errors`는 dict, `form.non_field_errors`는 `clean()`에서 발생한 전체 에러.
+
+## __init__ 커스터마이즈
+
+런타임 동적 필드 변경.
+
+```python
+class PostForm(forms.ModelForm):
+    class Meta:
+        model = Post
+        fields = ["title", "body", "category"]
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user:
+            self.fields["category"].queryset = Category.objects.filter(owner=user)
+        self.fields["title"].widget.attrs.update({"class": "form-control"})
+```
+
+View:
+
+```python
+form = PostForm(request.POST or None, user=request.user)
+```
+
+## Formset: 여러 form 동시 처리
+
+```python
+from django.forms import formset_factory, modelformset_factory
+
+# 같은 폼 N개
+TagFormset = formset_factory(TagForm, extra=3, can_delete=True)
+
+formset = TagFormset(request.POST or None)
+if formset.is_valid():
+    for form in formset:
+        if form.cleaned_data:
+            form.save()
+```
+
+`modelformset_factory`는 모델 단위. `inlineformset_factory`는 부모-자식 관계 편집에 유용 (Post + Comments 같이).
+
+## File Upload
+
+```python
+class UploadForm(forms.Form):
+    file = forms.FileField()
+
+def upload(request):
+    if request.method == "POST":
+        form = UploadForm(request.POST, request.FILES)    # FILES 필수!
+        if form.is_valid():
+            f = form.cleaned_data["file"]
+            save_to_disk(f)
+            return redirect("done")
+    ...
+```
+
+```html
+<form method="post" enctype="multipart/form-data">    {# enctype 필수 #}
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">업로드</button>
+</form>
+```
+
+`enctype="multipart/form-data"` 빠뜨리면 파일 안 전송.
+
+## crispy-forms / django-widget-tweaks
+
+`{{ form.as_p }}`는 빠르나 디자인 제한. 커스텀 렌더링이 번거롭다면:
+
+- **django-crispy-forms**: Bootstrap/Tailwind 통합 폼 렌더링
+- **django-widget-tweaks**: 템플릿에서 위젯 attrs 조정
+
+```html
+{% load widget_tweaks %}
+{{ form.title|add_class:"form-control"|attr:"placeholder:제목" }}
+```
+
+## 함정
+
+### 1. is_valid() 호출 전 cleaned_data 접근
+
+```python
+form.cleaned_data    # AttributeError! is_valid() 먼저
+```
+
+### 2. ModelForm + commit=False 후 M2M
+
+```python
+post = form.save(commit=False)
+post.author = user
+post.save()
+form.save_m2m()    # M2M은 PK 필요 → 명시 호출
+```
+
+또는:
+
+```python
+form.instance.author = user
+form.save()    # 이젠 save_m2m 자동
+```
+
+### 3. 검증 시점에 외부 데이터
+
+`clean()`은 모델 저장 전 호출. DB 조회 시 동시성 고려.
+
+### 4. ValidationError 위치
+
+- 필드 레벨: `clean_<field>` 또는 `validators`
+- 폼 레벨: `clean()`에서 raise
+- 모델 레벨: `model.clean()` (full_clean에서 호출)
+
+## 보안
+
+- CSRF: POST 폼에 `{% csrf_token %}` 필수
+- HTML escape: 템플릿 자동 (별도 처리 불필요)
+- SQL injection: ORM 사용 시 자동 방지
+- 파일 업로드: 확장자/MIME 검증, 저장 위치 격리, 권한 제한
+
+## 참고
+
+- [Forms documentation](https://docs.djangoproject.com/en/stable/topics/forms/)
+- [Form fields](https://docs.djangoproject.com/en/stable/ref/forms/fields/)
+- [Widgets](https://docs.djangoproject.com/en/stable/ref/forms/widgets/)
+- [ModelForm](https://docs.djangoproject.com/en/stable/topics/forms/modelforms/)
+- [Formsets](https://docs.djangoproject.com/en/stable/topics/forms/formsets/)
+- [django-crispy-forms](https://django-crispy-forms.readthedocs.io/)

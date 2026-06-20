@@ -1,0 +1,318 @@
+---
+title: "[Spring] SpEL: Spring Expression Language"
+aliases: ["spring spel", "expression language", "@Value SpEL", "spring expression", "ExpressionParser"]
+tags: [spring, spel, expression]
+updated: 2026-06-20
+---
+
+## 정의
+
+**SpEL (Spring Expression Language)**은 Spring의 강력한 표현 언어. `@Value`, `@PreAuthorize`, `@Cacheable` 등 어노테이션 내에서 동적 표현 평가. property 조회, 메서드 호출, 산술, 컬렉션 projection 등.
+
+## 기본 문법
+
+`#{expression}`은 SpEL, `${property}`는 properties placeholder.
+
+```java
+@Value("#{systemProperties['user.home']}")
+private String home;
+
+@Value("#{T(java.lang.Math).PI}")
+private double pi;
+
+@Value("#{2 + 3}")
+private int five;
+
+@Value("#{'Hello'.length()}")
+private int length;
+```
+
+## @Value에서
+
+### Property 값
+
+```java
+@Value("${app.api.key}")              // placeholder
+@Value("${app.timeout:30}")            // 기본값
+@Value("#{${app.api.urls}}")           // SpEL + property
+@Value("#{'${app.tags}'.split(',')}")  // 쉼표 분리
+```
+
+### Bean 메서드 호출
+
+```java
+@Value("#{userService.findById(1)}")
+private User user;
+
+@Value("#{configService.timeout}")
+private int timeout;
+```
+
+### 조건
+
+```java
+@Value("#{${app.feature.enabled} ? 'premium' : 'basic'}")
+private String tier;
+```
+
+### 컬렉션
+
+```java
+@Value("#{userService.all.![email]}")   // map (각 user의 email)
+private List<String> emails;
+
+@Value("#{userService.all.?[active]}")  // select (active true만)
+private List<User> activeUsers;
+
+@Value("#{userService.all.^[score > 90]}")    // first match
+@Value("#{userService.all.$[score > 90]}")    // last match
+```
+
+## 어디서 SpEL을 쓰나
+
+### @PreAuthorize / @PostAuthorize
+
+```java
+@PreAuthorize("hasRole('ADMIN')")
+@PreAuthorize("hasAuthority('user:write')")
+@PreAuthorize("#userId == authentication.principal.id")
+@PreAuthorize("@securityService.canAccess(#postId, authentication)")
+public void doSomething(Long userId, Long postId) { ... }
+
+@PostAuthorize("returnObject.owner == authentication.name")
+public Document load(Long id) { ... }
+```
+
+### @Cacheable / @CacheEvict
+
+```java
+@Cacheable(value = "users", key = "#id", condition = "#id > 0", unless = "#result == null")
+public User findById(Long id) { ... }
+
+@CacheEvict(value = "users", key = "#user.id")
+public void update(User user) { ... }
+```
+
+### @ConditionalOnExpression
+
+```java
+@Bean
+@ConditionalOnExpression("${app.feature.enabled} && '${app.env}' != 'test'")
+public FeatureService featureService() { ... }
+```
+
+### @Scheduled cron (간접)
+
+```java
+@Scheduled(cron = "${app.cron.cleanup}")    // property
+public void cleanup() { ... }
+```
+
+## 프로그래밍 사용
+
+```java
+import org.springframework.expression.ExpressionParser;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
+
+ExpressionParser parser = new SpelExpressionParser();
+Expression exp = parser.parseExpression("'Hello World'.length()");
+int length = (int) exp.getValue();    // 11
+
+// 컨텍스트
+StandardEvaluationContext context = new StandardEvaluationContext();
+context.setVariable("name", "Alice");
+Expression exp2 = parser.parseExpression("'Hello, ' + #name");
+String greeting = (String) exp2.getValue(context);    // "Hello, Alice"
+
+// Root object
+User user = new User("Alice", 30);
+StandardEvaluationContext ctx = new StandardEvaluationContext(user);
+Expression exp3 = parser.parseExpression("name.toUpperCase()");
+String name = (String) exp3.getValue(ctx);    // "ALICE"
+```
+
+## 자주 사용 패턴
+
+### Type reference
+
+```java
+T(java.lang.Math).PI                // Math.PI
+T(java.lang.Math).max(1, 2)         // 2
+T(java.lang.Integer).MAX_VALUE
+T(java.time.LocalDate).now()
+```
+
+### List / Map literal
+
+```java
+{1, 2, 3, 4}                         // List
+{name: 'Alice', age: 30}             // Map
+new java.util.ArrayList()
+```
+
+### Null-safe
+
+```java
+user?.profile?.email                 // user나 profile이 null이면 null
+```
+
+### Elvis operator
+
+```java
+name ?: 'default'                    // name이 null이면 'default'
+```
+
+### 정규식
+
+```java
+'abc' matches '[a-z]+'    // true
+```
+
+## Method security 표현식
+
+```java
+@PreAuthorize("hasRole('ADMIN')")
+@PreAuthorize("hasAnyRole('ADMIN', 'EDITOR')")
+@PreAuthorize("hasAuthority('SCOPE_read')")
+@PreAuthorize("isAuthenticated()")
+@PreAuthorize("isAnonymous()")
+@PreAuthorize("permitAll()")
+@PreAuthorize("denyAll()")
+
+// 인자 참조
+@PreAuthorize("#userId == authentication.principal.id")
+public void update(Long userId) { ... }
+
+// Bean 메서드
+@PreAuthorize("@authz.canEdit(#postId)")
+public void edit(Long postId) { ... }
+
+// 복합
+@PreAuthorize("hasRole('ADMIN') and #postId > 0")
+
+// 반환값
+@PostAuthorize("returnObject.author == authentication.name")
+public Post get(Long id) { ... }
+
+// 필터
+@PostFilter("filterObject.public or filterObject.author == authentication.name")
+public List<Post> all() { ... }
+
+@PreFilter("filterObject.author == authentication.name")
+public void delete(List<Post> posts) { ... }
+```
+
+## 컬렉션 표현식
+
+```java
+// Map (projection): .![property]
+users.![name]                 // List<String>의 이름들
+users.![{name, email}]        // List<Map>
+
+// Filter: .?[predicate]
+users.?[age > 18]
+users.?[active and admin]
+
+// First / Last match
+users.^[score > 90]
+users.$[score > 90]
+
+// Length
+users.size()
+users.?[active].size()
+```
+
+## 함정
+
+### 1. SpEL 인젝션
+
+```java
+@Value("#{${user_input}}")    // 위험: user_input이 시스템 명령 실행 가능
+```
+
+사용자 입력을 SpEL에 직접 넣지 말 것. 명시 placeholder만.
+
+### 2. Bean 메서드 호출 비용
+
+```java
+@Cacheable(key = "#user.expensiveCalc()")
+```
+
+매 호출마다 평가. 가능하면 simple 값.
+
+### 3. null 처리
+
+```java
+@PreAuthorize("#user.id == authentication.principal.id")
+// user가 null이면 NullPointerException
+```
+
+`#user?.id` 또는 `hasRole + #user` 조합.
+
+### 4. 표현식 컴파일
+
+```java
+// 매번 파싱 (느림)
+parser.parseExpression("..." + variable)
+
+// 컴파일
+SpelParserConfiguration config = new SpelParserConfiguration(
+    SpelCompilerMode.IMMEDIATE, this.getClass().getClassLoader()
+);
+ExpressionParser parser = new SpelExpressionParser(config);
+```
+
+핫 코드면 IMMEDIATE 모드로 JIT 컴파일.
+
+### 5. 디버깅
+
+SpEL 에러는 `SpelEvaluationException`. 표현식이 길면 디버깅 어려움. 간단히 유지.
+
+## SpEL vs JSP EL
+
+SpEL이 더 강력 (메서드 호출, 컬렉션 연산, type reference). JSP EL은 Servlet 컨테이너 표준.
+
+## 활용 예제
+
+### 동적 캐시 키
+
+```java
+@Cacheable(value = "users", key = "#root.methodName + '_' + #id")
+public User get(Long id) { ... }
+```
+
+### 메서드별 다른 조건
+
+```java
+@Cacheable(value = "products", condition = "#product != null && #product.price > 100")
+public Product enrich(Product product) { ... }
+```
+
+### 권한 위임
+
+```java
+@PreAuthorize("@accessChecker.check(#root)")
+public void doSomething(Long id, String action) { ... }
+
+@Component("accessChecker")
+public class AccessChecker {
+    public boolean check(MethodSecurityExpressionRoot root) {
+        // 복잡한 로직
+        return true;
+    }
+}
+```
+
+### 조건부 Bean
+
+```java
+@Bean
+@ConditionalOnExpression("'${db.type}' == 'postgres'")
+public DataSource postgresDataSource() { ... }
+```
+
+## 참고
+
+- [Spring Expression Language](https://docs.spring.io/spring-framework/reference/core/expressions.html)
+- [Spring Security Expressions](https://docs.spring.io/spring-security/reference/servlet/authorization/expression-based.html)
+- [Spring Cache SpEL](https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html#cache-spel-context)

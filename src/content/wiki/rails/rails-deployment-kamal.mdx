@@ -1,0 +1,409 @@
+---
+title: "[Rails] 배포: Kamal, Capistrano, Heroku"
+aliases: ["rails deployment", "kamal", "capistrano", "rails heroku", "rails docker", "puma config"]
+tags: [rails, deployment, kamal, docker, puma]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails 배포 옵션:
+
+- **Kamal** (Rails 8 기본): Docker + zero-downtime, 자체 호스팅
+- **Capistrano**: SSH 기반 (전통)
+- **Heroku / Render / Fly.io**: PaaS
+- **AWS Elastic Beanstalk, ECS, EKS**: AWS 매니지드
+- **Docker Compose / Kubernetes**: 자체 컨테이너
+
+## Puma (앱 서버)
+
+기본. `config/puma.rb`:
+
+```ruby
+max_threads_count = ENV.fetch("RAILS_MAX_THREADS") { 5 }
+min_threads_count = ENV.fetch("RAILS_MIN_THREADS") { max_threads_count }
+threads min_threads_count, max_threads_count
+
+worker_timeout 3600 if ENV.fetch("RAILS_ENV", "development") == "development"
+
+port ENV.fetch("PORT") { 3000 }
+
+environment ENV.fetch("RAILS_ENV") { "development" }
+
+pidfile ENV.fetch("PIDFILE") { "tmp/pids/server.pid" }
+
+if ENV["WEB_CONCURRENCY"]
+  workers ENV.fetch("WEB_CONCURRENCY") { 2 }
+  preload_app!
+end
+
+plugin :tmp_restart
+plugin :solid_queue if ENV["SOLID_QUEUE_IN_PUMA"]
+```
+
+- workers: 멀티 프로세스 (CPU 코어 수)
+- threads: 워커당 스레드 (5-10)
+- 메모리 = workers × per_worker_memory
+
+## Kamal 2 (Rails 8 기본)
+
+```bash
+bin/kamal init
+# config/deploy.yml 생성
+```
+
+`config/deploy.yml`:
+
+```yaml
+service: myapp
+image: myorg/myapp
+
+servers:
+  web:
+    - 192.168.0.1
+    - 192.168.0.2
+  worker:
+    hosts:
+      - 192.168.0.3
+    cmd: bin/jobs
+
+proxy:
+  ssl: true
+  host: example.com
+  app_port: 3000
+  healthcheck:
+    path: /up
+    interval: 3
+    timeout: 30
+
+registry:
+  server: ghcr.io
+  username: myorg
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+env:
+  clear:
+    RAILS_LOG_TO_STDOUT: "1"
+    RAILS_SERVE_STATIC_FILES: "true"
+  secret:
+    - RAILS_MASTER_KEY
+    - SECRET_KEY_BASE
+    - DATABASE_URL
+
+builder:
+  arch: amd64
+  cache:
+    type: gha    # GitHub Actions
+    # 또는 type: registry
+  context: .
+
+accessories:
+  db:
+    image: postgres:16
+    host: 192.168.0.4
+    env:
+      secret: [POSTGRES_PASSWORD]
+    directories:
+      - data:/var/lib/postgresql/data
+    files:
+      - config/postgres/postgresql.conf:/etc/postgresql/postgresql.conf
+
+  redis:
+    image: redis:7-alpine
+    host: 192.168.0.4
+    directories:
+      - data:/data
+```
+
+### 명령
+
+```bash
+bin/kamal setup           # 첫 배포 (서버 setup + Docker 설치 + 첫 컨테이너)
+bin/kamal deploy           # 이후 배포
+bin/kamal redeploy         # 재시작 없이 재배포
+bin/kamal rollback v123
+
+bin/kamal app logs --follow
+bin/kamal app exec "bin/rails db:migrate"
+bin/kamal console          # rails c
+bin/kamal shell            # bash
+bin/kamal db console        # psql
+
+bin/kamal accessory boot db
+bin/kamal accessory logs db
+```
+
+### Zero-downtime
+
+Kamal proxy (Traefik 대체, 8.0+)가 무중단 롤링 업데이트:
+1. 새 컨테이너 시작
+2. healthcheck 통과 대기
+3. 트래픽 전환
+4. 옛 컨테이너 종료
+
+`up` 엔드포인트:
+
+```ruby
+# config/routes.rb
+get "up" => "rails/health#show", as: :rails_health_check
+```
+
+기본 Rails health check.
+
+### CI/CD
+
+```yaml
+# .github/workflows/deploy.yml
+- uses: actions/checkout@v4
+- uses: docker/setup-buildx-action@v3
+- run: |
+    bundle exec kamal deploy
+  env:
+    KAMAL_REGISTRY_PASSWORD: ${{ secrets.KAMAL_REGISTRY_PASSWORD }}
+    SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+```
+
+## Capistrano (전통)
+
+```bash
+cap install
+```
+
+`config/deploy.rb`:
+
+```ruby
+set :application, "myapp"
+set :repo_url, "git@github.com:org/myapp.git"
+set :deploy_to, "/var/www/myapp"
+set :branch, "main"
+
+set :linked_files, %w{config/master.key .env.production}
+set :linked_dirs, %w{log tmp/pids tmp/cache tmp/sockets storage public/uploads}
+
+set :rbenv_ruby, "3.3.0"
+set :passenger_restart_with_touch, true
+```
+
+```bash
+cap production deploy
+cap production deploy:rollback
+```
+
+전통적인 ssh + git pull 방식. Kamal보다 복잡.
+
+## Heroku
+
+```bash
+heroku create myapp
+git push heroku main
+heroku run rails db:migrate
+heroku logs --tail
+heroku ps:scale web=2 worker=1
+heroku config:set RAILS_MASTER_KEY=...
+```
+
+빠른 prototype에 적합. 비싸짐. Render/Fly.io가 대안.
+
+```ruby
+# Procfile
+web: bin/rails server -p $PORT -e $RAILS_ENV
+worker: bundle exec sidekiq
+release: bin/rails db:migrate
+```
+
+## Render / Fly.io
+
+비슷한 PaaS. 더 가성비. Render는 GitHub auto-deploy 깔끔.
+
+`render.yaml`:
+
+```yaml
+services:
+  - type: web
+    name: myapp
+    runtime: ruby
+    buildCommand: "bundle install && bin/rails assets:precompile"
+    startCommand: "bundle exec puma -C config/puma.rb"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: myapp-db
+          property: connectionString
+
+databases:
+  - name: myapp-db
+    plan: starter
+```
+
+## Docker (수동)
+
+```dockerfile
+FROM ruby:3.3-alpine
+
+RUN apk add --no-cache build-base postgresql-dev nodejs yarn tzdata git
+
+WORKDIR /app
+
+COPY Gemfile* ./
+RUN bundle install --jobs 4 --retry 3
+
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile
+
+COPY . .
+
+RUN SECRET_KEY_BASE=$(bin/rails secret) bin/rails assets:precompile
+
+EXPOSE 3000
+
+CMD ["bin/rails", "server", "-b", "0.0.0.0"]
+```
+
+### docker-compose
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build: .
+    depends_on: [db, redis]
+    environment:
+      DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/myapp
+      REDIS_URL: redis://redis:6379/0
+      RAILS_MASTER_KEY: ${RAILS_MASTER_KEY}
+    ports: ["3000:3000"]
+    command: bin/rails server -b 0.0.0.0
+
+  worker:
+    build: .
+    depends_on: [db, redis]
+    command: bundle exec sidekiq
+
+volumes:
+  pg_data:
+```
+
+## Asset precompile
+
+```bash
+RAILS_ENV=production bin/rails assets:precompile
+```
+
+`public/assets/`에 결과. nginx/CDN이 서빙.
+
+Rails 8 + Propshaft + importmap → 빌드 거의 없음. esbuild/dartsass-rails 사용 시 별도 빌드.
+
+## DB migration
+
+```bash
+# Kamal
+bin/kamal app exec "bin/rails db:migrate"
+
+# Heroku
+heroku run rails db:migrate
+
+# 일반 ssh
+ssh server "cd /app && bin/rails db:migrate"
+```
+
+배포 워크플로에 자동화. 다운타임 없는 마이그레이션 = 별 페이지 참고.
+
+## 환경변수
+
+```bash
+# 로컬
+EDITOR=vim bin/rails credentials:edit
+
+# Kamal
+bin/kamal env push    # local .env → 서버
+# 또는 secret env로 명시
+```
+
+`.env` 파일 git 커밋 X. `.env.example`만.
+
+## 모니터링
+
+- **에러**: Sentry, Honeybadger, Rollbar
+- **APM**: Skylight, NewRelic, AppSignal, Scout
+- **로그**: Papertrail, Datadog, ELK
+- **메트릭**: Prometheus + Grafana
+- **uptime**: Pingdom, UptimeRobot
+
+```ruby
+# Gemfile
+gem "sentry-ruby"
+gem "sentry-rails"
+
+# config/initializers/sentry.rb
+Sentry.init do |config|
+  config.dsn = ENV["SENTRY_DSN"]
+  config.traces_sample_rate = 0.1
+end
+```
+
+## 함정
+
+### 1. master.key git 커밋
+
+`.gitignore`에 `config/master.key`. 절대 커밋 X. 노출 시 즉시 회전.
+
+### 2. asset 변경 후 재배포
+
+CDN 캐싱 1년 → 새 자산 안 보임. `bin/rails assets:precompile`이 hash 추가하므로 자동 새 URL.
+
+### 3. DB connection pool
+
+```yaml
+# database.yml
+production:
+  pool: <%= ENV.fetch("DB_POOL") { ENV.fetch("RAILS_MAX_THREADS") { 5 } } %>
+```
+
+워커 × 스레드 ≤ DB max_connections. 부족하면 timeout.
+
+### 4. tmp/ 영속성
+
+```ruby
+Rails.root.join("tmp", "uploads", filename).write(...)
+```
+
+컨테이너 재시작 시 사라짐. Active Storage + S3로.
+
+### 5. healthcheck 인증
+
+```ruby
+get "up" => "rails/health#show"    # public OK?
+```
+
+내부 IP만 또는 token 검사. 외부 노출은 정보 누출 가능.
+
+## 보안 체크리스트
+
+- [ ] Rails master key 환경변수
+- [ ] HTTPS 강제 (`force_ssl`)
+- [ ] HSTS
+- [ ] CSP
+- [ ] SECURE/HTTPONLY cookies
+- [ ] DB password 환경변수
+- [ ] dependabot, bundler-audit
+- [ ] log에 비밀 X (filter_parameters)
+- [ ] CORS allowedOrigins 명시
+
+## 참고
+
+- [Kamal](https://kamal-deploy.org/)
+- [Capistrano](https://capistranorb.com/)
+- [Puma config](https://github.com/puma/puma)
+- [Render Rails guide](https://render.com/docs/deploy-rails)
+- [Fly.io Rails](https://fly.io/docs/rails/)

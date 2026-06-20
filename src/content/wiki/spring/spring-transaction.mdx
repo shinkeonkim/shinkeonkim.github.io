@@ -1,0 +1,334 @@
+---
+title: "[Spring] Transaction: @Transactional, propagation, isolation"
+aliases: ["spring transaction", "@Transactional", "propagation", "isolation level", "rollback", "PlatformTransactionManager"]
+tags: [spring, transaction, jpa, jdbc]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring 트랜잭션은 **AOP 기반 선언형 트랜잭션 관리**. `@Transactional` 한 줄로 메서드 전체를 트랜잭션 범위로. JDBC, JPA, MongoDB 등 backend에 동일 API.
+
+## 기본
+
+```java
+@Service
+public class TransferService {
+    private final AccountRepository accountRepository;
+
+    @Transactional
+    public void transfer(Long fromId, Long toId, BigDecimal amount) {
+        Account from = accountRepository.findById(fromId).orElseThrow();
+        Account to = accountRepository.findById(toId).orElseThrow();
+        from.withdraw(amount);
+        to.deposit(amount);
+        // dirty checking이 자동 UPDATE
+    }
+}
+```
+
+메서드 시작 시 트랜잭션 begin, 정상 반환 시 commit, 예외 시 rollback (기본은 unchecked만).
+
+## readOnly
+
+```java
+@Service
+@Transactional(readOnly = true)
+public class UserService {
+
+    public User findById(Long id) {
+        return userRepository.findById(id).orElseThrow();
+    }
+
+    @Transactional    // override
+    public User update(Long id, String name) {
+        ...
+    }
+}
+```
+
+`readOnly=true`로 Hibernate가 dirty checking 생략 → 성능 향상. read 메서드에 권장.
+
+## Propagation
+
+중첩 트랜잭션 처리.
+
+| Propagation | 동작 |
+|-------------|------|
+| `REQUIRED` (기본) | 트랜잭션 있으면 참여, 없으면 새로 |
+| `REQUIRES_NEW` | 항상 새 트랜잭션 (기존은 suspend) |
+| `NESTED` | 부모 안의 savepoint |
+| `SUPPORTS` | 트랜잭션 있으면 참여, 없으면 비트랜잭션 |
+| `NOT_SUPPORTED` | 트랜잭션 suspend, 비트랜잭션으로 실행 |
+| `MANDATORY` | 트랜잭션 필수, 없으면 예외 |
+| `NEVER` | 트랜잭션 없어야 함, 있으면 예외 |
+
+```java
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void logAudit(...) {
+    // 부모 트랜잭션과 독립적으로 commit/rollback
+}
+```
+
+자주 쓰는 case: 감사 로그는 `REQUIRES_NEW`로 메인 작업이 실패해도 기록 남김.
+
+## Isolation Level
+
+```java
+@Transactional(isolation = Isolation.READ_COMMITTED)
+public void doSomething() { ... }
+```
+
+| Isolation | 동작 |
+|-----------|------|
+| `READ_UNCOMMITTED` | dirty read 가능 (가장 약) |
+| `READ_COMMITTED` | dirty read 방지 (대부분 DB 기본) |
+| `REPEATABLE_READ` | non-repeatable read 방지 (MySQL 기본) |
+| `SERIALIZABLE` | phantom read 방지 (가장 강) |
+| `DEFAULT` | DB의 기본 |
+
+PostgreSQL 기본은 READ_COMMITTED. SERIALIZABLE은 데드락 가능 + 성능 손해.
+
+## rollbackFor
+
+```java
+@Transactional(rollbackFor = Exception.class)    // checked exception도 rollback
+public void process() throws IOException { ... }
+
+@Transactional(noRollbackFor = BusinessException.class)
+public void doIt() { ... }
+```
+
+기본은 `RuntimeException` + `Error`만 rollback. Checked 예외는 commit. 의도에 맞게 override.
+
+## timeout
+
+```java
+@Transactional(timeout = 5)    // 5초
+public void longOperation() { ... }
+```
+
+지정 시간 초과 시 rollback.
+
+## 트랜잭션 매니저
+
+```java
+@Bean
+public PlatformTransactionManager transactionManager(EntityManagerFactory emf) {
+    return new JpaTransactionManager(emf);
+}
+
+// JDBC만
+@Bean
+public PlatformTransactionManager transactionManager(DataSource ds) {
+    return new DataSourceTransactionManager(ds);
+}
+```
+
+Spring Boot 자동. 여러 DB는 명시.
+
+```java
+@Transactional("primary")
+@Transactional("secondary")
+```
+
+## 수동 트랜잭션
+
+```java
+@Service
+public class MyService {
+    private final TransactionTemplate txTemplate;
+
+    public MyService(PlatformTransactionManager txManager) {
+        this.txTemplate = new TransactionTemplate(txManager);
+    }
+
+    public void doIt() {
+        txTemplate.executeWithoutResult(status -> {
+            // 트랜잭션 안
+            try {
+                ...
+            } catch (Exception e) {
+                status.setRollbackOnly();
+                throw e;
+            }
+        });
+    }
+}
+```
+
+선언형이 보통 충분하나 동적 결정 시 유용.
+
+## 트랜잭션 이벤트
+
+```java
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+public void handleAfterCommit(UserCreatedEvent event) {
+    sendWelcomeEmail(event.user());
+}
+```
+
+phase:
+- `BEFORE_COMMIT`
+- `AFTER_COMMIT` (가장 흔함)
+- `AFTER_ROLLBACK`
+- `AFTER_COMPLETION`
+
+이메일 발송은 commit 후 → 트랜잭션 rollback 시 이메일 미발송 보장.
+
+```java
+@Service
+public class UserService {
+    @Transactional
+    public User create(...) {
+        User user = userRepository.save(...);
+        eventPublisher.publishEvent(new UserCreatedEvent(user));
+        return user;
+    }
+}
+```
+
+## 자주 보는 패턴
+
+### Service-level 트랜잭션
+
+```java
+@Service
+@Transactional(readOnly = true)
+public class UserService {
+    // 모든 메서드 read-only 기본
+
+    @Transactional
+    public User create(...) { ... }    // write
+
+    @Transactional
+    public void delete(Long id) { ... }    // write
+}
+```
+
+읽기가 대부분이고 쓰기만 명시.
+
+### Bulk update
+
+```java
+@Transactional
+public int bulkUpdate(List<Long> ids) {
+    return em.createQuery("UPDATE User u SET u.active = false WHERE u.id IN :ids")
+        .setParameter("ids", ids)
+        .executeUpdate();
+}
+```
+
+## 함정
+
+### 1. 자기 호출 (self-invocation)
+
+```java
+@Service
+public class UserService {
+    public void a() {
+        b();    // @Transactional 무시!
+    }
+
+    @Transactional
+    public void b() { ... }
+}
+```
+
+proxy 거치지 않아 트랜잭션 시작 안 됨. 해결: 다른 Bean으로 분리.
+
+### 2. checked exception은 기본 rollback X
+
+```java
+@Transactional
+public void process() throws IOException {
+    ...
+    throw new IOException();    // commit! (rollback X)
+}
+```
+
+명시: `@Transactional(rollbackFor = Exception.class)`.
+
+### 3. private 메서드에 @Transactional
+
+```java
+@Transactional    // 무시됨!
+private void doIt() { ... }
+```
+
+public만. 또는 AspectJ load-time weaving.
+
+### 4. 트랜잭션 너무 길게
+
+```java
+@Transactional
+public void big() {
+    // DB 작업
+    externalApiCall();    // 트랜잭션 안에서 외부 호출 → DB 락 길게
+    // DB 작업
+}
+```
+
+외부 호출은 트랜잭션 밖으로 분리.
+
+### 5. lazy loading 실패
+
+```java
+@Transactional
+public User findById(Long id) { ... }
+
+// controller에서
+User user = userService.findById(1L);
+user.getPosts();    // LazyInitializationException (트랜잭션 끝남)
+```
+
+JOIN FETCH 또는 OSIV (Open Session In View, 비권장).
+
+### 6. @Transactional과 try-catch
+
+```java
+@Transactional
+public void doIt() {
+    try {
+        riskyOperation();
+    } catch (Exception e) {
+        log.error("", e);    // 예외 삼킴 → commit!
+    }
+}
+```
+
+예외 삼키면 rollback 안 됨. 명시:
+
+```java
+TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+```
+
+또는 그냥 예외 던지기.
+
+## 모니터링
+
+```yaml
+logging:
+  level:
+    org.springframework.transaction: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type: TRACE
+```
+
+P6Spy, datasource-proxy로 SQL 추적.
+
+## Reactive Transaction (WebFlux)
+
+```java
+@Transactional
+public Mono<User> create(...) { ... }
+```
+
+R2DBC, Reactive Mongo 등. 동작 원리 동일하나 reactive context.
+
+## 참고
+
+- [Spring Transaction Management](https://docs.spring.io/spring-framework/reference/data-access/transaction.html)
+- [@Transactional](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative.html)
+- [Propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html)
+- [TransactionalEventListener](https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html#context-functionality-events)

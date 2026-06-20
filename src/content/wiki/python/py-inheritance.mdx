@@ -1,0 +1,261 @@
+---
+title: "[Python] 상속, super, MRO, ABC"
+aliases: ["python inheritance", "super", "MRO", "method resolution order", "ABC", "abstract base class", "다중 상속"]
+tags: [python, inheritance, oop, super, mro, abc]
+updated: 2026-06-20
+---
+
+## 단일 상속
+
+```python
+class Animal:
+    def __init__(self, name):
+        self.name = name
+
+    def speak(self):
+        return "some sound"
+
+class Dog(Animal):
+    def speak(self):
+        return "Woof!"
+
+d = Dog("Rex")
+print(d.name, d.speak())    # Rex Woof!
+print(isinstance(d, Dog))      # True
+print(isinstance(d, Animal))   # True
+print(issubclass(Dog, Animal)) # True
+```
+
+## super()
+
+부모 메서드를 호출하려면 `super()`. 다중 상속에서 MRO를 따라 다음 클래스로 디스패치.
+
+```python
+class Animal:
+    def __init__(self, name):
+        self.name = name
+        print(f"Animal init: {name}")
+
+class Dog(Animal):
+    def __init__(self, name, breed):
+        super().__init__(name)       # 부모 __init__ 호출
+        self.breed = breed
+        print(f"Dog init: {breed}")
+
+d = Dog("Rex", "Labrador")
+```
+
+`super()` 인자 없이 호출하면 현재 클래스/인스턴스가 자동 주입된다(Python 3). 명시 형태 `super(Dog, self)`는 Python 2 호환이나 특수 상황에서만.
+
+## 메서드 오버라이딩
+
+```python
+class Base:
+    def greet(self):
+        return "Hello"
+
+class Friendly(Base):
+    def greet(self):
+        return super().greet() + ", friend!"
+
+print(Friendly().greet())    # Hello, friend!
+```
+
+## 다중 상속과 MRO
+
+Python은 **다중 상속**을 지원한다. 메서드 해결 순서(MRO)는 **C3 linearization** 알고리즘으로 결정.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`class A:
+    def method(self):
+        print("A")
+
+class B(A):
+    def method(self):
+        print("B")
+        super().method()
+
+class C(A):
+    def method(self):
+        print("C")
+        super().method()
+
+class D(B, C):
+    def method(self):
+        print("D")
+        super().method()
+
+D().method()
+print([c.__name__ for c in D.__mro__])`}
+  output={`D
+B
+C
+A
+['D', 'B', 'C', 'A', 'object']`}
+/>
+
+MRO 출력: D → B → C → A → object. 다이아몬드 상속에서 A가 두 번 호출되지 않는다.
+
+### C3 알고리즘 개요
+
+- **자식이 부모보다 먼저**
+- **선언 순서 보존** (D(B, C) → B가 C보다 먼저)
+- **단조성**: 모든 클래스의 MRO가 일관
+
+```python
+print(D.mro())  # [D, B, C, A, object]
+```
+
+MRO 충돌 시 `TypeError: Cannot create a consistent method resolution order`.
+
+## Mixin 패턴
+
+다중 상속의 실용 사례. 작고 직교적인 기능을 조합.
+
+```python
+class JSONMixin:
+    def to_json(self):
+        import json
+        return json.dumps(self.__dict__)
+
+class TimestampMixin:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from datetime import datetime
+        self.created_at = datetime.now()
+
+class User(TimestampMixin, JSONMixin):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+u = User("Alice")
+print(u.to_json())
+```
+
+Mixin은 상태가 거의 없고, 다른 클래스에 기능만 주입하는 클래스. 이름 끝에 `Mixin` 접미사가 관례.
+
+## 추상 베이스 클래스 (ABC)
+
+`abc` 모듈로 강제 구현 인터페이스 정의.
+
+```python
+from abc import ABC, abstractmethod
+
+class Shape(ABC):
+    @abstractmethod
+    def area(self):
+        ...
+
+    @abstractmethod
+    def perimeter(self):
+        ...
+
+class Square(Shape):
+    def __init__(self, side):
+        self.side = side
+
+    def area(self):
+        return self.side ** 2
+
+    def perimeter(self):
+        return self.side * 4
+
+# Shape() → TypeError (인스턴스화 불가)
+# 추상 메서드 미구현 서브클래스도 인스턴스화 불가
+s = Square(5)
+print(s.area())
+```
+
+`@abstractmethod`로 표시된 메서드가 하나라도 미구현이면 인스턴스화 시 `TypeError`. 컴파일 타임이 아닌 호출 시점 검사.
+
+### 가상 서브클래스 등록
+
+명시 상속 없이도 isinstance/issubclass에서 통과시킬 수 있다.
+
+```python
+from abc import ABC
+class Iterable(ABC):
+    @classmethod
+    def __subclasshook__(cls, C):
+        return hasattr(C, "__iter__")
+
+print(issubclass(list, Iterable))    # True
+```
+
+`collections.abc`가 이 패턴으로 표준 인터페이스(Mapping, Sequence, Set, …)를 제공한다.
+
+## Protocol (Structural Subtyping, 3.8+)
+
+명시 상속 없이 **모양**으로 타입 호환을 판정. duck typing의 정적 버전.
+
+```python
+from typing import Protocol
+
+class Drawable(Protocol):
+    def draw(self) -> None: ...
+
+class Circle:
+    def draw(self) -> None:
+        print("○")
+
+def render(d: Drawable):
+    d.draw()
+
+render(Circle())   # 타입 체커가 Circle을 Drawable로 인정 (명시 상속 불필요)
+```
+
+라이브러리 호환성 유지에 유용. 기존 클래스를 수정 없이 인터페이스에 맞출 수 있다.
+
+## 상속 vs 합성
+
+> "Favor composition over inheritance" - Gang of Four
+
+상속은 강한 결합. 부모 변경이 자식을 깬다. 가능하면 **위임/합성** 사용.
+
+```python
+# 상속
+class TimedList(list):
+    def append(self, x):
+        self._touch()
+        return super().append(x)
+
+# 합성
+class TimedList:
+    def __init__(self):
+        self._data = []
+
+    def append(self, x):
+        self._touch()
+        self._data.append(x)
+
+    def __len__(self):
+        return len(self._data)
+```
+
+합성이 더 안전하지만 list의 모든 메서드를 위임해야 함. 추상화 비용 트레이드오프.
+
+## 자주 쓰이는 매직 메서드
+
+| 메서드 | 호출 시점 |
+|--------|----------|
+| `__init__` | 인스턴스 초기화 |
+| `__new__` | 인스턴스 생성 (드물게 오버라이드) |
+| `__del__` | GC (의존 X) |
+| `__repr__`, `__str__` | 표시 |
+| `__eq__`, `__hash__` | 비교, 해시 |
+| `__lt__` 등 | `<`, `>`, … |
+| `__len__`, `__getitem__`, `__setitem__` | 컨테이너 |
+| `__iter__`, `__next__` | iterator |
+| `__call__` | `instance()` 호출 |
+| `__enter__`, `__exit__` | with 문 |
+| `__getattr__`, `__setattr__` | 속성 접근 가로채기 |
+
+## 참고
+
+- [Python tutorial: Inheritance](https://docs.python.org/3/tutorial/classes.html#inheritance)
+- [PEP 3119 – Introducing Abstract Base Classes](https://peps.python.org/pep-3119/)
+- [PEP 544 – Protocols: Structural subtyping](https://peps.python.org/pep-0544/)
+- [The Python 2.3 Method Resolution Order](https://www.python.org/download/releases/2.3/mro/)

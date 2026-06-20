@@ -1,0 +1,285 @@
+---
+title: "[Python] pickle, shelve, marshal: 객체 직렬화"
+aliases: ["python pickle", "pickle.dumps", "shelve", "marshal", "직렬화", "serialization"]
+tags: [python, pickle, shelve, serialization, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`pickle`은 **Python 객체를 바이트로 직렬화**하는 표준 모듈. dict, list, 사용자 클래스 등 거의 모든 객체를 디스크/네트워크로 옮길 수 있다.
+
+**보안 경고**: pickle은 **신뢰할 수 없는 입력을 절대 로드하지 마라**. `__reduce__` 메서드를 통해 임의 코드 실행이 가능 (RCE).
+
+## 기본 API
+
+```python
+import pickle
+
+data = {"name": "Alice", "age": 30, "tags": [1, 2, 3]}
+
+# 바이트로 직렬화
+b = pickle.dumps(data)
+print(type(b), len(b))
+
+# 역직렬화
+restored = pickle.loads(b)
+print(restored)
+
+# 파일에 직접
+with open("data.pkl", "wb") as f:
+    pickle.dump(data, f)
+
+with open("data.pkl", "rb") as f:
+    restored = pickle.load(f)
+```
+
+`json`과 달리 binary, Python 전용.
+
+## 지원 객체
+
+- 기본 타입: int, float, str, bytes, bool, None
+- 컨테이너: list, tuple, dict, set, frozenset
+- 사용자 클래스 (모듈 경로 + 속성 사전)
+- function, class 자체 (이름 참조)
+
+**불가**:
+- 람다, 로컬 함수 (`__qualname__`로 찾을 수 없음)
+- 파일 핸들, 소켓, DB 커넥션
+- 일부 제너레이터, 컨텍스트 매니저
+
+## 프로토콜 버전
+
+```python
+pickle.HIGHEST_PROTOCOL    # 5 (Python 3.8+)
+pickle.DEFAULT_PROTOCOL    # 4 또는 5
+
+pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+```
+
+높은 protocol = 작고 빠름. 다른 Python 버전과 호환 필요하면 protocol 명시.
+
+- protocol 5 (3.8+): out-of-band buffer (NumPy 등 zero-copy)
+- protocol 4 (3.4+): 큰 객체 지원
+- protocol 2 (2.3+): 신클래스 지원
+
+## 사용자 클래스
+
+```python
+import pickle
+
+class User:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+u = User("Alice", 30)
+b = pickle.dumps(u)
+
+# 역직렬화 시 클래스 import 가능해야 함
+u2 = pickle.loads(b)
+print(u2.name, u2.age)
+```
+
+pickle은 인스턴스 데이터(`__dict__`)와 클래스의 **이름**(`module.Classname`)을 저장. 역직렬화 시 import 후 `__new__`로 인스턴스 만들고 `__dict__` 복원.
+
+**클래스가 이동/이름 변경되면 unpickle 실패**.
+
+## __reduce__: 커스텀 직렬화
+
+특별한 객체를 직렬화하려면.
+
+```python
+class FileWrapper:
+    def __init__(self, path):
+        self.path = path
+        self.f = open(path)
+
+    def __reduce__(self):
+        return (FileWrapper, (self.path,))    # 재생성 인자
+```
+
+`__reduce__`는 `(callable, args)` 또는 더 긴 튜플 반환.
+
+이게 보안 위험의 핵심: 임의 callable + 인자를 실행하라고 지시할 수 있음.
+
+## 보안: 절대 신뢰할 수 없는 pickle 로드 금지
+
+```python
+# 공격자가 만든 pickle
+class Exploit:
+    def __reduce__(self):
+        import os
+        return (os.system, ("rm -rf /",))
+
+evil = pickle.dumps(Exploit())
+
+# 서버에서 함부로
+pickle.loads(evil)    # 시스템 삭제!
+```
+
+**규칙**:
+- 외부에서 받은 pickle 절대 로드 X
+- 신뢰 경계 내부에서만 (내부 캐시, 같은 프로세스 IPC)
+- 외부 통신은 JSON, MessagePack, Protocol Buffers 등 안전한 포맷
+
+## json vs pickle
+
+| | json | pickle |
+|---|------|--------|
+| 보안 | 안전 | 위험 |
+| 크기 | 큼 | 작음 |
+| 속도 | 보통 | 빠름 |
+| 호환성 | 모든 언어 | Python 전용 |
+| 지원 타입 | dict/list/기본형 | 거의 모든 객체 |
+| 가독성 | O | X (binary) |
+
+| 상황 | 선택 |
+|------|------|
+| 다른 시스템과 통신 | json |
+| Python 캐시, 임시 저장 | pickle |
+| 사용자가 업로드 가능 | json (절대 pickle X) |
+| 성능 + 풍부한 타입 | pickle |
+
+## shelve: dict 같은 영속 저장소
+
+내부적으로 pickle + dbm.
+
+```python
+import shelve
+
+with shelve.open("mydata.db") as db:
+    db["user1"] = {"name": "Alice", "age": 30}
+    db["users"] = [1, 2, 3]
+
+with shelve.open("mydata.db") as db:
+    print(db["user1"])
+    for k in db:
+        print(k, db[k])
+```
+
+dict 인터페이스로 디스크 영속화. 키는 string만, 값은 pickle 가능한 모든 것.
+
+함정: 가변 객체 변경이 반영 안 됨.
+
+```python
+with shelve.open("db") as db:
+    db["list"] = [1, 2]
+    db["list"].append(3)    # 반영 X (pickle된 사본을 변경한 것뿐)
+
+    # writeback=True 또는 명시 재할당
+    lst = db["list"]
+    lst.append(3)
+    db["list"] = lst         # 재할당으로 다시 pickle
+```
+
+```python
+shelve.open("db", writeback=True)    # 메모리 캐시 + 자동 sync (메모리 부담)
+```
+
+작은 데이터엔 편하지만 동시성·트랜잭션 없음. 대안: sqlite3.
+
+## marshal
+
+CPython 내부 포맷 (`.pyc` 파일에 사용). 사용자 코드는 거의 안 씀.
+
+```python
+import marshal
+data = marshal.dumps({"a": 1})
+print(marshal.loads(data))
+```
+
+장점: pickle보다 빠를 수 있음. 단점: 매우 제한적 타입 지원, Python 버전 호환 없음, 디버깅 어려움. **거의 사용 안 함**.
+
+## 안전한 대안
+
+### MessagePack
+
+```python
+import msgpack    # pip install msgpack
+
+b = msgpack.packb({"name": "Alice", "age": 30})
+restored = msgpack.unpackb(b)
+```
+
+json보다 작고 빠름. Python 외 언어와 호환. 안전.
+
+### Protocol Buffers
+
+```bash
+pip install protobuf
+```
+
+타입 스키마 정의 → 강타입, 다국어 호환. 대규모 시스템에 적합.
+
+### Apache Arrow / Parquet
+
+큰 DataFrame, 분석 데이터.
+
+### pickle 안전 모드: 화이트리스트
+
+```python
+import pickle
+import io
+
+class SafeUnpickler(pickle.Unpickler):
+    safe_modules = {"builtins": {"list", "dict", "set"}}
+
+    def find_class(self, module, name):
+        if module in self.safe_modules and name in self.safe_modules[module]:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"forbidden: {module}.{name}")
+
+def safe_loads(data):
+    return SafeUnpickler(io.BytesIO(data)).load()
+```
+
+완벽한 안전은 아님. 신뢰할 수 없는 데이터엔 여전히 다른 포맷 권장.
+
+## 자주 보는 패턴
+
+### multiprocessing 인자 전달
+
+`multiprocessing`은 내부적으로 pickle을 사용. 람다, 로컬 함수, 일부 객체 전달 시 `PicklingError` 발생.
+
+```python
+# WRONG
+def main():
+    fn = lambda x: x * 2
+    pool.map(fn, data)    # 람다는 pickle 불가
+
+# CORRECT
+def double(x): return x * 2
+
+def main():
+    pool.map(double, data)
+```
+
+### 캐시 저장
+
+```python
+import pickle
+from pathlib import Path
+
+def cached(path, fn):
+    p = Path(path)
+    if p.exists():
+        with p.open("rb") as f:
+            return pickle.load(f)
+    result = fn()
+    with p.open("wb") as f:
+        pickle.dump(result, f)
+    return result
+
+data = cached("cache.pkl", lambda: expensive_compute())
+```
+
+빠른 prototype. 프로덕션엔 더 견고한 캐시 (Redis 등).
+
+## 참고
+
+- [`pickle` documentation](https://docs.python.org/3/library/pickle.html)
+- [`shelve` documentation](https://docs.python.org/3/library/shelve.html)
+- [`marshal` documentation](https://docs.python.org/3/library/marshal.html)
+- [Pickle is a hacker’s favorite](https://intoli.com/blog/dangerous-pickles/)
+- [`msgpack` Python](https://msgpack-python.readthedocs.io/)

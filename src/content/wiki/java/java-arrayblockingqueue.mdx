@@ -1,0 +1,107 @@
+---
+title: "[Java] ArrayBlockingQueue"
+aliases: ["ArrayBlockingQueue", "java.util.concurrent.ArrayBlockingQueue", "ABQ", "고정 크기 블로킹 큐"]
+tags: [java, concurrent, queue, blocking, bounded]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.ArrayBlockingQueue<E>`** 는 **고정 크기 원형 배열** 기반의 [[BlockingQueue]]. 생성 시 capacity 를 지정해야 하고 그 이상 늘어나지 않는다.
+
+내부에 **단일 [[ReentrantLock]]** 을 사용 (head/tail 공유). 동시 throughput 은 [[LinkedBlockingQueue]] 보다 낮을 수 있지만 메모리 사용량이 예측 가능하고 GC 압력이 작다.
+
+## 시각화
+
+```anim:java-abq-circular
+{}
+```
+
+## 내부 구조
+
+```java
+public class ArrayBlockingQueue<E> ... {
+    final Object[] items;          // 원형 배열
+    int takeIndex;                  // head
+    int putIndex;                   // tail (next slot)
+    int count;
+    final ReentrantLock lock;
+    private final Condition notEmpty;
+    private final Condition notFull;
+}
+```
+
+`notEmpty`, `notFull` 두 [[ReentrantLock]] `Condition` 을 사용. take 가 비어 있으면 notEmpty 에서 대기, put 이 가득 차면 notFull 에서 대기.
+
+## 동작
+
+```java
+public void put(E e) throws InterruptedException {
+    lock.lockInterruptibly();
+    try {
+        while (count == items.length) notFull.await();      // 가득 차면 대기
+        enqueue(e);
+        notEmpty.signal();                                    // take 대기자 깨움
+    } finally { lock.unlock(); }
+}
+
+public E take() throws InterruptedException {
+    lock.lockInterruptibly();
+    try {
+        while (count == 0) notEmpty.await();                // 비어 있으면 대기
+        E e = dequeue();
+        notFull.signal();                                     // put 대기자 깨움
+        return e;
+    } finally { lock.unlock(); }
+}
+```
+
+## 복잡도
+
+| 작업 | 시간 |
+|:---|:---:|
+| `put`, `take` | O(1) |
+| `offer`, `poll`, `peek` | O(1) |
+| `contains`, `remove(Object)` | O(n) |
+| 순회 | O(n), weakly consistent |
+
+## ArrayBlockingQueue vs LinkedBlockingQueue
+
+| 항목 | ArrayBlockingQueue | LinkedBlockingQueue |
+|:---|:---|:---|
+| 크기 | **항상 bounded** | optionally bounded |
+| 백킹 | 원형 배열 | linked list |
+| 락 | **단일** ReentrantLock | takeLock + putLock 분리 |
+| 동시 throughput | 낮음 (락 경합) | 높음 |
+| 메모리 / 원소 | 슬롯 1개 | 노드 객체 1개 |
+| GC 압력 | 작음 (배열 고정) | 큼 (노드 생성/소멸) |
+| 공정성 옵션 | ✓ | ✗ |
+
+> [!IMPORTANT]
+> 메모리 예측이 중요한 환경, 또는 capacity 가 작은 경우 ArrayBlockingQueue 가 자연스럽다. 대량 throughput 이 필요하면 LinkedBlockingQueue.
+
+## 사용 예
+
+### bounded 생산자-소비자
+
+```java
+BlockingQueue<Task> queue = new ArrayBlockingQueue<>(100);
+
+// Producer
+new Thread(() -> {
+    while (running) queue.put(create());
+}).start();
+
+// Consumer
+new Thread(() -> {
+    while (running) process(queue.take());
+}).start();
+```
+
+## 참고
+
+- [[BlockingQueue]]
+- [[LinkedBlockingQueue]]
+- [[ReentrantLock]]
+- [[Blocking]]
+- Oracle, [ArrayBlockingQueue (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ArrayBlockingQueue.html)

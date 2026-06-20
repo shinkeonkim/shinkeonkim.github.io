@@ -1,0 +1,357 @@
+---
+title: "[Spring] Cache: @Cacheable, @CacheEvict, Redis"
+aliases: ["spring cache", "@Cacheable", "@CacheEvict", "@CachePut", "spring cache redis", "CaffeineCache"]
+tags: [spring, cache, redis, caffeine, performance]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Cache**는 메서드 결과를 캐시하는 추상화. `@Cacheable` 한 줄로 메모이제이션. 백엔드는 Caffeine, Redis, Hazelcast, EhCache 등 자유롭게. 캐시 키 생성, TTL, 무효화를 표준 어노테이션으로.
+
+## 활성화
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-cache")
+```
+
+```java
+@SpringBootApplication
+@EnableCaching
+public class App { }
+```
+
+## @Cacheable
+
+```java
+@Service
+public class UserService {
+
+    @Cacheable("users")
+    public User findById(Long id) {
+        return userRepository.findById(id).orElseThrow();
+    }
+}
+```
+
+첫 호출 시 DB 조회 + 캐시 저장. 이후 같은 ID는 캐시에서.
+
+여러 cache 이름:
+
+```java
+@Cacheable({"users", "all-users"})
+```
+
+## key
+
+```java
+@Cacheable(value = "users", key = "#id")
+public User findById(Long id) { ... }
+
+@Cacheable(value = "users", key = "#user.id")
+public Profile getProfile(User user) { ... }
+
+@Cacheable(value = "users", key = "#a0 + '-' + #a1")
+public List<User> search(String name, String role) { ... }
+
+@Cacheable(value = "users", key = "T(java.util.Objects).hash(#name, #role)")
+public ...
+```
+
+SpEL 표현식. 기본은 모든 인자 조합으로 SimpleKey 생성.
+
+## condition / unless
+
+```java
+@Cacheable(value = "users", condition = "#id > 0", unless = "#result == null")
+public User findById(Long id) { ... }
+```
+
+- `condition`: 호출 전 평가 → false면 캐시 미사용
+- `unless`: 호출 후 평가 → true면 캐시 안 함
+
+## @CacheEvict
+
+```java
+@CacheEvict(value = "users", key = "#user.id")
+public void update(User user) { ... }
+
+@CacheEvict(value = "users", allEntries = true)
+public void clear() { ... }
+
+@CacheEvict(value = "users", beforeInvocation = true)
+public void deleteIfExists(Long id) {
+    if (userRepository.existsById(id)) userRepository.deleteById(id);
+}
+```
+
+`beforeInvocation=true`는 메서드 실행 전 (실패해도 캐시는 비움).
+
+## @CachePut
+
+캐시는 갱신하되 메서드는 항상 실행.
+
+```java
+@CachePut(value = "users", key = "#user.id")
+public User update(User user) {
+    return userRepository.save(user);
+}
+```
+
+반환값으로 캐시 갱신.
+
+## 여러 캐시 동시
+
+```java
+@Caching(
+    evict = {
+        @CacheEvict(value = "users", key = "#user.id"),
+        @CacheEvict(value = "users-by-email", key = "#user.email"),
+    },
+    put = {
+        @CachePut(value = "users", key = "#user.id"),
+    }
+)
+public User save(User user) {
+    return userRepository.save(user);
+}
+```
+
+## Cache 백엔드
+
+### Caffeine (in-memory, 권장 single instance)
+
+```kotlin
+implementation("com.github.ben-manes.caffeine:caffeine")
+```
+
+```yaml
+spring:
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=10000,expireAfterWrite=10m
+```
+
+LRU + TTL + 통계. 단일 JVM에 최적.
+
+### Redis (분산)
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-data-redis")
+```
+
+```yaml
+spring:
+  cache:
+    type: redis
+    redis:
+      time-to-live: 600000    # 10분
+      cache-null-values: false
+  data:
+    redis:
+      host: localhost
+      port: 6379
+```
+
+여러 인스턴스 공유. 메모리 큼.
+
+### EhCache, Hazelcast 등
+
+거의 안 씀. 보통 Caffeine 또는 Redis.
+
+## 커스텀 CacheManager
+
+```java
+@Configuration
+@EnableCaching
+public class CacheConfig {
+
+    @Bean
+    public CacheManager cacheManager() {
+        CaffeineCacheManager manager = new CaffeineCacheManager();
+        manager.setCaffeine(Caffeine.newBuilder()
+            .maximumSize(10000)
+            .expireAfterWrite(Duration.ofMinutes(10))
+            .recordStats());
+        return manager;
+    }
+
+    @Bean
+    public CacheManager redisCacheManager(RedisConnectionFactory factory) {
+        return RedisCacheManager.builder(factory)
+            .cacheDefaults(RedisCacheConfiguration.defaultCacheConfig()
+                .entryTtl(Duration.ofMinutes(10))
+                .disableCachingNullValues()
+                .serializeValuesWith(SerializationPair.fromSerializer(new GenericJackson2JsonRedisSerializer())))
+            .build();
+    }
+}
+```
+
+cache 별 다른 TTL:
+
+```java
+.withCacheConfiguration("users", config.entryTtl(Duration.ofHours(1)))
+.withCacheConfiguration("posts", config.entryTtl(Duration.ofMinutes(5)))
+```
+
+## 직접 캐시 조작
+
+```java
+@Service
+public class MyService {
+    private final CacheManager cacheManager;
+
+    public void warmup() {
+        Cache cache = cacheManager.getCache("users");
+        cache.put("key", value);
+        Cache.ValueWrapper wrapper = cache.get("key");
+        cache.evict("key");
+        cache.clear();
+    }
+}
+```
+
+## 자주 보는 패턴
+
+### Repository 메서드 캐시
+
+```java
+@Cacheable(value = "users-by-email", key = "#email")
+public Optional<User> findByEmail(String email) {
+    return userRepository.findByEmail(email);
+}
+```
+
+JPA의 1차 캐시 + 2차 캐시(Hibernate)가 있지만 Spring Cache는 더 명시적·간단.
+
+### TTL 짧은 hot path
+
+```java
+@Cacheable(value = "popular-posts", key = "'top10'")
+public List<Post> getPopular() {
+    return postRepository.findTop10ByViewsDesc();
+}
+```
+
+캐시 짧게 (1분) + 자주 조회 → DB 부담 크게 감소.
+
+### 비싼 계산
+
+```java
+@Cacheable(value = "recommendations", key = "#userId")
+public List<Item> recommendations(Long userId) {
+    return mlModel.recommend(userId);    // 1초 이상
+}
+```
+
+## Conditional cache (사용자별)
+
+```java
+@Cacheable(value = "user-feed", key = "#userId", condition = "#userId != null")
+public List<Post> feed(Long userId) { ... }
+```
+
+## 함정
+
+### 1. self-invocation
+
+```java
+@Service
+public class MyService {
+    public List<Item> findAll() {
+        return getById(1);    // 직접 호출! @Cacheable 무시
+    }
+
+    @Cacheable("items")
+    public Item getById(Long id) { ... }
+}
+```
+
+proxy 거치지 않음. 다른 Bean으로 분리.
+
+### 2. null 캐시
+
+```java
+@Cacheable("users")
+public User findById(Long id) {
+    return userRepository.findById(id).orElse(null);    // null 캐시됨
+}
+```
+
+`unless = "#result == null"`로 방지.
+
+### 3. Map&lt;K,V&gt; 캐싱
+
+```java
+@Cacheable("config")
+public Map<String, String> loadConfig() { ... }
+```
+
+거대 Map 통째로 캐싱은 무효화 어려움. 더 작은 단위로.
+
+### 4. JSON 직렬화
+
+Redis 사용 시 직렬화/역직렬화 비용. final class, generic은 까다로움.
+
+### 5. Cache stampede
+
+만료 순간 동시 다수 요청 → 모두 DB. lock-based 갱신:
+
+```java
+@Cacheable(value = "...", sync = true)
+public User findById(Long id) { ... }
+```
+
+`sync=true`는 첫 요청만 메서드 실행, 나머지 대기.
+
+## Cache Statistics
+
+Caffeine:
+
+```java
+.recordStats()
+
+// 통계
+caffeineCache.stats();
+// CacheStats{hitCount=1000, missCount=50, ...}
+```
+
+Micrometer 통합:
+
+```yaml
+management:
+  metrics:
+    cache:
+      instrument: true
+```
+
+`cache.gets`, `cache.puts`, `cache.evictions` 메트릭.
+
+## TTL 전략
+
+- Hot data: TTL 짧음 (분)
+- Reference data: TTL 길게 (시간/일)
+- 무한: TTL 없음 + 명시적 evict
+- LRU: 메모리 한계 시 자동 제거
+
+## 비교: Redis vs Caffeine
+
+| | Caffeine | Redis |
+|---|----------|-------|
+| 위치 | JVM 내부 | 외부 |
+| 분산 | X (각 인스턴스) | O |
+| 속도 | 매우 빠름 | 빠름 (네트워크) |
+| 메모리 | JVM heap | 별도 |
+| 영속성 | X | 옵션 |
+| 인프라 | 추가 X | 필요 |
+
+단일 인스턴스 + read-heavy → Caffeine. 분산 → Redis.
+
+## 참고
+
+- [Spring Cache Abstraction](https://docs.spring.io/spring-framework/reference/integration/cache.html)
+- [Caffeine](https://github.com/ben-manes/caffeine)
+- [Spring Data Redis](https://docs.spring.io/spring-data/redis/docs/current/reference/html/#redis)
+- [Caching pattern: cache aside](https://docs.aws.amazon.com/whitepapers/latest/database-caching-strategies-using-redis/welcome.html)

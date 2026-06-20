@@ -1,0 +1,409 @@
+---
+title: "[Rails] AR Associations: belongs_to, has_many, polymorphic"
+aliases: ["rails associations", "has_many through", "belongs_to", "polymorphic association", "STI"]
+tags: [rails, activerecord, association, relationship]
+updated: 2026-06-20
+---
+
+## 정의
+
+ActiveRecord associations로 **테이블 간 관계를 객체 그래프로 표현**. 6가지 매크로(`belongs_to`, `has_one`, `has_many`, `has_many :through`, `has_one :through`, `has_and_belongs_to_many`)와 polymorphic, STI 같은 고급 패턴.
+
+## belongs_to
+
+```ruby
+# Post가 author(User)에 속한다
+class Post < ApplicationRecord
+  belongs_to :author, class_name: "User", foreign_key: "author_id"
+end
+```
+
+마이그레이션:
+
+```ruby
+add_reference :posts, :author, foreign_key: { to_table: :users }
+```
+
+기본 동작:
+- `post.author` → User 조회
+- `post.author = user` → author_id 설정
+- 5.0+ `belongs_to`는 기본 `optional: false` (NOT NULL)
+
+```ruby
+belongs_to :author, optional: true    # NULL 허용
+```
+
+## has_many
+
+```ruby
+class User < ApplicationRecord
+  has_many :posts, foreign_key: "author_id", dependent: :destroy
+end
+```
+
+```ruby
+user.posts                  # SELECT * FROM posts WHERE author_id = ?
+user.posts.count
+user.posts.create(title: "X")
+user.posts << post
+user.posts.destroy(post)
+user.posts.delete_all
+```
+
+`dependent:`
+- `:destroy` (콜백 실행)
+- `:delete_all` (SQL DELETE, 빠름)
+- `:nullify` (FK NULL로)
+- `:restrict_with_exception` (자식 있으면 예외)
+- `:restrict_with_error` (검증 에러)
+
+## has_one
+
+```ruby
+class User < ApplicationRecord
+  has_one :profile, dependent: :destroy
+end
+
+class Profile < ApplicationRecord
+  belongs_to :user
+end
+```
+
+## has_many :through
+
+조인 테이블이 자체 모델인 M:N.
+
+```ruby
+class Doctor < ApplicationRecord
+  has_many :appointments
+  has_many :patients, through: :appointments
+end
+
+class Appointment < ApplicationRecord
+  belongs_to :doctor
+  belongs_to :patient
+end
+
+class Patient < ApplicationRecord
+  has_many :appointments
+  has_many :doctors, through: :appointments
+end
+```
+
+```ruby
+doctor.patients              # 그를 만난 환자들
+appointment = doctor.appointments.create(patient: patient, scheduled_at: ...)
+```
+
+through 모델에 추가 컬럼 가질 수 있어 가장 유연.
+
+## has_and_belongs_to_many
+
+조인 테이블에 모델 없는 M:N. 거의 안 쓴다. through 권장.
+
+```ruby
+class Post < ApplicationRecord
+  has_and_belongs_to_many :tags
+end
+
+# 마이그레이션
+create_join_table :posts, :tags
+```
+
+조인 테이블에 추가 컬럼 못 둠.
+
+## has_one :through
+
+```ruby
+class Supplier < ApplicationRecord
+  has_one :account
+  has_one :account_history, through: :account
+end
+
+class Account < ApplicationRecord
+  belongs_to :supplier
+  has_one :account_history
+end
+
+class AccountHistory < ApplicationRecord
+  belongs_to :account
+end
+
+supplier.account_history    # JOIN account → account_history
+```
+
+## Polymorphic Associations
+
+여러 종류 부모를 하나의 자식이 가질 수 있게.
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :commentable, polymorphic: true
+end
+
+class Post < ApplicationRecord
+  has_many :comments, as: :commentable
+end
+
+class Photo < ApplicationRecord
+  has_many :comments, as: :commentable
+end
+
+# 마이그레이션
+create_table :comments do |t|
+  t.references :commentable, polymorphic: true, null: false
+  t.text :body
+  t.timestamps
+end
+# commentable_type (string), commentable_id (integer)
+```
+
+`comments.commentable` → Post 또는 Photo. type 컬럼으로 클래스명 저장.
+
+함정: FK 제약 못 검. 데이터 무결성은 애플리케이션 책임.
+
+## self-join
+
+```ruby
+class Employee < ApplicationRecord
+  belongs_to :manager, class_name: "Employee", optional: true
+  has_many :subordinates, class_name: "Employee", foreign_key: "manager_id"
+end
+```
+
+조직도, 트리 구조.
+
+## STI (Single Table Inheritance)
+
+여러 클래스가 한 테이블 공유.
+
+```ruby
+class Vehicle < ApplicationRecord
+end
+
+class Car < Vehicle
+end
+
+class Truck < Vehicle
+end
+
+# 마이그레이션
+create_table :vehicles do |t|
+  t.string :type    # 클래스명 저장
+  t.string :name
+end
+
+Car.create(name: "Tesla")     # type = "Car"
+Vehicle.where(type: "Car")     # Car만
+Car.all                        # type = "Car" 자동
+```
+
+타입이 적고 비슷할 때. 컬럼 많아지면 비효율.
+
+## Delegated Type (6.1+)
+
+STI의 강력한 대안.
+
+```ruby
+class Entry < ApplicationRecord
+  delegated_type :entryable, types: %w[Message Comment]
+end
+
+class Message < ApplicationRecord
+  include Entry::Entryable
+end
+
+class Comment < ApplicationRecord
+  include Entry::Entryable
+end
+```
+
+조회는 Entry로 통합, 각자 자기 테이블.
+
+## eager loading
+
+```ruby
+# N+1
+posts = Post.all
+posts.each { |p| puts p.author.name }    # N+1
+
+# includes (자동 선택: preload or eager_load)
+Post.includes(:author).each { |p| puts p.author.name }
+
+# preload: 별도 쿼리 (WHERE author 사용 불가)
+Post.preload(:author)
+
+# eager_load: LEFT OUTER JOIN
+Post.eager_load(:author)
+
+# joins: INNER JOIN (eager X)
+Post.joins(:author).where(authors: { active: true })
+
+# 여러 관계
+Post.includes(:author, :comments, tags: :category)
+```
+
+## extension
+
+```ruby
+class User < ApplicationRecord
+  has_many :posts do
+    def published
+      where(published: true)
+    end
+
+    def recent
+      order(created_at: :desc).limit(5)
+    end
+  end
+end
+
+user.posts.published
+user.posts.recent.published
+```
+
+## counter_cache
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post, counter_cache: true
+end
+
+# Post에 comments_count 컬럼 필요
+post.comments_count    # SQL 없음
+```
+
+자동 +1/-1. M+1 회피.
+
+```ruby
+# 명시 컬럼명
+belongs_to :post, counter_cache: :total_comments
+```
+
+## inverse_of
+
+```ruby
+class Post < ApplicationRecord
+  has_many :comments, inverse_of: :post
+end
+
+class Comment < ApplicationRecord
+  belongs_to :post, inverse_of: :comments
+end
+
+post = Post.find(1)
+comment = post.comments.first
+comment.post.equal?(post)    # true (같은 객체 메모리 공유)
+```
+
+자동 추론되는 경우도 있지만 명시가 안전. 메모리 절약 + 검증 일관.
+
+## has_many association 옵션
+
+```ruby
+has_many :posts,
+  -> { where(published: true).order(created_at: :desc) },    # 기본 scope
+  class_name: "Article",
+  foreign_key: "author_id",
+  primary_key: "uuid",
+  dependent: :destroy,
+  inverse_of: :author,
+  autosave: true,        # 부모 저장 시 자동 자식 저장
+  validate: true,
+  counter_cache: :article_count
+```
+
+## 자주 보는 패턴
+
+### Through with extra data
+
+```ruby
+class Membership < ApplicationRecord
+  belongs_to :user
+  belongs_to :group
+  # 가입일, 권한 등 추가 컬럼
+end
+
+class User < ApplicationRecord
+  has_many :memberships
+  has_many :groups, through: :memberships
+end
+```
+
+### Polymorphic + Comment
+
+```ruby
+class Post; has_many :comments, as: :commentable; end
+class Video; has_many :comments, as: :commentable; end
+
+Comment.where(commentable: post).count
+Comment.where(commentable_type: "Post").count
+```
+
+### Soft delete (paranoid)
+
+```ruby
+gem "paranoia"
+
+class Post < ApplicationRecord
+  acts_as_paranoid
+end
+
+post.destroy           # deleted_at 설정만
+Post.all               # deleted 제외
+Post.with_deleted
+post.restore
+```
+
+대안: `discard` gem (더 단순).
+
+## 함정
+
+### 1. dependent 빠뜨림
+
+```ruby
+has_many :comments    # 부모 삭제해도 자식 남음 → orphan
+has_many :comments, dependent: :destroy
+```
+
+DB FK가 있으면 ON DELETE 동작은 별도.
+
+### 2. 큰 has_many에 destroy
+
+```ruby
+post.destroy    # comments 모두 콜백 실행 → 매우 느림
+```
+
+대안: `dependent: :delete_all` (콜백 X) 또는 background job.
+
+### 3. through + has_many 메모리
+
+```ruby
+Post.includes(:tags).each { |p| p.tags.each {} }
+# tags가 100개 × posts 100개 = 10000 객체
+```
+
+through 깊이 주의.
+
+### 4. polymorphic FK 제약 X
+
+DB가 commentable_id가 진짜 존재하는 행 가리키는지 모름. 직접 검증 또는 callback.
+
+### 5. inverse 추론 실패
+
+```ruby
+class Post; has_many :tags; end
+class Tag; belongs_to :post; end    # inverse 자동 추론
+
+class Post; has_many :tags, class_name: "TagModel"; end
+class TagModel; belongs_to :post; end    # 추론 실패, inverse_of 필요
+```
+
+## 참고
+
+- [Rails Guides: Associations](https://guides.rubyonrails.org/association_basics.html)
+- [Polymorphic associations](https://guides.rubyonrails.org/association_basics.html#polymorphic-associations)
+- [STI](https://api.rubyonrails.org/classes/ActiveRecord/Inheritance.html)
+- [Delegated types](https://api.rubyonrails.org/classes/ActiveRecord/DelegatedType.html)
+- [paranoia](https://github.com/rubysherpas/paranoia)
+- [discard](https://github.com/jhawthorn/discard)

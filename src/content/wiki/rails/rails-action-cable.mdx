@@ -1,0 +1,361 @@
+---
+title: "[Rails] Action Cable & Solid Cable: WebSocket"
+aliases: ["action cable", "websocket", "solid cable", "channels", "broadcast", "rails realtime"]
+tags: [rails, action-cable, websocket, realtime]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Action Cable**은 Rails의 WebSocket 통합. 채널(channel) 기반 발행/구독 모델. Rails 8부터 **Solid Cable** (DB 기반 어댑터)이 기본. 이전엔 Redis 필요. Turbo Streams의 broadcast가 이 위에 구축됨.
+
+## 채널 생성
+
+```bash
+bin/rails g channel Chat
+```
+
+```ruby
+# app/channels/chat_channel.rb
+class ChatChannel < ApplicationCable::Channel
+  def subscribed
+    stream_from "chat_room_#{params[:room]}"
+  end
+
+  def unsubscribed
+    # cleanup
+  end
+
+  def receive(data)
+    # 클라이언트가 보낸 메시지 처리
+    ActionCable.server.broadcast("chat_room_#{params[:room]}", data)
+  end
+
+  def send_message(data)
+    # 클라이언트 perform("send_message", {...}) 호출 처리
+    Message.create!(content: data["message"], room: params[:room])
+  end
+end
+```
+
+```javascript
+// app/javascript/channels/chat_channel.js
+import consumer from "./consumer"
+
+consumer.subscriptions.create({ channel: "ChatChannel", room: "lobby" }, {
+    received(data) {
+        console.log(data)
+    },
+
+    send_message(message) {
+        this.perform("send_message", { message })
+    },
+})
+```
+
+## broadcast
+
+```ruby
+ActionCable.server.broadcast("chat_room_lobby", {
+  user: "Alice",
+  message: "Hello!",
+})
+```
+
+모든 구독자에게 메시지 전송.
+
+Channel 인스턴스에서:
+
+```ruby
+ChatChannel.broadcast_to(@room, message: "...")
+```
+
+## 인증
+
+```ruby
+# app/channels/application_cable/connection.rb
+module ApplicationCable
+  class Connection < ActionCable::Connection::Base
+    identified_by :current_user
+
+    def connect
+      self.current_user = find_verified_user
+    end
+
+    private
+
+    def find_verified_user
+      if verified_user = env["warden"]&.user
+        verified_user
+      else
+        reject_unauthorized_connection
+      end
+    end
+  end
+end
+```
+
+세션/cookie 기반 인증. 또는 token:
+
+```ruby
+def find_verified_user
+  token = request.params[:token]
+  User.find_by(api_token: token) || reject_unauthorized_connection
+end
+```
+
+## stream_for (자동 channel 이름)
+
+```ruby
+class RoomChannel < ApplicationCable::Channel
+  def subscribed
+    room = Room.find(params[:id])
+    stream_for room
+  end
+end
+
+# broadcast
+RoomChannel.broadcast_to(@room, ...)
+```
+
+`broadcasting_for(@room)`이 자동 채널 이름.
+
+## Solid Cable (8.0+)
+
+```ruby
+# Gemfile (Rails 8 자동)
+gem "solid_cable"
+```
+
+```yaml
+# config/cable.yml
+production:
+  adapter: solid_cable
+  connects_to:
+    database:
+      writing: cable
+```
+
+전용 DB 또는 기본 DB 사용 가능. Redis 의존 제거.
+
+## Redis 어댑터 (전통)
+
+```yaml
+production:
+  adapter: redis
+  url: <%= ENV["REDIS_URL"] %>
+```
+
+## Turbo Streams broadcast (위에 구축)
+
+```ruby
+class Post < ApplicationRecord
+  broadcasts_to ->(post) { "posts" }
+  # post.created → posts 채널에 turbo_stream 전송
+  # post.updated, post.destroyed 자동
+end
+
+# 또는 명시
+class Post < ApplicationRecord
+  after_create_commit -> { broadcast_append_to "posts" }
+  after_update_commit -> { broadcast_replace_to "posts" }
+  after_destroy_commit -> { broadcast_remove_to "posts" }
+end
+```
+
+```erb
+<%# views/posts/index.html.erb %>
+<%= turbo_stream_from "posts" %>
+
+<div id="posts">
+  <%= render @posts %>
+</div>
+```
+
+다른 사용자가 글 작성/수정 → 모든 클라이언트에 자동 반영.
+
+## Channel에 인자 전달
+
+```javascript
+consumer.subscriptions.create({
+    channel: "ChatChannel",
+    room: "lobby",
+    user_id: 42
+}, {...})
+```
+
+```ruby
+class ChatChannel < ApplicationCable::Channel
+  def subscribed
+    stream_from "chat_#{params[:room]}"
+    Rails.logger.info "user #{params[:user_id]} joined"
+  end
+end
+```
+
+## reject
+
+```ruby
+def subscribed
+  if user_can_access?(params[:room])
+    stream_from "..."
+  else
+    reject
+  end
+end
+```
+
+권한 없음.
+
+## 클라이언트 메서드 호출
+
+```javascript
+const sub = consumer.subscriptions.create({...}, {
+    received(data) {...}
+})
+
+sub.perform("send_message", {body: "Hello"})    // channel의 send_message 호출
+```
+
+서버:
+
+```ruby
+class ChatChannel < ApplicationCable::Channel
+  def send_message(data)
+    # data["body"]
+    Message.create!(...)
+  end
+end
+```
+
+## 자주 보는 패턴
+
+### 실시간 알림
+
+```ruby
+class NotificationsChannel < ApplicationCable::Channel
+  def subscribed
+    stream_for current_user
+  end
+end
+
+# 알림 발송
+NotificationsChannel.broadcast_to(user, message: "새 댓글")
+```
+
+```javascript
+consumer.subscriptions.create("NotificationsChannel", {
+    received(data) {
+        showToast(data.message)
+    }
+})
+```
+
+### Presence (온라인 사용자)
+
+```ruby
+class PresenceChannel < ApplicationCable::Channel
+  def subscribed
+    Redis.current.sadd("online_users", current_user.id)
+    broadcast_presence
+    stream_from "presence"
+  end
+
+  def unsubscribed
+    Redis.current.srem("online_users", current_user.id)
+    broadcast_presence
+  end
+
+  private
+
+  def broadcast_presence
+    ActionCable.server.broadcast("presence", users: Redis.current.smembers("online_users"))
+  end
+end
+```
+
+### 실시간 협업 에디터
+
+각 키 입력을 broadcast → 다른 클라이언트 즉시 반영. Operational Transform 또는 CRDT 라이브러리 필요.
+
+## 배포 시 고려
+
+- WebSocket은 long-lived 연결 → 워커 메모리/CPU
+- Nginx 프록시 설정:
+  ```nginx
+  location /cable {
+      proxy_pass http://rails;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+  }
+  ```
+- Puma 워커는 thread-safe 필수
+- 큰 메시지는 별도 storage + ID broadcast
+
+## 함정
+
+### 1. broadcast에 큰 객체
+
+```ruby
+ActionCable.server.broadcast("ch", post: @post)    # AR 인스턴스 직렬화
+```
+
+primitive로 변환:
+
+```ruby
+broadcast("ch", post: @post.as_json)
+```
+
+### 2. broadcast가 트랜잭션 내부
+
+```ruby
+ActiveRecord::Base.transaction do
+  post.save!
+  ActionCable.server.broadcast("ch", post: post.as_json)
+  # 트랜잭션 rollback 시 broadcast는 이미 발송됨
+end
+```
+
+`after_commit` 안에서.
+
+### 3. 권한 검사
+
+`stream_from`은 채널 이름만 검사. 권한 없는 사용자가 다른 사람 채널 구독 시도 가능.
+
+```ruby
+def subscribed
+  if @room.member?(current_user)
+    stream_for @room
+  else
+    reject
+  end
+end
+```
+
+### 4. JSON 인코딩
+
+서버는 hash 그대로 broadcast. 클라이언트가 JSON 받음. 객체 inspect 등 직렬화 안 됨.
+
+### 5. 동시성
+
+채널 핸들러는 Puma thread pool에서 실행. CPU 작업은 별도 job으로.
+
+## 대안
+
+| 솔루션 | 적합 |
+|--------|------|
+| Action Cable | Rails 표준 |
+| Solid Cable | DB 단순화 |
+| Pusher | 호스팅 (외부 의존) |
+| AnyCable | Action Cable 성능 향상 (Go 워커) |
+| Mercure | SSE 대안 |
+
+대용량 동시 연결은 AnyCable 검토.
+
+## 참고
+
+- [Action Cable Overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [Solid Cable](https://github.com/rails/solid_cable)
+- [AnyCable](https://anycable.io/)
+- [Turbo Streams](https://turbo.hotwired.dev/handbook/streams)

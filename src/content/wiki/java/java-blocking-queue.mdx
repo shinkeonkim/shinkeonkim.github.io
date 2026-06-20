@@ -1,0 +1,256 @@
+---
+title: "[Java] BlockingQueue"
+aliases: ["BlockingQueue", "java.util.concurrent.BlockingQueue", "blocking queue", "블로킹 큐", "BQ"]
+tags: [java, concurrent, queue, blocking, producer-consumer, jsr-166]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.BlockingQueue<E>`** 는 **요소를 가져올 때 비어 있으면 대기**, **넣을 때 가득 차 있으면 대기** 하는 thread-safe 큐 인터페이스. 생산자-소비자 (producer-consumer) 패턴의 표준 구현체.
+
+`take()` 는 큐가 빌 때까지 [[Blocking]], `put()` 은 큐가 가득 찰 때까지 blocking. 이름 그대로 **block 의 성질을 활용** 한다.
+
+핵심 구현체 6 개.
+
+| 구현 | 특징 |
+|:---|:---|
+| **ArrayBlockingQueue** | 고정 크기, 단일 락 (head/tail 공유) |
+| **LinkedBlockingQueue** | 옵션 크기, **두 락** (head/tail 분리, 더 높은 throughput) |
+| **PriorityBlockingQueue** | 우선순위 (heap), unbounded |
+| **SynchronousQueue** | 용량 0, 직접 핸드오프 |
+| **DelayQueue** | 원소가 지정된 delay 이후에만 꺼낼 수 있음 |
+| **LinkedTransferQueue** | producer 가 consumer 도착을 기다릴 수 있음 |
+
+## 시각화
+
+```anim:java-blocking-queue-pc
+{}
+```
+
+## 핵심 메서드 매트릭스
+
+`BlockingQueue` 의 메서드는 **꽉 참 / 비어 있음** 상황에 어떻게 반응하느냐로 4 가지 그룹으로 나뉜다.
+
+| 동작 | 예외 throw | 특수값 반환 | block | timeout |
+|:---|:---|:---|:---|:---|
+| **insert** | `add(e)` | `offer(e)` | `put(e)` | `offer(e, t, u)` |
+| **remove** | `remove()` | `poll()` | `take()` | `poll(t, u)` |
+| **peek** | `element()` | `peek()` | (없음) | (없음) |
+
+### 예외 throw
+
+```java
+queue.add(elem);        // 큐 가득 → IllegalStateException
+queue.remove();         // 큐 비어 있음 → NoSuchElementException
+```
+
+### 특수값 반환
+
+```java
+boolean ok = queue.offer(elem);   // 가득 → false
+Task t = queue.poll();             // 비어 있음 → null
+```
+
+### Block (BlockingQueue 의 핵심)
+
+```java
+queue.put(elem);        // 가득 → 자리 날 때까지 block
+Task t = queue.take();   // 비어 있음 → 원소 들어올 때까지 block
+```
+
+### Timeout
+
+```java
+boolean ok = queue.offer(elem, 100, TimeUnit.MILLISECONDS);
+Task t = queue.poll(500, TimeUnit.MILLISECONDS);
+```
+
+> [!TIP]
+> 어떤 그룹을 쓸지가 설계 결정이다. **반드시 처리해야 함 → put/take**, **포기 가능 → offer/poll**, **포기 + 타임아웃 → timed offer/poll**.
+
+## 가장 흔한 패턴, Producer-Consumer
+
+```java
+final BlockingQueue<Task> queue = new LinkedBlockingQueue<>(1000);
+
+// Producer
+new Thread(() -> {
+    while (true) {
+        Task t = generate();
+        queue.put(t);              // 큐가 가득 차면 자연스럽게 backpressure
+    }
+}).start();
+
+// Consumer
+new Thread(() -> {
+    while (true) {
+        Task t = queue.take();     // 원소 올 때까지 block
+        process(t);
+    }
+}).start();
+```
+
+이 코드의 강점.
+
+1. **명시적 동기화 코드가 없다**, BlockingQueue 가 모두 처리
+2. **자연스러운 backpressure**, producer 가 너무 빠르면 큐가 가득 차서 자동으로 throttle
+3. **확장 가능**, producer 또는 consumer 를 N 개로 늘려도 코드 변경 없음
+
+## 구현체별 비교
+
+### ArrayBlockingQueue
+
+- 내부: 원형 배열 (circular buffer)
+- 락: **단일 ReentrantLock**, head 와 tail 모두 같은 락 보호
+- 크기: **고정** (생성 시 지정)
+- 공정성: 옵션 (FIFO 보장)
+
+```java
+BlockingQueue<Task> q = new ArrayBlockingQueue<>(100);
+BlockingQueue<Task> fair = new ArrayBlockingQueue<>(100, true);
+```
+
+장점: 메모리 미리 할당, GC 압력 작음.
+단점: 락 경합 (read/write 가 같은 락).
+
+### LinkedBlockingQueue
+
+- 내부: linked list (head, tail 포인터)
+- 락: **두 개의 ReentrantLock** (`takeLock`, `putLock`)
+- 크기: optionally bounded (`Integer.MAX_VALUE` 기본)
+
+```java
+BlockingQueue<Task> q = new LinkedBlockingQueue<>();       // unbounded
+BlockingQueue<Task> q2 = new LinkedBlockingQueue<>(1000);  // bounded
+```
+
+장점: producer 와 consumer 가 다른 락 → **동시에 가능**.
+단점: 각 원소가 노드 객체 → GC 압력.
+
+> [!IMPORTANT]
+> **거의 모든 실무 case 의 첫 선택은 `LinkedBlockingQueue` 또는 `ArrayBlockingQueue`**. 두 락 분리 덕에 LinkedBlockingQueue 가 throughput 우위인 경우가 많다. **크기를 반드시 bounded 로 지정** 하라, unbounded 는 OOM 의 원인.
+
+### PriorityBlockingQueue
+
+- 내부: 힙 (heap)
+- 락: 단일 ReentrantLock
+- 크기: **unbounded** (capacity 부족 시 grow)
+- 순서: `Comparator` 또는 `Comparable` 기준 우선순위
+
+```java
+BlockingQueue<Task> q = new PriorityBlockingQueue<>(
+    100,
+    Comparator.comparingInt(Task::priority).reversed()
+);
+```
+
+긴급 작업 우선 처리, 스케줄러 패턴에 적합.
+
+### SynchronousQueue
+
+- 용량 0, **저장 공간 없음**
+- `put` 은 매칭되는 `take` 가 있어야 진행, 반대도 마찬가지
+- **직접 핸드오프 (direct handoff)**
+
+```java
+BlockingQueue<Task> q = new SynchronousQueue<>();
+// Producer: put 하면 consumer 가 take 할 때까지 block
+// Consumer: take 하면 producer 가 put 할 때까지 block
+```
+
+쓰임: `Executors.newCachedThreadPool()` 의 내부 큐. 새 작업이 오면 즉시 스레드에 전달, 없으면 새 스레드 생성.
+
+### DelayQueue
+
+- 원소는 `Delayed` 인터페이스 구현 필요
+- **delay 가 만료된 원소만** poll/take 로 꺼낼 수 있음
+
+```java
+class DelayedTask implements Delayed {
+    private final long readyAt;
+    public long getDelay(TimeUnit u) {
+        return u.convert(readyAt - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+    }
+    public int compareTo(Delayed o) { ... }
+}
+
+BlockingQueue<DelayedTask> q = new DelayQueue<>();
+q.put(new DelayedTask(System.currentTimeMillis() + 5000));  // 5초 뒤 ready
+q.take();   // 5초간 block 후 반환
+```
+
+스케줄러, retry 큐, TTL 캐시 만료 처리 등.
+
+### LinkedTransferQueue
+
+- LinkedBlockingQueue 의 확장
+- 추가 메서드: `transfer(e)` (consumer 가 받을 때까지 block), `tryTransfer(e)`
+- producer 가 consumer 의 도착을 알 수 있음
+
+대량 동시성에 최적화. 일반 BlockingQueue 보다 throughput 우위지만 구현 복잡.
+
+## ExecutorService 와의 연동
+
+Java 의 `ThreadPoolExecutor` 가 내부적으로 `BlockingQueue` 를 사용한다.
+
+```java
+ExecutorService pool = new ThreadPoolExecutor(
+    4, 16, 60L, TimeUnit.SECONDS,
+    new LinkedBlockingQueue<>(1000)   // 작업 대기열
+);
+```
+
+`Executors` factory 별 기본 큐.
+
+| Factory | 내부 큐 |
+|:---|:---|
+| `newFixedThreadPool(n)` | `LinkedBlockingQueue` (unbounded ⚠️) |
+| `newSingleThreadExecutor()` | `LinkedBlockingQueue` (unbounded ⚠️) |
+| `newCachedThreadPool()` | `SynchronousQueue` (핸드오프) |
+| `newScheduledThreadPool(n)` | `DelayedWorkQueue` (DelayQueue 변형) |
+
+> [!CAUTION]
+> `newFixedThreadPool` 의 unbounded 큐가 OOM 의 단골 원인. 명시적으로 `new ThreadPoolExecutor(..., new LinkedBlockingQueue<>(N))` 로 제한해야 한다.
+
+## 함정
+
+### 1. `take()` 의 인터럽트
+
+```java
+try {
+    Task t = queue.take();
+} catch (InterruptedException e) {
+    Thread.currentThread().interrupt();   // 인터럽트 상태 복원
+    return;
+}
+```
+
+`take()` 는 block 중 인터럽트되면 `InterruptedException`. 처리 안 하면 컴파일 오류. **무시하지 말고 인터럽트 상태를 복원**, 그러지 않으면 상위 코드가 인터럽트를 못 본다.
+
+### 2. unbounded 큐의 OOM 위험
+
+`new LinkedBlockingQueue<>()` (인자 없이) 는 `Integer.MAX_VALUE` 크기. producer 가 빠르면 OOM. 항상 bounded.
+
+### 3. drainTo 사용
+
+```java
+List<Task> batch = new ArrayList<>();
+queue.drainTo(batch, 100);   // 한 번에 최대 100 개를 batch 로
+```
+
+`take()` 를 반복 호출하는 것보다 훨씬 빠르다 (락 한 번에 여러 원소 이동). 배치 처리에 유용.
+
+## 참고
+
+- [[Object]]
+- [[Iterable]]
+- [[Collection]]
+- [[Blocking]]
+- [[Non-Blocking]]
+- [[Synchronous]]
+- [[Asynchronous]]
+- [[ReentrantLock]]
+- Oracle, [BlockingQueue (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/BlockingQueue.html)
+- Brian Goetz, *Java Concurrency in Practice*, §5.3 Blocking Queues and the Producer-Consumer Pattern
+- Doug Lea, [JSR-166: java.util.concurrent](https://jcp.org/en/jsr/detail?id=166)

@@ -1,0 +1,300 @@
+---
+title: "[Python] multiprocessing: Process, Pool, Queue, Manager"
+aliases: ["python multiprocessing", "Process", "Pool", "Manager", "shared memory", "fork", "spawn"]
+tags: [python, multiprocessing, concurrency, parallel, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`multiprocessing`은 별도 프로세스로 작업을 분산. **GIL 우회 → 진정한 CPU 병렬**. 각 프로세스는 독립된 메모리 공간이라 데이터 공유에 오버헤드(pickle, IPC).
+
+CPU 집약 작업 → multiprocessing. I/O 집약 → threading 또는 asyncio.
+
+## Process 기본
+
+```python
+from multiprocessing import Process
+import os
+
+def worker(name):
+    print(f"{name} PID={os.getpid()}")
+
+if __name__ == "__main__":
+    p1 = Process(target=worker, args=("A",))
+    p2 = Process(target=worker, args=("B",))
+    p1.start(); p2.start()
+    p1.join(); p2.join()
+```
+
+**`if __name__ == "__main__":` 가드 필수** (Windows/spawn에서 import 시 무한 재실행 방지).
+
+## Pool
+
+여러 작업을 워커 풀로 분산.
+
+```python
+from multiprocessing import Pool
+
+def square(x):
+    return x ** 2
+
+if __name__ == "__main__":
+    with Pool(4) as pool:
+        result = pool.map(square, range(10))
+        print(result)
+```
+
+`map`은 결과 순서 보존. `imap`은 lazy, `imap_unordered`는 완료 순서.
+
+### apply_async / map_async
+
+```python
+with Pool(4) as pool:
+    futures = [pool.apply_async(work, (i,)) for i in range(10)]
+    results = [f.get(timeout=10) for f in futures]
+```
+
+## Pool vs concurrent.futures.ProcessPoolExecutor
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+with ProcessPoolExecutor(max_workers=4) as ex:
+    results = list(ex.map(square, range(10)))
+```
+
+`concurrent.futures`가 더 깔끔한 API. 신규 코드는 권장. 내부적으로 `multiprocessing`을 사용.
+
+## 데이터 공유: 비용
+
+각 프로세스는 자체 메모리. 인자 전달은 **pickle 직렬화 → IPC → 역직렬화**. 큰 데이터를 자주 전달하면 매우 느림.
+
+### 큰 read-only 데이터
+
+```python
+# BAD: 워커마다 5GB 복사
+def process(data, idx):
+    return data[idx]
+
+with Pool(4) as p:
+    p.starmap(process, [(huge_data, i) for i in range(100)])
+
+# GOOD: fork (Unix)에서는 copy-on-write, 명시적으로 globals 활용
+huge_data = load_5gb()
+
+def process(idx):
+    return huge_data[idx]    # 부모 메모리 공유 (Unix fork)
+
+with Pool(4) as p:
+    p.map(process, range(100))
+```
+
+3.14+ `concurrent.futures.ProcessPoolExecutor`에 `initargs`로 워커마다 한 번 setup 가능. fork는 macOS 14+에서 deprecated.
+
+### shared_memory (3.8+)
+
+```python
+from multiprocessing import shared_memory
+import numpy as np
+
+shm = shared_memory.SharedMemory(create=True, size=1024)
+buf = np.ndarray((128,), dtype=np.int64, buffer=shm.buf)
+buf[:] = np.arange(128)
+
+# 다른 프로세스에서
+shm2 = shared_memory.SharedMemory(name=shm.name)
+buf2 = np.ndarray((128,), dtype=np.int64, buffer=shm2.buf)
+
+shm.close(); shm.unlink()
+```
+
+대용량 배열을 복사 없이 공유. 명시적 lifecycle 관리 필요 (메모리 누수 위험).
+
+## Queue, Pipe
+
+프로세스 간 통신.
+
+```python
+from multiprocessing import Process, Queue
+
+def producer(q):
+    for i in range(10):
+        q.put(i)
+    q.put(None)
+
+def consumer(q):
+    while True:
+        x = q.get()
+        if x is None: break
+        print(x)
+
+if __name__ == "__main__":
+    q = Queue()
+    p1 = Process(target=producer, args=(q,))
+    p2 = Process(target=consumer, args=(q,))
+    p1.start(); p2.start()
+    p1.join(); p2.join()
+```
+
+`Queue`는 내부적으로 pickle + pipe. 큰 객체는 비용.
+
+`Pipe()`는 양방향 단일 채널 (Connection 객체 2개 반환).
+
+## Manager
+
+여러 프로세스가 공유하는 객체(`dict`, `list` 등) 프록시.
+
+```python
+from multiprocessing import Manager, Process
+
+def worker(shared_dict, key, value):
+    shared_dict[key] = value
+
+if __name__ == "__main__":
+    with Manager() as m:
+        d = m.dict()
+        processes = [Process(target=worker, args=(d, i, i*2)) for i in range(5)]
+        for p in processes: p.start()
+        for p in processes: p.join()
+        print(dict(d))
+```
+
+Manager는 별도 프로세스를 띄워 그 안에서 객체 관리. 접근마다 IPC라 느림. 작은 데이터에만.
+
+## start method
+
+Python 3.x는 3가지 시작 방법.
+
+- **fork** (Unix 기본): 부모 프로세스 복사. 빠르나 메모리 공유로 미묘한 버그 (스레드 + fork 위험)
+- **spawn** (Windows/macOS 14+ 기본): 새 인터프리터. 안전하나 느림 (모듈 재로딩)
+- **forkserver** (Unix): 별도 서버 프로세스로부터 fork
+
+```python
+import multiprocessing as mp
+
+if __name__ == "__main__":
+    mp.set_start_method("spawn")    # 한 번만 가능
+    # 또는 mp.get_context("spawn")
+```
+
+라이브러리는 `mp.get_context()`로 명시적 컨텍스트 사용 권장 (사용자 설정 침범 X).
+
+## 함정
+
+### 1. __name__ == "__main__" 가드 누락
+
+```python
+# WRONG (Windows/spawn에서 무한 재실행)
+from multiprocessing import Process
+p = Process(target=work)
+p.start()
+
+# CORRECT
+if __name__ == "__main__":
+    p = Process(target=work)
+    p.start()
+```
+
+### 2. pickle 안 되는 인자
+
+람다, 로컬 함수, 익명 클래스 인스턴스는 pickle 불가 → 워커 전달 실패.
+
+```python
+# WRONG
+pool.map(lambda x: x ** 2, range(10))
+
+# CORRECT: 모듈 수준 함수
+def square(x): return x ** 2
+pool.map(square, range(10))
+```
+
+dill 같은 third-party가 더 관대하지만 표준 multiprocessing은 pickle만.
+
+### 3. 큰 데이터 인자 전달
+
+```python
+huge_data = load_5gb()
+
+pool.map(process, [huge_data] * 100)    # 100번 직렬화/IPC = 매우 느림
+```
+
+→ shared memory 또는 fork (Unix).
+
+### 4. join 안 함
+
+```python
+p = Process(target=work)
+p.start()
+# main 종료 시 daemon 아니면 p 끝까지 대기, daemon이면 강제 종료
+```
+
+명시적 join이 안전.
+
+### 5. 좀비 프로세스
+
+```python
+processes = [Process(target=...) for _ in range(100)]
+for p in processes: p.start()
+# join 안 하면 좀비 누적 → ulimit
+```
+
+## 실용 패턴
+
+### CPU 집약 병렬화
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+import math
+
+def is_prime(n):
+    if n < 2: return False
+    for i in range(2, int(math.sqrt(n)) + 1):
+        if n % i == 0: return False
+    return True
+
+if __name__ == "__main__":
+    with ProcessPoolExecutor() as ex:
+        results = list(ex.map(is_prime, range(10**6)))
+```
+
+8코어 시스템에서 ~8x 속도 향상 기대 (chunksize 조정 필요할 수 있음).
+
+```python
+# chunksize로 IPC 비용 줄이기
+with ProcessPoolExecutor() as ex:
+    results = list(ex.map(is_prime, range(10**6), chunksize=1000))
+```
+
+### 워커별 초기화
+
+```python
+import os
+
+_cache = None
+
+def init_worker(model_path):
+    global _cache
+    _cache = load_model(model_path)
+
+def predict(input):
+    return _cache.predict(input)
+
+with ProcessPoolExecutor(max_workers=4, initializer=init_worker,
+                          initargs=("/path/to/model",)) as ex:
+    results = list(ex.map(predict, inputs))
+```
+
+모델·DB 커넥션처럼 워커마다 한 번 초기화 후 재사용.
+
+## subprocess와의 차이
+
+- **subprocess**: 외부 명령(독립 실행 가능 프로그램) 실행
+- **multiprocessing**: 같은 Python 프로그램의 함수를 다른 프로세스에서
+
+## 참고
+
+- [`multiprocessing` documentation](https://docs.python.org/3/library/multiprocessing.html)
+- [`multiprocessing.shared_memory`](https://docs.python.org/3/library/multiprocessing.shared_memory.html)
+- [`concurrent.futures.ProcessPoolExecutor`](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor)
+- [Why `if __name__ == "__main__"`?](https://docs.python.org/3/library/multiprocessing.html#multiprocessing-programming)

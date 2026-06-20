@@ -1,0 +1,266 @@
+---
+title: "[Python] collections: Counter, deque, defaultdict, OrderedDict, ChainMap"
+aliases: ["python collections", "Counter", "deque", "defaultdict", "OrderedDict", "ChainMap", "namedtuple"]
+tags: [python, collections, stdlib, datastructure]
+updated: 2026-06-20
+---
+
+## 정의
+
+`collections` 모듈은 dict/list/tuple/set의 특수화 컨테이너를 제공한다. 표준 라이브러리에 있는 데이터 구조 도구함의 핵심.
+
+| 클래스 | 용도 |
+|--------|------|
+| `Counter` | 해시 가능한 객체의 빈도 |
+| `deque` | 양끝 O(1) 큐/스택 |
+| `defaultdict` | 키 부재 시 자동 기본값 |
+| `OrderedDict` | 순서 보존 dict + 추가 메서드 |
+| `ChainMap` | 여러 dict를 하나로 |
+| `namedtuple` | 필드명 있는 불변 튜플 |
+| `UserDict`/`UserList`/`UserString` | 서브클래싱 친화 |
+
+## Counter
+
+빈도 계산의 표준.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from collections import Counter
+
+c = Counter("abracadabra")
+print(c)
+print(c.most_common(3))
+print(c["z"])              # 없는 키 → 0 (KeyError 없음)
+print(sum(c.values()))     # 전체 빈도
+
+# 산술
+a = Counter(a=3, b=2)
+b = Counter(a=1, c=1)
+print(a + b)
+print(a - b)               # 음수 제거
+print(a & b)               # 최소
+print(a | b)               # 최대`}
+  output={`Counter({'a': 5, 'b': 2, 'r': 2, 'c': 1, 'd': 1})
+[('a', 5), ('b', 2), ('r', 2)]
+0
+11
+Counter({'a': 4, 'b': 2, 'c': 1})
+Counter({'a': 2, 'b': 2})
+Counter({'a': 1, 'b': 2})
+Counter({'a': 3, 'b': 2, 'c': 1})`}
+/>
+
+`Counter.update()`는 합하기 (덮어쓰기가 아닌 누적). 인자는 iterable이나 mapping.
+
+## deque (Double-ended Queue)
+
+양끝에서 O(1) 추가/삭제. list의 `insert(0, ...)` / `pop(0)`는 O(n)이라 부적합.
+
+```python
+from collections import deque
+
+d = deque([1, 2, 3], maxlen=5)
+d.append(4)              # 오른쪽 O(1)
+d.appendleft(0)          # 왼쪽 O(1)
+d.pop()                  # 오른쪽 O(1)
+d.popleft()              # 왼쪽 O(1)
+d.rotate(2)              # 오른쪽으로 2칸 (-는 왼쪽)
+d.extendleft([1, 2, 3])  # 역순으로 왼쪽에 붙음
+```
+
+`maxlen` 지정 시 한쪽이 차면 반대편 원소가 자동 제거 → 슬라이딩 윈도우, 최근 N개 캐시에 유용.
+
+```python
+recent = deque(maxlen=10)
+for event in stream:
+    recent.append(event)    # 항상 최근 10개만
+```
+
+큐(FIFO)로 쓰려면 `append` + `popleft`. 스택(LIFO)도 가능 (`append` + `pop`).
+
+## defaultdict
+
+키가 없을 때 자동으로 기본 인스턴스 생성. 그룹핑·카운팅에 표준.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from collections import defaultdict
+
+# 리스트 그룹핑
+words = ["apple", "banana", "avocado", "blueberry"]
+by_first = defaultdict(list)
+for w in words:
+    by_first[w[0]].append(w)
+print(dict(by_first))
+
+# 카운터 (Counter가 더 편함)
+freq = defaultdict(int)
+for ch in "hello":
+    freq[ch] += 1
+print(dict(freq))
+
+# 중첩 dict
+matrix = defaultdict(lambda: defaultdict(int))
+matrix["a"]["b"] += 1
+print(dict(matrix))`}
+  output={`{'a': ['apple', 'avocado'], 'b': ['banana', 'blueberry']}
+{'h': 1, 'e': 1, 'l': 2, 'o': 1}
+{'a': defaultdict(<class 'int'>, {'b': 1})}`}
+/>
+
+생성자 인자는 **호출 가능한 객체**. `int` → 0, `list` → `[]`, `set` → `set()`, `lambda: ...` → 임의.
+
+함정: 키 부재 시 자동 생성되므로 단순 조회만 했는데 키가 추가될 수 있다.
+
+```python
+d = defaultdict(list)
+print(d["x"])    # []
+print(d)         # {'x': []}  (!! 추가됨)
+
+# 조회만 원하면
+print(d.get("x"))   # None, dict 변경 없음
+```
+
+## OrderedDict
+
+Python 3.7+ 부터 일반 `dict`도 삽입 순서 보장. 그래도 `OrderedDict`가 가지는 추가 기능:
+
+- `move_to_end(key, last=True)`: 키를 끝(또는 앞)으로
+- `popitem(last=True)`: LIFO/FIFO 선택
+- 동등성 비교가 **순서까지 고려** (`OrderedDict(a=1, b=2) != OrderedDict(b=2, a=1)`, dict는 같다고 판단)
+- LRU 캐시 같은 자료구조 직접 구현 시 유용
+
+```python
+from collections import OrderedDict
+
+class LRUCache:
+    def __init__(self, capacity):
+        self.cap = capacity
+        self.d = OrderedDict()
+
+    def get(self, key):
+        if key not in self.d:
+            return None
+        self.d.move_to_end(key)
+        return self.d[key]
+
+    def put(self, key, value):
+        if key in self.d:
+            self.d.move_to_end(key)
+        self.d[key] = value
+        if len(self.d) > self.cap:
+            self.d.popitem(last=False)    # FIFO 제거
+```
+
+`functools.lru_cache`가 대부분의 경우 더 빠르고 안전.
+
+## ChainMap
+
+여러 dict를 **하나의 뷰**로 합친다. 변경은 첫 번째에만.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from collections import ChainMap
+
+defaults = {"color": "blue", "size": "medium"}
+user = {"color": "red"}
+
+config = ChainMap(user, defaults)
+print(config["color"])       # red (앞쪽 우선)
+print(config["size"])        # medium (defaults 폴백)
+
+config["color"] = "green"    # 첫 dict만 변경
+print(user)`}
+  output={`red
+medium
+{'color': 'green'}`}
+/>
+
+활용: 설정 우선순위 (CLI > env > config > default), 스코프 시뮬레이션, 임시 컨텍스트.
+
+## namedtuple
+
+`py-tuple` 페이지에서 자세히. 짧게:
+
+```python
+from collections import namedtuple
+
+Point = namedtuple("Point", ["x", "y"])
+p = Point(3, 4)
+print(p.x, p[1], p._asdict())
+```
+
+`@dataclass`와 `typing.NamedTuple`이 더 강력. 기존 코드 호환 외엔 새로 namedtuple 쓰지 않아도 됨.
+
+## UserDict / UserList / UserString
+
+내장 타입을 상속하는 대신 이걸 상속하면 안전하게 메서드 오버라이드 가능. (내장 `dict`/`list` 직접 상속은 일부 내부 메서드가 우회되는 함정이 있음.)
+
+```python
+from collections import UserDict
+
+class CaseInsensitiveDict(UserDict):
+    def __setitem__(self, key, value):
+        super().__setitem__(key.lower(), value)
+
+    def __getitem__(self, key):
+        return super().__getitem__(key.lower())
+
+d = CaseInsensitiveDict()
+d["Hello"] = 1
+print(d["HELLO"])    # 1
+```
+
+## 자주 결합되는 패턴
+
+### 그래프 BFS
+
+```python
+from collections import deque, defaultdict
+
+graph = defaultdict(list)
+visited = set()
+q = deque([start])
+while q:
+    node = q.popleft()
+    if node in visited: continue
+    visited.add(node)
+    q.extend(graph[node])
+```
+
+### 윈도우 최대값 (deque + 단조 큐)
+
+```python
+def max_window(nums, k):
+    q, out = deque(), []
+    for i, x in enumerate(nums):
+        while q and nums[q[-1]] < x:
+            q.pop()
+        q.append(i)
+        if q[0] <= i - k:
+            q.popleft()
+        if i >= k - 1:
+            out.append(nums[q[0]])
+    return out
+```
+
+### N-gram 빈도
+
+```python
+from collections import Counter
+
+def ngrams(seq, n):
+    return zip(*(seq[i:] for i in range(n)))
+
+text = "abracadabra"
+print(Counter(ngrams(text, 2)).most_common(3))
+```
+
+## 참고
+
+- [`collections` documentation](https://docs.python.org/3/library/collections.html)
+- [`collections.abc`](https://docs.python.org/3/library/collections.abc.html) - 추상 인터페이스
+- [`heapq`](https://docs.python.org/3/library/heapq.html), [`bisect`](https://docs.python.org/3/library/bisect.html), [`array`](https://docs.python.org/3/library/array.html) - 인접 모듈

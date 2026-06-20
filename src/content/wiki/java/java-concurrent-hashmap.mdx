@@ -1,0 +1,269 @@
+---
+title: "[Java] ConcurrentHashMap"
+aliases: ["ConcurrentHashMap", "java.util.concurrent.ConcurrentHashMap", "CHM", "concurrent hash map", "동시성 해시맵"]
+tags: [java, collection, map, concurrent, jsr-166, hash, thread-safe]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.ConcurrentHashMap<K,V>`** 는 **고동시성 환경에서 사용 가능한 `Map`** 구현. JSR-166 (Java 5) 도입, Java 8 에서 내부 구조가 크게 재작성됐다.
+
+`HashMap` 과 같은 인터페이스를 제공하면서 thread-safe. `Hashtable` (legacy) 보다 압도적으로 빠르고, `Collections.synchronizedMap(...)` 보다 훨씬 좋은 동시성을 제공한다.
+
+> **실무에서 thread-safe Map 이 필요할 때 거의 항상 첫 번째 선택.**
+
+## 시각화
+
+```anim:java-concurrent-hashmap-bins
+{}
+```
+
+## 내부 구조 (Java 8+)
+
+```java
+public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
+    implements ConcurrentMap<K,V>, Serializable {
+
+    transient volatile Node<K,V>[] table;       // 버킷 배열
+    private transient volatile Node<K,V>[] nextTable;  // resize 중 임시 테이블
+    private transient volatile long baseCount;
+    private transient volatile int sizeCtl;
+
+    static class Node<K,V> implements Map.Entry<K,V> {
+        final int hash;
+        final K key;
+        volatile V val;
+        volatile Node<K,V> next;
+    }
+}
+```
+
+- **`table`**: 버킷 (bin) 배열. 각 버킷은 `Node` 의 linked list 또는 (TREEIFY 임계 이상이면) red-black tree.
+- **`volatile`**: 모든 핵심 필드가 volatile, 락 없이 일관된 view.
+- **CAS**: 새 노드 삽입은 `Unsafe.compareAndSwapObject` 로 atomic.
+- **synchronized (Node)**: 같은 버킷에 충돌이 생기면 그 **버킷의 첫 노드** 에 synchronized.
+
+Java 7 까지는 **segment-based** 였다 (16개 segment 로 분할 동기화). Java 8 부터는 **bin-level (버킷 단위) 동기화** 로 진화. 충돌 단위가 더 작아져 동시성이 크게 향상.
+
+## 핵심 알고리즘
+
+### get, 락 없이
+
+```java
+public V get(Object key) {
+    int h = spread(key.hashCode());
+    Node<K,V>[] tab = table;
+    int n = tab.length;
+    Node<K,V> e = tabAt(tab, (n - 1) & h);   // volatile read
+    while (e != null) {
+        if (e.hash == h && key.equals(e.key)) return e.val;
+        e = e.next;
+    }
+    return null;
+}
+```
+
+읽기에는 **락이 없다.** 모든 필드가 volatile 이라 다른 스레드의 쓰기가 즉시 보인다. 사실상 `HashMap.get()` 만큼 빠르다.
+
+### put, 빈 버킷이면 CAS, 충돌이면 synchronized
+
+```java
+final V putVal(K key, V value, boolean onlyIfAbsent) {
+    int h = spread(key.hashCode());
+    Node<K,V>[] tab = table;
+    while (true) {
+        int i = (tab.length - 1) & h;
+        Node<K,V> f = tabAt(tab, i);
+        if (f == null) {
+            // 빈 버킷, CAS 로 새 노드 삽입 (lock-free)
+            if (casTabAt(tab, i, null, new Node<>(h, key, value, null)))
+                break;
+        } else {
+            // 충돌, 첫 노드에 synchronized
+            synchronized (f) {
+                if (tabAt(tab, i) == f) {     // double-check
+                    // 같은 버킷에 추가 또는 갱신
+                    ...
+                }
+            }
+            break;
+        }
+    }
+}
+```
+
+핵심 통찰:
+- **충돌이 없으면 락도 없다**. CAS 한 번으로 끝.
+- **충돌이 있으면 그 버킷에만 락**. 다른 버킷은 영향 없음.
+- 락의 단위가 **버킷 1 개** (보통 노드 0-2 개).
+
+## 동시성 특성
+
+| 작업 | 동시성 |
+|:---|:---|
+| 다른 키의 `get` / `put` | **완전 병렬** |
+| 같은 버킷의 `put` | 직렬 (synchronized) |
+| `get` 과 `put` | `get` 은 락 없음, 진행 가능 |
+| `resize` | 다른 스레드도 도와줌 (cooperative) |
+
+즉, 같은 키에 동시 `put` 하지 않는 한 거의 모두 병렬.
+
+## Iterator 는 weakly consistent
+
+[[fail-fast iterator]] 가 아니다. 순회 중 다른 스레드가 수정해도 `ConcurrentModificationException` 을 던지지 않는다.
+
+```java
+Map<String, Integer> map = new ConcurrentHashMap<>();
+map.put("a", 1); map.put("b", 2);
+
+Iterator<Map.Entry<String, Integer>> it = map.entrySet().iterator();
+map.put("c", 3);                    // 순회 중 추가
+while (it.hasNext()) {
+    System.out.println(it.next());  // CME 안 던짐
+}
+```
+
+대신 **weakly consistent**, 순회 시작 후 변경된 내용이 보일 수도 있고 안 보일 수도 있다. 일관된 snapshot 이 아니다.
+
+## 원자 연산 메서드들
+
+`ConcurrentHashMap` 은 단순 `put` / `get` 외에도 **원자성을 보장하는 복합 연산** 을 제공한다.
+
+```java
+// 키가 없으면 추가, 있으면 기존 값 반환
+map.putIfAbsent("key", 1);
+
+// 키가 있으면 람다 적용해 값 갱신, 없으면 추가
+map.compute("key", (k, v) -> v == null ? 1 : v + 1);
+
+// 키가 없을 때만 람다 호출해 추가
+map.computeIfAbsent("key", k -> expensiveCompute(k));
+
+// 키가 있을 때만 람다 호출해 갱신
+map.computeIfPresent("key", (k, v) -> v + 1);
+
+// 추가 또는 람다로 병합
+map.merge("key", 1, Integer::sum);
+```
+
+이 메서드들은 **버킷 단위 락 안에서 람다를 실행** 한다. 람다 안에서 다시 같은 map 을 수정하면 deadlock 가능, 주의.
+
+## Java 8 의 추가 기능
+
+```java
+// 병렬 처리 (forEach, search, reduce)
+map.forEach(1, (k, v) -> process(k, v));   // 1 = 병렬 threshold
+map.search(1, (k, v) -> v > 100 ? k : null);
+long sum = map.reduceValues(1, 0L, Long::sum);
+```
+
+지정한 threshold (병렬 진입 한계) 보다 entry 가 많으면 ForkJoinPool 로 병렬 실행. 큰 map 의 일괄 처리에 유리.
+
+## size 의 약점
+
+`ConcurrentHashMap.size()` 는 **정확한 값이 아닐 수 있다.** Java 8 부터는 `LongAdder` 기반으로 분산 카운터를 사용하므로 빠르지만 여전히 동시 수정 중에는 부정확.
+
+```java
+int count = map.size();          // 호출 시점의 추정
+// 다른 스레드가 그 사이 추가/삭제하면 실제와 다를 수 있음
+```
+
+정확한 카운트가 필요한 시나리오라면 외부 카운터를 따로 유지하거나, snapshot 을 위해 외부 동기화.
+
+## null 비허용
+
+`HashMap` 과 달리 **key 도 value 도 null 불가**. null 을 넣으면 `NullPointerException`.
+
+```java
+Map<String, Integer> chm = new ConcurrentHashMap<>();
+chm.put(null, 1);    // ❌ NPE
+chm.put("a", null);  // ❌ NPE
+chm.get(null);       // ❌ NPE
+```
+
+이유: `get(null)` 이 반환한 null 이 **"키가 없음"** 인지 **"키는 있는데 값이 null"** 인지 동시성 안에서 구분 불가능. 처음부터 허용하지 않는 게 안전.
+
+## HashMap / Hashtable / synchronizedMap 비교
+
+| 항목 | HashMap | Hashtable | synchronizedMap | ConcurrentHashMap |
+|:---|:---:|:---:|:---:|:---:|
+| Thread-safe | ✗ | ✓ (메서드별 lock) | ✓ (메서드별 lock) | ✓ (bin-level) |
+| null key/value | 1 / 다수 | ✗ | 1 / 다수 | ✗ |
+| 도입 | JDK 1.2 | JDK 1.0 | JDK 1.2 | JDK 1.5 |
+| 동시 read 처리량 | n/a | 직렬화 | 직렬화 | **병렬** |
+| 동시 write 처리량 | n/a | 직렬화 | 직렬화 | **버킷별 직렬, 다른 버킷 병렬** |
+| Iterator | fail-fast | fail-fast | fail-fast | weakly consistent |
+| 권장 | 단일 스레드 | ✗ legacy | 가벼운 보호 | **동시성 표준** |
+
+## 실무 사용 예
+
+### 1. 캐시
+
+```java
+private final Map<String, User> cache = new ConcurrentHashMap<>();
+
+public User getUser(String id) {
+    return cache.computeIfAbsent(id, this::loadFromDb);
+}
+```
+
+`computeIfAbsent` 가 원자성을 보장하므로 같은 id 로 동시 호출 시 한 번만 `loadFromDb` 실행.
+
+### 2. 카운터
+
+```java
+private final Map<String, LongAdder> counts = new ConcurrentHashMap<>();
+
+public void increment(String key) {
+    counts.computeIfAbsent(key, k -> new LongAdder()).increment();
+}
+```
+
+`LongAdder` 가 고경합에 강함. `AtomicLong` 보다 빠를 때가 많다.
+
+### 3. Spring 의 빈 레지스트리
+
+Spring 내부에 ConcurrentHashMap 이 많이 쓰인다 (`DefaultListableBeanFactory.singletonObjects` 등). 캐시류는 거의 모두 이 자료구조.
+
+## 함정
+
+### 1. compute 안의 부수효과
+
+```java
+map.compute("key", (k, v) -> {
+    map.put("other", 99);    // ❌ 같은 버킷이면 deadlock, 다른 버킷이면 UB
+    return v + 1;
+});
+```
+
+람다 안에서 같은 map 수정 금지.
+
+### 2. size + put 두 번 호출
+
+```java
+if (map.size() < 100) {       // ← race
+    map.put(key, value);
+}
+```
+
+이 사이에 다른 스레드가 추가했을 수 있다. `compute`, `merge` 같은 원자 메서드로 표현 가능한지 먼저 검토.
+
+### 3. iterator 의 snapshot 가정
+
+weakly consistent 라서 일관된 view 가 아니다. 정합성 있는 read 가 필요하면 별도 동기화 또는 `CopyOnWriteArrayList` 같은 snapshot 컬렉션.
+
+## 참고
+
+- [[Object]]
+- [[Iterable]]
+- [[Collection]]
+- [[CopyOnWriteArrayList]]
+- [[Vector]]
+- [[fail-fast iterator]]
+- [[volatile]]
+- [[ReentrantLock]]
+- [[Non-Blocking]]
+- Oracle, [ConcurrentHashMap (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html)
+- Doug Lea, [JSR-166: java.util.concurrent](https://jcp.org/en/jsr/detail?id=166)
+- Brian Goetz, *Java Concurrency in Practice*, §5.2 Concurrent Collections

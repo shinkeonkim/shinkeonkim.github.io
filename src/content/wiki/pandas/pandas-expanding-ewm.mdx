@@ -1,0 +1,170 @@
+---
+title: "[Pandas] expanding / ewm"
+aliases: ["Pandas expanding", "Pandas ewm", "지수가중이동평균"]
+tags: [python, pandas, expanding, ewm, window, time-series]
+updated: 2026-06-18
+---
+
+## 정의
+
+[[Pandas rolling]] 외의 윈도우 연산.
+
+- **`expanding()`** : 시작부터 현재까지 누적 윈도우
+- **`ewm()`** : exponentially weighted (지수 가중)
+
+## expanding
+
+```python
+s.expanding().mean()           # 시작부터 현재까지 평균
+s.expanding().sum()            # = cumsum
+s.expanding(min_periods=5).std()
+```
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+s = pd.Series([10, 20, 30, 40, 50])
+print('mean:', s.expanding().mean().tolist())
+print('std :', s.expanding().std().round(2).tolist())`}
+  output={`mean: [10.0, 15.0, 20.0, 25.0, 30.0]
+std : [nan, 7.07, 10.0, 12.91, 15.81]`}
+/>
+
+| index | s | expanding mean |
+|---|---|---|
+| 0 | 10 | 10 |
+| 1 | 20 | 15 |
+| 2 | 30 | 20 |
+| 3 | 40 | 25 |
+| 4 | 50 | 30 |
+
+`rolling` 과 달리 윈도우 크기가 무한히 커진다.
+
+## ewm, 지수 가중
+
+```python
+s.ewm(alpha=0.3).mean()
+s.ewm(span=10).mean()
+s.ewm(halflife=5).mean()
+s.ewm(com=4).mean()
+```
+
+| 파라미터 | 의미 |
+|:---|:---|
+| `alpha` | 직접 가중치 (0 < α ≤ 1) |
+| `span` | 평균적 윈도우 크기 (α = 2/(span+1)) |
+| `halflife` | 가중치가 절반이 되는 거리 |
+| `com` | center of mass (α = 1/(1+com)) |
+
+> alpha 가 클수록 최근 값에 가중.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+s = pd.Series([1, 2, 3, 4, 5, 6, 7, 8])
+print('span=3 ewm:', s.ewm(span=3).mean().round(2).tolist())
+print('span=7 ewm:', s.ewm(span=7).mean().round(2).tolist())`}
+  output={`span=3 ewm: [1.0, 1.67, 2.43, 3.27, 4.17, 5.12, 6.09, 7.06]
+span=7 ewm: [1.0, 1.57, 2.18, 2.81, 3.45, 4.11, 4.78, 5.46]`}
+/>
+
+`span=3` 이 작아서 최근 값에 더 빨리 반응, `span=7` 은 smoother.
+
+## ewm 의 수식
+
+$$
+y_t = \alpha \cdot x_t + (1 - \alpha) \cdot y_{t-1}
+$$
+
+지수 감쇠 가중. 모든 과거 값을 고려하지만 가중치가 지수적으로 감소.
+
+## rolling vs expanding vs ewm
+
+| 항목 | 윈도우 | 가중치 |
+|:---|:---|:---|
+| `rolling(n)` | 고정 n | 같음 |
+| `expanding()` | 1 → ∞ | 같음 |
+| `ewm(span=n)` | 사실상 무한 | 지수 감쇠 |
+
+## 자주 쓰는 패턴
+
+### 누적 평균 / 표준편차
+
+```python
+df['avg_so_far'] = df['x'].expanding().mean()
+df['std_so_far'] = df['x'].expanding().std()
+```
+
+ML 의 online 통계, 게임 점수 누적 평균 등.
+
+### 지수 이동 평균 (EMA)
+
+```python
+df['ema_short'] = df['close'].ewm(span=12, adjust=False).mean()
+df['ema_long'] = df['close'].ewm(span=26, adjust=False).mean()
+df['macd'] = df['ema_short'] - df['ema_long']
+```
+
+금융 지표 MACD.
+
+### Bollinger Bands
+
+```python
+ma = df['close'].rolling(20).mean()
+std = df['close'].rolling(20).std()
+df['upper'] = ma + 2 * std
+df['lower'] = ma - 2 * std
+```
+
+(rolling 기반)
+
+### 시계열 smoothing
+
+```python
+df['smoothed'] = df['signal'].ewm(span=10).mean()
+# noise 줄이기
+```
+
+## adjust 옵션
+
+```python
+s.ewm(span=3, adjust=True).mean()    # 기본, 더 정확한 평균
+s.ewm(span=3, adjust=False).mean()   # 재귀식 사용 (online 계산용)
+```
+
+- `adjust=True` : 시작 부분의 가중치도 보정
+- `adjust=False` : 단순 재귀 (실시간 처리에 적합)
+
+## 함정
+
+### 1. expanding 의 첫 N 개
+
+```python
+s.expanding(min_periods=5).std()
+# 처음 4 개는 NaN
+```
+
+표본 크기가 작으면 표준편차가 불안정.
+
+### 2. ewm 의 가중치 합
+
+`adjust=False` 면 초기 가중치 합이 1 미만, bias 발생 가능.
+
+### 3. groupby 결합
+
+```python
+df['ema'] = df.groupby('user')['x'].transform(
+    lambda s: s.ewm(span=10).mean()
+)
+```
+
+`apply` 보다 `transform` 권장 (원본 shape 유지).
+
+## 참고
+
+- [[Pandas rolling]]
+- [[Pandas cumulative]]
+- [[Pandas resample]]
+- 공식 문서, [expanding](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.expanding.html), [ewm](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.ewm.html)

@@ -1,0 +1,289 @@
+---
+title: "[Python] enum: Enum, IntEnum, Flag, StrEnum"
+aliases: ["python enum", "IntEnum", "StrEnum", "Flag", "auto", "Enum members"]
+tags: [python, enum, stdlib, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+`enum`은 **고정된 이름-값 매핑**을 정의하는 표준 모듈. 마법 숫자나 문자열 상수를 타입화된 멤버로 대체해 타입 안정성·가독성·IDE 지원을 얻는다.
+
+## Enum 기본
+
+```python
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = 3
+
+print(Color.RED)            # Color.RED
+print(Color.RED.name)       # 'RED'
+print(Color.RED.value)      # 1
+print(Color(1))             # Color.RED (값으로 lookup)
+print(Color["RED"])         # Color.RED (이름으로 lookup)
+
+# 동등성
+print(Color.RED == Color.RED)   # True
+print(Color.RED is Color.RED)   # True (singleton)
+print(Color.RED == 1)           # False! (Enum과 int는 다름)
+```
+
+`Enum` 멤버는 싱글톤. 같은 멤버는 항상 같은 객체.
+
+## 순회
+
+```python
+for c in Color:
+    print(c.name, c.value)
+
+print(list(Color))
+print(len(Color))
+```
+
+선언 순서대로 순회.
+
+## auto()
+
+값을 자동 할당.
+
+```python
+from enum import Enum, auto
+
+class Status(Enum):
+    PENDING = auto()
+    APPROVED = auto()
+    REJECTED = auto()
+
+print(Status.PENDING.value)    # 1
+```
+
+값에 의미가 없고 멤버 식별만 중요할 때 권장. 명시 값은 그대로.
+
+## IntEnum: int과 비교 가능
+
+```python
+from enum import IntEnum
+
+class HttpStatus(IntEnum):
+    OK = 200
+    NOT_FOUND = 404
+    SERVER_ERROR = 500
+
+print(HttpStatus.OK == 200)         # True
+print(HttpStatus.OK < HttpStatus.NOT_FOUND)
+print(int(HttpStatus.OK))            # 200
+```
+
+기존 int 비교 코드와 호환 시 유용. 단 타입 안전성 약간 손해 (int와 자유롭게 비교됨).
+
+## StrEnum (3.11+)
+
+```python
+from enum import StrEnum
+
+class Env(StrEnum):
+    DEV = "dev"
+    STAGING = "staging"
+    PROD = "prod"
+
+print(Env.DEV == "dev")          # True
+print(f"{Env.DEV}")              # 'dev' (str과 동등)
+```
+
+JSON, 환경변수, 설정 값으로 자연스럽게.
+
+3.11 이전엔 직접:
+
+```python
+class Env(str, Enum):
+    DEV = "dev"
+```
+
+## Flag, IntFlag: 비트 조합
+
+```python
+from enum import Flag, auto
+
+class Permission(Flag):
+    READ = auto()      # 1
+    WRITE = auto()     # 2
+    EXEC = auto()      # 4
+
+# 조합
+all_perm = Permission.READ | Permission.WRITE | Permission.EXEC
+print(all_perm)                # Permission.READ|WRITE|EXEC
+
+# 검사
+print(Permission.READ in all_perm)        # True
+print(Permission.WRITE in Permission.READ) # False
+
+# 비트 연산
+ro = all_perm & ~Permission.WRITE
+print(ro)                       # Permission.READ|EXEC
+```
+
+권한, 옵션 플래그 등 비트마스크를 타입화. C의 `enum + bitfield`보다 안전.
+
+`IntFlag`는 int 비교 가능 버전.
+
+## 메서드 추가
+
+Enum 멤버에 메서드 정의 가능 (`self`로 멤버 접근).
+
+```python
+class Direction(Enum):
+    NORTH = (0, 1)
+    SOUTH = (0, -1)
+    EAST = (1, 0)
+    WEST = (-1, 0)
+
+    def move(self, x, y):
+        dx, dy = self.value
+        return x + dx, y + dy
+
+    def opposite(self):
+        opposites = {
+            Direction.NORTH: Direction.SOUTH,
+            Direction.SOUTH: Direction.NORTH,
+            Direction.EAST: Direction.WEST,
+            Direction.WEST: Direction.EAST,
+        }
+        return opposites[self]
+
+print(Direction.NORTH.move(0, 0))      # (0, 1)
+print(Direction.EAST.opposite())        # Direction.WEST
+```
+
+## unique 데코레이터
+
+중복 값 금지.
+
+```python
+from enum import Enum, unique
+
+@unique
+class Status(Enum):
+    OK = 1
+    GOOD = 1     # ValueError: duplicate values
+```
+
+기본 Enum은 중복 허용 (alias 생성). `@unique`로 강제.
+
+## 매칭 (3.10+ match문)
+
+```python
+def handle(status: Status):
+    match status:
+        case Status.PENDING:
+            return "wait"
+        case Status.APPROVED | Status.REJECTED:
+            return "done"
+```
+
+가독성 좋고 누락된 멤버를 타입 체커가 잡아줄 수 있음.
+
+## 함정
+
+### 1. == vs is
+
+```python
+Color.RED == Color.RED    # True (값 비교)
+Color.RED is Color.RED    # True (싱글톤)
+```
+
+둘 다 True지만 `is`가 의도 명확 + 빠름.
+
+### 2. Enum + int 비교
+
+```python
+class Color(Enum):
+    RED = 1
+
+Color.RED == 1    # False
+```
+
+`int` 비교가 필요하면 `IntEnum` 또는 `.value` 명시.
+
+### 3. 멤버 할당 후 클래스 속성 추가 금지
+
+```python
+class Color(Enum):
+    RED = 1
+    DEFAULT = "red"     # 이건 alias (값이 같다면) 또는 멤버
+```
+
+값이 같은 두 이름은 alias. 별도 메타데이터를 두려면 `_member_map_` 직접 만지지 말고 별도 dict.
+
+### 4. JSON 직렬화
+
+기본 `json.dumps`는 Enum을 모름.
+
+```python
+import json
+from enum import Enum
+
+class Color(Enum):
+    RED = "red"
+
+# WRONG
+json.dumps(Color.RED)    # TypeError
+
+# 옵션 1: value 명시
+json.dumps(Color.RED.value)
+
+# 옵션 2: default 함수
+json.dumps({"color": Color.RED}, default=lambda o: o.value if isinstance(o, Enum) else o)
+
+# 옵션 3: StrEnum (3.11+)
+class Color(StrEnum):
+    RED = "red"
+json.dumps(Color.RED)    # '"red"'  (자동)
+```
+
+## 자주 보는 활용
+
+### API 응답 코드
+
+```python
+class ErrorCode(IntEnum):
+    INVALID_INPUT = 1001
+    NOT_FOUND = 1002
+    UNAUTHORIZED = 1003
+
+raise APIError(code=ErrorCode.NOT_FOUND, message="...")
+```
+
+### Django/SQLAlchemy choices
+
+```python
+class OrderStatus(models.TextChoices):    # Django
+    PENDING = "pending", "Pending Approval"
+    APPROVED = "approved", "Approved"
+    SHIPPED = "shipped", "Shipped"
+```
+
+ORM이 enum의 (value, label) 튜플을 인식해 admin 등에서 라벨 표시.
+
+### 환경별 설정
+
+```python
+from enum import StrEnum
+import os
+
+class Env(StrEnum):
+    DEV = "dev"
+    PROD = "prod"
+
+env = Env(os.environ.get("APP_ENV", "dev"))
+if env is Env.PROD:
+    enable_strict_mode()
+```
+
+## 참고
+
+- [`enum` documentation](https://docs.python.org/3/library/enum.html)
+- [PEP 435 – Adding an Enum type to the Python standard library](https://peps.python.org/pep-0435/)
+- [PEP 663 – Standardizing Enum str(), repr(), and format() behaviors](https://peps.python.org/pep-0663/)

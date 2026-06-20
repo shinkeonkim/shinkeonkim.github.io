@@ -1,0 +1,93 @@
+---
+title: "[Java] CountDownLatch"
+aliases: ["CountDownLatch", "java.util.concurrent.CountDownLatch", "카운트다운 래치"]
+tags: [java, concurrent, synchronizer, latch]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.CountDownLatch`** 는 **한 스레드 또는 여러 스레드가 다른 스레드들의 작업 완료를 기다리는** 일회용 synchronizer.
+
+`N` 으로 초기화하고, 각 worker 가 작업 후 `countDown()` 호출. waiter 는 `await()` 로 count 가 0 이 될 때까지 [[Blocking]]. **0 이 되면 다시 1 로 돌릴 수 없음**, 일회용.
+
+## 시각화
+
+```anim:java-countdown-latch
+{}
+```
+
+## 핵심 메서드
+
+```java
+CountDownLatch latch = new CountDownLatch(N);
+
+latch.countDown();              // count - 1
+latch.await();                  // count == 0 될 때까지 block
+latch.await(timeout, unit);     // timeout 까지만 block
+latch.getCount();               // 현재 count (참고용)
+```
+
+## 가장 흔한 두 패턴
+
+### 1. main 스레드가 N 개 작업 완료 대기
+
+```java
+ExecutorService pool = Executors.newFixedThreadPool(N);
+CountDownLatch done = new CountDownLatch(N);
+
+for (int i = 0; i < N; i++) {
+    pool.submit(() -> {
+        try { doWork(); }
+        finally { done.countDown(); }   // 반드시 finally
+    });
+}
+done.await();                          // 모든 작업 끝날 때까지 block
+System.out.println("all done");
+```
+
+### 2. 시작 신호 (start gate)
+
+```java
+CountDownLatch startGate = new CountDownLatch(1);
+
+for (int i = 0; i < N; i++) {
+    new Thread(() -> {
+        startGate.await();              // start 신호 대기
+        run();
+    }).start();
+}
+// 준비 완료 시
+startGate.countDown();                  // 모든 스레드 동시 출발
+```
+
+부하 테스트 도구 (JMeter, Gatling 의 ramp-up) 와 비슷한 패턴.
+
+## CountDownLatch vs CyclicBarrier
+
+| 항목 | CountDownLatch | [[CyclicBarrier]] |
+|:---|:---|:---|
+| 사용 횟수 | **일회용** | **재사용 가능** |
+| 누가 기다리는가 | 한 명 또는 여러 명 | 모두가 서로 기다림 |
+| 도착 콜백 | 없음 | barrier action 실행 가능 |
+| reset | 불가 | `reset()` 가능 |
+
+CountDownLatch 는 비대칭 (1 -> N 또는 N -> 1), CyclicBarrier 는 대칭 (N -> N 만남).
+
+## 함정
+
+### 1. 0 이후 다시 못 쓴다
+
+재사용이 필요하면 [[CyclicBarrier]] 또는 [[Phaser]].
+
+### 2. countDown 빠뜨리면 영원히 block
+
+worker 가 예외로 종료되면서 `countDown` 을 호출 안 하면 main 이 영영 대기. **항상 `finally` 블록에서 호출.**
+
+## 참고
+
+- [[CyclicBarrier]]
+- [[Semaphore]]
+- [[Phaser]]
+- [[Blocking]]
+- Oracle, [CountDownLatch (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CountDownLatch.html)

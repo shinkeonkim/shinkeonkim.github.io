@@ -1,0 +1,266 @@
+---
+title: "[Java] ReentrantLock"
+aliases: ["ReentrantLock", "java.util.concurrent.locks.ReentrantLock", "reentrant lock", "재진입 락", "재진입 가능 락", "Java ReentrantLock"]
+tags: [java, concurrency, lock, jsr-166, reentrant]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.locks.ReentrantLock`** 는 `synchronized` 키워드와 같은 **상호 배제 (mutual exclusion)** 를 제공하는 클래스 기반 락. JSR-166 (Java 5) 에서 추가됐다.
+
+"재진입 (reentrant)" 은 같은 스레드가 **이미 갖고 있는 락을 다시 획득할 수 있다** 는 뜻. `synchronized` 도 재진입 가능하다, 동일한 성질.
+
+`synchronized` 보다 많은 기능을 제공한다.
+
+- `tryLock()`: 즉시 시도 또는 시한 대기
+- 인터럽트 가능한 `lockInterruptibly()`
+- 공정성 (fairness) 옵션
+- 여러 개의 `Condition` 변수
+- 락 정보 조회 (`isLocked()`, `getQueueLength()` 등)
+
+## 기본 사용
+
+```java
+import java.util.concurrent.locks.ReentrantLock;
+
+private final ReentrantLock lock = new ReentrantLock();
+
+public void doWork() {
+    lock.lock();                  // 락 획득 (block 가능)
+    try {
+        // critical section
+    } finally {
+        lock.unlock();             // 반드시 finally 에서 해제
+    }
+}
+```
+
+> [!IMPORTANT]
+> **`unlock()` 은 반드시 `finally` 블록에서 호출.** 예외가 throw 되면 락이 영원히 해제되지 않아 다른 스레드가 deadlock. `synchronized` 는 컴파일러가 자동으로 처리하지만, `ReentrantLock` 은 수동.
+
+## synchronized 와의 비교
+
+| 기능 | `synchronized` | `ReentrantLock` |
+|:---|:---:|:---:|
+| 재진입 | ✓ | ✓ |
+| 기본 동작 | block | block (또는 tryLock) |
+| **타임아웃 락** | ✗ | ✓ (`tryLock(timeout)`) |
+| **인터럽트 가능** | ✗ | ✓ (`lockInterruptibly()`) |
+| **공정 모드** | ✗ (어떤 스레드든) | ✓ (FIFO 선택 가능) |
+| **여러 Condition** | wait/notify 1 개 | `newCondition()` 으로 다수 |
+| **락 상태 조회** | ✗ | ✓ |
+| 자동 해제 | ✓ (블록 종료) | ✗ (수동 `unlock()`) |
+| 성능 (저경합) | 사실상 동일 | 사실상 동일 |
+| 성능 (고경합) | 비슷, JVM 최적화 | 비슷 |
+
+> [!TIP]
+> **단순 mutex 가 필요하면 `synchronized` 를 먼저 고려.** 자동 해제와 코드 간결성이 우선. 위의 추가 기능 중 **하나라도** 필요하면 `ReentrantLock`.
+
+## tryLock, 비차단 시도
+
+`lock()` 은 락이 안 잡힐 때까지 block. `tryLock()` 은 **즉시 결과를 반환**.
+
+```java
+if (lock.tryLock()) {
+    try { ... }
+    finally { lock.unlock(); }
+} else {
+    // 락을 못 얻음, 다른 일을 한다 (또는 포기)
+}
+```
+
+타임아웃 버전.
+
+```java
+if (lock.tryLock(500, TimeUnit.MILLISECONDS)) {
+    try { ... }
+    finally { lock.unlock(); }
+} else {
+    // 500ms 안에 못 얻음
+}
+```
+
+이 기능 덕에 **deadlock 회피**, **응답성 우선** 시나리오에서 유리. `synchronized` 로는 불가능.
+
+## lockInterruptibly, 인터럽트 대응
+
+`lock()` 으로 락을 기다리는 스레드는 `Thread.interrupt()` 에 반응하지 않는다. `lockInterruptibly()` 는 반응한다.
+
+```java
+try {
+    lock.lockInterruptibly();    // 인터럽트되면 InterruptedException
+    try { ... }
+    finally { lock.unlock(); }
+} catch (InterruptedException e) {
+    Thread.currentThread().interrupt();  // 좋은 관행
+    // 락 안 잡고 종료
+}
+```
+
+장시간 락 대기에 stuck 된 스레드를 강제 종료할 때 필요. `synchronized` 는 인터럽트 무시.
+
+## 공정성 (fairness)
+
+기본은 **non-fair**. 락이 해제될 때 어떤 스레드가 다음으로 잡을지는 보장 없음 (실제로는 막 도착한 스레드가 잡는 "barging" 이 자주 발생).
+
+```java
+ReentrantLock fair = new ReentrantLock(true);   // FIFO 보장
+```
+
+`true` 면 FIFO 순서. 다만 **공정 모드는 처리량이 크게 떨어진다** (수십 % ~ 수 배). 스타베이션 (starvation) 이 실제 문제일 때만 활성화.
+
+> [!CAUTION]
+> 공정 모드는 짧은 critical section 의 경우 throughput 이 극단적으로 떨어진다 (10x 이상). Brian Goetz 의 측정에 따르면, 공정 모드는 "공정성 자체가 비즈니스 요구사항" 일 때만 의미가 있다.
+
+## Condition, wait/notify 의 진화
+
+`synchronized` 의 `wait()` / `notify()` / `notifyAll()` 은 **하나의 모니터 락에 하나의 wait set**. 여러 조건을 구분하려면 부자연스럽다.
+
+`ReentrantLock.newCondition()` 은 **같은 락에 여러 wait set** 을 만들 수 있다.
+
+```java
+private final ReentrantLock lock = new ReentrantLock();
+private final Condition notFull = lock.newCondition();
+private final Condition notEmpty = lock.newCondition();
+
+private final Object[] buffer = new Object[N];
+private int count;
+
+public void put(Object e) throws InterruptedException {
+    lock.lock();
+    try {
+        while (count == N) notFull.await();   // 버퍼 가득
+        // ... put e ...
+        notEmpty.signal();                     // 빈 상태에서 기다리는 자만 깨움
+    } finally { lock.unlock(); }
+}
+
+public Object take() throws InterruptedException {
+    lock.lock();
+    try {
+        while (count == 0) notEmpty.await();   // 버퍼 비어 있음
+        // ... remove ...
+        notFull.signal();
+    } finally { lock.unlock(); }
+}
+```
+
+`ArrayBlockingQueue` 의 내부 구현이 이 패턴.
+
+## 재진입 동작
+
+같은 스레드는 락을 여러 번 잡을 수 있다 (count 증가). 같은 횟수만큼 `unlock()` 해야 진짜 해제된다.
+
+```java
+lock.lock();      // hold count = 1
+lock.lock();      // hold count = 2 (같은 스레드)
+recursive();
+lock.unlock();    // hold count = 1
+lock.unlock();    // hold count = 0, 진짜 해제
+```
+
+재귀 메서드, 같은 락을 호출하는 콜백에서 유용.
+
+## 정보 조회 (디버깅용)
+
+```java
+lock.isLocked();           // 누군가 잡고 있나
+lock.isHeldByCurrentThread();  // 내가 잡고 있나
+lock.getHoldCount();       // 내 hold count
+lock.getQueueLength();     // 대기 중인 스레드 수 (추정)
+```
+
+`synchronized` 는 이런 introspection 불가능. 모니터링이나 디버깅에 유용.
+
+## 실무 사용 예
+
+### CopyOnWriteArrayList 의 쓰기 직렬화
+
+```java
+public boolean add(E e) {
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        Object[] elements = getArray();
+        Object[] newElements = Arrays.copyOf(elements, elements.length + 1);
+        newElements[elements.length] = e;
+        setArray(newElements);
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+[[CopyOnWriteArrayList]] 의 핵심.
+
+### 짧은 mutex
+
+```java
+private final ReentrantLock lock = new ReentrantLock();
+private int counter;
+
+public int incrementAndGet() {
+    lock.lock();
+    try { return ++counter; }
+    finally { lock.unlock(); }
+}
+```
+
+이 경우라면 `AtomicInteger.incrementAndGet()` 이 lock-free 라 더 빠르다. `ReentrantLock` 은 더 복잡한 critical section 에 적합.
+
+## ReentrantLock 의 함정
+
+### 1. `unlock()` 빠뜨림
+
+```java
+lock.lock();
+process();          // ← 여기서 예외 throw 시 unlock 안 됨
+lock.unlock();
+```
+
+`try/finally` 필수.
+
+### 2. 다른 락 객체에 unlock
+
+```java
+ReentrantLock a = new ReentrantLock();
+ReentrantLock b = new ReentrantLock();
+a.lock();
+b.unlock();   // ❌ IllegalMonitorStateException
+```
+
+내가 잡지도 않은 락을 풀려 하면 예외.
+
+### 3. 두 락을 잡는 순서
+
+여러 락을 잡을 때 **모든 스레드가 같은 순서** 로 잡아야 deadlock 회피.
+
+```java
+// Thread A
+lockA.lock(); lockB.lock();   // ✓
+
+// Thread B
+lockA.lock(); lockB.lock();   // ✓ (같은 순서)
+
+// Thread C
+lockB.lock(); lockA.lock();   // ❌ deadlock 가능
+```
+
+## ReentrantReadWriteLock 으로 확장
+
+읽기/쓰기 비대칭이라면 `ReentrantReadWriteLock` (이 글에는 미수록) 으로 더 세분화. 여러 reader 가 동시에 읽고, writer 만 배타.
+
+`StampedLock` (Java 8+) 은 더 발전된 형태, optimistic read 지원.
+
+## 참고
+
+- [[volatile]]
+- [[CopyOnWriteArrayList]]
+- [[Synchronous]]
+- [[Blocking]]
+- [[Non-Blocking]]
+- Oracle, [ReentrantLock (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/ReentrantLock.html)
+- Brian Goetz, *Java Concurrency in Practice*, §13 Explicit Locks
+- Doug Lea, [JSR-166: java.util.concurrent](https://jcp.org/en/jsr/detail?id=166)

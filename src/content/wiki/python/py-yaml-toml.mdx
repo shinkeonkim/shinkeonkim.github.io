@@ -1,0 +1,380 @@
+---
+title: "[Python] YAML, TOML, INI: 설정 파일 포맷"
+aliases: ["python yaml", "PyYAML", "tomllib", "configparser", "ruamel.yaml", "settings"]
+tags: [python, yaml, toml, ini, configparser, config, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+설정 파일 포맷 비교:
+
+- **JSON**: 데이터 직렬화. 주석 없음, 좀 엄격. (`json` stdlib)
+- **YAML**: 풍부한 표현, 가독성 좋음. 보안 함정. (`PyYAML` 외부)
+- **TOML**: 명확한 명세, Python 친화. (`tomllib` 3.11+ stdlib)
+- **INI**: 단순. (`configparser` stdlib)
+
+`pyproject.toml`이 TOML, GitHub Actions가 YAML, 레거시 설정이 INI. 새 프로젝트는 TOML 권장.
+
+## TOML (3.11+ 기본 내장)
+
+```toml
+# config.toml
+[server]
+host = "localhost"
+port = 8080
+debug = true
+
+[database]
+url = "postgres://localhost/mydb"
+pool_size = 10
+
+[[users]]
+name = "Alice"
+roles = ["admin"]
+
+[[users]]
+name = "Bob"
+roles = ["user", "viewer"]
+```
+
+```python
+import tomllib    # 3.11+
+
+with open("config.toml", "rb") as f:    # bytes 모드 필수
+    config = tomllib.load(f)
+
+print(config["server"]["host"])
+print(config["users"][0]["name"])
+```
+
+3.10 이하는 `tomli` 패키지 (`pip install tomli`).
+
+**쓰기**는 표준 라이브러리에 없음. `tomli-w` 또는 `tomlkit` (포맷 보존).
+
+```bash
+pip install tomli-w
+```
+
+```python
+import tomli_w
+
+with open("config.toml", "wb") as f:
+    tomli_w.dump(config, f)
+```
+
+## YAML
+
+```yaml
+# config.yaml
+server:
+  host: localhost
+  port: 8080
+  debug: true
+
+database:
+  url: postgres://localhost/mydb
+  pool_size: 10
+
+users:
+  - name: Alice
+    roles:
+      - admin
+  - name: Bob
+    roles: [user, viewer]
+```
+
+```bash
+pip install pyyaml
+```
+
+```python
+import yaml
+
+with open("config.yaml") as f:
+    config = yaml.safe_load(f)    # 항상 safe_load!
+
+print(config["server"]["host"])
+
+# 쓰기
+with open("config.yaml", "w") as f:
+    yaml.safe_dump(config, f, default_flow_style=False)
+```
+
+### YAML 보안 함정
+
+```python
+yaml.load(data)         # RCE 가능! 절대 사용 X
+yaml.safe_load(data)    # 안전
+```
+
+기본 `yaml.load`는 임의 Python 객체 생성 가능 (`!!python/object`). 신뢰할 수 없는 입력 → 시스템 침해. **항상 safe_load**.
+
+3.x PyYAML은 경고 표시. 보안 의식 강한 곳은 `yaml.SafeLoader` 명시.
+
+### 멀티 문서
+
+YAML은 한 파일에 여러 문서 (`---` 구분).
+
+```yaml
+# multi.yaml
+name: doc1
+---
+name: doc2
+```
+
+```python
+import yaml
+
+with open("multi.yaml") as f:
+    for doc in yaml.safe_load_all(f):
+        print(doc)
+```
+
+Kubernetes manifest 등에 사용.
+
+### Anchor, alias
+
+DRY 원칙.
+
+```yaml
+defaults: &defaults
+  timeout: 10
+  retries: 3
+
+dev:
+  <<: *defaults
+  host: localhost
+
+prod:
+  <<: *defaults
+  host: prod.example.com
+```
+
+```python
+config = yaml.safe_load(text)
+print(config["dev"])   # {'timeout': 10, 'retries': 3, 'host': 'localhost'}
+```
+
+### ruamel.yaml: 포맷 보존
+
+PyYAML은 read/write 시 주석·순서를 잃는다. 사용자 설정을 프로그램이 일부 수정 후 저장 시 `ruamel.yaml` 사용.
+
+```bash
+pip install ruamel.yaml
+```
+
+```python
+from ruamel.yaml import YAML
+
+yaml = YAML()
+yaml.preserve_quotes = True
+with open("config.yaml") as f:
+    config = yaml.load(f)
+
+config["server"]["port"] = 9090
+
+with open("config.yaml", "w") as f:
+    yaml.dump(config, f)
+# 주석, 빈 줄, 따옴표 형식 보존
+```
+
+## INI (configparser)
+
+```ini
+# config.ini
+[DEFAULT]
+debug = false
+
+[server]
+host = localhost
+port = 8080
+
+[database]
+url = postgres://localhost/mydb
+```
+
+```python
+import configparser
+
+config = configparser.ConfigParser()
+config.read("config.ini")
+
+print(config["server"]["host"])
+print(config["server"].getint("port"))         # int 변환
+print(config["DEFAULT"].getboolean("debug"))   # bool 변환
+```
+
+INI는 평면적. 중첩 구조 표현 약함. TOML 권장.
+
+## 비교 요약
+
+| 포맷 | 사람 가독성 | 안전성 | 표현력 | Python stdlib | 주석 |
+|------|------------|--------|--------|--------------|------|
+| JSON | 보통 | 안전 | 기본 | O | X |
+| TOML | 좋음 | 안전 | 풍부 | O (3.11+) | O |
+| YAML | 최상 | 함정 있음 | 매우 풍부 | X | O |
+| INI | 보통 | 안전 | 평면적 | O | O |
+
+## 환경 변수 + 설정 파일
+
+실무에선 보통 둘 결합.
+
+```python
+import os
+import tomllib
+
+with open("config.toml", "rb") as f:
+    config = tomllib.load(f)
+
+# 환경 변수가 우선
+config["database"]["url"] = os.environ.get(
+    "DATABASE_URL", config["database"]["url"]
+)
+```
+
+### pydantic-settings
+
+`pydantic-settings`로 환경변수 + 파일 + 기본값 자동 병합.
+
+```bash
+pip install pydantic-settings
+```
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="APP_")
+
+    debug: bool = False
+    database_url: str
+    api_key: str
+
+settings = Settings()    # 환경변수 자동 로드 + 검증
+```
+
+타입 안전 + 검증 + 다중 소스 (.env, 환경변수, secrets directory).
+
+### dynaconf
+
+`dynaconf`는 더 풍부한 옵션 (Vault 통합, 동적 reload, 환경별 분리).
+
+```bash
+pip install dynaconf
+```
+
+## 자주 보는 패턴
+
+### 환경별 설정
+
+```python
+# settings.toml
+[default]
+debug = false
+log_level = "INFO"
+
+[development]
+debug = true
+log_level = "DEBUG"
+
+[production]
+log_level = "WARNING"
+
+# 코드
+import os
+import tomllib
+
+with open("settings.toml", "rb") as f:
+    all_settings = tomllib.load(f)
+
+env = os.environ.get("APP_ENV", "default")
+config = {**all_settings["default"], **all_settings.get(env, {})}
+```
+
+### 비밀 정보 분리
+
+```toml
+# config.toml (커밋)
+[server]
+host = "localhost"
+port = 8080
+
+[database]
+# url은 환경변수 또는 secret store에서
+```
+
+```python
+import os
+config = load_config()
+config["database"]["url"] = os.environ["DATABASE_URL"]
+```
+
+코드와 설정과 비밀을 분리. 12-factor app 원칙.
+
+### 스키마 검증
+
+```python
+from pydantic import BaseModel, Field
+import tomllib
+
+class ServerConfig(BaseModel):
+    host: str
+    port: int = Field(ge=1, le=65535)
+
+class Config(BaseModel):
+    server: ServerConfig
+
+with open("config.toml", "rb") as f:
+    raw = tomllib.load(f)
+
+config = Config(**raw)    # 검증
+print(config.server.host)
+```
+
+잘못된 설정을 시작 시 즉시 발견. pydantic, jsonschema 활용.
+
+## 함정
+
+### YAML 미묘한 타입 변환
+
+```yaml
+version: 1.10        # float! '1.1' 아님
+port: 8000           # int
+date: 2026-06-20     # date 객체
+yes: 1               # YAML 1.1: True (PyYAML은 1.1 사용)
+```
+
+명시적 따옴표: `version: "1.10"`.
+
+### TOML 날짜 타입
+
+TOML은 datetime, date, time 타입 내장.
+
+```toml
+created = 2026-06-20T14:30:00+09:00
+```
+
+`tomllib.load` 결과는 `datetime.datetime` 객체로 자동 변환.
+
+### INI는 모두 문자열
+
+```ini
+port = 8080
+```
+
+```python
+config["server"]["port"]               # '8080' (str)
+config["server"].getint("port")        # 8080 (int)
+```
+
+## 참고
+
+- [`tomllib` documentation (3.11+)](https://docs.python.org/3/library/tomllib.html)
+- [TOML specification](https://toml.io/)
+- [PyYAML documentation](https://pyyaml.org/wiki/PyYAMLDocumentation)
+- [YAML specification](https://yaml.org/)
+- [`configparser`](https://docs.python.org/3/library/configparser.html)
+- [`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+- [`ruamel.yaml`](https://yaml.readthedocs.io/)
+- [`dynaconf`](https://www.dynaconf.com/)

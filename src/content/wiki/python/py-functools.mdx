@@ -1,0 +1,269 @@
+---
+title: "[Python] functools: cache, partial, reduce, singledispatch"
+aliases: ["python functools", "lru_cache", "cache", "partial", "reduce", "singledispatch", "cached_property"]
+tags: [python, functools, stdlib, function]
+updated: 2026-06-20
+---
+
+## 정의
+
+`functools`는 **함수형 프로그래밍 도구와 함수 변환 데코레이터**를 제공하는 표준 라이브러리. 메모이제이션, 부분 적용, 디스패치, 데코레이터 메타데이터 등을 다룬다.
+
+## lru_cache / cache
+
+함수 결과를 메모이제이션. 같은 인자엔 한 번만 계산.
+
+```python
+from functools import lru_cache, cache
+
+@cache                      # 3.9+: 무제한 캐시
+def fib(n):
+    return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+@lru_cache(maxsize=128)     # LRU eviction, 기본 128
+def expensive(x, y):
+    return slow_compute(x, y)
+
+fib(100)
+fib.cache_info()      # CacheInfo(hits=98, misses=101, ...)
+fib.cache_clear()
+```
+
+- 인자는 해시 가능해야 (list 못 받음)
+- 캐시 키는 위치/키워드 인자 둘 다 포함 → `f(1, 2)`와 `f(a=1, b=2)`는 다른 캐시
+- 인스턴스 메서드에 쓰면 `self`가 키에 포함 → 인스턴스 살아 있는 동안 메모리 점유. 약한 참조 캐시는 별도 구현 필요
+
+## cached_property
+
+`@property` + 캐싱. 인스턴스의 `__dict__`에 저장.
+
+```python
+from functools import cached_property
+
+class DataSet:
+    def __init__(self, data):
+        self.data = data
+
+    @cached_property
+    def stats(self):
+        return {"mean": sum(self.data) / len(self.data),
+                "max": max(self.data)}
+
+d = DataSet([1, 2, 3])
+d.stats       # 계산
+d.stats       # 캐시
+del d.stats   # 무효화
+```
+
+불변 데이터 가정. 데이터가 바뀌면 캐시 직접 비워야 함.
+
+## partial / partialmethod
+
+함수의 일부 인자를 미리 채워 새 함수 생성.
+
+```python
+from functools import partial
+
+def power(base, exp):
+    return base ** exp
+
+square = partial(power, exp=2)
+cube = partial(power, exp=3)
+
+print(square(5))    # 25
+print(cube(5))      # 125
+
+# 콜백에 인자 미리 주입
+button.on_click(partial(handle_click, user_id=42))
+```
+
+람다보다 빠르고 introspection 친화적 (`partial`은 `.func`, `.args`, `.keywords` 노출).
+
+`partialmethod`는 클래스 메서드에 사용:
+
+```python
+from functools import partialmethod
+
+class Service:
+    def _request(self, method, url): ...
+    get = partialmethod(_request, "GET")
+    post = partialmethod(_request, "POST")
+```
+
+## reduce
+
+iterable을 누적해 단일 값으로 축약. Python 3에서 `functools`로 이동.
+
+```python
+from functools import reduce
+
+reduce(lambda a, b: a + b, [1, 2, 3, 4])     # 10
+reduce(lambda a, b: a + b, [1, 2, 3], 100)   # 106 (초기값)
+
+# 보통 sum, min, max, math.prod로 충분
+sum([1, 2, 3, 4])                # 10
+import math
+math.prod([1, 2, 3, 4])           # 24
+```
+
+reduce는 가독성이 낮아 권장도가 낮음. 명시적 for나 전용 함수 우선.
+
+## singledispatch
+
+함수의 **첫 번째 인자 타입**에 따라 다른 구현으로 디스패치. 단일 디스패치 다형성.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from functools import singledispatch
+
+@singledispatch
+def render(obj):
+    return repr(obj)
+
+@render.register
+def _(obj: str):
+    return f"text: {obj}"
+
+@render.register
+def _(obj: list):
+    return f"list of {len(obj)}"
+
+@render.register(dict)
+def _(obj):
+    return f"dict with keys {list(obj)}"
+
+print(render(42))
+print(render("hi"))
+print(render([1, 2, 3]))
+print(render({"a": 1}))`}
+  output={`42
+text: hi
+list of 3
+dict with keys ['a']`}
+/>
+
+타입 별로 함수를 추가할 수 있어 `isinstance`-체인을 깔끔하게 대체. 메서드 버전은 `singledispatchmethod`.
+
+```python
+from functools import singledispatchmethod
+
+class Renderer:
+    @singledispatchmethod
+    def render(self, obj):
+        return repr(obj)
+
+    @render.register
+    def _(self, obj: str):
+        return f"text: {obj}"
+```
+
+## wraps
+
+데코레이터에서 원본 함수 메타데이터 보존. `py-decorator` 참고.
+
+```python
+from functools import wraps
+
+def log(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        ...
+        return fn(*args, **kwargs)
+    return wrapper
+```
+
+`wraps`는 `__name__`, `__doc__`, `__qualname__`, `__module__`, `__wrapped__` 복사.
+
+## update_wrapper
+
+`@wraps`의 동작을 수동으로. 클래스 기반 데코레이터에서 유용.
+
+```python
+from functools import update_wrapper
+
+class Decorator:
+    def __init__(self, fn):
+        self.fn = fn
+        update_wrapper(self, fn)
+
+    def __call__(self, *args, **kwargs):
+        return self.fn(*args, **kwargs)
+```
+
+## total_ordering
+
+`__eq__`와 비교 메서드 중 하나만 정의하면 나머지 자동 생성.
+
+```python
+from functools import total_ordering
+
+@total_ordering
+class Version:
+    def __init__(self, *parts):
+        self.parts = parts
+
+    def __eq__(self, other):
+        return self.parts == other.parts
+
+    def __lt__(self, other):
+        return self.parts < other.parts
+
+# __le__, __gt__, __ge__ 자동 생성
+```
+
+성능은 직접 구현보다 약간 느림. `@dataclass(order=True)`가 더 편함.
+
+## reduce + operator
+
+`reduce`와 `operator` 모듈 결합으로 람다 제거.
+
+```python
+from functools import reduce
+import operator
+
+reduce(operator.add, [1, 2, 3, 4])    # 10
+reduce(operator.mul, [1, 2, 3, 4])    # 24
+
+# operator는 itemgetter, attrgetter도 제공
+from operator import itemgetter, attrgetter
+sorted(items, key=itemgetter("price"))    # lambda d: d["price"] 와 동등
+sorted(users, key=attrgetter("name"))     # lambda u: u.name
+```
+
+## 주의: 가변 인자와 캐시
+
+```python
+from functools import lru_cache
+
+@lru_cache
+def f(xs):
+    return sum(xs)
+
+f([1, 2, 3])    # TypeError: unhashable type: 'list'
+f((1, 2, 3))    # OK
+```
+
+list/dict는 해시 안 되므로 tuple/frozenset로 변환해 넘기거나 캐시 안 씀.
+
+## 캐시 무효화 패턴
+
+```python
+@cache
+def lookup(key):
+    return slow_query(key)
+
+# 캐시 비우기
+lookup.cache_clear()
+
+# 특정 키만 무효화는 직접 dict로 구현해야 함 (lru_cache는 단일 키 삭제 미지원)
+```
+
+세밀한 제어가 필요하면 `cachetools` 라이브러리 또는 직접 dict.
+
+## 참고
+
+- [`functools` documentation](https://docs.python.org/3/library/functools.html)
+- [`operator` documentation](https://docs.python.org/3/library/operator.html)
+- [PEP 443 – Single-dispatch generic functions](https://peps.python.org/pep-0443/)
+- [PEP 549 – Instance Descriptors](https://peps.python.org/pep-0549/)

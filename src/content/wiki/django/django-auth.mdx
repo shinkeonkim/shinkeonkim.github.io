@@ -1,0 +1,432 @@
+---
+title: "[Django] 인증: User, login, permissions"
+aliases: ["django auth", "django user", "AUTH_USER_MODEL", "AbstractUser", "permissions", "login_required"]
+tags: [django, auth, user, permission]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django는 **User 모델, 인증·세션, 권한·그룹**을 기본 제공한다. `django.contrib.auth` 앱이 핵심. 비밀번호 해싱(PBKDF2, scrypt, Argon2), 세션, 권한, 그룹, 비밀번호 재설정 등을 즉시 사용 가능.
+
+## User 모델
+
+기본 User 필드: `username`, `password`, `email`, `first_name`, `last_name`, `is_active`, `is_staff`, `is_superuser`, `last_login`, `date_joined`.
+
+```python
+from django.contrib.auth import get_user_model
+User = get_user_model()    # 직접 import 대신
+
+user = User.objects.create_user("alice", "alice@example.com", "secret123")
+user.is_staff = True
+user.save()
+```
+
+`create_user`는 비밀번호 해싱 자동. `User(...)` + `.save()`는 안 함.
+
+## AbstractUser 확장 (권장)
+
+처음 프로젝트 시작 시 무조건 커스텀 User 사용. 나중에 바꾸기 매우 어려움.
+
+```python
+# accounts/models.py
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+class User(AbstractUser):
+    bio = models.TextField(blank=True)
+    avatar = models.ImageField(upload_to="avatars/", blank=True)
+    birthday = models.DateField(null=True, blank=True)
+```
+
+```python
+# settings.py
+AUTH_USER_MODEL = "accounts.User"
+```
+
+initial migration **전에** 설정해야 함. 이미 시작한 프로젝트는 마이그레이션 재정렬 필요.
+
+## AbstractBaseUser: 더 깊은 커스텀
+
+`username` 대신 email 로그인 등 완전 커스텀.
+
+```python
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+
+class UserManager(BaseUserManager):
+    def create_user(self, email, password, **extra):
+        if not email:
+            raise ValueError("Email required")
+        email = self.normalize_email(email)
+        user = self.model(email=email, **extra)
+        user.set_password(password)
+        user.save()
+        return user
+
+    def create_superuser(self, email, password, **extra):
+        extra.setdefault("is_staff", True)
+        extra.setdefault("is_superuser", True)
+        return self.create_user(email, password, **extra)
+
+class User(AbstractBaseUser, PermissionsMixin):
+    email = models.EmailField(unique=True)
+    name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+
+    objects = UserManager()
+    USERNAME_FIELD = "email"
+    REQUIRED_FIELDS = ["name"]
+```
+
+## 인증 처리
+
+### 회원가입
+
+```python
+from django.contrib.auth import login
+from django.contrib.auth.forms import UserCreationForm
+
+def signup(request):
+    if request.method == "POST":
+        form = UserCreationForm(request.POST)
+        if form.is_valid():
+            user = form.save()
+            login(request, user)     # 자동 로그인
+            return redirect("home")
+    else:
+        form = UserCreationForm()
+    return render(request, "signup.html", {"form": form})
+```
+
+### 로그인
+
+```python
+from django.contrib.auth import authenticate, login
+
+def login_view(request):
+    if request.method == "POST":
+        username = request.POST["username"]
+        password = request.POST["password"]
+        user = authenticate(request, username=username, password=password)
+        if user is not None:
+            login(request, user)
+            return redirect("home")
+        else:
+            return render(request, "login.html", {"error": "Invalid"})
+    return render(request, "login.html")
+```
+
+또는 빌트인 view 활용:
+
+```python
+# urls.py
+from django.contrib.auth import views as auth_views
+
+urlpatterns = [
+    path("login/", auth_views.LoginView.as_view(), name="login"),
+    path("logout/", auth_views.LogoutView.as_view(), name="logout"),
+    path("password_change/", auth_views.PasswordChangeView.as_view()),
+    path("password_reset/", auth_views.PasswordResetView.as_view()),
+]
+```
+
+settings에 `LOGIN_REDIRECT_URL`, `LOGOUT_REDIRECT_URL`, `LOGIN_URL` 설정.
+
+### 로그아웃
+
+```python
+from django.contrib.auth import logout
+
+def logout_view(request):
+    logout(request)
+    return redirect("home")
+```
+
+## login_required 데코레이터
+
+```python
+from django.contrib.auth.decorators import login_required
+
+@login_required
+def my_view(request):
+    return render(request, "my.html")
+
+@login_required(login_url="/auth/login/")
+def custom(request):
+    ...
+```
+
+미로그인 시 `LOGIN_URL`로 리다이렉트.
+
+CBV는 mixin:
+
+```python
+from django.contrib.auth.mixins import LoginRequiredMixin
+
+class MyView(LoginRequiredMixin, ListView):
+    model = Post
+```
+
+## 권한 (Permissions)
+
+각 모델당 자동 생성: `add_<model>`, `change_<model>`, `delete_<model>`, `view_<model>`.
+
+```python
+# 확인
+user.has_perm("blog.add_post")
+user.has_perms(["blog.add_post", "blog.change_post"])
+
+# 부여
+from django.contrib.auth.models import Permission
+perm = Permission.objects.get(codename="add_post")
+user.user_permissions.add(perm)
+```
+
+### 추가 권한
+
+```python
+class Post(models.Model):
+    ...
+    class Meta:
+        permissions = [
+            ("can_publish", "Can publish post"),
+            ("can_feature", "Can feature post"),
+        ]
+```
+
+```python
+user.has_perm("blog.can_publish")
+```
+
+### permission_required 데코레이터
+
+```python
+from django.contrib.auth.decorators import permission_required
+
+@permission_required("blog.add_post", login_url="/login/")
+def post_create(request):
+    ...
+
+@permission_required("blog.can_publish", raise_exception=True)    # 403 즉시
+def publish(request, slug):
+    ...
+```
+
+CBV:
+
+```python
+from django.contrib.auth.mixins import PermissionRequiredMixin
+
+class PostCreateView(PermissionRequiredMixin, CreateView):
+    permission_required = "blog.add_post"
+```
+
+## Group
+
+여러 사용자에게 같은 권한 부여.
+
+```python
+from django.contrib.auth.models import Group
+
+editors = Group.objects.create(name="Editors")
+editors.permissions.add(perm1, perm2, perm3)
+
+user.groups.add(editors)
+user.has_perm("blog.change_post")    # 그룹 권한 통해 True
+```
+
+## 비밀번호 처리
+
+```python
+user.set_password("new_password")    # 해시 후 저장
+user.save()
+
+user.check_password("guess")         # 검증
+
+# 비밀번호 검증 (settings.AUTH_PASSWORD_VALIDATORS)
+from django.contrib.auth.password_validation import validate_password
+validate_password("weak")    # ValidationError if 약함
+```
+
+settings 기본 validator: UserAttribute, MinimumLength, CommonPassword, Numeric.
+
+## 비밀번호 해싱
+
+```python
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.Argon2PasswordHasher",     # 권장 (argon2-cffi 설치)
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+    "django.contrib.auth.hashers.ScryptPasswordHasher",     # 4.0+
+]
+```
+
+순서 중요. 첫 번째 hasher로 새 비밀번호 저장. 기존 다른 hasher 비밀번호는 다음 로그인 시 자동 마이그레이션.
+
+## 세션
+
+로그인 정보는 세션에 저장.
+
+```python
+# settings.py
+SESSION_ENGINE = "django.contrib.sessions.backends.db"        # 기본
+# 또는: cache, cached_db, file, signed_cookies
+SESSION_COOKIE_AGE = 1209600                                  # 2주
+SESSION_COOKIE_SECURE = True                                  # HTTPS only
+SESSION_COOKIE_HTTPONLY = True                                # JS 접근 차단
+SESSION_COOKIE_SAMESITE = "Lax"                                # CSRF 보호
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+```
+
+코드에서 세션 사용:
+
+```python
+def view(request):
+    request.session["cart"] = [1, 2, 3]
+    cart = request.session.get("cart", [])
+    del request.session["cart"]
+    request.session.flush()    # 전체 삭제
+```
+
+## 비밀번호 재설정 이메일
+
+```python
+# urls.py
+path("password_reset/", auth_views.PasswordResetView.as_view(
+    email_template_name="emails/password_reset.html",
+    subject_template_name="emails/password_reset_subject.txt",
+)),
+path("password_reset/done/", auth_views.PasswordResetDoneView.as_view()),
+path("reset/<uidb64>/<token>/", auth_views.PasswordResetConfirmView.as_view()),
+path("reset/done/", auth_views.PasswordResetCompleteView.as_view()),
+```
+
+EMAIL_BACKEND 설정 필요.
+
+## 인증 백엔드
+
+기본은 ModelBackend (DB). 추가/교체 가능.
+
+```python
+# settings.py
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "social_core.backends.google.GoogleOAuth2",
+]
+```
+
+여러 백엔드 순서대로 시도.
+
+## 소셜 로그인
+
+`django-allauth` 또는 `social-auth-app-django`로 OAuth.
+
+```bash
+pip install django-allauth
+```
+
+Google, GitHub, Facebook, Apple 등 다수 제공자 지원.
+
+## 함정
+
+### 1. AUTH_USER_MODEL 늦은 변경
+
+initial migration 후 변경하면 매우 어려움. **항상 프로젝트 시작 시 커스텀 User**.
+
+### 2. is_authenticated는 메서드 X
+
+```python
+# 1.10+
+if request.user.is_authenticated:    # 속성!
+    ...
+
+# 그 이전
+if request.user.is_authenticated():    # 메서드 (deprecated)
+    ...
+```
+
+### 3. AnonymousUser
+
+미로그인 시 `request.user`는 `AnonymousUser` 인스턴스 (None 아님).
+
+```python
+if request.user.is_anonymous:
+    ...
+if not request.user.is_authenticated:
+    ...
+```
+
+### 4. 비밀번호 set vs 직접
+
+```python
+user.password = "new"     # 평문 저장! 위험
+user.save()
+
+user.set_password("new")  # 해시
+user.save()
+```
+
+### 5. 슈퍼유저 vs 스태프
+
+- `is_superuser=True`: 모든 권한 자동
+- `is_staff=True`: admin 접속 가능
+- 둘 다 별개. 슈퍼유저도 is_staff=True 필요 (admin 접속용)
+
+## 자주 보는 패턴
+
+### 사용자 별 데이터 격리
+
+```python
+class PostListView(LoginRequiredMixin, ListView):
+    model = Post
+
+    def get_queryset(self):
+        return Post.objects.filter(author=self.request.user)
+```
+
+### Profile + User 분리
+
+```python
+class Profile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    bio = models.TextField()
+
+# Signal로 User 생성 시 Profile 자동 생성
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+@receiver(post_save, sender=User)
+def create_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.create(user=instance)
+```
+
+또는 AbstractUser 확장이 더 간단.
+
+### JWT 인증 (API)
+
+`djangorestframework-simplejwt`로 stateless JWT.
+
+```bash
+pip install djangorestframework-simplejwt
+```
+
+```python
+# settings.py
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ],
+}
+```
+
+## 참고
+
+- [Authentication system](https://docs.djangoproject.com/en/stable/topics/auth/)
+- [Default user model](https://docs.djangoproject.com/en/stable/ref/contrib/auth/)
+- [Customizing authentication](https://docs.djangoproject.com/en/stable/topics/auth/customizing/)
+- [Password management](https://docs.djangoproject.com/en/stable/topics/auth/passwords/)
+- [django-allauth](https://docs.allauth.org/)
+- [Simple JWT](https://django-rest-framework-simplejwt.readthedocs.io/)

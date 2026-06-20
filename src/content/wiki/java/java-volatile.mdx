@@ -1,0 +1,192 @@
+---
+title: "[Java] volatile"
+aliases: ["volatile", "java volatile", "Java volatile", "volatile keyword", "volatile 키워드"]
+tags: [java, concurrency, memory-model, jmm, volatile, happens-before]
+updated: 2026-06-18
+---
+
+## 정의
+
+`volatile` 은 Java 의 키워드. 필드에 붙이면 두 가지를 보장한다.
+
+1. **가시성 (visibility)**: 한 스레드의 `volatile` 쓰기가 **다른 모든 스레드에 즉시 보인다**. CPU 캐시에 머무르지 않고 메인 메모리에 즉시 반영.
+2. **순서 (ordering)**: `volatile` 읽기 / 쓰기 주변의 다른 메모리 연산이 재배치 (reorder) 되지 않는다. [JMM (Java Memory Model)] 의 **happens-before** 관계 확립.
+
+`volatile` 은 **상호 배제 (mutual exclusion) 를 보장하지 않는다.** `volatile int` 에 `i++` 를 해도 atomic 하지 않다. 이걸 헷갈리면 잘못된 동시성 코드가 된다.
+
+## 왜 필요한가, 가시성 문제
+
+기본적으로 각 스레드는 변수를 **자기 CPU 의 register 나 캐시에 복사** 해 둘 수 있다. JIT 컴파일러도 적극적으로 캐시한다.
+
+```java
+class Flag {
+    boolean stop = false;     // ← volatile 아님
+
+    void run() {
+        while (!stop) {        // 캐시된 값을 계속 봄
+            doWork();
+        }
+    }
+}
+
+// 다른 스레드
+flag.stop = true;             // ❌ run() 이 영원히 못 볼 수 있음
+```
+
+`stop` 이 메인 메모리에 기록돼도 `run()` 을 도는 스레드는 자기 캐시에 false 를 들고 있어서 **무한 루프** 가 된다. 실제 production 에서 종종 만나는 버그.
+
+```java
+class Flag {
+    volatile boolean stop = false;  // ✓ volatile
+
+    void run() {
+        while (!stop) {              // 매번 메인 메모리 확인
+            doWork();
+        }
+    }
+}
+```
+
+이제 `stop = true` 가 즉시 보인다.
+
+## happens-before 의 핵심
+
+`volatile` 변수 `v` 에 대해:
+
+> **v 의 쓰기는 v 의 같은 변수에 대한 이후 모든 읽기 보다 happens-before.**
+
+이게 진짜로 중요한 함의:
+
+> **쓰기 스레드가 `v` 쓰기 *이전* 에 수행한 모든 작업은, 읽기 스레드가 `v` 를 읽은 *이후* 의 작업에 모두 보인다.**
+
+즉 `volatile` 한 변수의 쓰기/읽기는 **그 주변 모든 메모리 연산** 의 동기화 지점이 된다.
+
+```java
+class Publisher {
+    int x = 0;                    // 평범한 필드
+    int y = 0;
+    volatile boolean ready = false;  // ← volatile
+
+    // Writer thread
+    void publish() {
+        x = 42;
+        y = 100;
+        ready = true;            // ready 쓰기 = barrier
+    }
+
+    // Reader thread
+    void consume() {
+        if (ready) {              // ready == true 를 본 순간
+            // x == 42 와 y == 100 도 보장된다
+            System.out.println(x + ", " + y);
+        }
+    }
+}
+```
+
+이 패턴이 **safe publication** 의 기초.
+
+## volatile vs synchronized
+
+| 특성 | `volatile` | `synchronized` |
+|:---|:---|:---|
+| 가시성 | ✓ | ✓ |
+| 원자성 (read/write) | ✓ (단일 read/write) | ✓ |
+| **원자성 (복합 연산)** | ✗ (`i++` 안 됨) | ✓ |
+| **상호 배제** | ✗ | ✓ |
+| 비용 | 매우 낮음 | 중간 (락 acquire/release) |
+| 블로킹 | ✗ (lock-free) | ✓ (대기 가능) |
+
+> [!CAUTION]
+> **`volatile int counter; counter++;` 는 thread-safe 가 아니다.** 읽기-수정-쓰기 가 세 단계로 나뉘어 그 사이 다른 스레드가 끼어들 수 있다. atomic counter 가 필요하면 `AtomicInteger`.
+
+## 언제 volatile 이 충분한가
+
+- **단일 read 또는 단일 write 가 atomic 으로 충분**. 예: 상태 플래그, 캐시된 값의 참조 교체.
+- **다른 변수와 invariant 가 얽혀 있지 않다**. `volatile` 은 그 변수 하나만 보장.
+- **읽기 매우 많음 + 쓰기 매우 적음**. lock-free 라 읽기가 빠르다.
+
+대표 사용 사례:
+
+```java
+// 1. 상태 플래그
+class Worker {
+    private volatile boolean shouldStop = false;
+    public void stop() { shouldStop = true; }
+    public void run() { while (!shouldStop) { ... } }
+}
+
+// 2. Double-Checked Locking (DCL)
+class Singleton {
+    private static volatile Singleton instance;
+    public static Singleton getInstance() {
+        if (instance == null) {                   // 1st check (no lock)
+            synchronized (Singleton.class) {
+                if (instance == null) {           // 2nd check
+                    instance = new Singleton();
+                }
+            }
+        }
+        return instance;
+    }
+}
+
+// 3. 참조 교체 (예: CopyOnWriteArrayList 의 array)
+class CowList<E> {
+    private volatile Object[] array;
+    public Object[] getArray() { return array; }     // lock-free read
+    public void setArray(Object[] a) { array = a; }  // visible write
+}
+```
+
+세 번째 패턴이 [[CopyOnWriteArrayList]] 의 핵심.
+
+## volatile 의 함정
+
+### 1. `i++` 같은 복합 연산 atomic 아님
+
+```java
+class Counter {
+    private volatile int n = 0;
+    public void increment() {
+        n++;   // ❌ atomic 아님 (read → +1 → write 분리)
+    }
+}
+```
+
+해법: `AtomicInteger` (CAS 기반) 또는 `synchronized` 메서드.
+
+### 2. 여러 변수 간 invariant 보호 못 함
+
+```java
+class Range {
+    private volatile int low;
+    private volatile int high;
+    public void set(int l, int h) {
+        low = l;   // ← 사이 시간
+        high = h;
+    }
+    // 다른 스레드가 그 사이 set() 를 또 호출하면 low > high 일 수 있다
+}
+```
+
+해법: `synchronized` 또는 [[ReentrantLock]] 으로 두 쓰기 묶기.
+
+### 3. JIT 최적화는 막을 수 있지만, 알고리즘 동시성 문제는 못 막는다
+
+`volatile` 을 붙이면 컴파일러가 "이 변수의 캐시는 못 쓴다" 고 인식해 매번 메모리 접근. 하지만 그뿐이다.
+
+## 64-bit 값과 volatile
+
+JVM 명세는 `long`, `double` 의 단일 read/write 가 **64-bit OS 에서는 atomic** 이지만 32-bit OS 에서는 두 번에 나뉠 수 있다고 한다. `volatile long`, `volatile double` 은 32-bit 환경에서도 atomic.
+
+요즘은 거의 64-bit 환경이라 차이가 없지만, `AtomicLong` 을 쓰는 게 안전.
+
+## 참고
+
+- [[ReentrantLock]]
+- [[CopyOnWriteArrayList]]
+- Oracle, [Java Language Specification §17.4 Memory Model](https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html#jls-17.4)
+- Doug Lea, [The JSR-133 Cookbook for Compiler Writers](https://gee.cs.oswego.edu/dl/jmm/cookbook.html)
+- Brian Goetz, *Java Concurrency in Practice*, §3.1.4 Volatile Variables
+- JEP 188, [Java Memory Model Update](https://openjdk.org/jeps/188)

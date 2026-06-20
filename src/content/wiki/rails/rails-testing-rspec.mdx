@@ -1,0 +1,439 @@
+---
+title: "[Rails] 테스트: Minitest, RSpec, FactoryBot, Capybara"
+aliases: ["rails test", "rspec rails", "factory bot", "system test", "capybara", "minitest rails"]
+tags: [rails, testing, rspec, minitest, factory-bot]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails는 **Minitest 기반 테스트**를 기본 제공한다. 커뮤니티는 **RSpec**도 광범위 사용. **FactoryBot**(객체 생성), **Capybara**(브라우저 시뮬레이션), **Rails System Test**(통합)이 표준 도구. fixture와 factory 둘 다 사용 가능.
+
+## 디렉터리 구조
+
+```
+test/                       # Minitest (Rails 기본)
+    models/
+    controllers/
+    system/                 # E2E
+    fixtures/
+    test_helper.rb
+
+spec/                       # RSpec
+    models/
+    controllers/
+    requests/
+    system/
+    factories/
+    rails_helper.rb
+```
+
+## Minitest
+
+```ruby
+# test/models/post_test.rb
+require "test_helper"
+
+class PostTest < ActiveSupport::TestCase
+  test "presence of title" do
+    post = Post.new(body: "...")
+    assert_not post.valid?
+    assert_includes post.errors[:title], "can't be blank"
+  end
+
+  test "creates a post" do
+    assert_difference "Post.count", 1 do
+      Post.create!(title: "Hi", body: "...")
+    end
+  end
+end
+```
+
+```bash
+bin/rails test                   # 전체
+bin/rails test test/models       # 디렉터리
+bin/rails test test/models/post_test.rb
+bin/rails test test/models/post_test.rb:42    # 특정 라인
+```
+
+## fixtures
+
+```yaml
+# test/fixtures/posts.yml
+hello:
+  title: Hello
+  body: World
+  author: alice    # users.yml의 alice 참조
+  created_at: <%= 1.day.ago %>
+
+ruby_post:
+  title: Ruby
+  body: "..."
+```
+
+```ruby
+def setup
+  @post = posts(:hello)
+end
+```
+
+자동 로드. 빠르지만 데이터 변경 시 모든 테스트 영향.
+
+## FactoryBot
+
+```ruby
+# Gemfile
+gem "factory_bot_rails"
+```
+
+```ruby
+# spec/factories/posts.rb
+FactoryBot.define do
+  factory :post do
+    title { "Test" }
+    body { "Body" }
+    association :author, factory: :user
+
+    trait :published do
+      published { true }
+      published_at { Time.current }
+    end
+
+    trait :with_comments do
+      after(:create) do |post|
+        create_list(:comment, 3, post: post)
+      end
+    end
+  end
+end
+```
+
+사용:
+
+```ruby
+post = create(:post)
+posts = create_list(:post, 5)
+published = create(:post, :published)
+with_tags = build(:post, tags: [tag1, tag2])     # save X
+attrs = attributes_for(:post)                     # hash
+```
+
+fixture보다 명시적·유연.
+
+## RSpec
+
+```ruby
+gem "rspec-rails", group: [:development, :test]
+bin/rails g rspec:install
+```
+
+```ruby
+# spec/models/post_spec.rb
+require "rails_helper"
+
+RSpec.describe Post, type: :model do
+  describe "validations" do
+    it { is_expected.to validate_presence_of(:title) }
+    it { is_expected.to belong_to(:author) }
+  end
+
+  describe "#publish!" do
+    let(:post) { create(:post) }
+
+    it "marks as published" do
+      post.publish!
+      expect(post.published).to be true
+      expect(post.published_at).to be_present
+    end
+
+    context "when already published" do
+      let(:post) { create(:post, :published) }
+
+      it "raises" do
+        expect { post.publish! }.to raise_error(StandardError)
+      end
+    end
+  end
+end
+```
+
+```bash
+bundle exec rspec
+bundle exec rspec spec/models
+bundle exec rspec spec/models/post_spec.rb:30
+```
+
+## Controller / Request specs
+
+```ruby
+# spec/requests/posts_spec.rb
+RSpec.describe "Posts", type: :request do
+  describe "GET /posts" do
+    it "returns success" do
+      get posts_path
+      expect(response).to have_http_status(:ok)
+    end
+  end
+
+  describe "POST /posts" do
+    let(:user) { create(:user) }
+    before { sign_in user }
+
+    it "creates a post" do
+      expect {
+        post posts_path, params: { post: { title: "T", body: "B" } }
+      }.to change(Post, :count).by(1)
+      expect(response).to redirect_to(Post.last)
+    end
+
+    context "with invalid params" do
+      it "renders new" do
+        post posts_path, params: { post: { title: "" } }
+        expect(response).to have_http_status(:unprocessable_entity)
+      end
+    end
+  end
+end
+```
+
+`type: :request`는 통합 테스트. controller spec(`type: :controller`)은 deprecated 방향.
+
+## System tests (browser)
+
+```ruby
+# test/system/posts_test.rb
+require "application_system_test_case"
+
+class PostsTest < ApplicationSystemTestCase
+  test "creating a post" do
+    sign_in users(:alice)
+    visit posts_path
+    click_on "New post"
+    fill_in "Title", with: "Hello"
+    fill_in "Body", with: "World"
+    click_on "Create Post"
+    assert_text "Hello"
+  end
+end
+```
+
+`Capybara` 사용. Selenium/Cuprite 드라이버.
+
+```ruby
+# test/application_system_test_case.rb
+class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
+  driven_by :selenium, using: :headless_chrome, screen_size: [1400, 1400]
+end
+```
+
+또는 RSpec:
+
+```ruby
+RSpec.describe "Posts", type: :system, js: true do
+  before { driven_by :selenium, using: :headless_chrome }
+
+  it "creates a post" do
+    visit posts_path
+    fill_in "Title", with: "Hi"
+    click_button "Create"
+    expect(page).to have_content "Hi"
+  end
+end
+```
+
+## Mailer test
+
+```ruby
+# spec/mailers/welcome_mailer_spec.rb
+RSpec.describe WelcomeMailer, type: :mailer do
+  describe "#welcome" do
+    let(:user) { create(:user, email: "a@x.com") }
+    let(:mail) { WelcomeMailer.welcome(user) }
+
+    it "renders" do
+      expect(mail.subject).to eq("환영합니다")
+      expect(mail.to).to eq([user.email])
+      expect(mail.body.encoded).to match("Hello")
+    end
+  end
+end
+```
+
+테스트 환경 EMAIL: `ActionMailer::Base.delivery_method = :test`. `ActionMailer::Base.deliveries`에 mail 누적.
+
+## Job test
+
+```ruby
+RSpec.describe SendWelcomeEmailJob, type: :job do
+  let(:user) { create(:user) }
+
+  it "enqueues" do
+    expect {
+      SendWelcomeEmailJob.perform_later(user.id)
+    }.to have_enqueued_job(SendWelcomeEmailJob).with(user.id)
+  end
+
+  it "sends email" do
+    expect {
+      perform_enqueued_jobs do
+        SendWelcomeEmailJob.perform_later(user.id)
+      end
+    }.to change { ActionMailer::Base.deliveries.size }.by(1)
+  end
+end
+```
+
+## VCR (외부 API mock)
+
+```ruby
+gem "vcr", group: :test
+
+# spec/spec_helper.rb
+VCR.configure do |c|
+  c.cassette_library_dir = "spec/vcr_cassettes"
+  c.hook_into :webmock
+end
+
+# 사용
+RSpec.describe "API", :vcr do
+  it "fetches data" do
+    response = ApiClient.fetch_user(1)
+    expect(response.name).to eq "Alice"
+  end
+end
+```
+
+첫 실행 시 실제 API 호출 → cassette 저장. 이후엔 cassette 재생.
+
+## DatabaseCleaner / 트랜잭션
+
+RSpec은 기본 트랜잭션 wrapping (rollback). JS system test는 별도 thread → 트랜잭션 안 됨.
+
+```ruby
+# spec/rails_helper.rb
+RSpec.configure do |config|
+  config.use_transactional_fixtures = true
+  # JS 테스트엔 DatabaseCleaner truncation
+end
+```
+
+## shoulda-matchers
+
+```ruby
+gem "shoulda-matchers"
+```
+
+```ruby
+RSpec.describe Post, type: :model do
+  it { should validate_presence_of(:title) }
+  it { should validate_uniqueness_of(:slug) }
+  it { should belong_to(:author).class_name("User") }
+  it { should have_many(:comments).dependent(:destroy) }
+  it { should have_many(:tags).through(:post_tags) }
+end
+```
+
+검증/관계를 한 줄로 테스트.
+
+## Mock / Stub
+
+```ruby
+allow(User).to receive(:find).and_return(user)
+expect(NotifyJob).to receive(:perform_later).with(user.id)
+
+# instance
+allow_any_instance_of(Post).to receive(:publish).and_return(true)
+```
+
+## 자주 보는 패턴
+
+### Request spec 표준
+
+```ruby
+describe "PostsController" do
+  describe "GET /posts" do
+    let!(:posts) { create_list(:post, 3) }
+
+    it "lists" do
+      get posts_path
+      expect(response).to be_successful
+      expect(response.body).to include(posts.first.title)
+    end
+  end
+end
+```
+
+### Pundit policy spec
+
+```ruby
+RSpec.describe PostPolicy do
+  subject { described_class }
+
+  permissions :update? do
+    let(:user) { create(:user) }
+    let(:post) { create(:post, author: user) }
+
+    it "allows author" do
+      expect(subject).to permit(user, post)
+    end
+
+    it "denies other" do
+      other = create(:user)
+      expect(subject).not_to permit(other, post)
+    end
+  end
+end
+```
+
+### Time travel
+
+```ruby
+travel_to Time.zone.local(2026, 1, 1) do
+  expect(Date.current).to eq(Date.new(2026, 1, 1))
+end
+
+# 또는 timecop
+Timecop.freeze("2026-01-01")
+```
+
+## 함정
+
+### 1. 트랜잭션과 background job
+
+`perform_enqueued_jobs` 또는 inline adapter로 테스트 시 동기 실행.
+
+### 2. system test flaky
+
+비동기 처리, animation → 시간 대기 필요.
+
+```ruby
+expect(page).to have_content("Saved", wait: 5)
+# wait는 기본 2초
+```
+
+### 3. fixtures 순서
+
+fixture 로드 순서가 보장 안 됨. ID 의존 코드 위험.
+
+### 4. 너무 많은 stub
+
+```ruby
+allow(...).to receive(...)
+allow(...).to receive(...)
+...
+```
+
+비즈니스 로직 결합 테스트가 됨. 통합 테스트가 가치 큼.
+
+### 5. CI 느림
+
+병렬 실행 (`parallel_tests`), `--fail-fast`, mock 줄이기.
+
+## 참고
+
+- [Rails Testing Guide](https://guides.rubyonrails.org/testing.html)
+- [RSpec Rails](https://github.com/rspec/rspec-rails)
+- [FactoryBot](https://github.com/thoughtbot/factory_bot)
+- [Capybara](https://github.com/teamcapybara/capybara)
+- [shoulda-matchers](https://github.com/thoughtbot/shoulda-matchers)
+- [VCR](https://github.com/vcr/vcr)

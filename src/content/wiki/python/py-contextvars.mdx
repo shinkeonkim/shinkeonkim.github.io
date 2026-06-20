@@ -1,0 +1,306 @@
+---
+title: "[Python] contextvars: 비동기 친화 컨텍스트 변수"
+aliases: ["python contextvars", "ContextVar", "Context", "copy_context", "asyncio context"]
+tags: [python, contextvars, async, concurrency, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`contextvars`(PEP 567, 3.7+)는 **현재 코드 실행 컨텍스트에 묶이는 변수**다. threading의 `local()`처럼 동작하지만 **asyncio 코루틴·태스크 경계도 정확히 인식**. 비동기 코드에서 "현재 사용자", "request id", "DB 트랜잭션" 같은 컨텍스트 정보를 안전하게 전달.
+
+## ContextVar 기본
+
+```python
+from contextvars import ContextVar
+
+current_user: ContextVar[str] = ContextVar("current_user", default="anonymous")
+
+print(current_user.get())          # 'anonymous'
+token = current_user.set("Alice")  # 새 값 설정
+print(current_user.get())          # 'Alice'
+current_user.reset(token)          # 복원
+print(current_user.get())          # 'anonymous'
+```
+
+`set()`은 `Token` 반환. `reset(token)`으로 이전 값 복원.
+
+## 코루틴 간 격리
+
+```python
+import asyncio
+from contextvars import ContextVar
+
+request_id: ContextVar[str] = ContextVar("request_id")
+
+async def handle(req_id):
+    request_id.set(req_id)
+    await asyncio.sleep(0.1)
+    print(f"handler {req_id} sees {request_id.get()}")
+
+async def main():
+    await asyncio.gather(
+        handle("req-1"),
+        handle("req-2"),
+        handle("req-3"),
+    )
+
+asyncio.run(main())
+# handler req-1 sees req-1
+# handler req-2 sees req-2
+# handler req-3 sees req-3
+```
+
+각 태스크가 자체 컨텍스트를 가져 서로 침범 X. `threading.local`에 해당하지만 코루틴 단위.
+
+## 왜 글로벌 변수가 안 되나
+
+```python
+# WRONG
+current_user = "anonymous"    # 글로벌
+
+async def handler1():
+    current_user = "Alice"     # 다른 코루틴이 덮어쓸 수 있음
+    await long_work()
+    print(current_user)        # 다른 코루틴이 바꿨을 수도
+
+# CORRECT
+current_user_var = ContextVar("current_user")
+
+async def handler1():
+    current_user_var.set("Alice")    # 자신의 컨텍스트만
+    await long_work()
+    print(current_user_var.get())     # 항상 Alice
+```
+
+함수 인자로 매번 전달하면 깔끔하지만 깊은 호출 스택에서 번거로움. 컨텍스트 변수는 "어디서나 접근, 자동 격리".
+
+## Context: 명시적 스냅샷
+
+`copy_context()`는 현재 모든 ContextVar 값의 스냅샷을 반환.
+
+```python
+from contextvars import copy_context, ContextVar
+
+x = ContextVar("x", default=0)
+
+def show():
+    print("x =", x.get())
+
+ctx = copy_context()
+x.set(1)
+show()                  # 1 (현재 컨텍스트)
+ctx.run(show)           # 0 (스냅샷)
+```
+
+`ctx.run(fn)`은 그 스냅샷 안에서 fn 실행. 컨텍스트가 격리된 채로 실행됨.
+
+## 실용 예제
+
+### request id 로깅
+
+```python
+from contextvars import ContextVar
+import logging
+
+request_id: ContextVar[str] = ContextVar("request_id", default="-")
+
+class ContextFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = request_id.get()
+        return True
+
+logger = logging.getLogger()
+logger.addFilter(ContextFilter())
+formatter = logging.Formatter("%(asctime)s [%(request_id)s] %(message)s")
+# 로그 출력 시 현재 컨텍스트의 request_id 자동 포함
+
+async def handle(req):
+    request_id.set(req.id)
+    logger.info("processing")
+    await do_work()
+    logger.info("done")
+```
+
+flask/FastAPI 미들웨어에서 request id 설정 → 모든 하위 함수의 로그에 자동 표시.
+
+### 현재 사용자
+
+```python
+from contextvars import ContextVar
+
+current_user: ContextVar[User | None] = ContextVar("current_user", default=None)
+
+def get_current_user():
+    user = current_user.get()
+    if user is None:
+        raise Unauthorized
+    return user
+
+# 미들웨어
+async def auth_middleware(request, call_next):
+    user = await authenticate(request)
+    token = current_user.set(user)
+    try:
+        return await call_next(request)
+    finally:
+        current_user.reset(token)
+```
+
+비즈니스 로직 어디서나 `get_current_user()` 호출. flask의 `g`, Django의 `request.user`와 비슷한 패턴.
+
+### DB 트랜잭션
+
+```python
+from contextvars import ContextVar
+
+current_tx: ContextVar = ContextVar("tx", default=None)
+
+class transaction:
+    async def __aenter__(self):
+        self.tx = await db.begin()
+        self.token = current_tx.set(self.tx)
+        return self.tx
+
+    async def __aexit__(self, *exc):
+        if exc[0] is None:
+            await self.tx.commit()
+        else:
+            await self.tx.rollback()
+        current_tx.reset(self.token)
+
+def get_tx():
+    tx = current_tx.get()
+    if tx is None:
+        raise RuntimeError("no transaction")
+    return tx
+
+async def update_user(id, data):
+    tx = get_tx()
+    await tx.execute("UPDATE users ...")
+```
+
+`with transaction():` 안의 모든 비동기 호출이 같은 트랜잭션 공유.
+
+## threading.local vs ContextVar
+
+| | `threading.local` | `ContextVar` |
+|---|------------------|--------------|
+| 격리 단위 | OS 스레드 | 코드 실행 컨텍스트 (코루틴 포함) |
+| 비동기 친화 | X (asyncio에서 깨짐) | O |
+| Token (reset) | X | O |
+| 스냅샷 | X | copy_context |
+| 추천 시점 | 동기 멀티스레드 | asyncio, 또는 둘 다 |
+
+asyncio + threading.local은 코루틴이 같은 스레드를 공유하므로 값이 섞임. ContextVar는 코루틴 task 경계에서 격리.
+
+## ContextVar와 일반 함수
+
+ContextVar는 동기 코드에서도 동작 (스레드 별 별도).
+
+```python
+import threading
+from contextvars import ContextVar
+
+x = ContextVar("x", default=0)
+
+def worker(name):
+    x.set(name)
+    print(f"thread {name}: x = {x.get()}")
+
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+for t in threads: t.start()
+for t in threads: t.join()
+```
+
+스레드별 독립. `local`을 ContextVar로 대체 가능.
+
+## 함정
+
+### 1. 코루틴 시작 전 set이 안 보일 수 있음
+
+```python
+import asyncio
+from contextvars import ContextVar
+
+x = ContextVar("x", default=0)
+
+async def child():
+    print(x.get())
+
+async def main():
+    x.set(99)
+    await child()         # 99 (자식이 부모 컨텍스트 상속)
+
+asyncio.run(main())
+```
+
+`asyncio.create_task`는 **생성 시점**의 컨텍스트를 복사. 이후 부모의 set은 자식에 안 보임.
+
+```python
+async def main():
+    task = asyncio.create_task(child())    # 이 시점의 컨텍스트 캡처
+    x.set(99)                               # task에는 안 보임
+    await task
+```
+
+### 2. ContextVar의 기본값과 set 안 한 경우
+
+```python
+x = ContextVar("x")          # 기본값 없음
+x.get()                       # LookupError!
+
+x = ContextVar("x", default=0)
+x.get()                       # 0
+```
+
+기본값 없으면 set 안 한 컨텍스트에서 `LookupError`.
+
+### 3. reset Token 잘못된 사용
+
+```python
+token1 = x.set(1)
+token2 = x.set(2)
+x.reset(token1)    # ValueError: 다른 컨텍스트의 토큰
+```
+
+토큰은 정확히 그 set 호출과 페어. 보통 `try/finally` 또는 컨텍스트 매니저로 보호.
+
+### 4. 동기 코드에서 의도치 않은 공유
+
+```python
+# 단일 스레드 + 동기 코드
+x.set(1)
+some_function()       # 안에서 x.get() 호출 시 1 보임
+x.reset(token)
+```
+
+명시적 reset 없으면 함수 종료 후에도 값 남음. 미들웨어/데코레이터 패턴 권장.
+
+## 비동기 컨텍스트 매니저 패턴
+
+```python
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+
+current_user = ContextVar("current_user")
+
+@asynccontextmanager
+async def user_context(user):
+    token = current_user.set(user)
+    try:
+        yield user
+    finally:
+        current_user.reset(token)
+
+async def handle(request):
+    async with user_context(request.user):
+        await process()    # process 내부에서 current_user.get() OK
+```
+
+## 참고
+
+- [`contextvars` documentation](https://docs.python.org/3/library/contextvars.html)
+- [PEP 567 – Context Variables](https://peps.python.org/pep-0567/)
+- [`asyncio` task context](https://docs.python.org/3/library/asyncio-task.html#asyncio.Task.get_context)
+- [threading.local vs contextvars](https://docs.python.org/3/library/threading.html#thread-local-data)

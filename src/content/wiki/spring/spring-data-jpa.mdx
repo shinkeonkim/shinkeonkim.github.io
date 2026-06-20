@@ -1,0 +1,402 @@
+---
+title: "[Spring] Spring Data JPA: Repository, Query Methods"
+aliases: ["spring data jpa", "JpaRepository", "query methods", "@Query", "Specifications", "Pageable"]
+tags: [spring, jpa, hibernate, data, repository]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Data JPA**는 JPA(Hibernate) 위에 **Repository 추상화**를 얹어 boilerplate를 제거. 인터페이스만 정의하면 Spring이 구현체 자동 생성. 메서드 이름으로 쿼리 파싱, `@Query`로 JPQL, Specification으로 동적 쿼리.
+
+## 설정
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+runtimeOnly("org.postgresql:postgresql")
+```
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost/myapp
+    username: app
+    password: ...
+  jpa:
+    hibernate:
+      ddl-auto: validate    # none, validate, update, create, create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+```
+
+## Entity
+
+```java
+@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    private String name;
+
+    @Enumerated(EnumType.STRING)
+    private Role role;
+
+    @CreatedDate
+    @Column(updatable = false)
+    private Instant createdAt;
+
+    @LastModifiedDate
+    private Instant updatedAt;
+
+    // getter/setter or use Lombok @Getter @Setter
+}
+```
+
+Spring Boot 3+ Jakarta namespace (`jakarta.persistence.*`).
+
+## Repository
+
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByEmail(String email);
+    List<User> findByNameContaining(String name);
+    boolean existsByEmail(String email);
+    long countByRole(Role role);
+    void deleteByEmail(String email);
+}
+```
+
+`JpaRepository<Entity, ID>` 상속만으로 save, findById, findAll, delete, count 자동 제공.
+
+## Query Method 명명 규칙
+
+| Keyword | 예시 |
+|---------|-----|
+| `findBy`, `getBy`, `readBy` | findByEmail |
+| `existsBy` | existsByEmail |
+| `countBy` | countByRole |
+| `deleteBy` | deleteByEmail |
+| `And`, `Or` | findByEmailAndRole |
+| `Between` | findByCreatedAtBetween |
+| `LessThan`, `GreaterThan` | findByAgeLessThan |
+| `Like`, `Containing` | findByNameContaining |
+| `IsNull`, `IsNotNull` | findByDeletedAtIsNull |
+| `OrderBy` | findByRoleOrderByCreatedAtDesc |
+| `Top`, `First` | findTop10ByOrderByCreatedAtDesc |
+| `Distinct` | findDistinctByRole |
+
+```java
+List<User> findByEmailAndRole(String email, Role role);
+List<User> findByCreatedAtBetween(Instant start, Instant end);
+List<User> findByNameStartingWith(String prefix);
+Page<User> findByRole(Role role, Pageable pageable);
+```
+
+긴 이름이 가독성을 해치면 `@Query` 사용.
+
+## @Query
+
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+
+    @Query("SELECT u FROM User u WHERE u.email = :email AND u.active = true")
+    Optional<User> findActiveByEmail(@Param("email") String email);
+
+    @Query("SELECT u FROM User u WHERE LOWER(u.name) LIKE LOWER(CONCAT('%', :q, '%'))")
+    List<User> search(@Param("q") String q);
+
+    @Query(value = "SELECT * FROM users WHERE email = :email", nativeQuery = true)
+    Optional<User> findByEmailNative(@Param("email") String email);
+}
+```
+
+JPQL (Java Persistence Query Language). `nativeQuery=true`로 raw SQL.
+
+## Modifying query
+
+```java
+@Modifying
+@Query("UPDATE User u SET u.lastLoginAt = :now WHERE u.id = :id")
+int updateLastLogin(@Param("id") Long id, @Param("now") Instant now);
+
+@Modifying
+@Query("DELETE FROM User u WHERE u.active = false")
+int deleteInactive();
+```
+
+INSERT/UPDATE/DELETE는 `@Modifying`. 트랜잭션 안에서 실행.
+
+## Pageable / Sort
+
+```java
+Page<User> findByRole(Role role, Pageable pageable);
+```
+
+```java
+@GetMapping
+public Page<User> list(Pageable pageable) {
+    return userRepository.findAll(pageable);
+}
+```
+
+요청: `GET /users?page=0&size=20&sort=name,asc&sort=createdAt,desc`
+
+응답:
+```json
+{
+  "content": [...],
+  "totalElements": 100,
+  "totalPages": 5,
+  "number": 0,
+  "size": 20
+}
+```
+
+## Specifications (동적 쿼리)
+
+```java
+public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificationExecutor<User> {
+}
+
+// 사용
+public class UserSpecs {
+    public static Specification<User> hasRole(Role role) {
+        return (root, query, cb) -> cb.equal(root.get("role"), role);
+    }
+
+    public static Specification<User> emailContains(String q) {
+        return (root, query, cb) -> cb.like(cb.lower(root.get("email")), "%" + q.toLowerCase() + "%");
+    }
+}
+
+userRepository.findAll(
+    Specification.where(UserSpecs.hasRole(Role.ADMIN))
+        .and(UserSpecs.emailContains("example"))
+);
+```
+
+런타임에 조합되는 복잡한 필터.
+
+## Projection (DTO 조회)
+
+엔티티 전체가 아닌 일부만.
+
+### Interface-based
+
+```java
+public interface UserSummary {
+    Long getId();
+    String getEmail();
+    String getName();
+}
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    List<UserSummary> findAllProjectedBy();
+    Optional<UserSummary> findUserSummaryById(Long id);
+}
+```
+
+자동 proxy. 필요한 컬럼만 SELECT.
+
+### Class-based
+
+```java
+public record UserDto(Long id, String email, String name) { }
+
+@Query("SELECT new com.example.UserDto(u.id, u.email, u.name) FROM User u")
+List<UserDto> findAllAsDto();
+```
+
+JPA 생성자 표현식.
+
+### Dynamic
+
+```java
+<T> List<T> findBy(Class<T> type);
+
+repository.findBy(UserDto.class);
+repository.findBy(User.class);
+```
+
+## 관계와 fetch
+
+```java
+@Entity
+public class Post {
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "author_id")
+    private User author;
+
+    @OneToMany(mappedBy = "post", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Comment> comments = new ArrayList<>();
+}
+```
+
+기본 fetch: `@ManyToOne`/`@OneToOne` 은 EAGER, `@OneToMany`/`@ManyToMany`는 LAZY. **모두 LAZY로 명시 권장**.
+
+## N+1 해결
+
+```java
+// Bad
+List<Post> posts = postRepository.findAll();
+for (Post p : posts) {
+    p.getAuthor().getName();    // N+1
+}
+
+// JOIN FETCH
+@Query("SELECT p FROM Post p JOIN FETCH p.author")
+List<Post> findAllWithAuthor();
+
+// @EntityGraph
+@EntityGraph(attributePaths = {"author", "comments"})
+@Query("SELECT p FROM Post p")
+List<Post> findAllWithGraph();
+```
+
+## 트랜잭션
+
+```java
+@Service
+@Transactional(readOnly = true)
+public class UserService {
+    private final UserRepository userRepository;
+
+    public Optional<User> findById(Long id) {
+        return userRepository.findById(id);
+    }
+
+    @Transactional
+    public User update(Long id, String name) {
+        User user = userRepository.findById(id).orElseThrow();
+        user.setName(name);
+        return user;    // dirty checking → UPDATE on flush
+    }
+}
+```
+
+class 레벨 read-only → 모든 메서드 기본. write 메서드만 `@Transactional` 오버라이드.
+
+## Auditing
+
+```java
+@Configuration
+@EnableJpaAuditing
+public class JpaConfig { }
+
+@Entity
+@EntityListeners(AuditingEntityListener.class)
+public class User {
+    @CreatedDate
+    private Instant createdAt;
+
+    @LastModifiedDate
+    private Instant updatedAt;
+
+    @CreatedBy
+    private String createdBy;    // AuditorAware Bean 필요
+
+    @LastModifiedBy
+    private String updatedBy;
+}
+```
+
+## 자주 보는 패턴
+
+### Soft delete
+
+```java
+@Entity
+@SQLDelete(sql = "UPDATE users SET deleted_at = NOW() WHERE id = ?")
+@Where(clause = "deleted_at IS NULL")
+public class User { ... }
+```
+
+Hibernate 어노테이션. 모든 조회에 자동 적용 + delete가 UPDATE로.
+
+### Optimistic Lock
+
+```java
+@Entity
+public class User {
+    @Version
+    private Long version;
+}
+```
+
+UPDATE 시 version 비교 → 충돌 시 `OptimisticLockingFailureException`.
+
+### Pessimistic Lock
+
+```java
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+Optional<User> findById(Long id);
+```
+
+SELECT FOR UPDATE.
+
+## 함정
+
+### 1. ddl-auto=update 위험
+
+```yaml
+spring.jpa.hibernate.ddl-auto: update
+```
+
+자동 스키마 변경은 위험. 프로덕션은 `validate` + Flyway/Liquibase.
+
+### 2. 트랜잭션 없이 lazy
+
+```java
+public User get(Long id) {
+    User user = userRepository.findById(id).orElseThrow();
+    return user;
+}
+// controller에서 user.getPosts() → LazyInitializationException
+```
+
+@Transactional 또는 fetch.
+
+### 3. equals/hashCode
+
+```java
+public class User {
+    @Id @GeneratedValue Long id;
+}
+
+User u1 = new User();    // id null
+User u2 = new User();    // id null
+Set.of(u1, u2);    // 같은 hash → 하나?
+```
+
+엔티티의 equals/hashCode는 신중. id 기반 또는 business key.
+
+### 4. EntityManager flush 타이밍
+
+```java
+userRepository.save(user);
+// user.id 가 null 일 수도 (flush 안 됨)
+userRepository.flush();
+// 이제 id 있음
+```
+
+또는 `saveAndFlush`.
+
+### 5. N+1 자주
+
+리스트 화면이 가장 흔함. Spring Boot Actuator + Hibernate statistics로 모니터링.
+
+## 참고
+
+- [Spring Data JPA Reference](https://docs.spring.io/spring-data/jpa/docs/current/reference/html/)
+- [JPA Query Methods](https://docs.spring.io/spring-data/jpa/docs/current/reference/html/#repositories.query-methods)
+- [@Query](https://docs.spring.io/spring-data/jpa/docs/current/reference/html/#jpa.query-methods.at-query)
+- [Specifications](https://docs.spring.io/spring-data/jpa/docs/current/reference/html/#specifications)
+- [Hibernate documentation](https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html)

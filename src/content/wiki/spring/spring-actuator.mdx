@@ -1,0 +1,459 @@
+---
+title: "[Spring] Actuator: health, metrics, info"
+aliases: ["spring actuator", "spring boot actuator", "/actuator", "Micrometer", "health endpoint"]
+tags: [spring, actuator, monitoring, metrics, observability]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Boot Actuator**는 프로덕션용 monitoring/management endpoint 자동 제공. health check, metrics, env, beans, mappings 등. Micrometer로 Prometheus, CloudWatch, Datadog 등 다양한 모니터링 백엔드.
+
+## 설정
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-actuator")
+```
+
+기본 노출: `/actuator/health`, `/actuator/info`. 다른 endpoint는 명시:
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      show-details: when-authorized    # always | never | when-authorized
+```
+
+## /actuator/health
+
+```bash
+curl http://localhost:8080/actuator/health
+```
+
+```json
+{"status": "UP"}
+```
+
+show-details=always:
+
+```json
+{
+  "status": "UP",
+  "components": {
+    "db": {"status": "UP", "details": {"database": "PostgreSQL", "validationQuery": "isValid()"}},
+    "diskSpace": {"status": "UP", "details": {"total": 500000000000, "free": 250000000000}},
+    "ping": {"status": "UP"}
+  }
+}
+```
+
+자동 health indicator: DB, Redis, RabbitMQ, MongoDB, Elasticsearch, JMS 등.
+
+### 커스텀 HealthIndicator
+
+```java
+@Component
+public class ExternalApiHealthIndicator implements HealthIndicator {
+
+    private final WebClient client;
+
+    @Override
+    public Health health() {
+        try {
+            String response = client.get().uri("/ping").retrieve().bodyToMono(String.class).block(Duration.ofSeconds(3));
+            return Health.up().withDetail("response", response).build();
+        } catch (Exception e) {
+            return Health.down(e).build();
+        }
+    }
+}
+```
+
+`/actuator/health/externalApi`로 개별 조회.
+
+### Liveness vs Readiness
+
+Kubernetes probe.
+
+```yaml
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState, db, redis
+```
+
+```
+GET /actuator/health/liveness    # pod 살아있는지
+GET /actuator/health/readiness   # 트래픽 받을 준비됐는지
+```
+
+## /actuator/info
+
+```yaml
+info:
+  app:
+    name: My App
+    version: 1.0.0
+  java:
+    version: 21
+```
+
+```bash
+curl /actuator/info
+```
+
+Git info, build info 자동:
+
+```kotlin
+plugins {
+    id("org.springframework.boot")
+}
+
+springBoot {
+    buildInfo()    // META-INF/build-info.properties 생성
+}
+```
+
+```yaml
+management:
+  info:
+    git:
+      mode: full
+    build:
+      enabled: true
+    java:
+      enabled: true
+```
+
+## /actuator/metrics
+
+```bash
+curl /actuator/metrics
+```
+
+```json
+{
+  "names": [
+    "jvm.memory.used",
+    "jvm.gc.pause",
+    "http.server.requests",
+    "tomcat.sessions.active.current",
+    "hikaricp.connections.active",
+    ...
+  ]
+}
+```
+
+개별:
+
+```bash
+curl /actuator/metrics/http.server.requests?tag=uri:/api/users
+```
+
+## Micrometer
+
+```java
+@Service
+public class OrderService {
+    private final Counter counter;
+    private final Timer timer;
+
+    public OrderService(MeterRegistry registry) {
+        this.counter = registry.counter("orders.created");
+        this.timer = registry.timer("orders.processing.time");
+    }
+
+    public Order create(...) {
+        return timer.recordCallable(() -> {
+            counter.increment();
+            return doCreate(...);
+        });
+    }
+}
+```
+
+또는 어노테이션:
+
+```java
+@Timed("orders.processing.time")
+@Counted("orders.created")
+public Order create(...) { ... }
+```
+
+`@EnableAspectJAutoProxy`와 `aop` 의존성 필요.
+
+## Prometheus
+
+```kotlin
+implementation("io.micrometer:micrometer-registry-prometheus")
+```
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: prometheus
+```
+
+```bash
+curl /actuator/prometheus
+```
+
+Prometheus가 scrape할 수 있는 텍스트 포맷.
+
+## Grafana 대시보드
+
+Micrometer Prometheus 대시보드 ID: 4701, 11378 등 (Spring Boot 2.x/3.x). 가져와 customize.
+
+## /actuator/loggers
+
+런타임 로그 레벨 변경.
+
+```bash
+# 현재
+curl /actuator/loggers/com.example
+
+# 변경
+curl -X POST /actuator/loggers/com.example -H "Content-Type: application/json" -d '{"configuredLevel":"DEBUG"}'
+```
+
+장애 디버깅 시 재시작 없이.
+
+## /actuator/env, configprops
+
+```bash
+curl /actuator/env
+curl /actuator/configprops    # @ConfigurationProperties 모두
+```
+
+비밀 정보 노출 위험 → show-values 신중히.
+
+## /actuator/threaddump, heapdump
+
+```bash
+curl /actuator/threaddump
+curl /actuator/heapdump > heap.hprof
+```
+
+장애 디버깅. heapdump는 큰 파일.
+
+## /actuator/beans, mappings, conditions
+
+- `/actuator/beans`: 등록된 Bean 전체
+- `/actuator/mappings`: URL 매핑
+- `/actuator/conditions`: 자동 구성 조건 평가 결과
+
+## Custom endpoint
+
+```java
+@Component
+@Endpoint(id = "users")
+public class UsersEndpoint {
+
+    private final UserRepository userRepository;
+
+    @ReadOperation
+    public long count() {
+        return userRepository.count();
+    }
+
+    @ReadOperation
+    public User get(@Selector String id) {
+        return userRepository.findById(Long.parseLong(id)).orElse(null);
+    }
+
+    @WriteOperation
+    public void update(@Selector String id, String name) {
+        ...
+    }
+}
+```
+
+`/actuator/users`, `/actuator/users/1`.
+
+## 보안
+
+기본은 모든 endpoint 인증 필요. health, info만 노출.
+
+```java
+@Configuration
+public class ActuatorSecurityConfig {
+
+    @Bean
+    public SecurityFilterChain actuatorSecurity(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher(EndpointRequest.toAnyEndpoint())
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers(EndpointRequest.to("health", "info")).permitAll()
+                .anyRequest().hasRole("ACTUATOR")
+            )
+            .httpBasic(Customizer.withDefaults());
+        return http.build();
+    }
+}
+```
+
+별도 포트:
+
+```yaml
+management:
+  server:
+    port: 8081    # 메인 8080, actuator 8081
+    address: 127.0.0.1
+```
+
+내부 네트워크에만 노출.
+
+## Tracing (3.0+)
+
+```kotlin
+implementation("io.micrometer:micrometer-tracing-bridge-otel")
+implementation("io.opentelemetry:opentelemetry-exporter-otlp")
+```
+
+```yaml
+management:
+  tracing:
+    sampling:
+      probability: 1.0    # 100% sampling (dev)
+  zipkin:
+    tracing:
+      endpoint: http://zipkin:9411/api/v2/spans
+```
+
+OpenTelemetry 표준. Jaeger, Zipkin, Datadog APM 등에 연결.
+
+## Logging structured
+
+```yaml
+logging:
+  pattern:
+    correlation: "[%X{traceId:-},%X{spanId:-}] "
+```
+
+각 로그에 trace ID 포함 → 분산 시스템에서 요청 추적.
+
+## 자주 보는 패턴
+
+### Health check (Kubernetes)
+
+```yaml
+# k8s deployment.yaml
+livenessProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /actuator/health/readiness
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+```
+
+### Datadog/CloudWatch
+
+```kotlin
+implementation("io.micrometer:micrometer-registry-datadog")
+```
+
+```yaml
+management:
+  metrics:
+    export:
+      datadog:
+        api-key: ${DATADOG_API_KEY}
+```
+
+자동 전송. 별도 코드 X.
+
+### 비즈니스 메트릭
+
+```java
+@Service
+public class CheckoutService {
+    private final Counter checkouts;
+    private final Counter errors;
+    private final DistributionSummary revenue;
+
+    public CheckoutService(MeterRegistry registry) {
+        this.checkouts = Counter.builder("business.checkouts").register(registry);
+        this.errors = Counter.builder("business.checkouts.errors").register(registry);
+        this.revenue = DistributionSummary.builder("business.revenue").register(registry);
+    }
+
+    public void checkout(Order order) {
+        try {
+            processOrder(order);
+            checkouts.increment();
+            revenue.record(order.total().doubleValue());
+        } catch (Exception e) {
+            errors.increment();
+            throw e;
+        }
+    }
+}
+```
+
+비즈니스 KPI를 대시보드에 자동.
+
+## 함정
+
+### 1. 민감 정보 노출
+
+```bash
+curl /actuator/env
+# DB password, API key 등 노출 가능
+```
+
+show-values: `never` 또는 인증 + sanitize.
+
+### 2. heapdump 큰 응답
+
+GB 단위. timeout, 디스크 공간 주의.
+
+### 3. metrics cardinality
+
+```java
+counter.increment(Tags.of("user_id", String.valueOf(userId)));    // 폭발!
+```
+
+태그 값이 unbounded면 metrics 수 폭발 → 메모리/저장 비용.
+
+### 4. /actuator/threaddump의 성능 영향
+
+stop-the-world 잠시. 자주 호출 X.
+
+### 5. probe와 graceful shutdown
+
+```yaml
+server:
+  shutdown: graceful
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+```
+
+readiness가 먼저 DOWN → 트래픽 차단 → in-flight 요청 완료 → 종료.
+
+## 참고
+
+- [Spring Boot Actuator](https://docs.spring.io/spring-boot/docs/current/reference/html/actuator.html)
+- [Production-ready endpoints](https://docs.spring.io/spring-boot/docs/current/actuator-api/htmlsingle/)
+- [Micrometer](https://micrometer.io/)
+- [Prometheus](https://prometheus.io/)
+- [OpenTelemetry](https://opentelemetry.io/)

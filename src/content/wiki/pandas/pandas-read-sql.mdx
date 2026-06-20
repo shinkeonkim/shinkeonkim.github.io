@@ -1,0 +1,151 @@
+---
+title: "[Pandas] read_sql / to_sql"
+aliases: ["Pandas read_sql", "Pandas to_sql", "SQL pandas", "pandas DB I/O"]
+tags: [python, pandas, io, sql, database]
+updated: 2026-06-18
+---
+
+## 정의
+
+- **`pd.read_sql(query, con)`** : SQL 결과 → DataFrame
+- **`DataFrame.to_sql(name, con)`** : DataFrame → DB 테이블
+
+SQLAlchemy 의 connection / engine 객체를 사용. 직접 sqlite3, psycopg2 의 `Connection` 도 가능 (제한적).
+
+## 의존성
+
+```bash
+pip install sqlalchemy psycopg2-binary  # PostgreSQL
+pip install sqlalchemy pymysql           # MySQL
+pip install sqlalchemy                    # SQLite (내장 sqlite3)
+```
+
+## 기본 사용
+
+```python
+from sqlalchemy import create_engine
+import pandas as pd
+
+engine = create_engine('postgresql://user:pwd@host:5432/db')
+df = pd.read_sql('SELECT * FROM users WHERE active = true', engine)
+df.to_sql('users_backup', engine, if_exists='replace', index=False)
+```
+
+## read_sql 옵션
+
+| 옵션 | 의미 |
+|:---|:---|
+| `sql` | 쿼리 문자열 또는 SQLAlchemy Selectable |
+| `con` | engine / connection |
+| `params` | parameterized query 값 |
+| `parse_dates` | 날짜 컬럼 파싱 |
+| `chunksize` | 청크 단위 (generator) |
+| `dtype_backend` | 'numpy_nullable' / 'pyarrow' |
+
+### parameterized query (SQL injection 방지)
+
+```python
+df = pd.read_sql(
+    'SELECT * FROM events WHERE user_id = %(uid)s AND date > %(d)s',
+    engine,
+    params={'uid': 42, 'd': '2024-01-01'},
+)
+```
+
+문자열 포맷 (`f-string`) 대신 반드시 params 사용.
+
+## to_sql 옵션
+
+| 옵션 | 의미 |
+|:---|:---|
+| `if_exists` | 'fail' (기본) / 'replace' / 'append' |
+| `index` | DataFrame index 도 저장? (보통 False) |
+| `dtype` | SQLAlchemy 타입 명시 |
+| `chunksize` | 청크 단위 INSERT |
+| `method` | 'multi' (한 INSERT 에 여러 row), psycopg2 의 `psql_insert_copy` |
+
+### 빠른 대량 삽입
+
+```python
+df.to_sql('events', engine, if_exists='append', index=False,
+    chunksize=10000, method='multi')
+```
+
+PostgreSQL 은 `COPY` 가 가장 빠르다.
+
+```python
+import csv
+from io import StringIO
+
+def psql_insert_copy(table, conn, keys, data_iter):
+    raw = conn.connection
+    with raw.cursor() as cur:
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerows(data_iter)
+        buf.seek(0)
+        cur.copy_expert(
+            f'COPY {table.name} ({", ".join(keys)}) FROM STDIN WITH CSV',
+            buf
+        )
+
+df.to_sql('events', engine, if_exists='append',
+    index=False, method=psql_insert_copy)
+```
+
+## 청크로 대용량 처리
+
+```python
+total = 0
+for chunk in pd.read_sql('SELECT * FROM huge_table', engine, chunksize=50_000):
+    total += chunk['amount'].sum()
+```
+
+수백만 행도 메모리 부담 없이.
+
+## SQLAlchemy 2.0 + 의 변화
+
+```python
+# pandas 2.0+ 와 SA 2.0+
+from sqlalchemy import text
+with engine.connect() as conn:
+    df = pd.read_sql(text('SELECT * FROM t'), conn)
+```
+
+문자열 대신 `text(...)` 권장.
+
+## 함정
+
+### 1. SQL injection
+
+```python
+# ❌ 위험
+df = pd.read_sql(f"SELECT * FROM t WHERE id = {user_input}", engine)
+# ✓ 안전
+df = pd.read_sql("SELECT * FROM t WHERE id = %(id)s", engine, params={'id': user_input})
+```
+
+### 2. to_sql 의 속도
+
+기본 `to_sql` 은 매 row INSERT, 매우 느림. `chunksize` + `method='multi'` 또는 native bulk loader 필수.
+
+### 3. dtype mapping
+
+- `int64` (pandas) → BIGINT (SQL)
+- `object` (str) → TEXT
+- pandas datetime → TIMESTAMP
+- 명시적 `dtype={'col': sa.types.Integer}` 권장
+
+### 4. timezone 처리
+
+```python
+# DB 의 TIMESTAMP WITH TIMEZONE 가 naive 로 들어올 수 있음
+df['ts'] = df['ts'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul')
+```
+
+## 참고
+
+- [[Pandas read_csv]]
+- [[Pandas read_excel]]
+- [[Pandas read_parquet]]
+- 공식 문서, [read_sql](https://pandas.pydata.org/docs/reference/api/pandas.read_sql.html)

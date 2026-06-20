@@ -1,0 +1,261 @@
+---
+title: "[Python] asyncio: 이벤트 루프, async/await"
+aliases: ["python asyncio", "async await", "event loop", "coroutine", "TaskGroup", "PEP 492"]
+tags: [python, asyncio, async, await, concurrency, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+`asyncio`는 Python 표준 라이브러리의 **단일 스레드 이벤트 루프 기반 비동기 I/O 프레임워크**다. `async def`로 코루틴을 정의하고 `await`로 다른 코루틴/awaitable 완료를 기다린다. I/O 바운드 작업(네트워크, 디스크, DB)에서 수천~수만 개 연결을 효율적으로 다룬다.
+
+CPU 바운드 작업엔 부적합 → `multiprocessing` 또는 `concurrent.futures.ProcessPoolExecutor` 사용.
+
+## hello world
+
+```python
+import asyncio
+
+async def hello():
+    print("hello")
+    await asyncio.sleep(1)
+    print("world")
+
+asyncio.run(hello())
+```
+
+`asyncio.run()`이 이벤트 루프를 생성/실행/종료한다. 진입점은 이거 하나.
+
+## 동시 실행: gather, TaskGroup
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import asyncio, time
+
+async def fetch(name, delay):
+    print(f"{name} start")
+    await asyncio.sleep(delay)
+    print(f"{name} done")
+    return name
+
+async def main():
+    start = time.perf_counter()
+    results = await asyncio.gather(
+        fetch("A", 1),
+        fetch("B", 2),
+        fetch("C", 1),
+    )
+    print(results)
+    print(f"elapsed: {time.perf_counter() - start:.2f}s")
+
+asyncio.run(main())`}
+  output={`A start
+B start
+C start
+A done
+C done
+B done
+['A', 'B', 'C']
+elapsed: 2.00s`}
+/>
+
+세 작업이 동시에 시작되어 가장 오래 걸리는 B(2초)에 맞춰 끝남. 순차 실행이었으면 4초.
+
+## TaskGroup (3.11+, PEP 654)
+
+```python
+async def main():
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(fetch("A", 1))
+        tg.create_task(fetch("B", 2))
+        tg.create_task(fetch("C", 1))
+    # 블록 종료 시 모든 task 완료 대기
+```
+
+`gather`보다 안전: 한 작업 실패 시 형제 작업을 자동 취소하고 `ExceptionGroup`으로 묶어 전파. 신규 코드는 TaskGroup 권장.
+
+## Task 생성
+
+```python
+task = asyncio.create_task(fetch("X", 1))
+# 코루틴은 즉시 스케줄링되어 실행 시작 (이벤트 루프가 양보받을 때)
+
+result = await task           # 완료 대기
+print(task.done())
+task.cancel()                 # CancelledError 던짐
+```
+
+## await 가능한 객체 (Awaitable)
+
+- Coroutine (`async def`로 만든 것)
+- Task (`asyncio.create_task`)
+- Future (`asyncio.Future`)
+- `__await__`을 구현한 객체
+
+```python
+async def use():
+    await asyncio.sleep(1)        # coroutine
+    await asyncio.create_task(f()) # task
+    await future                   # future
+```
+
+## 동기 코드를 비동기 컨텍스트에서 실행
+
+이벤트 루프를 막는 동기 함수는 **스레드 풀에 위임**.
+
+```python
+import asyncio
+import time
+
+def blocking():
+    time.sleep(2)
+    return "done"
+
+async def main():
+    result = await asyncio.to_thread(blocking)
+    print(result)
+
+asyncio.run(main())
+```
+
+`to_thread`(3.9+)는 `run_in_executor(None, fn)`의 편의 래퍼.
+
+CPU 집약 작업은 `ProcessPoolExecutor`로:
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+async def heavy():
+    loop = asyncio.get_running_loop()
+    with ProcessPoolExecutor() as pool:
+        return await loop.run_in_executor(pool, compute, big_data)
+```
+
+## 타임아웃과 취소
+
+```python
+try:
+    async with asyncio.timeout(5):    # 3.11+
+        await long_running()
+except TimeoutError:
+    print("timed out")
+
+# 또는 3.11 이전
+try:
+    await asyncio.wait_for(long_running(), timeout=5)
+except asyncio.TimeoutError:
+    ...
+```
+
+`asyncio.timeout()`는 컨텍스트 매니저로 더 안전. `wait_for`는 wrapping 한 작업을 직접 cancel.
+
+## async 컨텍스트 매니저 / iterator
+
+```python
+async with aiohttp.ClientSession() as session:
+    async with session.get(url) as resp:
+        text = await resp.text()
+
+async for line in stream:
+    process(line)
+```
+
+각각 `__aenter__`/`__aexit__`, `__aiter__`/`__anext__` 구현.
+
+## 동기화 프리미티브
+
+`asyncio`도 thread와 비슷한 동기화 도구 제공 (모두 코루틴용).
+
+```python
+lock = asyncio.Lock()
+event = asyncio.Event()
+sem = asyncio.Semaphore(10)
+queue = asyncio.Queue(maxsize=100)
+
+async with lock:
+    critical()
+
+await event.wait()
+event.set()
+
+async with sem:    # 동시 10개 제한
+    await fetch()
+
+await queue.put(item)
+item = await queue.get()
+```
+
+## 코루틴 호출 vs await
+
+```python
+async def f(): return 1
+
+# WRONG: 코루틴 객체만 만들고 await 안 함 → 경고 "never awaited"
+f()
+
+# GOOD
+result = await f()
+```
+
+`async def` 호출은 코루틴 객체 반환만. 실제 실행은 await(또는 task로 만든 후 루프가 실행).
+
+## 흔한 함정
+
+### 1. 블로킹 호출이 이벤트 루프 정지
+
+```python
+async def bad():
+    time.sleep(5)       # 이벤트 루프 5초 정지! 모든 동시 작업 멈춤
+
+async def good():
+    await asyncio.sleep(5)
+```
+
+`open()`, `requests.get()`, DB 동기 드라이버, CPU 집약 루프 모두 위험. 대안: aiohttp, asyncpg, `to_thread`.
+
+### 2. async와 sync 혼용 시 한쪽이 다른 쪽 못 부름
+
+- async 함수에서 sync 함수: 그냥 호출 OK
+- sync 함수에서 async 함수: `asyncio.run()` 또는 새 루프 필요
+- 라이브러리 작성자: 두 버전 모두 지원하기 위해 `anyio` 등 활용
+
+### 3. CancelledError를 삼키지 말 것
+
+```python
+async def task():
+    try:
+        await long()
+    except Exception:    # CancelledError도 잡힘 (3.8+에선 BaseException)
+        pass
+```
+
+`CancelledError`는 BaseException으로 분리(3.8+)되어 `except Exception:`엔 안 잡힘. 그래도 절대 명시적으로 무시 금지.
+
+### 4. 다중 await의 순서
+
+```python
+# 순차: 총 2초
+await f1()
+await f2()
+
+# 동시: 총 max 시간
+await asyncio.gather(f1(), f2())
+```
+
+## 동기 vs 비동기 모델 비교
+
+| 모델 | 동시성 | 적합한 작업 | 비용 |
+|------|--------|------------|------|
+| threading | OS 스레드 | I/O (GIL 때문에 CPU는 X) | 스레드당 메모리 |
+| multiprocessing | 별도 프로세스 | CPU 집약 | 프로세스 오버헤드 |
+| asyncio | 단일 스레드 코루틴 | I/O 대량 동시 | 가장 가벼움 |
+| free-threaded (3.13+) | OS 스레드, GIL 없음 | CPU+I/O | 실험적 |
+
+## 참고
+
+- [`asyncio` documentation](https://docs.python.org/3/library/asyncio.html)
+- [PEP 492 – Coroutines with async and await syntax](https://peps.python.org/pep-0492/)
+- [PEP 525 – Asynchronous Generators](https://peps.python.org/pep-0525/)
+- [PEP 654 – Exception Groups and except*](https://peps.python.org/pep-0654/)
+- [`asyncio.TaskGroup`](https://docs.python.org/3/library/asyncio-task.html#task-groups)

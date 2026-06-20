@@ -1,0 +1,350 @@
+---
+title: "[Rails] AR Validations와 Callbacks"
+aliases: ["rails validations", "rails callbacks", "before_save", "validates_uniqueness_of", "errors"]
+tags: [rails, activerecord, validation, callback]
+updated: 2026-06-20
+---
+
+## 정의
+
+ActiveRecord는 **save 전 검증과 다양한 라이프사이클 콜백**을 제공한다. 검증은 DB 제약과 별도(애플리케이션 레벨). 콜백은 신중히, 비즈니스 로직은 service object로 분리하는 게 일반.
+
+## 검증
+
+```ruby
+class User < ApplicationRecord
+  validates :email, presence: true, uniqueness: true, format: { with: URI::MailTo::EMAIL_REGEXP }
+  validates :age, numericality: { greater_than_or_equal_to: 0, less_than: 150 }
+  validates :password, length: { minimum: 8 }, on: :create
+  validates :role, inclusion: { in: %w[admin user guest] }
+  validates :bio, length: { maximum: 500 }
+end
+
+user = User.new(email: "")
+user.valid?           # false
+user.errors           # ActiveModel::Errors
+user.errors.full_messages   # ["Email can't be blank", ...]
+user.save             # false (검증 실패)
+user.save!            # ActiveRecord::RecordInvalid 예외
+```
+
+## 빌트인 검증
+
+| validator | 옵션 |
+|-----------|------|
+| `presence` | `true`, allow_nil: false |
+| `uniqueness` | `true`, scope, case_sensitive, conditions |
+| `length` | minimum, maximum, in: 1..100 |
+| `format` | with: regex |
+| `inclusion` | in: [...] |
+| `exclusion` | in: [...] |
+| `numericality` | greater_than, less_than, only_integer |
+| `acceptance` | (체크박스, 약관) |
+| `confirmation` | (password_confirmation) |
+| `comparison` | greater_than: :other_field (7.0+) |
+
+여러 attribute 동시:
+
+```ruby
+validates :title, :body, presence: true
+```
+
+## 조건부 검증
+
+```ruby
+validates :password, length: { minimum: 8 }, if: :new_record?
+validates :credit_card, presence: true, if: -> { paid? }
+validates :age, numericality: true, unless: :guest?
+```
+
+## 커스텀 검증
+
+```ruby
+class User < ApplicationRecord
+  validate :email_must_be_company_domain
+
+  private
+
+  def email_must_be_company_domain
+    return if email.blank?
+    errors.add(:email, "must be a company email") unless email.ends_with?("@example.com")
+  end
+end
+```
+
+또는 클래스로:
+
+```ruby
+class EmailValidator < ActiveModel::EachValidator
+  def validate_each(record, attribute, value)
+    unless value =~ URI::MailTo::EMAIL_REGEXP
+      record.errors.add(attribute, "is not a valid email")
+    end
+  end
+end
+
+class User < ApplicationRecord
+  validates :email, email: true
+end
+```
+
+## errors
+
+```ruby
+user.errors[:email]                  # ["can't be blank", ...]
+user.errors.add(:base, "something")  # 모델 전체 에러
+user.errors.full_messages
+user.errors.full_messages_for(:email)
+user.errors.delete(:email)
+user.errors.size
+user.errors.any?
+```
+
+폼 표시:
+
+```erb
+<% if @user.errors.any? %>
+  <ul>
+    <% @user.errors.full_messages.each do |msg| %>
+      <li><%= msg %></li>
+    <% end %>
+  </ul>
+<% end %>
+```
+
+## Strong Migration / DB 제약과 함께
+
+검증은 race condition 회피 못 함.
+
+```ruby
+validates :email, uniqueness: true
+```
+
+두 요청이 동시에 같은 email로 가입 → 둘 다 검증 통과 → DB INSERT 시 unique 제약 위반.
+
+**해결**: DB 레벨 unique index 필수.
+
+```ruby
+add_index :users, :email, unique: true
+```
+
+검증은 사용자에 친절한 에러 메시지, DB는 무결성 보장.
+
+## Callbacks
+
+라이프사이클 hook.
+
+| Callback | 시점 |
+|----------|------|
+| `before_validation` | 검증 전 |
+| `after_validation` | 검증 후 |
+| `before_save` | save 전 (create + update) |
+| `around_save` | save 둘러쌈 |
+| `after_save` | save 후 |
+| `before_create` / `after_create` | create 전후 |
+| `before_update` / `after_update` | update 전후 |
+| `before_destroy` / `after_destroy` | destroy 전후 |
+| `after_commit` | 트랜잭션 commit 후 |
+| `after_rollback` | rollback 후 |
+| `after_initialize` | new 호출 직후 |
+| `after_find` | DB에서 로드 직후 |
+| `after_touch` | touch 후 |
+
+순서: before_validation → validate → after_validation → before_save → before_create/update → save → after_create/update → after_save → after_commit.
+
+## 사용 예
+
+```ruby
+class Post < ApplicationRecord
+  before_validation :generate_slug
+  before_save :normalize_title
+  after_create :notify_subscribers
+  after_destroy :clear_cache
+
+  private
+
+  def generate_slug
+    self.slug ||= title.parameterize
+  end
+
+  def normalize_title
+    self.title = title.strip.squeeze(" ")
+  end
+
+  def notify_subscribers
+    NotifySubscribersJob.perform_later(id)
+  end
+
+  def clear_cache
+    Rails.cache.delete_matched("post:#{id}:*")
+  end
+end
+```
+
+## after_commit
+
+비동기 작업 트리거에 표준.
+
+```ruby
+after_commit :enqueue_index, on: [:create, :update]
+after_commit :remove_index, on: :destroy
+
+def enqueue_index
+  IndexJob.perform_later(id)
+end
+```
+
+트랜잭션 commit 후 호출 → 워커가 진짜 commit된 데이터 볼 수 있음.
+
+`after_create_commit`, `after_update_commit`, `after_destroy_commit`도 있음.
+
+## 조건부 callback
+
+```ruby
+before_save :downcase_email, if: :email_changed?
+after_create :send_welcome, unless: :guest?
+```
+
+## abort 콜백 (5.0+)
+
+```ruby
+before_destroy :prevent_if_admin
+
+def prevent_if_admin
+  throw :abort if admin?
+end
+```
+
+return false는 deprecated. `throw :abort`.
+
+## 함정과 안티패턴
+
+### 1. 콜백 과다 사용
+
+```ruby
+class Post < ApplicationRecord
+  after_save :update_search_index
+  after_save :notify_subscribers
+  after_save :clear_caches
+  after_save :send_to_analytics
+  after_save :update_user_stats
+  ...
+```
+
+테스트 어렵고 디버깅 지옥. **service object** 패턴 권장.
+
+```ruby
+class CreatePost
+  def call(params)
+    post = Post.new(params)
+    return post unless post.save
+
+    SearchIndex.add(post)
+    NotifySubscribers.call(post)
+    CacheInvalidator.call(post)
+    post
+  end
+end
+```
+
+### 2. callback에서 무한 루프
+
+```ruby
+after_save :update_views
+
+def update_views
+  self.views_summary = ...
+  save    # 또 after_save → 무한 루프
+end
+```
+
+해결:
+- `update_columns` (콜백 우회)
+- `update_column`
+- 플래그
+
+```ruby
+def update_views
+  update_columns(views_summary: ...)
+end
+```
+
+### 3. callback과 update_all
+
+```ruby
+Post.where(...).update_all(views: 0)    # 콜백 미실행
+```
+
+콜백 의존 로직 깨짐. 명시적으로 알고 사용.
+
+### 4. uniqueness 검증의 race
+
+위에서 설명. DB index 필수.
+
+### 5. validation 의존 외부 호출
+
+```ruby
+validate :api_check
+
+def api_check
+  errors.add(:base, "external") if ExternalApi.invalid?(self)
+end
+```
+
+매 save마다 외부 호출 → 느림. 캐싱 또는 별도 시점 검증.
+
+## 검증 skip
+
+```ruby
+post.save(validate: false)
+post.update_columns(title: "...")    # 검증 + 콜백 우회
+```
+
+신중히. 주로 데이터 마이그레이션.
+
+## 자주 보는 패턴
+
+### normalizes (7.1+)
+
+```ruby
+class User < ApplicationRecord
+  normalizes :email, with: ->(email) { email.strip.downcase }
+end
+
+user = User.new(email: "  Alice@Example.com  ")
+user.email    # "alice@example.com"
+```
+
+before_validation을 깔끔하게.
+
+### encrypts (7.0+)
+
+```ruby
+class User < ApplicationRecord
+  encrypts :ssn, deterministic: true
+end
+
+user.ssn = "..."    # 자동 암호화 저장
+user.ssn            # 복호화 반환
+```
+
+자세한 건 `rails-active-record-encryption`.
+
+### tokens
+
+```ruby
+class User < ApplicationRecord
+  has_secure_token :api_key
+end
+
+user = User.create
+user.api_key    # 자동 생성된 토큰
+user.regenerate_api_key
+```
+
+## 참고
+
+- [Rails Guides: Validations](https://guides.rubyonrails.org/active_record_validations.html)
+- [Rails Guides: Callbacks](https://guides.rubyonrails.org/active_record_callbacks.html)
+- [ActiveModel::Validations](https://api.rubyonrails.org/classes/ActiveModel/Validations.html)
+- [Service Object Pattern](https://www.toptal.com/ruby-on-rails/rails-service-objects-tutorial)

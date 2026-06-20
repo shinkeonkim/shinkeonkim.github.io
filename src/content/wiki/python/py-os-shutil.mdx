@@ -1,0 +1,327 @@
+---
+title: "[Python] os, shutil, glob: 파일 시스템 도구"
+aliases: ["python os", "shutil", "glob", "파일 시스템", "os.path"]
+tags: [python, os, shutil, glob, stdlib, filesystem]
+updated: 2026-06-20
+---
+
+## 정의
+
+파일 시스템 다루는 세 표준 모듈:
+
+- **`os`**: OS 인터페이스 (환경 변수, 프로세스, 파일 기본 연산)
+- **`os.path`**: 경로 문자열 조작 (대부분 `pathlib`로 대체 가능)
+- **`shutil`**: 고수준 파일 복사·이동·트리 작업
+- **`glob`**: 와일드카드 매칭
+
+`pathlib.Path`(`py-pathlib` 참고)가 객체지향 대안. 같은 작업을 어느 쪽으로든 가능하니 팀 컨벤션 맞춤.
+
+## os 자주 쓰는 것
+
+### 환경 변수
+
+```python
+import os
+
+os.environ["API_KEY"]               # KeyError if missing
+os.environ.get("API_KEY", "default")
+os.environ["DEBUG"] = "1"           # 자식 프로세스에도 상속
+
+# 현재 모든 환경
+for k, v in os.environ.items():
+    print(k, v)
+```
+
+### 현재 디렉터리
+
+```python
+os.getcwd()
+os.chdir("/path/to/dir")
+```
+
+### 파일/디렉터리 작업
+
+```python
+os.listdir(".")                     # 디렉터리 이름 리스트
+os.scandir(".")                     # 더 빠른 iterator (DirEntry 객체)
+
+os.mkdir("newdir")                  # 단일 디렉터리
+os.makedirs("a/b/c", exist_ok=True) # 중간 디렉터리 자동 생성
+
+os.remove("file.txt")               # 파일 삭제
+os.rmdir("empty_dir")               # 빈 디렉터리만
+os.unlink("file.txt")               # remove와 동일
+
+os.rename("old", "new")
+os.replace("src", "dst")            # 덮어쓰기 보장 (rename은 OS에 따라 다름)
+
+# 메타데이터
+st = os.stat("file.txt")
+print(st.st_size, st.st_mtime)
+```
+
+### 권한과 사용자
+
+```python
+os.chmod("file.txt", 0o644)
+os.chown("file.txt", uid, gid)      # Unix만
+
+os.getuid(), os.getgid()             # Unix
+os.getpid(), os.getppid()
+```
+
+### 프로세스
+
+```python
+os.system("ls -la")                  # 셸 실행 (subprocess 권장)
+os.execvp("ls", ["ls", "-la"])       # 현재 프로세스를 교체
+os.fork()                            # 자식 프로세스 (Unix만)
+os.wait()
+```
+
+대부분의 프로세스 작업은 `subprocess`로 (`py-subprocess` 참고).
+
+## os.path 핵심
+
+```python
+import os.path as p
+
+p.join("/home", "user", "file.txt")    # '/home/user/file.txt'
+p.basename("/a/b/c.txt")               # 'c.txt'
+p.dirname("/a/b/c.txt")                # '/a/b'
+p.split("/a/b/c.txt")                  # ('/a/b', 'c.txt')
+p.splitext("file.tar.gz")              # ('file.tar', '.gz')
+p.exists("/a/b")
+p.isfile("..."); p.isdir("...")
+p.abspath(".")                         # 절대 경로
+p.expanduser("~/data")                 # 홈 디렉터리 확장
+p.expandvars("$HOME/data")             # 환경 변수 확장
+p.normpath("/a/./b//c")                # '/a/b/c'
+p.relpath("/a/b/c", "/a")              # 'b/c'
+```
+
+`pathlib.Path`가 더 가독성 좋지만, 빠른 일회성 처리엔 os.path가 가볍다.
+
+## shutil: 고수준 파일 작업
+
+### 복사
+
+```python
+import shutil
+
+shutil.copy(src, dst)               # 데이터 + 권한 (mtime은 X)
+shutil.copy2(src, dst)              # 데이터 + 권한 + mtime
+shutil.copyfile(src, dst)           # 데이터만
+shutil.copymode(src, dst)           # 권한만
+shutil.copystat(src, dst)           # 모든 메타데이터
+shutil.copytree(src, dst, dirs_exist_ok=True)  # 디렉터리 트리
+```
+
+### 이동·삭제
+
+```python
+shutil.move(src, dst)               # rename + 다른 파일시스템 이동
+shutil.rmtree(path)                 # 디렉터리 트리 통째로
+shutil.rmtree(path, ignore_errors=True)
+```
+
+`rmtree`는 위험. `path`를 신중히 확인 후 호출.
+
+### 디스크 사용량
+
+```python
+total, used, free = shutil.disk_usage("/")
+print(f"{free / 1e9:.1f}GB free")
+```
+
+### 압축
+
+```python
+shutil.make_archive("backup", "gztar", root_dir="src")   # backup.tar.gz
+shutil.unpack_archive("backup.tar.gz", "extracted")
+```
+
+### 명령어 경로 찾기
+
+```python
+shutil.which("git")    # '/usr/local/bin/git' 또는 None
+```
+
+`subprocess.run(["git", ...])` 호출 전에 명령어 존재 확인.
+
+## glob: 와일드카드 매칭
+
+```python
+import glob
+
+glob.glob("*.py")                    # 현재 디렉터리의 .py
+glob.glob("**/*.py", recursive=True) # 재귀
+glob.glob("[abc]*.txt")              # a, b, c로 시작하는 .txt
+glob.iglob("**/*.py", recursive=True) # iterator (메모리 절약)
+```
+
+패턴 문법:
+- `*`: 0개 이상 글자 (디렉터리 구분자 제외)
+- `?`: 1글자
+- `[abc]` / `[!abc]`: 문자 집합 / 부정
+- `**` (recursive=True): 임의 깊이 디렉터리
+
+대용량 디렉터리는 `pathlib.Path.rglob` 또는 `os.scandir` 직접 사용이 더 빠를 수 있다.
+
+## tempfile: 임시 파일
+
+```python
+import tempfile
+from pathlib import Path
+
+# 임시 파일
+with tempfile.NamedTemporaryFile(suffix=".txt", delete=True) as f:
+    f.write(b"hello")
+    f.flush()
+    print(f.name)
+# 자동 삭제
+
+# 임시 디렉터리
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    work_file = tmp / "data.json"
+    work_file.write_text("...")
+# 자동 정리
+
+# 단일 호출
+fd, path = tempfile.mkstemp()    # 호출자가 close, 삭제 책임
+```
+
+## fileinput: 파일·stdin 통합 처리
+
+```python
+import fileinput
+
+# python script.py file1 file2 또는 cat file | python script.py
+for line in fileinput.input():
+    print(line.rstrip().upper())
+```
+
+스트림 처리 스크립트에 편함. `inplace=True`로 in-place 편집도.
+
+## stat 결과 해석
+
+```python
+import os
+import stat
+
+st = os.stat("file.txt")
+print(st.st_size)                       # 바이트
+print(st.st_mtime)                      # mtime (epoch float)
+
+# 모드 검사
+print(stat.S_ISREG(st.st_mode))         # 일반 파일?
+print(stat.S_ISDIR(st.st_mode))
+print(stat.S_ISLNK(st.st_mode))
+print(oct(st.st_mode & 0o777))          # 권한 비트만
+```
+
+## 자주 보는 패턴
+
+### 디렉터리 트리 순회
+
+```python
+import os
+
+for root, dirs, files in os.walk("project"):
+    # root: 현재 디렉터리
+    # dirs: root 안의 서브디렉터리 (in-place 수정 가능: 트리 제외)
+    # files: root 안의 파일
+    if ".git" in dirs:
+        dirs.remove(".git")           # .git 안 들어감
+    for f in files:
+        if f.endswith(".py"):
+            print(os.path.join(root, f))
+```
+
+`pathlib.Path.rglob`이 더 간결.
+
+### 안전한 파일 쓰기 (atomic write)
+
+```python
+import os
+import tempfile
+
+def atomic_write(path, content):
+    """쓰기 중 중단되어도 원본 파일 보존."""
+    dir_ = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=dir_)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp, path)        # atomic rename
+    except Exception:
+        os.unlink(tmp)
+        raise
+```
+
+`os.replace`는 같은 파일시스템 내에서 원자성 보장 (POSIX).
+
+### 대용량 파일 복사 (진행 상황)
+
+```python
+import shutil
+
+def copy_with_progress(src, dst, callback):
+    total = os.path.getsize(src)
+    copied = 0
+    with open(src, "rb") as r, open(dst, "wb") as w:
+        while chunk := r.read(64 * 1024):
+            w.write(chunk)
+            copied += len(chunk)
+            callback(copied / total)
+
+# shutil.copyfileobj도 사용 가능 (구현이 더 최적화됨)
+```
+
+## 함정
+
+### 1. 권한 모드 8진수
+
+```python
+os.chmod("file", 644)       # 10진 644 → 비정상 권한
+os.chmod("file", 0o644)     # 8진 (rw-r--r--)
+```
+
+리눅스 권한은 항상 0o 접두로.
+
+### 2. os.path.join 안 쓰고 문자열 concat
+
+```python
+path = base + "/" + name        # 윈도우에서 / 와 \ 혼용 위험
+path = os.path.join(base, name) # 또는 Path(base) / name
+```
+
+### 3. rmtree에 신뢰할 수 없는 경로
+
+```python
+shutil.rmtree(user_input)    # 위험! 검증 필요
+```
+
+`Path(user_input).resolve().is_relative_to(allowed_root)` 검증 후 실행.
+
+### 4. open()이 누수
+
+```python
+f = open("file.txt")
+data = f.read()
+# f.close() 빠뜨림 → 파일 핸들 누수
+
+# 항상 with
+with open("file.txt") as f:
+    data = f.read()
+```
+
+## 참고
+
+- [`os` documentation](https://docs.python.org/3/library/os.html)
+- [`os.path` documentation](https://docs.python.org/3/library/os.path.html)
+- [`shutil` documentation](https://docs.python.org/3/library/shutil.html)
+- [`glob` documentation](https://docs.python.org/3/library/glob.html)
+- [`tempfile` documentation](https://docs.python.org/3/library/tempfile.html)
+- [`pathlib` (객체지향 대안)](https://docs.python.org/3/library/pathlib.html)

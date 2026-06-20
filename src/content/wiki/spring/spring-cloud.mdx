@@ -1,0 +1,443 @@
+---
+title: "[Spring Cloud] Eureka, Config, Gateway, OpenFeign"
+aliases: ["spring cloud", "spring cloud gateway", "eureka discovery", "config server", "openfeign", "circuit breaker"]
+tags: [spring, spring-cloud, microservices]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Cloud**는 Spring Boot 기반 마이크로서비스 인프라 패턴 (service discovery, config server, gateway, circuit breaker, distributed tracing 등)을 제공한다. Netflix OSS와의 호흡, 현재는 Resilience4j, Micrometer Tracing 등 Spring 자체 / open source 대안 위주.
+
+## 핵심 컴포넌트
+
+| 컴포넌트 | 역할 |
+|----------|------|
+| **Spring Cloud Config** | 중앙 설정 서버 |
+| **Eureka / Consul / Nacos** | Service Discovery |
+| **Spring Cloud Gateway** | API Gateway (라우팅, 필터) |
+| **OpenFeign** | 선언형 HTTP 클라이언트 |
+| **Spring Cloud LoadBalancer** | 클라이언트 로드밸런싱 |
+| **Resilience4j** | Circuit Breaker, Retry, Rate Limit |
+| **Micrometer Tracing** | 분산 트레이싱 (OpenTelemetry) |
+| **Spring Cloud Stream** | 메시지 추상화 (Kafka, RabbitMQ) |
+| **Spring Cloud Sleuth** | (Deprecated → Micrometer Tracing) |
+
+## Service Discovery (Eureka)
+
+### Eureka Server
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-netflix-eureka-server")
+```
+
+```java
+@SpringBootApplication
+@EnableEurekaServer
+public class EurekaServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(EurekaServerApplication.class, args);
+    }
+}
+```
+
+```yaml
+server:
+  port: 8761
+eureka:
+  client:
+    register-with-eureka: false    # 서버 자신은 등록 X
+    fetch-registry: false
+```
+
+### Eureka Client
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-netflix-eureka-client")
+```
+
+```yaml
+spring:
+  application:
+    name: user-service
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+```
+
+서비스가 시작 시 Eureka에 자동 등록. 다른 서비스가 이름으로 찾음.
+
+### 대안
+
+- **Consul** (HashiCorp): 더 일반적
+- **Nacos** (Alibaba): 설정 + 등록 통합
+- **etcd, ZooKeeper**: 저수준
+- **Kubernetes Service Discovery**: k8s 환경엔 가장 자연스러움
+
+## Spring Cloud Config
+
+중앙 설정 서버. 모든 서비스가 시작 시 설정을 fetch.
+
+### Config Server
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-config-server")
+```
+
+```java
+@SpringBootApplication
+@EnableConfigServer
+public class ConfigServerApplication { ... }
+```
+
+```yaml
+server:
+  port: 8888
+spring:
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/org/config-repo
+```
+
+Git 리포지토리에 `{서비스명}-{프로파일}.yml` 파일.
+
+### Config Client
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-config")
+```
+
+```yaml
+# bootstrap.yml (또는 application.yml 3.4+)
+spring:
+  application:
+    name: user-service
+  config:
+    import: optional:configserver:http://localhost:8888
+```
+
+`config-repo/user-service-prod.yml`이 자동 로드.
+
+```java
+@Value("${db.url}")
+private String dbUrl;
+
+@RefreshScope    // POST /actuator/refresh로 재로드
+public class MyBean { ... }
+```
+
+### 대안
+
+- **Kubernetes ConfigMap + Secret**
+- **AWS Parameter Store / Secrets Manager**
+- **HashiCorp Vault**
+
+## Spring Cloud Gateway
+
+### 설정
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-gateway")
+```
+
+WebFlux 기반이라 `web` starter와 충돌.
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: user-service
+          uri: lb://user-service    # Eureka에서 lookup
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - RewritePath=/api/(?<segment>.*), /$\{segment}
+            - AddRequestHeader=X-Gateway, true
+        - id: order-service
+          uri: lb://order-service
+          predicates:
+            - Path=/api/orders/**
+            - Method=GET,POST
+```
+
+`lb://` = 로드밸런서 (Eureka 통합).
+
+### Filter
+
+```java
+@Component
+public class AuthFilter extends AbstractGatewayFilterFactory<AuthFilter.Config> {
+
+    @Override
+    public GatewayFilter apply(Config config) {
+        return (exchange, chain) -> {
+            String token = exchange.getRequest().getHeaders().getFirst("Authorization");
+            if (token == null || !isValid(token)) {
+                exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+                return exchange.getResponse().setComplete();
+            }
+            return chain.filter(exchange);
+        };
+    }
+
+    public static class Config { }
+}
+```
+
+## OpenFeign (선언형 HTTP)
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-openfeign")
+```
+
+```java
+@SpringBootApplication
+@EnableFeignClients
+public class App { }
+
+@FeignClient(name = "user-service")    // Eureka name
+public interface UserClient {
+
+    @GetMapping("/users/{id}")
+    User findById(@PathVariable Long id);
+
+    @PostMapping("/users")
+    User create(@RequestBody CreateUserDto dto);
+
+    @GetMapping("/users")
+    List<User> search(@RequestParam String q);
+}
+```
+
+```java
+@Service
+public class OrderService {
+    private final UserClient userClient;
+
+    public Order createOrder(...) {
+        User user = userClient.findById(userId);    // 자동 HTTP 호출
+        ...
+    }
+}
+```
+
+선언만으로 HTTP 클라이언트. Eureka, LoadBalancer, Circuit Breaker 자동 통합.
+
+### Fallback
+
+```java
+@FeignClient(name = "user-service", fallback = UserClientFallback.class)
+public interface UserClient { ... }
+
+@Component
+public class UserClientFallback implements UserClient {
+    @Override
+    public User findById(Long id) {
+        return User.empty();    // 빈 객체 또는 에러 마킹
+    }
+}
+```
+
+## Resilience4j
+
+### Circuit Breaker
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-circuitbreaker-reactor-resilience4j")
+```
+
+```java
+@Service
+public class UserService {
+    private final UserClient userClient;
+    private final CircuitBreakerFactory cbFactory;
+
+    public User getUser(Long id) {
+        return cbFactory.create("user-service")
+            .run(
+                () -> userClient.findById(id),
+                throwable -> User.empty()    // fallback
+            );
+    }
+}
+```
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    instances:
+      user-service:
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        sliding-window-size: 10
+```
+
+### Retry
+
+```java
+@Retry(name = "user-service", fallbackMethod = "fallback")
+public User getUser(Long id) {
+    return userClient.findById(id);
+}
+
+public User fallback(Long id, Exception ex) {
+    return User.empty();
+}
+```
+
+### Rate Limit, Bulkhead
+
+설정으로 정의 + 어노테이션 적용.
+
+## Distributed Tracing
+
+```kotlin
+implementation("io.micrometer:micrometer-tracing-bridge-otel")
+implementation("io.opentelemetry:opentelemetry-exporter-otlp")
+```
+
+```yaml
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+otel:
+  exporter:
+    otlp:
+      endpoint: http://otel-collector:4317
+```
+
+OpenTelemetry로 모든 요청에 trace ID 부여. Jaeger, Zipkin, Datadog, Honeycomb 등에서 분산 트랜잭션 추적.
+
+## Spring Cloud Stream
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-stream")
+implementation("org.springframework.cloud:spring-cloud-stream-binder-kafka")
+```
+
+```java
+@Bean
+public Consumer<OrderCreatedEvent> processOrder() {
+    return event -> {
+        log.info("Order created: {}", event);
+        ...
+    };
+}
+
+@Bean
+public Supplier<String> heartbeat() {
+    return () -> "ping " + Instant.now();
+}
+```
+
+```yaml
+spring:
+  cloud:
+    stream:
+      bindings:
+        processOrder-in-0:
+          destination: orders
+          group: order-processors
+        heartbeat-out-0:
+          destination: heartbeats
+      kafka:
+        binder:
+          brokers: localhost:9092
+```
+
+Kafka, RabbitMQ 통일 인터페이스.
+
+## 자주 보는 패턴
+
+### Microservice + Gateway 구조
+
+```
+[Client]
+   ↓
+[Gateway] (8080)
+   ├→ user-service (Eureka lookup)
+   ├→ order-service
+   └→ product-service
+       ↓ OpenFeign
+       ↓
+   user-service (조회)
+```
+
+### Saga pattern
+
+분산 트랜잭션. Spring Cloud Stream + Kafka로 이벤트 기반 보상.
+
+```java
+// OrderService
+@Transactional
+public void createOrder(...) {
+    Order order = orderRepository.save(...);
+    eventPublisher.publishEvent(new OrderCreatedEvent(order.getId()));
+}
+
+// PaymentService listens
+@Bean
+public Consumer<OrderCreatedEvent> processPayment() {
+    return event -> {
+        try {
+            charge(event.orderId());
+            publish(new PaymentSucceededEvent(...));
+        } catch (Exception e) {
+            publish(new PaymentFailedEvent(...));    // 보상
+        }
+    };
+}
+```
+
+## 함정
+
+### 1. Spring Cloud 버전 호환성
+
+Spring Boot 3.4 ↔ Spring Cloud 2024.0.x. release train 매트릭스 확인.
+
+### 2. bootstrap.yml deprecated
+
+```yaml
+# 3.4+
+spring:
+  config:
+    import: configserver:http://localhost:8888
+```
+
+`bootstrap.yml` 대신 `spring.config.import`.
+
+### 3. Eureka heartbeat
+
+서비스가 정기 heartbeat 안 보내면 30초 후 제외. 네트워크 이슈 시 false negative 가능.
+
+### 4. Gateway WebFlux
+
+Gateway는 reactive. blocking call 금지. 모든 downstream도 reactive 또는 별 스레드.
+
+### 5. config 중앙화의 위험
+
+Config Server 다운 → 모든 서비스 시작 실패. fallback 또는 cache (Spring Cloud Config가 last-known 보존).
+
+## Kubernetes-native 대안
+
+K8s 환경이면 Spring Cloud 대안:
+- Service Discovery: K8s Service / DNS
+- Config: ConfigMap, Secret
+- Gateway: Istio, Linkerd, Kong
+- Circuit Breaker: Istio
+- Tracing: OpenTelemetry (벤더 무관)
+
+`spring-cloud-kubernetes`로 K8s API 통합.
+
+## 참고
+
+- [Spring Cloud](https://spring.io/projects/spring-cloud)
+- [Spring Cloud Gateway](https://docs.spring.io/spring-cloud-gateway/reference/)
+- [OpenFeign](https://docs.spring.io/spring-cloud-openfeign/reference/)
+- [Resilience4j](https://resilience4j.readme.io/)
+- [Eureka](https://spring.io/projects/spring-cloud-netflix)

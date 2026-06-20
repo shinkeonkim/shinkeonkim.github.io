@@ -1,0 +1,243 @@
+---
+title: "[Python] @property, getter, setter, deleter"
+aliases: ["python property", "@property", "getter setter", "computed property"]
+tags: [python, property, oop, descriptor, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+`@property`는 메서드를 **속성처럼 접근**할 수 있게 해주는 데코레이터다. 호출자는 `obj.name`처럼 보지만 내부적으로는 함수가 실행되어 계산되거나 검증된 값을 반환한다. Java의 getter/setter에 해당하지만 호출 측 코드를 바꾸지 않고 도입할 수 있다.
+
+## 기본 사용
+
+```python
+class Circle:
+    def __init__(self, radius):
+        self.radius = radius
+
+    @property
+    def area(self):
+        return 3.14159 * self.radius ** 2
+
+c = Circle(5)
+print(c.area)    # 78.53975 (메서드 호출이 아닌 속성 접근)
+c.area = 100     # AttributeError: can't set attribute
+```
+
+`c.area`는 함수 호출처럼 보이지 않지만 매번 `area(self)`를 실행. 의도하지 않은 부수효과나 비싼 계산은 피해야 한다.
+
+## getter / setter / deleter
+
+```python
+class Temperature:
+    def __init__(self, celsius):
+        self._celsius = celsius
+
+    @property
+    def celsius(self):
+        return self._celsius
+
+    @celsius.setter
+    def celsius(self, value):
+        if value < -273.15:
+            raise ValueError("below absolute zero")
+        self._celsius = value
+
+    @celsius.deleter
+    def celsius(self):
+        del self._celsius
+
+    @property
+    def fahrenheit(self):
+        return self._celsius * 9 / 5 + 32
+
+t = Temperature(25)
+print(t.celsius, t.fahrenheit)    # 25 77.0
+t.celsius = 30                     # setter 호출
+print(t.fahrenheit)                # 86.0
+t.celsius = -300                   # ValueError
+```
+
+setter는 `@property_name.setter`로 등록. deleter는 거의 안 씀.
+
+## 언제 property를 쓰나
+
+### 1. 검증 (validation)
+
+```python
+class User:
+    @property
+    def email(self):
+        return self._email
+
+    @email.setter
+    def email(self, value):
+        if "@" not in value:
+            raise ValueError("invalid email")
+        self._email = value.lower()
+```
+
+직접 `self.email = "..."` 할당해도 검증이 자동.
+
+### 2. 파생값 (computed)
+
+```python
+class Box:
+    def __init__(self, w, h, d):
+        self.w, self.h, self.d = w, h, d
+
+    @property
+    def volume(self):
+        return self.w * self.h * self.d
+```
+
+`box.volume`은 매번 신선하게 계산. 불일치 위험 없음.
+
+### 3. 마이그레이션 (호환성 유지)
+
+```python
+class User:
+    def __init__(self, name):
+        self.name = name
+
+    @property
+    def full_name(self):    # 새 API로 가는 도중 호환
+        return self.name
+```
+
+기존 코드가 `user.name`을 쓰던 것을 깨지 않으면서 `user.full_name`도 노출.
+
+## property vs 직접 속성
+
+Pythonic 가이드: **처음부터 property로 만들지 말고, 필요할 때 도입하라.**
+
+```python
+# 처음엔 그냥
+class User:
+    def __init__(self, name):
+        self.name = name
+
+# 나중에 검증이 필요해지면 코드 호환성 유지하며 추가
+class User:
+    def __init__(self, name):
+        self.name = name        # setter 통과
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        if not value:
+            raise ValueError("name required")
+        self._name = value
+```
+
+호출자 코드 변경 0줄. Java처럼 처음부터 getter/setter 쓰지 않는 이유.
+
+## cached_property
+
+`functools.cached_property` (3.8+)는 첫 호출 결과를 **인스턴스 속성**에 저장 → 이후 일반 속성 조회 속도.
+
+```python
+from functools import cached_property
+
+class DataSet:
+    def __init__(self, data):
+        self.data = data
+
+    @cached_property
+    def mean(self):
+        print("computing")
+        return sum(self.data) / len(self.data)
+
+d = DataSet([1, 2, 3])
+d.mean   # "computing" 후 2.0
+d.mean   # 캐시 (출력 없음)
+del d.mean    # 무효화
+d.mean   # 다시 "computing"
+```
+
+`@property`와 달리 캐시되므로 **불변 데이터**나 **명시적 무효화 의도가 있을 때**만 사용.
+
+## __slots__와의 충돌
+
+`__slots__`는 `__dict__`를 막아 메모리를 절감. property는 클래스 속성이라 영향 없지만, `cached_property`는 인스턴스 `__dict__`에 저장하므로 `__slots__` 사용 시 슬롯에 포함시켜야 한다.
+
+```python
+class C:
+    __slots__ = ("_x", "computed")    # cached_property 이름도 포함
+
+    @cached_property
+    def computed(self): ...
+```
+
+## descriptor와의 관계
+
+`property`는 사실 **data descriptor**의 표준 구현체다. `__get__`, `__set__`, `__delete__` 메서드가 있다. 더 복잡한 동작이 필요하면 직접 descriptor 작성. `py-descriptor` 페이지 참고.
+
+```python
+import inspect
+print(inspect.getmembers(property))    # __get__, __set__, __delete__ 확인
+```
+
+## 함정과 팁
+
+### 1. property 안에서 self.속성 호출하면 무한 재귀
+
+```python
+class C:
+    @property
+    def value(self):
+        return self.value    # 무한 재귀
+
+# 백킹 변수 분리 필요
+class C:
+    @property
+    def value(self):
+        return self._value
+```
+
+### 2. setter 없는 property는 read-only
+
+```python
+class C:
+    @property
+    def x(self):
+        return 1
+
+c = C()
+c.x = 99    # AttributeError
+```
+
+### 3. 비싼 계산은 명시 호출이 낫다
+
+```python
+# property로 감추면 c.area를 무심코 N번 호출 시 N번 계산
+c.area + c.area + c.area  # 3번 계산
+
+# 명시 메서드면 사용자가 의식
+c.compute_area()
+```
+
+cached_property나 일반 메서드 중 선택.
+
+### 4. 호출자가 함수인 줄 모르고 비교
+
+```python
+if obj.is_ready:    # property라 매번 호출
+    ...
+
+# 자주 쓰는 비싼 계산이면 캐시 또는 명시 메서드
+ready = obj.is_ready
+if ready:
+    ...
+```
+
+## 참고
+
+- [Python tutorial: Properties](https://docs.python.org/3/tutorial/classes.html#properties-and-attribute-decorators)
+- [Built-in functions: property](https://docs.python.org/3/library/functions.html#property)
+- [`functools.cached_property`](https://docs.python.org/3/library/functools.html#functools.cached_property)
+- [Descriptor HowTo Guide](https://docs.python.org/3/howto/descriptor.html)

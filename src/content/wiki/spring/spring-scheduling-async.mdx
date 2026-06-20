@@ -1,0 +1,371 @@
+---
+title: "[Spring] @Scheduled와 @Async"
+aliases: ["spring scheduled", "spring async", "task scheduler", "TaskExecutor", "cron expression"]
+tags: [spring, scheduling, async, task]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring은 **@Scheduled** (정기 작업)와 **@Async** (비동기 메서드)를 어노테이션으로 제공. ThreadPool, TaskScheduler 설정 가능. Quartz 같은 본격 스케줄러는 별도.
+
+## @Scheduled
+
+```java
+@SpringBootApplication
+@EnableScheduling
+public class App { }
+```
+
+```java
+@Component
+public class ScheduledTasks {
+
+    // 5초마다 (fixedRate: 시작 기준)
+    @Scheduled(fixedRate = 5000)
+    public void everyFiveSeconds() {
+        log.info("tick");
+    }
+
+    // 이전 실행 종료 5초 후 (fixedDelay)
+    @Scheduled(fixedDelay = 5000)
+    public void afterFiveSecondsDelay() { ... }
+
+    // 시작 후 10초 대기, 그 후 5초마다
+    @Scheduled(initialDelay = 10000, fixedRate = 5000)
+    public void delayedStart() { ... }
+
+    // Cron 표현식
+    @Scheduled(cron = "0 0 3 * * *")    // 매일 03:00
+    public void dailyAt3am() { ... }
+
+    @Scheduled(cron = "0 */15 * * * *")  // 15분마다
+    public void every15Min() { ... }
+
+    @Scheduled(cron = "0 0 9 * * MON")   // 매주 월요일 09:00
+    public void mondayMorning() { ... }
+}
+```
+
+### Cron 표현식
+
+Spring Cron: `초 분 시 일 월 요일`
+
+```
+0 0 12 * * ?         매일 정오
+0 15 10 ? * *        매일 10:15
+0 0 18 ? * MON-FRI   평일 18:00
+0 0 0 1 * ?          매월 1일 0시
+0 0 0 1 1 ?          매년 1월 1일 0시
+*/5 * * * * ?        5초마다
+```
+
+`?`는 day 또는 dow 중 하나만 사용. 모던하게는 `*` 또는 명시.
+
+### 표현식 외부화
+
+```yaml
+app:
+  cron:
+    cleanup: "0 0 3 * * *"
+    report: "0 0 9 * * MON"
+```
+
+```java
+@Scheduled(cron = "${app.cron.cleanup}")
+public void cleanup() { ... }
+```
+
+## TaskScheduler 설정
+
+기본은 단일 스레드. 여러 작업 동시 실행 필요하면 풀.
+
+```java
+@Configuration
+@EnableScheduling
+public class SchedulingConfig implements SchedulingConfigurer {
+
+    @Override
+    public void configureTasks(ScheduledTaskRegistrar registrar) {
+        registrar.setScheduler(taskScheduler());
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler taskScheduler() {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(10);
+        scheduler.setThreadNamePrefix("scheduled-");
+        scheduler.setAwaitTerminationSeconds(60);
+        scheduler.setWaitForTasksToCompleteOnShutdown(true);
+        return scheduler;
+    }
+}
+```
+
+## 분산 환경
+
+```java
+@Scheduled(fixedRate = 60000)
+public void everyMinute() { ... }
+```
+
+여러 인스턴스 모두 실행 → 중복. 해결:
+
+### ShedLock
+
+```kotlin
+implementation("net.javacrumbs.shedlock:shedlock-spring:5.16.0")
+implementation("net.javacrumbs.shedlock:shedlock-provider-jdbc-template:5.16.0")
+```
+
+```java
+@Configuration
+@EnableSchedulerLock(defaultLockAtMostFor = "10m")
+public class SchedulerConfig {
+    @Bean
+    public LockProvider lockProvider(DataSource dataSource) {
+        return new JdbcTemplateLockProvider(dataSource);
+    }
+}
+
+@Scheduled(cron = "0 0 3 * * *")
+@SchedulerLock(name = "cleanupTask", lockAtMostFor = "1h", lockAtLeastFor = "5m")
+public void cleanup() { ... }
+```
+
+DB lock으로 한 노드만 실행 보장.
+
+대안: Quartz cluster, Redis lock (Redlock 패턴).
+
+## @Async
+
+```java
+@SpringBootApplication
+@EnableAsync
+public class App { }
+```
+
+```java
+@Service
+public class NotificationService {
+
+    @Async
+    public void sendEmail(String to, String subject) {
+        // 별도 스레드에서 실행
+        emailClient.send(to, subject);
+    }
+
+    @Async
+    public CompletableFuture<String> fetchData(String url) {
+        String result = restClient.get(url);
+        return CompletableFuture.completedFuture(result);
+    }
+}
+```
+
+### 반환 타입
+
+- `void`: fire-and-forget
+- `Future<T>` / `CompletableFuture<T>`: 결과 받음
+- `ListenableFuture<T>` (deprecated)
+
+```java
+CompletableFuture<String> future = notificationService.fetchData(url);
+future.thenAccept(result -> ...);
+```
+
+### TaskExecutor 설정
+
+```java
+@Configuration
+public class AsyncConfig implements AsyncConfigurer {
+
+    @Override
+    public Executor getAsyncExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(50);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("async-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
+
+    @Override
+    public AsyncUncaughtExceptionHandler getAsyncUncaughtExceptionHandler() {
+        return (ex, method, params) -> log.error("Async error in {}", method, ex);
+    }
+}
+```
+
+### 다중 executor
+
+```java
+@Bean(name = "emailExecutor")
+public Executor emailExecutor() { ... }
+
+@Bean(name = "reportExecutor")
+public Executor reportExecutor() { ... }
+
+@Async("emailExecutor")
+public void sendEmail(...) { ... }
+
+@Async("reportExecutor")
+public void generateReport(...) { ... }
+```
+
+## 자주 보는 패턴
+
+### 외부 API fire-and-forget
+
+```java
+@Async
+public void trackEvent(String event, User user) {
+    analyticsClient.track(event, user.id());
+}
+
+// controller
+analytics.trackEvent("signup", user);    // 즉시 반환, 별 스레드에서 호출
+return ResponseEntity.ok();
+```
+
+### 병렬 데이터 fetch
+
+```java
+@Async public CompletableFuture<User> fetchUser(Long id) { ... }
+@Async public CompletableFuture<List<Order>> fetchOrders(Long userId) { ... }
+@Async public CompletableFuture<Stats> fetchStats(Long userId) { ... }
+
+CompletableFuture<Dashboard> dashboard = fetchUser(id)
+    .thenCombine(fetchOrders(id), (u, o) -> ...)
+    .thenCombine(fetchStats(id), (acc, s) -> ...);
+
+return dashboard.get();
+```
+
+WebFlux의 `Mono.zip`과 동등.
+
+### 정기 cleanup
+
+```java
+@Component
+public class CleanupTasks {
+
+    @Scheduled(cron = "0 0 3 * * *")
+    @Transactional
+    public void deleteOldSessions() {
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(30);
+        sessionRepository.deleteByExpiresAtBefore(cutoff);
+    }
+
+    @Scheduled(cron = "0 0 4 * * *")
+    public void purgeDeletedUsers() {
+        // soft-delete 30일 지난 사용자 영구 삭제
+    }
+}
+```
+
+### 리포트 발송
+
+```java
+@Scheduled(cron = "0 0 9 * * MON")
+public void weeklyReport() {
+    List<User> subscribers = userRepository.findByWeeklyReportTrue();
+    for (User user : subscribers) {
+        reportService.sendWeeklyReport(user);    // @Async 메서드
+    }
+}
+```
+
+## 함정
+
+### 1. @Async 자기 호출
+
+```java
+@Service
+public class MyService {
+    public void caller() {
+        asyncMethod();    // proxy 거치지 않음 → 동기 실행!
+    }
+
+    @Async
+    public void asyncMethod() { ... }
+}
+```
+
+다른 Bean으로 분리 또는 `@Lazy` self-injection.
+
+### 2. @Async void 예외 처리
+
+```java
+@Async
+public void doIt() {
+    throw new RuntimeException();    // 어디로 가나?
+}
+```
+
+`AsyncUncaughtExceptionHandler`로 처리. 안 그러면 silent fail.
+
+### 3. 트랜잭션 + @Async
+
+```java
+@Transactional
+@Async
+public void doIt() { ... }
+```
+
+`@Async`로 새 스레드 → 호출자 트랜잭션 컨텍스트 없음. 새 트랜잭션 시작.
+
+### 4. @Scheduled 메서드는 인자 X, void
+
+```java
+@Scheduled(cron = "...")
+public void doIt(String arg) { ... }    // 에러
+```
+
+파라미터 없는 void 메서드만.
+
+### 5. 분산 환경의 중복
+
+```java
+@Scheduled(cron = "...")
+public void run() { ... }
+```
+
+3 인스턴스 = 3번 실행. ShedLock 또는 leader election.
+
+## Quartz Scheduler
+
+복잡한 스케줄링 (cron 외에 calendar, listener, persistence) 필요 시:
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-quartz")
+```
+
+DB에 작업 영속화 → 인스턴스 재시작 후에도 재개. Cluster 지원.
+
+### Spring Scheduling vs Quartz
+
+| | @Scheduled | Quartz |
+|---|------------|--------|
+| 설정 | 간단 (어노테이션) | 복잡 |
+| 영속성 | X | O |
+| 클러스터 | ShedLock | 내장 |
+| 동적 스케줄 | 일부 | 풍부 |
+
+대부분 앱은 @Scheduled로 충분. 본격 batch는 Spring Batch + Quartz.
+
+## 모니터링
+
+- TaskScheduler/TaskExecutor 메트릭 (Micrometer 자동)
+- 실행 시간, 실패 횟수
+- Actuator `/actuator/scheduledtasks` (활성 작업)
+
+## 참고
+
+- [Task Execution and Scheduling](https://docs.spring.io/spring-framework/reference/integration/scheduling.html)
+- [@Scheduled](https://docs.spring.io/spring-framework/reference/integration/scheduling.html#scheduling-annotation-support-scheduled)
+- [Async](https://docs.spring.io/spring-framework/reference/integration/scheduling.html#scheduling-annotation-support-async)
+- [ShedLock](https://github.com/lukas-krecan/ShedLock)
+- [Spring Batch](https://spring.io/projects/spring-batch)

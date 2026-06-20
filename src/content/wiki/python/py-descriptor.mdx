@@ -1,0 +1,242 @@
+---
+title: "[Python] Descriptor: __get__, __set__, __delete__"
+aliases: ["python descriptor", "data descriptor", "non-data descriptor", "__get__", "__set__"]
+tags: [python, descriptor, oop, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Descriptor**는 `__get__`, `__set__`, `__delete__` 중 하나 이상을 구현한 클래스다. 다른 클래스의 **클래스 속성**으로 사용되면 그 속성 접근이 descriptor의 메서드를 통해 라우팅된다. `@property`, `@classmethod`, `@staticmethod`, 모든 메서드가 사실 descriptor.
+
+## 종류
+
+- **Data descriptor**: `__set__` 또는 `__delete__` 존재 (보통 `__get__`도)
+- **Non-data descriptor**: `__get__`만 존재
+
+차이는 **속성 조회 우선순위**:
+- Data descriptor > 인스턴스 `__dict__` > Non-data descriptor
+
+## 기본 예제
+
+```python
+class Logged:
+    def __init__(self, name=""):
+        self.name = name
+
+    def __set_name__(self, owner, name):    # 3.6+
+        self.name = name
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        print(f"GET {self.name}")
+        return instance.__dict__.get(self.name)
+
+    def __set__(self, instance, value):
+        print(f"SET {self.name} = {value}")
+        instance.__dict__[self.name] = value
+
+class Account:
+    balance = Logged()
+    name = Logged()
+
+a = Account()
+a.name = "Alice"      # SET name = Alice
+a.balance = 1000      # SET balance = 1000
+print(a.balance)      # GET balance / 1000
+```
+
+## __set_name__ (3.6+)
+
+클래스 본문이 처리될 때 descriptor의 owner 클래스와 attribute 이름을 주입. PEP 487. 없으면 descriptor가 자기 이름을 알기 어렵다.
+
+```python
+class Field:
+    def __set_name__(self, owner, name):
+        self.public_name = name
+        self.private_name = "_" + name
+```
+
+## 검증 디스크립터 (실용)
+
+```python
+class Validator:
+    def __set_name__(self, owner, name):
+        self.private_name = "_" + name
+
+    def __get__(self, instance, owner):
+        return getattr(instance, self.private_name, None)
+
+    def __set__(self, instance, value):
+        self.validate(value)
+        setattr(instance, self.private_name, value)
+
+    def validate(self, value):
+        raise NotImplementedError
+
+class Positive(Validator):
+    def validate(self, value):
+        if value <= 0:
+            raise ValueError("must be positive")
+
+class String(Validator):
+    def validate(self, value):
+        if not isinstance(value, str):
+            raise TypeError("must be string")
+
+class Product:
+    name = String()
+    price = Positive()
+    stock = Positive()
+
+p = Product()
+p.name = "book"
+p.price = 1000
+p.stock = -1     # ValueError
+```
+
+각 클래스 속성을 한 줄로 검증·저장 동작 정의. ORM, Django Field, Pydantic 등의 핵심 메커니즘.
+
+## property가 사실 descriptor
+
+```python
+class property:               # 의사 코드
+    def __init__(self, fget=None, fset=None, fdel=None):
+        self.fget, self.fset, self.fdel = fget, fset, fdel
+
+    def __get__(self, instance, owner):
+        if instance is None: return self
+        return self.fget(instance)
+
+    def __set__(self, instance, value):
+        if self.fset is None:
+            raise AttributeError("can't set")
+        self.fset(instance, value)
+```
+
+`@property`가 만드는 객체가 `__get__`/`__set__`/`__delete__`를 모두 가진 data descriptor.
+
+## 함수도 descriptor
+
+```python
+class A:
+    def method(self):
+        pass
+
+a = A()
+print(A.method)         # <function A.method>
+print(a.method)         # <bound method A.method of <A object>>
+```
+
+`a.method`가 bound method가 되는 마법은 함수 객체가 `__get__`을 가진 **non-data descriptor**이기 때문이다.
+
+```python
+def f(): pass
+f.__get__(instance, owner)  # bound method 반환
+```
+
+## classmethod / staticmethod도 descriptor
+
+```python
+class C:
+    @classmethod
+    def cm(cls): pass
+
+    @staticmethod
+    def sm(): pass
+
+print(type(C.__dict__["cm"]))   # <class 'classmethod'>
+print(type(C.__dict__["sm"]))   # <class 'staticmethod'>
+```
+
+각각 `__get__`에서 cls 바인딩 / 그대로 함수 반환을 수행.
+
+## 속성 조회 순서 (data descriptor 우선)
+
+`obj.attr` 조회 시 (간단화):
+
+1. type(obj).__mro__에서 attr 검색
+   - data descriptor면 즉시 그 `__get__` 호출 후 종료
+2. obj.__dict__[attr] 있으면 반환
+3. type(obj).__mro__의 검색 결과
+   - non-data descriptor면 `__get__` 호출
+   - 일반 클래스 속성이면 그대로 반환
+4. `__getattr__` 호출
+5. AttributeError
+
+```python
+class D:
+    def __get__(self, instance, owner): return "from descriptor"
+    def __set__(self, instance, value): pass
+
+class C:
+    x = D()
+
+c = C()
+c.__dict__["x"] = "instance attr"
+print(c.x)   # "from descriptor" (data descriptor가 인스턴스보다 우선)
+
+class E:
+    def __get__(self, instance, owner): return "from non-data"
+
+class F:
+    x = E()
+
+f = F()
+f.__dict__["x"] = "instance attr"
+print(f.x)   # "instance attr" (non-data descriptor는 인스턴스 우선)
+```
+
+## 메서드/슬롯과의 차이
+
+- 함수는 매 호출마다 새 bound method 생성 (메서드 객체 재사용 안 함)
+- `__slots__` 클래스의 슬롯은 사실 C 레벨에서 만들어진 data descriptor
+- `__init_subclass__`, ABC도 descriptor와 클래스 본문 메커니즘 활용
+
+## 함정
+
+### 1. descriptor 자체에 상태 저장 금지
+
+```python
+class BadField:
+    def __get__(self, instance, owner):
+        return self.value
+
+    def __set__(self, instance, value):
+        self.value = value    # 모든 인스턴스가 공유!
+```
+
+descriptor 인스턴스는 **클래스 단위 1개**. 상태는 반드시 `instance.__dict__`에.
+
+### 2. instance가 None인 경우 처리
+
+클래스에서 직접 접근 시 instance가 None.
+
+```python
+class D:
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self       # 클래스 접근: descriptor 자체 반환
+        return ...
+```
+
+### 3. dataclass 필드와 descriptor
+
+`@dataclass`는 디스크립터를 인식해 기본값 처리에 사용. 3.10+ 에서 PEP 487 활용 패턴 개선.
+
+## 언제 직접 만드나
+
+- 같은 검증/변환을 여러 속성에 재사용
+- ORM/직렬화 프레임워크의 Field 추상
+- 게으른 초기화 + 인스턴스 캐싱
+- 타입 강제, 기본값 동적 결정
+
+단순 검증이면 property로 충분. descriptor는 **여러 클래스/속성에 재사용**할 때 진가.
+
+## 참고
+
+- [Descriptor HowTo Guide](https://docs.python.org/3/howto/descriptor.html)
+- [PEP 252 – Making Types Look More Like Classes](https://peps.python.org/pep-0252/)
+- [PEP 487 – Simpler customisation of class creation](https://peps.python.org/pep-0487/)
+- [Data Model: Implementing Descriptors](https://docs.python.org/3/reference/datamodel.html#implementing-descriptors)

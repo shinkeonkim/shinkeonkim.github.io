@@ -1,0 +1,150 @@
+---
+title: "[Pandas] merge_asof"
+aliases: ["Pandas merge_asof", "as-of join", "시간 매칭 merge"]
+tags: [python, pandas, merge, time-series, asof]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`pd.merge_asof(left, right, on, by=, direction=)`** 는 **가장 가까운 키** 기준 join. 일반 [[Pandas merge]] 가 정확히 일치하는 키만 매칭하는 반면, `merge_asof` 는 **이전 (또는 가장 가까운)** 키를 찾는다.
+
+시계열 데이터 (가격, 이벤트) 와 다른 시계열 데이터 (참조 데이터, 다른 채널) 를 매칭할 때 핵심.
+
+## 기본
+
+```python
+pd.merge_asof(left, right, on='time')
+# 양쪽 모두 time 으로 정렬되어 있어야 함
+# left 의 각 행에 대해, right 의 time <= left.time 중 가장 가까운 행 join
+```
+
+## 사용 예 (시계열 가격 + 거래)
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+trades = pd.DataFrame({
+    'time': pd.to_datetime(['09:00:30','09:01:15','09:02:45']),
+    'qty':  [100, 200, 150],
+})
+prices = pd.DataFrame({
+    'time': pd.to_datetime(['09:00:00','09:01:00','09:02:00','09:03:00']),
+    'price':[100, 101, 102, 103],
+})
+print(pd.merge_asof(trades, prices, on='time'))`}
+  output={`                 time  qty  price
+0 2026-06-18 09:00:30  100    100
+1 2026-06-18 09:01:15  200    101
+2 2026-06-18 09:02:45  150    102`}
+/>
+
+각 trade 시각의 직전 가격이 매칭됨.
+
+## direction
+
+| direction | 의미 |
+|:---|:---|
+| `'backward'` (기본) | 이전 시각 매칭 (≤) |
+| `'forward'` | 이후 시각 매칭 (≥) |
+| `'nearest'` | 더 가까운 쪽 |
+
+```python
+pd.merge_asof(trades, prices, on='time', direction='nearest')
+```
+
+## tolerance (허용 차이)
+
+```python
+pd.merge_asof(trades, prices, on='time', tolerance=pd.Timedelta('5min'))
+# 5 분 이상 떨어지면 매칭 안 됨 (NaN)
+```
+
+## by (그룹별 매칭)
+
+```python
+pd.merge_asof(left, right, on='time', by='symbol')
+# 같은 symbol 내에서 시간 매칭
+```
+
+각 종목별로 독립적 as-of join.
+
+## 정렬 필수
+
+```python
+left = left.sort_values('time')
+right = right.sort_values('time')
+pd.merge_asof(left, right, on='time')
+```
+
+정렬되지 않으면 `ValueError`.
+
+## 자주 쓰는 패턴
+
+### 가격 데이터 + 트랜잭션
+
+```python
+# 분 단위 가격 + 초 단위 거래
+trades.merge_asof(prices, on='timestamp', by='symbol')
+```
+
+### 이벤트 + 컨텍스트 데이터
+
+```python
+events.merge_asof(user_state, on='event_time', by='user_id',
+    tolerance=pd.Timedelta('1h'))
+```
+
+### 다중 시계열 통합
+
+```python
+df = pd.merge_asof(sales, weather, on='date')
+df = pd.merge_asof(df, marketing, on='date')
+df = pd.merge_asof(df, holiday_calendar, on='date')
+```
+
+## merge 와의 비교
+
+| 메서드 | 매칭 방식 | 사용처 |
+|:---|:---|:---|
+| `merge` | 정확 일치 | 일반 join |
+| `merge_asof` | 가장 가까운 (시간/수치 키) | 시계열 |
+
+## 함정
+
+### 1. 정렬 안 되면 에러
+
+```python
+pd.merge_asof(unsorted, sorted, on='time')   # ValueError
+```
+
+### 2. on 컬럼의 dtype
+
+```python
+pd.merge_asof(a, b, on='date')
+# date 가 한 쪽은 datetime, 다른 쪽은 str 이면 안 됨
+```
+
+같은 dtype 으로 통일.
+
+### 3. by 의 dtype
+
+```python
+pd.merge_asof(a, b, on='time', by='symbol')
+# 양쪽 symbol 이 같은 dtype, category 권장
+```
+
+### 4. 결과의 NaN
+
+```python
+# tolerance 밖이거나 매칭 없으면 NaN
+result['price'].isna().sum()
+```
+
+## 참고
+
+- [[Pandas merge]]
+- [[Pandas resample]]
+- [[Pandas to_datetime]]
+- 공식 문서, [merge_asof](https://pandas.pydata.org/docs/reference/api/pandas.merge_asof.html)

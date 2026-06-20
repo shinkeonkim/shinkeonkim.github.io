@@ -1,0 +1,165 @@
+---
+title: "[Pandas] pipe / method chaining"
+aliases: ["Pandas pipe", "pandas method chain", "Pandas 체이닝"]
+tags: [python, pandas, pipe, method-chain]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`DataFrame.pipe(func, *args, **kwargs)`** 는 **method chain 안에 사용자 함수를 끼워 넣기**. `func(df, ...)` 와 동등하지만 chain 의 흐름을 유지한다.
+
+```python
+df.pipe(my_func, arg1, arg2)
+# = my_func(df, arg1, arg2)
+```
+
+## 왜 pipe 인가
+
+체이닝의 가독성을 위해.
+
+```python
+# ❌ 중첩 함수 호출 (역순으로 읽힘)
+clean_data(remove_outliers(normalize(df, cols), threshold=3))
+
+# ✓ pipe 로 위에서 아래로
+(df
+ .pipe(normalize, cols)
+ .pipe(remove_outliers, threshold=3)
+ .pipe(clean_data))
+```
+
+## 기본 사용
+
+```python
+def add_total(df):
+    df['total'] = df['price'] * df['qty']
+    return df
+
+def filter_high_value(df, threshold):
+    return df[df['total'] >= threshold]
+
+result = (df
+    .pipe(add_total)
+    .pipe(filter_high_value, threshold=10000)
+    .sort_values('total', ascending=False))
+```
+
+## func 가 첫 인자가 DataFrame 이 아닐 때
+
+```python
+df.pipe((func, 'df_arg_name'), arg1)
+# func(arg1, df_arg_name=df)
+```
+
+func 의 첫 인자가 DataFrame 이 아닌 경우 tuple 로 위치 명시.
+
+## method chain 의 장점
+
+```python
+result = (df
+    .query('age > 18')
+    .assign(year=lambda d: d['date'].dt.year)
+    .groupby(['year', 'city'])
+    .agg(total=('sales', 'sum'))
+    .reset_index()
+    .pivot(index='year', columns='city', values='total')
+    .fillna(0)
+    .pipe(normalize_rows))
+```
+
+각 단계가 명확. 디버깅 시 한 줄씩 제거/추가 쉬움.
+
+## assign 과의 조합
+
+`assign` 으로 새 컬럼을 추가하면서 chain 유지.
+
+```python
+df.assign(
+    bmi=lambda d: d['weight'] / (d['height']/100)**2,
+    bmi_cat=lambda d: pd.cut(d['bmi'], bins=[0,18.5,25,30,100],
+        labels=['under','normal','over','obese'])
+)
+```
+
+`lambda d: ...` 패턴이 chain 안에서 이전 단계 결과를 참조.
+
+## query 와 조합
+
+```python
+df = (df
+    .query('age > 18 and city in @cities')
+    .assign(group=lambda d: pd.cut(d['age'], bins=[0,30,50,100]))
+    .groupby('group')
+    .agg({'sales': 'sum'}))
+```
+
+## 함수형 스타일
+
+```python
+def normalize(df, cols):
+    df = df.copy()
+    for c in cols:
+        df[c] = (df[c] - df[c].mean()) / df[c].std()
+    return df
+
+def remove_outliers(df, col, n_std=3):
+    mean, std = df[col].mean(), df[col].std()
+    return df[df[col].between(mean - n_std*std, mean + n_std*std)]
+
+df.pipe(normalize, ['x', 'y']).pipe(remove_outliers, 'z')
+```
+
+각 함수가 `DataFrame → DataFrame`, 재사용성 ↑.
+
+## 가독성 가이드
+
+| 패턴 | 권장 |
+|:---|:---|
+| 단순 한 단계 | 그냥 `func(df)` |
+| 2-3 단계 | chain 권장 |
+| 5+ 단계 | chain + 변수 분리 (readability) |
+
+## 함정
+
+### 1. inplace 함수와 안 어울림
+
+```python
+df.pipe(lambda d: d.sort_values('x', inplace=True))
+# None 반환 → chain 끊김
+```
+
+`inplace=True` 와 chain 은 호환 안 됨.
+
+### 2. side effect
+
+```python
+def add_log(df):
+    print(df.shape)
+    return df       # 반드시 return
+
+df.pipe(add_log).head()
+```
+
+return 빠뜨리면 None.
+
+### 3. 디버깅 어려움
+
+```python
+# 중간 결과 확인 어려움
+result = df.pipe(a).pipe(b).pipe(c)
+
+# 임시 변수
+step1 = df.pipe(a)
+step2 = step1.pipe(b)
+step3 = step2.pipe(c)
+```
+
+문제 단계 격리에 임시 변수가 유용.
+
+## 참고
+
+- [[Pandas DataFrame]]
+- [[Pandas apply / map]]
+- [[Pandas query]]
+- 공식 문서, [pipe](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.pipe.html)

@@ -1,0 +1,283 @@
+---
+title: "[Python] Context Manager: with, __enter__, contextlib"
+aliases: ["python context manager", "with statement", "__enter__", "__exit__", "contextmanager", "ExitStack"]
+tags: [python, context-manager, with, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Context manager**는 `__enter__`와 `__exit__` 메서드를 가진 객체로, `with` 문을 통해 **자원 획득/해제를 안전하게 묶는다**. 파일·락·DB 트랜잭션·임시 설정처럼 "들어가면 반드시 나와야 하는" 작업의 표준 패턴.
+
+## with 기본
+
+```python
+with open("file.txt") as f:
+    data = f.read()
+# f.close() 자동 호출 (예외 발생해도)
+
+with open("x.txt") as r, open("y.txt", "w") as w:
+    w.write(r.read())
+```
+
+`with` 블록은 다음과 거의 동등:
+
+```python
+mgr = open("file.txt")
+f = mgr.__enter__()
+try:
+    data = f.read()
+except BaseException as e:
+    if not mgr.__exit__(type(e), e, e.__traceback__):
+        raise
+else:
+    mgr.__exit__(None, None, None)
+```
+
+## 클래스로 만들기
+
+```python
+import time
+
+class Timer:
+    def __init__(self, label):
+        self.label = label
+
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self                # as 변수에 바인딩 (필수 아님)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        elapsed = time.perf_counter() - self.start
+        print(f"{self.label}: {elapsed:.4f}s")
+        return False               # 예외 재발생 (True면 삼킴)
+
+with Timer("work"):
+    sum(range(10 ** 6))
+```
+
+`__exit__` 반환값:
+- **falsy**: 예외 전파 (정상)
+- **truthy**: 예외 삼킴 (드물게 의도적으로)
+
+## contextlib.contextmanager
+
+함수에 `@contextmanager` 데코레이터를 붙이고 `yield` 한 번. 클래스보다 훨씬 간단.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from contextlib import contextmanager
+import time
+
+@contextmanager
+def timer(label):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(f"{label}: {time.perf_counter() - start:.4f}s")
+
+with timer("computation"):
+    sum(range(10 ** 5))`}
+  output={`computation: 0.0012s`}
+/>
+
+`yield` 전 = `__enter__`, `yield` 후 = `__exit__`. try/finally로 정리 보장.
+
+`yield value`처럼 값을 넘기면 `with ... as v`로 받을 수 있다.
+
+```python
+@contextmanager
+def temp_dir():
+    import tempfile, shutil, os
+    path = tempfile.mkdtemp()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+with temp_dir() as d:
+    print(d)    # /tmp/...
+```
+
+## 표준 라이브러리에서 자주 보는 context manager
+
+| 자원 | 매니저 |
+|------|--------|
+| 파일 | `open(path)` |
+| 락 | `threading.Lock()`, `multiprocessing.Lock()` |
+| DB 커넥션 | `sqlite3.connect()` (with 시 트랜잭션) |
+| HTTP 세션 | `requests.Session()`, `httpx.Client()` |
+| 잠시 stdout 가리기 | `contextlib.redirect_stdout(buf)` |
+| 예외 묵살 | `contextlib.suppress(KeyError)` |
+| 임시 디렉터리 | `tempfile.TemporaryDirectory()` |
+| 변경 가능한 상태 잠시 변경 | `unittest.mock.patch(...)` |
+
+```python
+from contextlib import suppress
+
+with suppress(FileNotFoundError):
+    os.remove("temp")
+```
+
+## ExitStack: 동적 컨텍스트 합치기
+
+여러 자원을 **동적 개수**로 묶을 때 (체이닝 with 문법은 컴파일 시점 고정).
+
+```python
+from contextlib import ExitStack
+
+paths = ["a.txt", "b.txt", "c.txt"]
+with ExitStack() as stack:
+    files = [stack.enter_context(open(p)) for p in paths]
+    process(files)
+# 모든 파일 자동 close (역순으로)
+```
+
+콜백도 등록 가능:
+
+```python
+with ExitStack() as stack:
+    stack.callback(print, "cleanup 1")
+    stack.callback(print, "cleanup 2")
+    work()
+# 등록 역순으로 cleanup 2, cleanup 1 실행
+```
+
+## async with (async context manager)
+
+비동기 자원 관리. `__aenter__`, `__aexit__`.
+
+```python
+import aiohttp
+
+async def fetch_all(urls):
+    async with aiohttp.ClientSession() as session:
+        for url in urls:
+            async with session.get(url) as resp:
+                yield await resp.text()
+```
+
+`@asynccontextmanager`로 함수 기반 작성:
+
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def db_session():
+    conn = await connect()
+    try:
+        yield conn
+    finally:
+        await conn.close()
+```
+
+## 예외 처리
+
+`__exit__`에서 예외 정보 검사 후 선택적 처리.
+
+```python
+class IgnoreKeyError:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb):
+        if exc_type is KeyError:
+            print(f"ignoring {exc_value}")
+            return True       # 예외 삼킴
+        return False          # 다른 예외는 전파
+
+with IgnoreKeyError():
+    d = {}
+    d["missing"]              # 삼켜짐
+```
+
+## 데코레이터로 쓰기
+
+`contextlib.ContextDecorator` 상속 또는 `@contextmanager` 함수는 **자체가 데코레이터**로 작동.
+
+```python
+@contextmanager
+def trace(name):
+    print(f"enter {name}")
+    yield
+    print(f"exit {name}")
+
+@trace("work")
+def work():
+    print("working")
+
+work()
+# enter work
+# working
+# exit work
+```
+
+## 자주 만드는 패턴
+
+### 임시 환경변수
+
+```python
+import os
+from contextlib import contextmanager
+
+@contextmanager
+def env(**kwargs):
+    old = {k: os.environ.get(k) for k in kwargs}
+    os.environ.update(kwargs)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+with env(API_KEY="test-key"):
+    run_test()
+```
+
+### 임시 작업 디렉터리
+
+```python
+@contextmanager
+def cwd(path):
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+with cwd("/tmp"):
+    run_in_tmp()
+```
+
+## 함정
+
+### __exit__에서 예외 발생
+
+`__exit__` 자신이 예외를 던지면 그게 우선 전파되고, with 본문 예외는 `__context__`로 묻힌다. 깨끗한 cleanup이 필요하면 try로 보호.
+
+### contextmanager 함수에서 yield 누락 또는 두 번
+
+- yield가 없으면 일반 함수
+- yield가 두 번이면 `RuntimeError: generator didn't stop`
+
+### with 안 return
+
+```python
+def f():
+    with open(...) as f:
+        return f.read()    # OK: with가 자동 정리 후 반환
+```
+
+`return`은 `with`의 `__exit__`을 거친다.
+
+## 참고
+
+- [PEP 343 – The "with" Statement](https://peps.python.org/pep-0343/)
+- [`contextlib` documentation](https://docs.python.org/3/library/contextlib.html)
+- [PEP 492 – Coroutines with async and await syntax](https://peps.python.org/pep-0492/)

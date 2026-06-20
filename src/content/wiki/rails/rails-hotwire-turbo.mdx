@@ -1,0 +1,351 @@
+---
+title: "[Rails] Hotwire: Turbo Drive, Frames, Streams, Stimulus"
+aliases: ["rails hotwire", "turbo drive", "turbo frames", "turbo streams", "stimulus", "rails SPA-less"]
+tags: [rails, hotwire, turbo, stimulus, frontend]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Hotwire**는 Rails 7부터 기본인 "SPA 없이 SPA 같은 UX"를 위한 프론트엔드 접근. **Turbo Drive**(전체 페이지 전환을 fetch + DOM swap), **Turbo Frames**(부분 페이지 업데이트), **Turbo Streams**(서버 → 클라이언트 DOM 갱신), **Stimulus**(가벼운 JS 컴포넌트)로 구성. Basecamp/37signals가 만들고 사용 중.
+
+## Turbo Drive
+
+기본 활성. 모든 링크/폼이 fetch로 가로채져 body만 교체.
+
+```javascript
+// app/javascript/application.js
+import "@hotwired/turbo-rails"
+// 또는
+import { Turbo } from "@hotwired/turbo-rails"
+```
+
+페이지 transition이 부드럽고 빠름. 전체 페이지 reload 없음.
+
+### 일부 페이지 제외
+
+```html
+<a href="/external" data-turbo="false">외부 사이트</a>
+<form data-turbo="false">...</form>
+```
+
+### Turbo Drive 옵션
+
+```html
+<meta name="turbo-cache-control" content="no-cache">
+<meta name="turbo-cache-control" content="no-preview">    <%# 미리 보기 미사용 %>
+```
+
+### 메서드와 confirm
+
+```erb
+<%= link_to "Delete", post,
+            data: { turbo_method: :delete, turbo_confirm: "삭제하시겠습니까?" } %>
+```
+
+`<a>` 태그가 DELETE 요청 가능 (form 자동 생성).
+
+## Turbo Frames
+
+`<turbo-frame>` 안의 링크/폼 결과를 그 frame만 교체.
+
+```erb
+<%# views/posts/show.html.erb %>
+<%= turbo_frame_tag "post_#{@post.id}" do %>
+  <h1><%= @post.title %></h1>
+  <p><%= @post.body %></p>
+  <%= link_to "수정", edit_post_path(@post) %>
+<% end %>
+
+<%# views/posts/edit.html.erb %>
+<%= turbo_frame_tag "post_#{@post.id}" do %>
+  <%= render "form", post: @post %>
+<% end %>
+```
+
+`수정` 클릭 → edit 페이지 fetch → 같은 ID의 frame만 교체. 나머지 페이지(header, sidebar 등) 그대로.
+
+### lazy load
+
+```erb
+<%= turbo_frame_tag "comments", src: post_comments_path(@post), loading: "lazy" do %>
+  로딩 중...
+<% end %>
+```
+
+frame이 화면에 들어오면 src에서 가져옴. 무거운 댓글 등 지연 로드.
+
+### Frame을 따라가지 않는 링크
+
+```erb
+<%= link_to "전체보기", post_path(@post), data: { turbo_frame: "_top" } %>
+```
+
+`_top`은 frame 무시하고 전체 페이지 전환.
+
+## Turbo Streams
+
+서버가 클라이언트의 DOM을 부분 갱신.
+
+7가지 액션:
+- `append` / `prepend`
+- `replace`
+- `update`
+- `remove`
+- `before` / `after`
+
+### Response로 stream
+
+```erb
+<%# views/comments/create.turbo_stream.erb %>
+<%= turbo_stream.append "comments" do %>
+  <%= render @comment %>
+<% end %>
+
+<%= turbo_stream.replace "comment_count" do %>
+  <%= @post.comments.count %>
+<% end %>
+
+<%= turbo_stream.update "new_comment_form" do %>
+  <%= render "form", comment: Comment.new %>
+<% end %>
+```
+
+```ruby
+# controller
+def create
+  @comment = @post.comments.create(comment_params)
+  respond_to do |format|
+    format.turbo_stream
+    format.html { redirect_to @post }
+  end
+end
+```
+
+클라이언트가 `Accept: text/vnd.turbo-stream.html`로 요청하면 stream 응답. form 제출 후 페이지 재로드 없이 댓글 추가.
+
+### Broadcast (Action Cable 위)
+
+```ruby
+class Post < ApplicationRecord
+  broadcasts_to ->(post) { "posts:#{post.id}" }
+end
+```
+
+모델 저장/삭제 시 모든 구독자에게 turbo stream 전송. 다중 사용자 실시간 협업.
+
+```erb
+<%# views/posts/show.html.erb %>
+<%= turbo_stream_from "posts:#{@post.id}" %>
+
+<%= turbo_frame_tag dom_id(@post) do %>
+  <%# 다른 사용자가 글을 업데이트하면 자동 반영 %>
+<% end %>
+```
+
+### Stream 헬퍼
+
+```ruby
+# 컨트롤러에서 직접
+def update
+  @post.update(post_params)
+  render turbo_stream: turbo_stream.replace(@post)
+end
+
+# 여러 액션
+render turbo_stream: [
+  turbo_stream.replace(@post),
+  turbo_stream.update("count", @posts.count),
+]
+```
+
+## Stimulus
+
+가벼운 JS 컨트롤러. 작은 인터랙션에 적합.
+
+```bash
+bin/rails g stimulus hello
+```
+
+```javascript
+// app/javascript/controllers/hello_controller.js
+import { Controller } from "@hotwired/stimulus"
+
+export default class extends Controller {
+    static targets = ["name", "output"]
+    static values = { url: String }
+
+    greet() {
+        this.outputTarget.textContent = `Hello, ${this.nameTarget.value}!`
+    }
+}
+```
+
+```erb
+<div data-controller="hello" data-hello-url-value="/api/users">
+  <input data-hello-target="name" type="text">
+  <button data-action="click->hello#greet">Greet</button>
+  <p data-hello-target="output"></p>
+</div>
+```
+
+- `data-controller`: 어떤 컨트롤러 사용
+- `data-action`: event → method 매핑
+- `data-<controller>-target`: 요소 참조
+- `data-<controller>-<name>-value`: 값 전달
+
+React/Vue처럼 무거운 SPA 없이 작은 UI 인터랙션.
+
+## 자주 보는 패턴
+
+### 무한 스크롤
+
+```erb
+<%# index.html.erb %>
+<div id="posts">
+  <%= render @posts %>
+</div>
+
+<% if @posts.next_page %>
+  <%= turbo_frame_tag "load_more",
+                       src: posts_path(page: @posts.next_page),
+                       loading: "lazy" do %>
+    로딩 중...
+  <% end %>
+<% end %>
+```
+
+```erb
+<%# views/posts/_page.html.erb %>
+<%= turbo_stream.append "posts" do %>
+  <%= render @posts %>
+<% end %>
+
+<% if @posts.next_page %>
+  <%= turbo_stream.replace "load_more" do %>
+    <%= turbo_frame_tag "load_more", src: posts_path(page: @posts.next_page), loading: "lazy" %>
+  <% end %>
+<% end %>
+```
+
+### 인라인 편집
+
+```erb
+<%= turbo_frame_tag dom_id(post, :title) do %>
+  <h1><%= post.title %></h1>
+  <%= link_to "수정", edit_post_path(post) %>
+<% end %>
+```
+
+수정 → 같은 frame에 form → 저장 → 새 제목으로 frame 교체.
+
+### 라이브 검색
+
+```erb
+<%= form_with url: search_path, method: :get, data: { turbo_frame: "results" } do |f| %>
+  <%= f.text_field :q, data: { action: "input->search#submit" } %>
+<% end %>
+
+<%= turbo_frame_tag "results" %>
+```
+
+```javascript
+// app/javascript/controllers/search_controller.js
+import { Controller } from "@hotwired/stimulus"
+
+export default class extends Controller {
+    submit() {
+        clearTimeout(this.timeout)
+        this.timeout = setTimeout(() => {
+            this.element.requestSubmit()
+        }, 200)
+    }
+}
+```
+
+debounce + 자동 제출 + frame 결과만 갱신.
+
+### 알림 (toast)
+
+```erb
+<%# layouts에 %>
+<%= turbo_stream_from "user_#{current_user.id}_notifications" %>
+<div id="toasts"></div>
+```
+
+```ruby
+# 어디서나
+Turbo::StreamsChannel.broadcast_append_to(
+    "user_#{user.id}_notifications",
+    target: "toasts",
+    partial: "shared/toast",
+    locals: { message: "저장됨" },
+)
+```
+
+## 함정
+
+### 1. JS 초기화 시점
+
+Turbo Drive는 페이지 교체 시 `DOMContentLoaded` 발생 X.
+
+```javascript
+document.addEventListener("turbo:load", () => {
+    // 새 페이지 로드 시
+})
+```
+
+Stimulus 컨트롤러는 자동 connect/disconnect라 신경 안 써도 됨.
+
+### 2. form 응답이 200 OK + HTML
+
+폼 제출 → 422 (검증 실패) 또는 200 OK + redirect 응답이 Turbo의 표준. 잘못 응답하면 turbo가 무시.
+
+```ruby
+def create
+  if @post.save
+    redirect_to @post    # OK
+  else
+    render :new, status: :unprocessable_entity    # 422 필수
+  end
+end
+```
+
+### 3. frame ID 중복
+
+```erb
+<%= turbo_frame_tag "post" do %>
+  ...
+<% end %>
+```
+
+여러 post 있으면 ID 충돌. `dom_id(post)` 사용 → `post_42`.
+
+### 4. broadcast 권한
+
+`broadcasts_to`는 모든 구독자에게. 비공개 글이라면 직접 스트림에 권한 체크.
+
+### 5. cache 무효화
+
+페이지 캐시되어 있으면 turbo가 cached 페이지를 가져옴. `Cache-Control` 헤더 관리.
+
+## SPA와 비교
+
+| | Hotwire | React/Vue SPA |
+|---|---------|---------------|
+| 학습 곡선 | 낮 | 높 |
+| JS 양 | 적음 | 많음 |
+| SEO | 자연스러움 | SSR 필요 |
+| 모바일 | turbo-native (iOS/Android 공유) | RN 별도 |
+| 복잡한 클라이언트 상태 | 약 | 강 |
+| 인터랙티브성 | 중 | 매우 강 |
+
+대다수 CRUD 앱엔 Hotwire가 충분 + 빠른 개발. 무거운 클라이언트 상태(에디터 등)는 SPA.
+
+## 참고
+
+- [Hotwire](https://hotwired.dev/)
+- [Turbo Handbook](https://turbo.hotwired.dev/handbook/introduction)
+- [Stimulus Handbook](https://stimulus.hotwired.dev/handbook/introduction)
+- [Rails Guides: Working with JavaScript](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
+- [Turbo Native](https://github.com/hotwired/turbo-ios)

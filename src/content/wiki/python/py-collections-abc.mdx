@@ -1,0 +1,283 @@
+---
+title: "[Python] collections.abc: 추상 컬렉션 인터페이스"
+aliases: ["python collections.abc", "Iterable", "Sequence", "Mapping", "Set", "MutableSequence", "abc"]
+tags: [python, collections, abc, protocol, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`collections.abc`는 **컬렉션의 추상 베이스 클래스**를 제공한다. 사용자 정의 컬렉션이 빌트인과 같은 인터페이스를 구현했음을 명시하거나, isinstance 검사에 사용. PEP 3119.
+
+타입 힌트에서도 자주 보임 (`Sequence[int]`는 `list[int]`보다 일반적).
+
+## 주요 ABC 계층
+
+```
+Container          __contains__
+Hashable           __hash__
+Iterable           __iter__
+Iterator           __next__, __iter__       ← Iterable
+Reversible         __reversed__              ← Iterable
+Sized              __len__
+Callable           __call__
+Collection         __contains__, __iter__, __len__   ← Iterable, Container, Sized
+
+Sequence           __getitem__, __len__              ← Reversible, Collection
+                   index, count, __iter__, __contains__, __reversed__
+MutableSequence    __setitem__, __delitem__, insert  ← Sequence
+                   append, extend, pop, remove, clear
+
+Set                __contains__, __iter__, __len__   ← Collection
+                   __le__, __lt__, __eq__, __ne__, __gt__, __ge__
+                   __and__, __or__, __sub__, __xor__, isdisjoint
+MutableSet         add, discard                       ← Set
+                   clear, pop, remove
+
+Mapping            __getitem__, __len__, __iter__    ← Collection
+                   __contains__, keys, items, values, get, __eq__, __ne__
+MutableMapping     __setitem__, __delitem__          ← Mapping
+                   pop, popitem, clear, update, setdefault
+
+MappingView        __len__
+ItemsView          __iter__, __contains__            ← MappingView, Set
+KeysView           __contains__, __iter__            ← MappingView, Set
+ValuesView         __iter__, __contains__            ← MappingView
+
+Awaitable          __await__
+Coroutine          send, throw, close                 ← Awaitable
+AsyncIterable      __aiter__
+AsyncIterator      __anext__, __aiter__              ← AsyncIterable
+AsyncGenerator     asend, athrow                     ← AsyncIterator
+```
+
+## isinstance 검사
+
+```python
+from collections.abc import Iterable, Sequence, Mapping
+
+isinstance([1, 2, 3], Iterable)     # True
+isinstance("abc", Iterable)          # True
+isinstance({"a": 1}, Iterable)       # True (키 순회)
+isinstance(42, Iterable)             # False
+
+isinstance([1, 2, 3], Sequence)     # True
+isinstance({1, 2, 3}, Sequence)     # False (순서 없음)
+isinstance("abc", Sequence)          # True
+isinstance(b"abc", Sequence)         # True
+
+isinstance({}, Mapping)             # True
+isinstance({}.keys(), Set)           # True (set처럼 다룰 수 있음)
+```
+
+빌트인 타입들은 자동으로 적절한 ABC에 등록됨.
+
+## 타입 힌트에 활용
+
+함수 인자를 구체 타입(list, dict)으로 제한하지 말고 ABC로.
+
+```python
+from collections.abc import Iterable, Mapping, Sequence
+
+def sum_all(xs: Iterable[int]) -> int:
+    return sum(xs)
+# list, tuple, set, generator 모두 받음
+
+def show(items: Sequence[str]) -> None:
+    for i, x in enumerate(items):
+        print(i, x)
+# list, tuple만 (인덱싱 가능)
+
+def update_settings(s: Mapping[str, int]) -> None:
+    for k, v in s.items():
+        ...
+# dict뿐 아니라 임의 mapping
+```
+
+라이브러리 함수는 가능한 한 일반적 ABC. 호출자가 다양한 타입을 자유롭게 넘길 수 있다.
+
+`typing.Iterable` 등은 `collections.abc.Iterable`의 별칭 (3.9+).
+
+## 직접 컬렉션 만들기
+
+ABC를 상속해 일부 메서드만 구현하면 나머지가 자동 제공.
+
+```python
+from collections.abc import MutableSequence
+
+class IntList(MutableSequence):
+    def __init__(self):
+        self._items = []
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+    def __setitem__(self, i, v):
+        if not isinstance(v, int):
+            raise TypeError("int only")
+        self._items[i] = v
+
+    def __delitem__(self, i):
+        del self._items[i]
+
+    def __len__(self):
+        return len(self._items)
+
+    def insert(self, i, v):
+        if not isinstance(v, int):
+            raise TypeError("int only")
+        self._items.insert(i, v)
+
+# append, extend, pop, remove, clear, reverse, __contains__, __iter__,
+# index, count 등은 ABC가 자동 제공
+
+lst = IntList()
+lst.append(1)
+lst.append(2)
+lst.extend([3, 4])
+print(list(lst), len(lst))     # 자동
+lst.remove(2)
+```
+
+abstractmethod만 구현하면 나머지가 무료. 다만 효율적인 직접 구현이 더 나을 수 있음.
+
+## 가상 서브클래스 (register)
+
+명시적 상속 없이 ABC 호환 표현.
+
+```python
+from collections.abc import Sized
+
+class MyContainer:
+    def __init__(self):
+        self.size = 0
+    def __len__(self):
+        return self.size
+
+Sized.register(MyContainer)
+isinstance(MyContainer(), Sized)    # True
+```
+
+또는 `__subclasshook__`로 자동 등록 (모든 ABC가 이 방식 사용).
+
+## Hashable의 의미
+
+```python
+from collections.abc import Hashable
+
+isinstance("abc", Hashable)    # True
+isinstance((1, 2), Hashable)   # True
+isinstance([1, 2], Hashable)   # False (mutable)
+isinstance({1, 2}, Hashable)   # False
+isinstance(frozenset(), Hashable)    # True
+```
+
+`__hash__`가 None이면 Hashable 아님. 가변 컨테이너 검사에 활용.
+
+## 비교: typing vs collections.abc
+
+```python
+# typing (3.9 이전)
+from typing import Iterable, List, Dict
+def f(xs: Iterable[int]) -> List[int]: ...
+
+# 3.9+ collections.abc + 내장 generic
+from collections.abc import Iterable
+def f(xs: Iterable[int]) -> list[int]: ...
+```
+
+3.9+에선 `typing.Iterable` 대신 `collections.abc.Iterable`이 표준.
+
+## 자주 보는 활용
+
+### duck typing 명시
+
+```python
+def process(items):
+    if isinstance(items, Mapping):
+        for k, v in items.items():
+            handle(k, v)
+    elif isinstance(items, Iterable):
+        for x in items:
+            handle(x)
+    else:
+        raise TypeError
+```
+
+dict이냐 list이냐 같은 구체 검사보다 인터페이스로.
+
+### dict의 view를 set처럼
+
+```python
+a = {"x": 1, "y": 2}
+b = {"y": 99, "z": 3}
+
+a.keys() & b.keys()    # {"y"}  (set 연산이 가능!)
+```
+
+`dict.keys()`는 KeysView (Set의 서브클래스). 자연스럽게 집합 연산.
+
+### Mapping 인터페이스 구현
+
+```python
+from collections.abc import Mapping
+
+class CaseInsensitiveDict(Mapping):
+    def __init__(self, data=None):
+        self._data = {}
+        if data:
+            for k, v in dict(data).items():
+                self[k.lower()] = v
+
+    def __setitem__(self, k, v):
+        self._data[k.lower()] = v
+
+    def __getitem__(self, k):
+        return self._data[k.lower()]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+```
+
+`MutableMapping`을 상속하면 update, pop, setdefault, items, keys, values, get 등 모두 무료.
+
+## 함정
+
+### 1. Sequence ≠ Iterable
+
+```python
+def f(xs: Sequence[int]) -> int:
+    return xs[0]    # 인덱싱 필요
+
+# generator는 Iterable이지만 Sequence는 아님
+f(x for x in [1, 2, 3])    # 타입 체커 에러 또는 런타임 인덱싱 실패
+```
+
+인덱싱이 필요하면 Sequence. 한 번 순회만이면 Iterable.
+
+### 2. Set 부분집합 검사
+
+```python
+{1, 2} <= {1, 2, 3}    # True (Set은 < <= 비교 정의)
+```
+
+list와 다른 의미라 헷갈리지 말 것.
+
+### 3. dict의 itertools 호환
+
+`dict.items()`는 Iterable이라 `itertools.chain`, `map` 등에 전달 가능.
+
+```python
+import itertools
+list(itertools.chain(d1.items(), d2.items()))
+```
+
+## 참고
+
+- [`collections.abc` documentation](https://docs.python.org/3/library/collections.abc.html)
+- [PEP 3119 – Introducing Abstract Base Classes](https://peps.python.org/pep-3119/)
+- [Python Glossary: ABC](https://docs.python.org/3/glossary.html#term-abstract-base-class)
+- [typing vs collections.abc](https://docs.python.org/3/library/typing.html#typing.Iterable)

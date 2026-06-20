@@ -1,0 +1,274 @@
+---
+title: "[Python] 예외 처리: try, except, raise, ExceptionGroup"
+aliases: ["python exception", "try except", "raise", "exception chaining", "ExceptionGroup", "PEP 654"]
+tags: [python, exception, error-handling, try-except, basics]
+updated: 2026-06-20
+---
+
+## try / except / else / finally
+
+```python
+try:
+    result = risky_op()
+except ValueError as e:
+    print(f"value error: {e}")
+except (KeyError, IndexError) as e:
+    print(f"lookup error: {e}")
+except Exception:
+    print("other error")
+else:
+    # 예외 없이 try 끝나면
+    use(result)
+finally:
+    # 예외 여부와 무관하게 실행
+    cleanup()
+```
+
+- `else`: try가 정상 종료된 경우만 실행. try 블록을 최소화하기 위함
+- `finally`: 항상 실행. 자원 해제용
+
+## 예외 계층
+
+```
+BaseException
+ ├── SystemExit
+ ├── KeyboardInterrupt
+ ├── GeneratorExit
+ └── Exception                  ← 거의 모든 사용자 정의는 여기서 상속
+      ├── ArithmeticError
+      │    ├── ZeroDivisionError
+      │    └── OverflowError
+      ├── LookupError
+      │    ├── IndexError
+      │    └── KeyError
+      ├── ValueError
+      ├── TypeError
+      ├── RuntimeError
+      ├── OSError
+      │    ├── FileNotFoundError
+      │    └── PermissionError
+      └── ...
+```
+
+`except Exception:` 으로 잡으면 `SystemExit`/`KeyboardInterrupt`는 빠진다. 정상적인 종료 흐름 방해 안 함.
+
+## raise
+
+```python
+raise ValueError("invalid input")
+raise ValueError(f"invalid: {x!r}")
+
+# 인수 없이: 현재 예외 재발생 (except 블록 안에서만)
+try:
+    work()
+except ValueError:
+    log_error()
+    raise           # 같은 예외 다시 던짐
+
+# 다른 예외로 변환 (chaining)
+try:
+    parse(text)
+except ValueError as e:
+    raise RuntimeError("parsing failed") from e
+```
+
+## 예외 체이닝: from
+
+```python
+try:
+    int("abc")
+except ValueError as e:
+    raise RuntimeError("conversion error") from e
+```
+
+출력:
+```
+ValueError: invalid literal for int() with base 10: 'abc'
+
+The above exception was the direct cause of the following exception:
+
+RuntimeError: conversion error
+```
+
+`from None`은 체인을 명시적으로 끊는다.
+
+```python
+raise RuntimeError("custom message") from None
+```
+
+## 예외 정보 추출
+
+```python
+import traceback
+
+try:
+    do_work()
+except Exception as e:
+    print(type(e).__name__, e)
+    print(e.args)
+    traceback.print_exc()            # 표준 에러로 풀 trace
+    tb_str = traceback.format_exc()  # 문자열로
+```
+
+## 사용자 정의 예외
+
+```python
+class AppError(Exception):
+    """앱 최상위 예외."""
+
+class ValidationError(AppError):
+    def __init__(self, field, message):
+        super().__init__(f"{field}: {message}")
+        self.field = field
+        self.message = message
+
+raise ValidationError("email", "invalid format")
+```
+
+관례:
+- 모든 도메인 예외의 베이스 클래스 1개 (`AppError`)
+- 사용자가 잡고 싶을 단위로 세분화
+- 메시지는 영문 (로깅·인덱싱 용이)
+- 데이터를 속성으로 보관 (메시지 파싱 금지)
+
+## 흔한 안티패턴
+
+### 1. 너무 광범위한 except
+
+```python
+# BAD: 모든 에러 삼킴, 디버깅 불가
+try:
+    work()
+except:
+    pass
+
+# 좀 더 나쁨: 정상 종료까지 삼킴 (KeyboardInterrupt 등)
+try: ...
+except BaseException: ...
+
+# GOOD: 구체 예외만
+try:
+    work()
+except (NetworkError, TimeoutError) as e:
+    handle(e)
+```
+
+### 2. except 후 정보 손실
+
+```python
+# BAD
+try:
+    parse(s)
+except ValueError:
+    raise RuntimeError("parse failed")    # 원인 사라짐
+
+# GOOD
+try:
+    parse(s)
+except ValueError as e:
+    raise RuntimeError("parse failed") from e
+```
+
+### 3. finally에서 예외 삼킴
+
+```python
+try:
+    work()
+finally:
+    return cleanup_status()    # 원본 예외가 사라짐!
+
+# finally에서 return/break/continue 금지
+```
+
+## 흐름 제어 vs 예외
+
+Python에선 예외를 **흐름 제어 수단**으로도 쓴다 (EAFP: Easier to Ask Forgiveness than Permission).
+
+```python
+# LBYL (Look Before You Leap)
+if key in d:
+    v = d[key]
+else:
+    v = default
+
+# EAFP (Pythonic)
+try:
+    v = d[key]
+except KeyError:
+    v = default
+
+# 더 Pythonic
+v = d.get(key, default)
+```
+
+예외가 자주 발생하지 않으면 EAFP가 성능 우위. 발생률이 높으면 LBYL이 빠를 수 있다.
+
+## ExceptionGroup (3.11+, PEP 654)
+
+여러 예외를 **동시에** 던지고 잡는다. `asyncio.TaskGroup`, 병렬 작업 등에 필수.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`def get_all():
+    errors = []
+    results = []
+    for url in ["a", "b", "c"]:
+        try:
+            results.append(fetch(url))
+        except Exception as e:
+            errors.append(e)
+    if errors:
+        raise ExceptionGroup("fetch failed", errors)
+    return results
+
+def fetch(url):
+    if url == "b":
+        raise ValueError("bad b")
+    if url == "c":
+        raise TypeError("bad c")
+    return url
+
+try:
+    get_all()
+except* ValueError as eg:
+    print("value errors:", eg.exceptions)
+except* TypeError as eg:
+    print("type errors:", eg.exceptions)`}
+  output={`value errors: (ValueError('bad b'),)
+type errors: (TypeError('bad c'),)`}
+/>
+
+`except*` (별표) 문법으로 그룹 안에서 타입별로 필터링. 매칭된 것만 새 ExceptionGroup으로 잡고, 나머지는 재발생.
+
+## 컨텍스트 매니저로 예외 안전성
+
+자원 해제는 try/finally보다 `with` 사용.
+
+```python
+# 장황함
+f = open("x.txt")
+try:
+    process(f)
+finally:
+    f.close()
+
+# 짧고 안전
+with open("x.txt") as f:
+    process(f)
+```
+
+`contextlib.suppress`로 특정 예외만 묵살:
+
+```python
+from contextlib import suppress
+with suppress(FileNotFoundError):
+    os.remove("tempfile")
+```
+
+## 참고
+
+- [Python tutorial: Errors and Exceptions](https://docs.python.org/3/tutorial/errors.html)
+- [Built-in Exceptions](https://docs.python.org/3/library/exceptions.html)
+- [PEP 3134 – Exception Chaining](https://peps.python.org/pep-3134/)
+- [PEP 654 – Exception Groups and except*](https://peps.python.org/pep-0654/)

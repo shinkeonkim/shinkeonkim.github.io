@@ -1,0 +1,102 @@
+---
+title: "[Java] LinkedBlockingQueue"
+aliases: ["LinkedBlockingQueue", "java.util.concurrent.LinkedBlockingQueue", "LBQ"]
+tags: [java, concurrent, queue, blocking, linked-list]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.LinkedBlockingQueue<E>`** 는 linked list 기반의 [[BlockingQueue]]. 기본 unbounded (`Integer.MAX_VALUE`) 이지만 생성 시 capacity 지정 가능.
+
+**Two-Lock Queue 알고리즘** 으로 producer 와 consumer 가 **서로 다른 락** 을 사용 → ArrayBlockingQueue 보다 높은 throughput.
+
+## 시각화
+
+```anim:java-lbq-twolock
+{}
+```
+
+## 내부 구조
+
+```java
+public class LinkedBlockingQueue<E> ... {
+    private final int capacity;
+    private final AtomicInteger count = new AtomicInteger();
+
+    transient Node<E> head;
+    private transient Node<E> last;
+
+    private final ReentrantLock takeLock = new ReentrantLock();
+    private final Condition notEmpty = takeLock.newCondition();
+
+    private final ReentrantLock putLock = new ReentrantLock();
+    private final Condition notFull = putLock.newCondition();
+}
+```
+
+핵심: **takeLock 과 putLock 이 분리**. take 와 put 이 동시에 진행 가능 (다른 끝을 다루므로).
+
+`count` 는 `AtomicInteger`, 두 락 모두에서 안전하게 갱신.
+
+## 두 락의 협력
+
+```java
+public void put(E e) throws InterruptedException {
+    putLock.lockInterruptibly();
+    try {
+        while (count.get() == capacity) notFull.await();
+        enqueue(new Node<>(e));
+        int c = count.getAndIncrement();
+        if (c + 1 < capacity) notFull.signal();   // 다음 put 대기자 깨움 (선택적)
+    } finally { putLock.unlock(); }
+    if (c == 0) signalNotEmpty();                  // take 대기자 깨움 (락 풀고)
+}
+```
+
+```java
+public E take() throws InterruptedException {
+    takeLock.lockInterruptibly();
+    try {
+        while (count.get() == 0) notEmpty.await();
+        E e = dequeue();
+        int c = count.getAndDecrement();
+        if (c > 1) notEmpty.signal();
+    } finally { takeLock.unlock(); }
+    if (c == capacity) signalNotFull();
+}
+```
+
+## 복잡도 및 동시성
+
+| 작업 | 시간 | 동시성 |
+|:---|:---:|:---|
+| `put` | O(1) | putLock 직렬 |
+| `take` | O(1) | takeLock 직렬 |
+| `put` ↔ `take` 동시 | O(1) | **병렬** (다른 락) |
+
+## 함정
+
+### 1. unbounded 가 기본
+
+`new LinkedBlockingQueue<>()` 는 `Integer.MAX_VALUE` 크기. producer 가 빠르면 OOM. **반드시 bounded** 지정.
+
+```java
+BlockingQueue<Task> q = new LinkedBlockingQueue<>(1000);   // 권장
+```
+
+### 2. 노드 객체 GC 압력
+
+각 원소가 노드 객체로 감싸진다. 짧은 시간에 수만 개가 들어왔다 나가는 워크로드에서는 GC 영향이 보일 수 있다.
+
+## LinkedBlockingQueue vs ArrayBlockingQueue
+
+[[ArrayBlockingQueue]] 의 비교 표 참고. 결론적으로 high throughput 이 필요하면 LinkedBlockingQueue, 메모리 예측이 중요하면 ArrayBlockingQueue.
+
+## 참고
+
+- [[BlockingQueue]]
+- [[ArrayBlockingQueue]]
+- [[ReentrantLock]]
+- [[Blocking]]
+- Oracle, [LinkedBlockingQueue (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/LinkedBlockingQueue.html)

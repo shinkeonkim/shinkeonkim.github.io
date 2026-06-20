@@ -1,0 +1,114 @@
+---
+title: "[Java] DelayQueue"
+aliases: ["DelayQueue", "java.util.concurrent.DelayQueue", "지연 큐"]
+tags: [java, concurrent, queue, blocking, delay, scheduling]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.DelayQueue<E extends Delayed>`** 는 **각 원소가 지정된 delay 가 만료된 후에만** 꺼낼 수 있는 [[BlockingQueue]]. 우선순위는 만료 시각이 빠른 것부터.
+
+## 시각화
+
+```anim:java-delayq-timed
+{}
+```
+
+## Delayed 인터페이스
+
+원소는 `Delayed` 인터페이스를 구현해야 한다.
+
+```java
+public interface Delayed extends Comparable<Delayed> {
+    long getDelay(TimeUnit unit);
+}
+
+class DelayedTask implements Delayed {
+    private final long readyAt;
+    private final Runnable job;
+
+    public DelayedTask(long delayMs, Runnable job) {
+        this.readyAt = System.currentTimeMillis() + delayMs;
+        this.job = job;
+    }
+
+    @Override
+    public long getDelay(TimeUnit unit) {
+        return unit.convert(readyAt - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public int compareTo(Delayed o) {
+        return Long.compare(this.readyAt, ((DelayedTask) o).readyAt);
+    }
+
+    public void run() { job.run(); }
+}
+```
+
+## 동작
+
+```java
+DelayQueue<DelayedTask> q = new DelayQueue<>();
+q.put(new DelayedTask(5000, () -> System.out.println("5초 뒤")));
+q.put(new DelayedTask(1000, () -> System.out.println("1초 뒤")));
+
+DelayedTask t = q.take();   // 1초 뒤에 반환
+t.run();
+t = q.take();               // 추가로 4초 뒤
+t.run();
+```
+
+`take()` 는 큐의 가장 앞 원소의 `getDelay` 가 ≤ 0 이 될 때까지 block.
+
+## 사용 사례
+
+### 스케줄러
+
+`ScheduledThreadPoolExecutor` 내부에서 비슷한 자료구조 (`DelayedWorkQueue`) 를 사용. 일정 시간 뒤 실행되는 작업을 관리.
+
+### 캐시 만료 (TTL)
+
+```java
+class CacheEntry implements Delayed {
+    private final String key;
+    private final long expiresAt;
+    // getDelay, compareTo ...
+}
+
+DelayQueue<CacheEntry> expirations = new DelayQueue<>();
+
+// 별도 스레드가 만료된 entry 를 캐시에서 제거
+new Thread(() -> {
+    while (true) {
+        CacheEntry e = expirations.take();
+        cache.remove(e.key);
+    }
+}).start();
+
+// 캐시 add 시
+expirations.put(new CacheEntry("k", now + ttl));
+cache.put("k", v);
+```
+
+### Retry 큐
+
+실패한 요청을 일정 시간 뒤 재시도.
+
+## 복잡도
+
+내부는 [[PriorityQueue]] (heap).
+
+| 작업 | 시간 |
+|:---|:---:|
+| `put`, `offer` | O(log n) |
+| `take`, `poll` | O(log n) |
+| `peek` | O(1) |
+
+## 참고
+
+- [[BlockingQueue]]
+- [[PriorityQueue]]
+- [[Blocking]]
+- Oracle, [DelayQueue (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/DelayQueue.html)

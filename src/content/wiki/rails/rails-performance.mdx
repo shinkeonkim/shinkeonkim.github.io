@@ -1,0 +1,344 @@
+---
+title: "[Rails] 성능: N+1, bullet, rack-mini-profiler"
+aliases: ["rails performance", "bullet gem", "rack-mini-profiler", "N+1 detection", "slow rails"]
+tags: [rails, performance, optimization, profiling, n+1]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails 성능 최적화는 보통 **DB 쿼리 (N+1 회피, 인덱스), 캐싱, view 렌더링, Ruby 코드 효율** 순서로 접근. 측정 도구 (`bullet`, `rack-mini-profiler`, APM)로 hotspot 식별 후 개선.
+
+## N+1 회피
+
+```ruby
+# 나쁨
+Post.all.each { |p| puts p.author.name }    # 1 + N
+
+# select_related 같은 효과
+Post.includes(:author).each { |p| puts p.author.name }
+# 또는
+Post.preload(:author)
+Post.eager_load(:author)
+```
+
+- `includes`: 자동 선택 (preload 또는 eager_load)
+- `preload`: 별도 쿼리 (WHERE on join 불가)
+- `eager_load`: LEFT OUTER JOIN
+
+```ruby
+# JOIN 후 join 컬럼 검색
+Post.includes(:author).where(authors: { active: true })    # eager_load 자동 사용
+Post.eager_load(:author).where(authors: { active: true })
+```
+
+### 깊은 nesting
+
+```ruby
+Post.includes(comments: { author: :profile }, tags: :category)
+```
+
+## bullet gem (개발 N+1 자동 감지)
+
+```ruby
+# Gemfile
+group :development do
+  gem "bullet"
+end
+```
+
+```ruby
+# config/environments/development.rb
+config.after_initialize do
+  Bullet.enable = true
+  Bullet.alert = true                  # JS alert
+  Bullet.bullet_logger = true          # log/bullet.log
+  Bullet.console = true                # browser console
+  Bullet.rails_logger = true
+  Bullet.add_footer = true             # 페이지 하단 표시
+end
+```
+
+N+1 발견 시 즉시 알림. 개발 단계에 켜두면 회귀 방지.
+
+## rack-mini-profiler
+
+```ruby
+gem "rack-mini-profiler"
+gem "memory_profiler"
+gem "stackprof"
+gem "flamegraph"
+```
+
+페이지 좌측 상단에 응답 시간 + SQL 쿼리 수 표시. 클릭하면 상세 (각 쿼리, 시간, 콜 스택).
+
+```
+?pp=help      옵션 보기
+?pp=profile-memory  메모리
+?pp=flamegraph
+```
+
+## APM (프로덕션)
+
+| 도구 | 특징 |
+|------|------|
+| Skylight | Rails 특화, 한국에 서버 X |
+| New Relic | 종합 |
+| AppSignal | Ruby 친화, 가격 합리적 |
+| Scout APM | Rails 친화 |
+| Datadog APM | 종합, 비쌈 |
+| Honeybadger | 에러 + APM |
+
+수집:
+- 평균 응답 시간 / p95 / p99
+- DB 쿼리 시간
+- 외부 API 호출
+- background job 처리 시간
+- 에러율
+
+## DB 인덱스
+
+```ruby
+# 마이그레이션
+add_index :posts, :slug, unique: true
+add_index :posts, [:author_id, :created_at]
+add_index :posts, :title, length: 100      # MySQL
+add_index :posts, :body, using: :gin       # PG full-text
+```
+
+`EXPLAIN`으로 쿼리 plan 확인:
+
+```ruby
+Post.where(author_id: 1).explain
+```
+
+자주 검색하는 컬럼 + JOIN 컬럼 인덱스 추가.
+
+### lol_dba / strong_migrations
+
+```bash
+gem "lol_dba"
+rake lol_dba:db_indexes    # 누락 인덱스 후보
+```
+
+```bash
+gem "strong_migrations"    # 위험 마이그레이션 차단
+```
+
+## 쿼리 최적화
+
+### count vs size vs length
+
+```ruby
+posts = Post.all
+posts.count    # 항상 SQL COUNT
+posts.length   # 모두 로드 후 count (위험)
+posts.size     # 로드됐으면 length, 아니면 count
+```
+
+### exists?
+
+```ruby
+Post.where(...).any?     # 모두 로드 후 length > 0 (느릴 수 있음)
+Post.where(...).exists?  # SQL EXISTS (1 LIMIT) - 권장
+```
+
+### find_each
+
+```ruby
+Post.all.each {}    # 모두 메모리에 로드
+
+Post.find_each(batch_size: 1000) {}   # 청크 단위
+Post.in_batches(of: 1000) { |batch| batch.update_all(...) }
+```
+
+큰 테이블 순회 시 메모리 절약.
+
+### pluck
+
+```ruby
+emails = User.all.map(&:email)        # User 객체 모두 인스턴스화
+emails = User.pluck(:email)            # SELECT email만
+emails = User.pluck(:id, :email)       # 다중
+```
+
+객체 인스턴스화 비용 회피.
+
+### update_all / delete_all
+
+```ruby
+Post.where(views: 0).update_all(featured: false)   # 콜백 X, 빠름
+Post.where(...).delete_all                          # 콜백 X, 빠름
+
+# vs
+Post.where(...).destroy_all   # 콜백 O, 매우 느림
+```
+
+대량 작업은 update_all/delete_all. 단 콜백/검증 우회.
+
+## View 캐싱
+
+`rails-caching` 페이지 참고. Russian Doll Caching이 view 렌더링 hotspot 해결.
+
+## 메모리 관리
+
+```ruby
+# 메모리 사용량 모니터링
+ObjectSpace.memsize_of(obj)
+GC.stat
+```
+
+`derailed_benchmarks` gem으로 메모리 leak detect:
+
+```bash
+gem "derailed_benchmarks"
+bundle exec derailed bundle:mem
+bundle exec derailed exec perf:mem
+```
+
+## Background job 활용
+
+긴 작업 (이메일, 이미지 처리, 외부 API)은 view에서 수행 X.
+
+```ruby
+# Bad
+def create
+  user = User.create(...)
+  send_welcome_email(user)        # 1-3초
+  upload_avatar_to_s3(user)        # 5초
+  redirect_to user_path(user)
+end
+
+# Good
+def create
+  user = User.create(...)
+  UserWelcomeJob.perform_later(user.id)
+  AvatarUploadJob.perform_later(user.id, avatar_data)
+  redirect_to user_path(user)
+end
+```
+
+## Asset / Frontend
+
+- `Propshaft` + `importmap-rails` (Rails 8 기본): 빌드 단계 거의 없음
+- `bun` 또는 `esbuild`-bundler: JS 번들링 필요 시
+- 이미지 최적화 (WebP, AVIF, Active Storage variants)
+- CDN (CloudFlare, CloudFront)
+
+## Ruby 코드 효율
+
+### Lazy enumerator
+
+```ruby
+[1, 2, 3, 4, 5].lazy.map { ... }.select { ... }.first(2)    # 필요한 만큼만
+```
+
+큰 컬렉션에 유용.
+
+### Frozen string literals
+
+```ruby
+# frozen_string_literal: true
+```
+
+각 파일 상단. 매 호출마다 새 문자열 생성 안 함.
+
+### Symbol vs string
+
+```ruby
+"key".to_sym    # 매번 변환
+:key            # 한 번
+```
+
+Hash 키는 symbol.
+
+## 자주 보는 패턴
+
+### Bulk insert
+
+```ruby
+posts = (1..1000).map { |i| { title: "Post #{i}", body: "..." } }
+Post.insert_all(posts)             # 콜백 X, 매우 빠름
+Post.upsert_all(posts, unique_by: :slug)
+```
+
+### Pagination
+
+```ruby
+# kaminari
+gem "kaminari"
+@posts = Post.page(params[:page]).per(20)
+
+# pagy (가장 빠름)
+gem "pagy"
+@pagy, @posts = pagy(Post.all)
+```
+
+`pagy`가 메모리/속도에서 최고. kaminari는 더 기능 풍부.
+
+### Counter cache
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post, counter_cache: true    # comments_count 컬럼 자동
+end
+
+post.comments_count    # SQL 없음
+```
+
+`post.comments.count` 대신.
+
+### 시간대 인덱스
+
+```ruby
+add_index :events, "start_at::date"    # 함수 인덱스 (PG)
+```
+
+`Event.where("start_at::date = ?", today)` 빠름.
+
+## 함정
+
+### 1. 측정 없이 최적화
+
+> "Premature optimization is the root of all evil"
+
+먼저 측정 (bullet, mini-profiler, APM), hotspot 식별, 그 다음 최적화.
+
+### 2. 캐시가 만능
+
+캐시 추가 = 정합성 문제. 인덱스, 쿼리 최적화가 우선.
+
+### 3. eager_load 남용
+
+```ruby
+Post.eager_load(:comments).limit(10)
+# JOIN 후 limit → comments 많으면 결과 행 폭발
+```
+
+이런 경우 `preload` 또는 별도 쿼리.
+
+### 4. 메모리 누수
+
+장시간 실행 Puma/Sidekiq 메모리 증가. `puma_worker_killer`, max_requests 옵션.
+
+### 5. before_action에 비싼 쿼리
+
+```ruby
+before_action :set_user
+
+def set_user
+  @user = User.includes(:posts, :comments, :followers).find(params[:id])
+  # 모든 액션에서 무거운 쿼리
+end
+```
+
+액션별 필요한 것만 fetch.
+
+## 참고
+
+- [Rails Performance Guide](https://guides.rubyonrails.org/active_record_querying.html)
+- [bullet](https://github.com/flyerhzm/bullet)
+- [rack-mini-profiler](https://github.com/MiniProfiler/rack-mini-profiler)
+- [Skylight](https://www.skylight.io/)
+- [pagy](https://github.com/ddnexus/pagy)
+- [derailed_benchmarks](https://github.com/zombocom/derailed_benchmarks)

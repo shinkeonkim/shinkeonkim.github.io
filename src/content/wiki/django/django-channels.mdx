@@ -1,0 +1,360 @@
+---
+title: "[Django] Channels: WebSocket, Consumer, Group"
+aliases: ["django channels", "WebSocket", "AsyncWebsocketConsumer", "channel layer", "Daphne", "Redis channel layer"]
+tags: [django, channels, websocket, async]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Django Channels**는 Django에 **WebSocket, 비동기 프로토콜, 백그라운드 작업**을 추가하는 공식 확장. 기본 Django는 HTTP만, Channels는 ASGI 위에 채널 레이어를 두어 양방향 통신을 표준화. Redis 등을 채널 레이어로 사용해 다중 워커 간 메시지 라우팅.
+
+3.1+ 의 표준 async view는 단일 요청 처리만. WebSocket 등 양방향은 Channels 필요.
+
+## 설치
+
+```bash
+pip install "channels[daphne]" channels-redis
+```
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    "daphne",          # 가장 먼저 (runserver 대체)
+    ...
+    "channels",
+]
+ASGI_APPLICATION = "myproject.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [("127.0.0.1", 6379)]},
+    },
+}
+```
+
+## ASGI 설정
+
+```python
+# myproject/asgi.py
+import os
+from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+import chat.routing
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+django_asgi_app = get_asgi_application()
+
+application = ProtocolTypeRouter({
+    "http": django_asgi_app,
+    "websocket": AuthMiddlewareStack(
+        URLRouter(chat.routing.websocket_urlpatterns)
+    ),
+})
+```
+
+## Consumer
+
+WebSocket 핸들러. View의 WebSocket 버전.
+
+```python
+# chat/consumers.py
+import json
+from channels.generic.websocket import AsyncWebsocketConsumer
+
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.room = self.scope["url_route"]["kwargs"]["room_name"]
+        self.group_name = f"chat_{self.room}"
+
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def receive(self, text_data):
+        data = json.loads(text_data)
+        message = data["message"]
+
+        # 그룹의 모든 소켓에 broadcast
+        await self.channel_layer.group_send(
+            self.group_name,
+            {"type": "chat.message", "message": message},
+        )
+
+    async def chat_message(self, event):
+        # group_send의 type이 메서드 이름 (점 → 언더스코어)
+        await self.send(text_data=json.dumps({"message": event["message"]}))
+```
+
+## Routing
+
+```python
+# chat/routing.py
+from django.urls import re_path
+from . import consumers
+
+websocket_urlpatterns = [
+    re_path(r"ws/chat/(?P<room_name>\w+)/$", consumers.ChatConsumer.as_asgi()),
+]
+```
+
+`as_asgi()` 호출 (View의 `as_view()`와 유사).
+
+## 클라이언트
+
+```javascript
+const socket = new WebSocket(`ws://${window.location.host}/ws/chat/lobby/`);
+
+socket.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    console.log(data.message);
+};
+
+socket.onopen = () => {
+    socket.send(JSON.stringify({message: "Hello!"}));
+};
+```
+
+## Channel Layer
+
+여러 consumer/워커 사이 메시지 전달. Redis 사용 시 수평 확장 가능.
+
+```python
+# 그룹에 메시지 보내기
+await channel_layer.group_send("group_name", {
+    "type": "method.name",     # consumer의 method_name 호출
+    "key": "value",
+})
+
+# 특정 채널에만
+await channel_layer.send("channel_name", {...})
+```
+
+`scope["channel_name"]`이 현재 연결의 식별자.
+
+## 인증
+
+```python
+# asgi.py
+from channels.auth import AuthMiddlewareStack
+
+application = ProtocolTypeRouter({
+    "websocket": AuthMiddlewareStack(URLRouter([...])),
+})
+```
+
+`AuthMiddlewareStack`이 `scope["user"]`를 세션 기반으로 설정.
+
+```python
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        if self.scope["user"].is_anonymous:
+            await self.close()
+            return
+        await self.accept()
+```
+
+JWT는 커스텀 미들웨어:
+
+```python
+class JWTAuthMiddleware:
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        token = parse_token_from_query(scope)
+        scope["user"] = await get_user_from_token(token)
+        return await self.inner(scope, receive, send)
+```
+
+## DB 접근
+
+```python
+from channels.db import database_sync_to_async
+
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user = self.scope["user"]
+        self.room = await self.get_room(self.scope["url_route"]["kwargs"]["room_name"])
+        ...
+
+    @database_sync_to_async
+    def get_room(self, name):
+        return Room.objects.get(name=name)
+```
+
+5.0+ async ORM (`aget`)도 사용 가능.
+
+## SyncConsumer (동기 코드)
+
+비동기 라이브러리 없는 경우.
+
+```python
+from channels.generic.websocket import WebsocketConsumer
+
+class SyncConsumer(WebsocketConsumer):
+    def connect(self):
+        self.accept()
+
+    def receive(self, text_data):
+        self.send(text_data="echo")
+```
+
+스레드 풀에서 실행. 비동기 consumer가 성능 우위지만 동기 라이브러리(많은 ORM 사용 등) 시엔 단순.
+
+## 배포
+
+```bash
+daphne myproject.asgi:application --bind 0.0.0.0 --port 8000
+
+# Uvicorn + gunicorn
+gunicorn myproject.asgi:application -k uvicorn.workers.UvicornWorker --workers 4
+```
+
+nginx 프록시 설정:
+
+```nginx
+location /ws/ {
+    proxy_pass http://django;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 86400;
+}
+```
+
+WebSocket은 long-lived 연결 → 타임아웃 길게.
+
+## 자주 보는 패턴
+
+### 알림 (Notification)
+
+```python
+# Django view에서 (동기 코드)
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+
+def trigger_notification(user_id, message):
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        f"user_{user_id}",
+        {"type": "notify", "message": message},
+    )
+
+# Consumer
+class NotificationConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.group = f"user_{self.scope['user'].id}"
+        await self.channel_layer.group_add(self.group, self.channel_name)
+        await self.accept()
+
+    async def notify(self, event):
+        await self.send(text_data=json.dumps({"message": event["message"]}))
+```
+
+### 실시간 협업 (typing indicator, presence)
+
+```python
+class CollabConsumer(AsyncWebsocketConsumer):
+    async def receive(self, text_data):
+        data = json.loads(text_data)
+        if data["type"] == "typing":
+            await self.channel_layer.group_send(self.group, {
+                "type": "typing.event",
+                "user": self.scope["user"].username,
+            })
+
+    async def typing_event(self, event):
+        await self.send(text_data=json.dumps(event))
+```
+
+### Stream 데이터 broadcast
+
+데이터 변경 시 모든 구독자에 push.
+
+```python
+# signals.py
+from django.db.models.signals import post_save
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+
+@receiver(post_save, sender=Post)
+def broadcast_post(sender, instance, **kwargs):
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        "post_updates",
+        {"type": "post.update", "post_id": instance.id, "title": instance.title},
+    )
+```
+
+## 함정
+
+### 1. 메서드 이름 컨벤션
+
+```python
+{"type": "chat.message"}    # group_send/send에선 점
+# → chat_message 메서드 호출 (점 → 언더스코어)
+```
+
+이름 안 맞으면 메시지 조용히 무시.
+
+### 2. JSON 시리얼라이즈 가능 데이터만
+
+```python
+await channel_layer.group_send("g", {"type": "msg", "obj": user})    # User instance
+# Pickling 오류 또는 redis 직렬화 실패
+```
+
+dict/list/str/int 등만.
+
+### 3. WebSocket 종료 처리
+
+```python
+async def disconnect(self, close_code):
+    await self.channel_layer.group_discard(self.group, self.channel_name)
+    # cleanup
+```
+
+`disconnect`는 close_code 받음. 자원 누수 방지.
+
+### 4. accept() 빠뜨림
+
+```python
+async def connect(self):
+    pass    # accept() 안 부르면 클라이언트가 503 받음
+```
+
+거부하려면 `await self.close()`.
+
+### 5. 인메모리 채널 레이어
+
+```python
+CHANNEL_LAYERS = {
+    "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+}
+```
+
+테스트용. 여러 프로세스 간 메시지 안 됨. 프로덕션엔 Redis.
+
+## 대안
+
+| | Channels | Server-Sent Events | WebSocket libs |
+|---|----------|-------------------|----------------|
+| 양방향 | O | X (서버 → 클라이언트) | O |
+| Django 통합 | O | StreamingHttpResponse | 별도 |
+| 학습 곡선 | 중 | 낮 | 중 |
+
+단방향 push (알림, 라이브 업데이트)는 SSE가 단순.
+
+## 참고
+
+- [Django Channels](https://channels.readthedocs.io/)
+- [Channels tutorial](https://channels.readthedocs.io/en/stable/tutorial/index.html)
+- [channels-redis](https://github.com/django/channels_redis)
+- [ASGI specification](https://asgi.readthedocs.io/)
+- [Daphne](https://github.com/django/daphne)

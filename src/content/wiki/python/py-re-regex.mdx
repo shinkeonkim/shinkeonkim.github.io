@@ -1,0 +1,251 @@
+---
+title: "[Python] re: 정규 표현식"
+aliases: ["python regex", "python re", "regular expression", "re.compile", "re.match"]
+tags: [python, re, regex, stdlib, string]
+updated: 2026-06-20
+---
+
+## 정의
+
+`re` 모듈은 **PCRE 호환 정규 표현식**(완전 호환은 아니나 거의 유사) 엔진을 제공한다. 백트래킹 NFA 기반으로 표현력은 강하나 catastrophic backtracking 위험.
+
+## 주요 함수
+
+| 함수 | 동작 |
+|------|-----|
+| `re.search(pat, s)` | 첫 매치 위치 검색 (어디서든) |
+| `re.match(pat, s)` | **문자열 시작**부터 매치 시도 |
+| `re.fullmatch(pat, s)` | 전체가 패턴과 일치하는지 |
+| `re.findall(pat, s)` | 모든 매치 리스트 |
+| `re.finditer(pat, s)` | 모든 매치 iterator (Match 객체) |
+| `re.split(pat, s)` | 패턴 기준 분할 |
+| `re.sub(pat, repl, s)` | 치환 |
+| `re.subn(pat, repl, s)` | 치환 + 횟수 반환 |
+| `re.compile(pat)` | 컴파일 (반복 사용 시) |
+
+## 기본 사용
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import re
+
+s = "Order #12345 placed on 2026-06-20"
+
+# search: 첫 매치
+m = re.search(r"\\d+", s)
+print(m.group(), m.start(), m.end())
+
+# findall: 전체
+print(re.findall(r"\\d+", s))
+
+# 그룹 + named group
+m = re.search(r"#(?P<order>\\d+)\\s+placed on (?P<date>\\S+)", s)
+print(m.group("order"), m.group("date"))
+print(m.groupdict())`}
+  output={`12345 7 12
+['12345', '2026', '06', '20']
+12345 2026-06-20
+{'order': '12345', 'date': '2026-06-20'}`}
+/>
+
+## raw string
+
+정규식엔 `\\d`, `\\s`, `\\b`처럼 백슬래시가 흔함. **반드시 raw string `r"..."`** 사용. 일반 문자열은 백슬래시 이스케이프 해석으로 의도와 달라진다.
+
+```python
+re.findall("\\d+", s)    # \d로 해석되나 deprecation warning 가능
+re.findall(r"\d+", s)    # 안전
+```
+
+## 메타문자 핵심
+
+| 패턴 | 의미 |
+|------|-----|
+| `.` | 줄바꿈 외 임의 1글자 (re.DOTALL이면 줄바꿈 포함) |
+| `^` `$` | 시작 / 끝 (re.MULTILINE이면 줄 시작/끝) |
+| `\d` `\D` | 숫자 / 비숫자 |
+| `\w` `\W` | 단어 글자 / 아님 |
+| `\s` `\S` | 공백 / 아님 |
+| `\b` `\B` | 단어 경계 / 아님 |
+| `[abc]` `[^abc]` | 문자 집합 / 부정 |
+| `[a-z]` | 범위 |
+| `*` `+` `?` | 0+, 1+, 0/1 (greedy) |
+| `*?` `+?` `??` | non-greedy |
+| `{n}` `{n,m}` | 정확히 n / n~m |
+| `(...)` | 캡처 그룹 |
+| `(?:...)` | 비캡처 그룹 |
+| `(?P<name>...)` | 명명 그룹 |
+| `(?=...)` `(?!...)` | 긍정/부정 lookahead |
+| `(?<=...)` `(?<!...)` | 긍정/부정 lookbehind |
+| `\|` | OR |
+| `\\1`, `\\g<name>` | 역참조 |
+
+## 컴파일
+
+같은 패턴을 여러 번 쓰면 `re.compile`로 미리 컴파일.
+
+```python
+EMAIL = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.IGNORECASE)
+
+for line in lines:
+    for m in EMAIL.finditer(line):
+        print(m.group())
+```
+
+내부적으로 `re.search` 등도 캐시(LRU, 기본 512개)를 두지만 명시 컴파일이 의도가 명확.
+
+## 플래그
+
+| 플래그 | 동작 |
+|--------|------|
+| `re.IGNORECASE` / `re.I` | 대소문자 무시 |
+| `re.MULTILINE` / `re.M` | `^`/`$`이 줄 시작/끝에도 매치 |
+| `re.DOTALL` / `re.S` | `.`이 줄바꿈도 포함 |
+| `re.VERBOSE` / `re.X` | 패턴 내 공백/주석 허용 |
+| `re.ASCII` / `re.A` | `\d`, `\w` 등이 ASCII만 |
+| `re.UNICODE` / `re.U` | 기본 (Python 3) |
+
+```python
+PATTERN = re.compile(r"""
+    (?P<year>\d{4})
+    -
+    (?P<month>\d{2})
+    -
+    (?P<day>\d{2})
+""", re.VERBOSE)
+
+m = PATTERN.search("date: 2026-06-20")
+print(m.groupdict())
+```
+
+VERBOSE는 복잡한 패턴 가독성을 크게 향상.
+
+## sub: 치환
+
+```python
+re.sub(r"\d+", "<NUM>", "order 12 of 45 items")
+# 'order <NUM> of <NUM> items'
+
+# 함수로 치환
+re.sub(r"\d+", lambda m: str(int(m.group()) * 2), "1 2 3")
+# '2 4 6'
+
+# 역참조
+re.sub(r"(\w+)\s+(\w+)", r"\2 \1", "Alice Bob")
+# 'Bob Alice'
+
+# 명명 그룹 역참조
+re.sub(r"(?P<first>\w+)\s+(?P<last>\w+)", r"\g<last>, \g<first>", "Alice Smith")
+# 'Smith, Alice'
+```
+
+## Match 객체
+
+```python
+m = re.search(r"(?P<year>\d{4})-(?P<month>\d{2})", "2026-06")
+
+m.group()           # 전체 매치
+m.group(0)          # 동일
+m.group(1)          # 첫 캡처 그룹
+m.group("year")     # 명명 그룹
+m.groups()          # 모든 캡처 그룹 (튜플)
+m.groupdict()       # {name: value}
+m.start(), m.end()  # 위치
+m.span()            # (start, end)
+m.string            # 원본 문자열
+```
+
+## findall vs finditer
+
+- `findall`: 결과 리스트
+  - 그룹 0개: 문자열 리스트
+  - 그룹 1개: 그룹 값 리스트
+  - 그룹 N개: 튜플 리스트
+- `finditer`: Match 객체 iterator (메모리 효율 + 위치 정보)
+
+```python
+re.findall(r"\d+", "1 22 333")            # ['1', '22', '333']
+re.findall(r"(\d)(\d?)", "1 22 333")      # [('1', ''), ('2', '2'), ('3', '3'), ('3', '')]
+
+for m in re.finditer(r"\d+", "1 22 333"):
+    print(m.group(), m.start())
+```
+
+## lookahead / lookbehind
+
+위치 검증 (소비하지 않음).
+
+```python
+# 'foo' 뒤에 'bar'가 오는 'foo'만 매치 (bar는 매치 결과에 포함 X)
+re.findall(r"foo(?=bar)", "foobar foobaz")    # ['foo']
+
+# 'foo' 뒤에 'bar'가 안 오는
+re.findall(r"foo(?!bar)", "foobar foobaz")    # ['foo']  (foobaz의 foo)
+
+# 'price ' 뒤에 오는 숫자
+re.findall(r"(?<=price )\d+", "price 100, price 200")    # ['100', '200']
+```
+
+lookbehind는 기본적으로 **고정 길이**여야 한다. 3.7+에서 일부 가변 길이도 가능.
+
+## 함정과 성능
+
+### 1. catastrophic backtracking
+
+```python
+# 위험: 중첩 quantifier
+re.search(r"(a+)+b", "a" * 30)    # 30 자 a 후 b 없음 → 지수 시간 시도
+```
+
+`(a+)+`는 `a`가 N개일 때 분할 경우의 수가 2^N. 입력 길이가 조금만 늘어도 멈춤.
+
+대처: **possessive quantifier**나 **atomic group**은 Python `re`에 없음. `regex` 패키지(서드파티) 사용 또는 패턴 단순화.
+
+### 2. greedy vs lazy
+
+```python
+re.search(r"<.*>", "<a><b>").group()    # '<a><b>' (greedy)
+re.search(r"<.*?>", "<a><b>").group()   # '<a>' (lazy)
+```
+
+HTML/XML 등 페어 매칭은 lazy 우선. 정확한 파싱은 전용 파서(html.parser, lxml)로.
+
+### 3. 캡처 그룹 비용
+
+캡처 없이 그룹화만 필요하면 `(?:...)` 사용. 미세하지만 백트래킹 시 성능 차이.
+
+```python
+re.compile(r"(?:abc|def)+")    # 비캡처
+```
+
+### 4. \b 단어 경계
+
+`\b`는 단어 글자(`\w`)와 아닌 글자의 경계. 한글/유니코드 경계는 Python 3 `\w`가 유니코드 인식하므로 잘 동작.
+
+## 정규식 디버깅
+
+```python
+import re
+
+p = re.compile(r"complex pattern here", re.VERBOSE | re.DEBUG)
+# 컴파일 단계의 AST 출력
+```
+
+`re.DEBUG`로 내부 표현 확인.
+
+## 언제 정규식을 쓰지 말까
+
+- HTML/XML 파싱 → 전용 파서
+- 깊이 중첩된 구조 → 정규언어로 표현 불가 (괄호 매칭 등)
+- 매우 큰 입력의 단일 fixed-string 검색 → `str.find` / `in` 이 더 빠름
+- 복잡한 검증 로직 (이메일, URL) → 검증 라이브러리 사용
+
+정규식은 빠르고 강력하지만 가독성과 유지보수성 비용이 크다.
+
+## 참고
+
+- [`re` documentation](https://docs.python.org/3/library/re.html)
+- [Regular Expression HOWTO](https://docs.python.org/3/howto/regex.html)
+- [regex101.com](https://regex101.com/) – 시각적 정규식 디버거 (Python flavor 선택 가능)
+- [`regex` 패키지 (third-party)](https://pypi.org/project/regex/) – 더 풍부한 기능

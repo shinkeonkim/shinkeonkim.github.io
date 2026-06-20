@@ -1,0 +1,419 @@
+---
+title: "[Spring] Spring Data Redis"
+aliases: ["spring redis", "RedisTemplate", "redis pub/sub", "lettuce", "redis cache spring"]
+tags: [spring, redis, data, cache]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Data Redis**는 Redis 클라이언트(Lettuce, Jedis)의 Spring 추상화. `RedisTemplate`, `StringRedisTemplate` (저수준), `@Cacheable` 통합, `RedisRepository` (객체 매핑), pub/sub 등.
+
+## 설정
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-data-redis")
+```
+
+Lettuce 기본 (Netty, async, reactive). Jedis 대안.
+
+```yaml
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: ${REDIS_PASSWORD:}
+      timeout: 5s
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+      cluster:
+        nodes:
+          - redis-1:6379
+          - redis-2:6379
+          - redis-3:6379
+        max-redirects: 3
+      sentinel:
+        master: mymaster
+        nodes:
+          - sentinel-1:26379
+```
+
+## StringRedisTemplate
+
+가장 흔한 사용.
+
+```java
+@Service
+public class CacheService {
+    private final StringRedisTemplate redis;
+
+    public void set(String key, String value, Duration ttl) {
+        redis.opsForValue().set(key, value, ttl);
+    }
+
+    public String get(String key) {
+        return redis.opsForValue().get(key);
+    }
+
+    public Long increment(String key) {
+        return redis.opsForValue().increment(key);
+    }
+
+    public boolean exists(String key) {
+        return Boolean.TRUE.equals(redis.hasKey(key));
+    }
+
+    public void delete(String key) {
+        redis.delete(key);
+    }
+
+    public Long expire(String key, Duration ttl) {
+        return redis.getExpire(key, TimeUnit.SECONDS);
+    }
+}
+```
+
+## RedisTemplate (객체)
+
+```java
+@Configuration
+public class RedisConfig {
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory cf) {
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(cf);
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(new GenericJackson2JsonRedisSerializer());
+        return template;
+    }
+}
+
+@Service
+public class UserCache {
+    private final RedisTemplate<String, Object> redis;
+
+    public void cache(User user) {
+        redis.opsForValue().set("user:" + user.id(), user, Duration.ofHours(1));
+    }
+
+    public User get(Long id) {
+        return (User) redis.opsForValue().get("user:" + id);
+    }
+}
+```
+
+## 다양한 데이터 구조
+
+### String
+
+```java
+redis.opsForValue().set("key", "value");
+redis.opsForValue().get("key");
+redis.opsForValue().increment("counter");
+redis.opsForValue().decrement("counter");
+redis.opsForValue().setIfAbsent("key", "value", Duration.ofMinutes(5));    // SETNX + EX
+```
+
+### Hash
+
+```java
+HashOperations<String, String, String> hash = redis.opsForHash();
+hash.put("user:1", "name", "Alice");
+hash.put("user:1", "email", "alice@x.com");
+hash.get("user:1", "name");
+hash.entries("user:1");    // Map<String, String> 전체
+hash.delete("user:1", "name");
+```
+
+### List
+
+```java
+ListOperations<String, String> list = redis.opsForList();
+list.leftPush("queue", "item1");
+list.rightPush("queue", "item2");
+list.leftPop("queue");                  // BRPOP은 timeout
+list.range("queue", 0, -1);              // 전체
+list.size("queue");
+```
+
+### Set
+
+```java
+SetOperations<String, String> set = redis.opsForSet();
+set.add("tags:post1", "java", "spring");
+set.members("tags:post1");
+set.isMember("tags:post1", "java");
+set.intersect("tags:post1", "tags:post2");
+```
+
+### Sorted Set (Leaderboard)
+
+```java
+ZSetOperations<String, String> zset = redis.opsForZSet();
+zset.add("leaderboard", "alice", 100);
+zset.add("leaderboard", "bob", 85);
+zset.incrementScore("leaderboard", "alice", 10);
+zset.reverseRangeWithScores("leaderboard", 0, 9);    // top 10
+zset.reverseRank("leaderboard", "alice");
+```
+
+## Pub/Sub
+
+```java
+@Configuration
+public class PubSubConfig {
+    @Bean
+    public RedisMessageListenerContainer container(
+        RedisConnectionFactory cf, MessageListenerAdapter listener
+    ) {
+        RedisMessageListenerContainer container = new RedisMessageListenerContainer();
+        container.setConnectionFactory(cf);
+        container.addMessageListener(listener, new PatternTopic("events:*"));
+        return container;
+    }
+
+    @Bean
+    public MessageListenerAdapter listenerAdapter(MyListener listener) {
+        return new MessageListenerAdapter(listener, "onMessage");
+    }
+}
+
+@Component
+public class MyListener {
+    public void onMessage(String message, String channel) {
+        log.info("Received {} on {}", message, channel);
+    }
+}
+
+// 발행
+redis.convertAndSend("events:user-signup", "alice");
+```
+
+영속 메시지는 Stream 사용 (XADD/XREAD).
+
+## @Cacheable (Spring Cache + Redis)
+
+```yaml
+spring:
+  cache:
+    type: redis
+    redis:
+      time-to-live: 600000
+      cache-null-values: false
+```
+
+```java
+@Service
+public class UserService {
+
+    @Cacheable(value = "users", key = "#id")
+    public User findById(Long id) {
+        return userRepository.findById(id).orElseThrow();
+    }
+}
+```
+
+자세한 건 `spring-cache` 참고.
+
+## Redis Repository (객체 매핑)
+
+```java
+@RedisHash("users")
+public class User {
+    @Id Long id;
+    String email;
+    @Indexed String name;    // 검색 인덱스 자동
+    LocalDateTime createdAt;
+}
+
+public interface UserRepository extends CrudRepository<User, Long> {
+    List<User> findByName(String name);    // 인덱스 활용
+}
+```
+
+JPA 비슷한 API. 단 SQL 못 씀, 단순 lookup만.
+
+## Lock (분산)
+
+```java
+@Component
+public class DistributedLock {
+    private final StringRedisTemplate redis;
+
+    public boolean acquire(String key, String value, Duration ttl) {
+        return Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, value, ttl));
+    }
+
+    public boolean release(String key, String value) {
+        String script = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+        Long result = redis.execute(
+            new DefaultRedisScript<>(script, Long.class),
+            List.of(key),
+            value
+        );
+        return result != null && result > 0;
+    }
+}
+```
+
+또는 Redisson 라이브러리 (더 풍부).
+
+## 자주 보는 패턴
+
+### Session 저장
+
+```yaml
+spring:
+  session:
+    store-type: redis
+    redis:
+      namespace: myapp:session
+```
+
+Spring Session이 자동으로 Redis에 세션 저장. 여러 인스턴스 간 공유.
+
+### Rate Limit (token bucket)
+
+```java
+public boolean tryAcquire(String key, int max, Duration window) {
+    String script = """
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+        return count <= tonumber(ARGV[1])
+    """;
+    return Boolean.TRUE.equals(redis.execute(
+        new DefaultRedisScript<>(script, Boolean.class),
+        List.of(key),
+        max, window.getSeconds()
+    ));
+}
+```
+
+### Idempotency Key
+
+```java
+public boolean processOnce(String key, Runnable action) {
+    Boolean acquired = redis.opsForValue().setIfAbsent(
+        "idempotent:" + key, "1", Duration.ofHours(24)
+    );
+    if (Boolean.TRUE.equals(acquired)) {
+        action.run();
+        return true;
+    }
+    return false;
+}
+```
+
+같은 요청 중복 처리 방지.
+
+### Cache aside
+
+```java
+public User getUser(Long id) {
+    String key = "user:" + id;
+    User cached = (User) redis.opsForValue().get(key);
+    if (cached != null) return cached;
+
+    User user = userRepository.findById(id).orElseThrow();
+    redis.opsForValue().set(key, user, Duration.ofMinutes(10));
+    return user;
+}
+```
+
+`@Cacheable`이 거의 동일 + 더 깔끔.
+
+## 함정
+
+### 1. 직렬화 클래스 변경
+
+```java
+@Cacheable("users")
+public User get(Long id) { ... }
+```
+
+`User` 클래스 변경 → 옛 캐시 deserialize 실패. cache version 추가 또는 cache.clear.
+
+### 2. 큰 키
+
+```java
+redis.opsForValue().set("posts", listOf1MItems, ...)    // 거대 value
+```
+
+Redis O(N) 명령 + 메모리. 작은 단위로 분할 (`posts:123` 같이).
+
+### 3. KEYS 명령
+
+```java
+redis.keys("user:*")    // BLOCKING + O(N), 프로덕션 금지
+```
+
+`SCAN` 사용:
+
+```java
+redis.execute((RedisCallback<Set<String>>) connection -> {
+    Set<String> keys = new HashSet<>();
+    Cursor<byte[]> cursor = connection.scan(ScanOptions.scanOptions().match("user:*").count(1000).build());
+    while (cursor.hasNext()) {
+        keys.add(new String(cursor.next()));
+    }
+    return keys;
+});
+```
+
+### 4. cluster mode + multi-key 명령
+
+```java
+redis.opsForValue().multiGet(List.of("user:1", "user:2"));    // cluster에서 같은 slot이어야
+```
+
+`{}` notation으로 hash tag: `user:{1}`, `user:{1}:detail`.
+
+### 5. TTL 없는 키
+
+```java
+redis.opsForValue().set("key", "value");    // 영구 (메모리 누적)
+redis.opsForValue().set("key", "value", Duration.ofHours(1));    // 권장
+```
+
+## Reactive Redis
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
+```
+
+```java
+@Autowired
+ReactiveRedisTemplate<String, String> reactive;
+
+public Mono<String> get(String key) {
+    return reactive.opsForValue().get(key);
+}
+```
+
+WebFlux 환경.
+
+## Redis vs Memcached
+
+| | Redis | Memcached |
+|---|-------|-----------|
+| 데이터 구조 | String, List, Hash, Set, ZSet, Stream | String만 |
+| 영속 | RDB/AOF | X |
+| Pub/Sub | O | X |
+| 클러스터 | O | 클라이언트 sharding |
+| 트랜잭션 | O (MULTI) | X |
+
+Redis가 더 강력. Memcached는 단순 캐시만.
+
+## 참고
+
+- [Spring Data Redis](https://docs.spring.io/spring-data/redis/docs/current/reference/html/)
+- [Lettuce](https://lettuce.io/)
+- [Redis commands](https://redis.io/commands/)
+- [Redisson](https://github.com/redisson/redisson)
+- [Spring Session Redis](https://docs.spring.io/spring-session/reference/)

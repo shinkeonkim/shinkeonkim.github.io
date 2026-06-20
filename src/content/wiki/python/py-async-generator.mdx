@@ -1,0 +1,277 @@
+---
+title: "[Python] Async Generator, async for, async with"
+aliases: ["python async generator", "async for", "async iterator", "aiter anext", "PEP 525", "PEP 530"]
+tags: [python, async, generator, asyncio, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+Python의 비동기 모델은 코루틴 + iterator의 조합으로 확장된다. 동기 generator가 lazy 시퀀스를 만들듯, async generator는 **각 값 사이에 await가 가능한 lazy 비동기 시퀀스**를 만든다.
+
+- **`async def` + `yield`**: async generator
+- **`async for`**: async iterator 순회
+- **`async with`**: async context manager
+
+PEP 492 (async/await), PEP 525 (async generators), PEP 530 (async comprehensions).
+
+## async generator
+
+```python
+import asyncio
+
+async def fetch_pages(urls):
+    for url in urls:
+        page = await fetch(url)      # 매 페이지마다 await
+        yield page                    # 호출자에게 yield
+
+async def main():
+    async for page in fetch_pages(urls):
+        process(page)
+
+asyncio.run(main())
+```
+
+`async def` 안에 `yield`가 있으면 호출 결과는 **async generator 객체**. `async for`로 순회하면서 각 `await`이 이벤트 루프에 양보.
+
+## async for
+
+`async for`는 `__aiter__()`/`__anext__()`를 구현한 객체에서 사용 가능.
+
+```python
+class AsyncCounter:
+    def __init__(self, end):
+        self.end = end
+
+    def __aiter__(self):
+        self.cur = 0
+        return self
+
+    async def __anext__(self):
+        if self.cur >= self.end:
+            raise StopAsyncIteration
+        await asyncio.sleep(0.1)
+        self.cur += 1
+        return self.cur - 1
+
+async def main():
+    async for x in AsyncCounter(3):
+        print(x)
+
+asyncio.run(main())
+```
+
+대부분의 경우 클래스를 직접 작성하지 않고 `async def + yield`로 충분.
+
+## async comprehension
+
+```python
+async def main():
+    # async list comprehension
+    pages = [await fetch(u) async for u in urls()]
+
+    # 또는 async generator를 가져옴
+    results = [item async for item in async_gen()]
+
+    # async dict comprehension
+    cache = {url: page async for url, page in fetch_with_url()}
+
+    # async set, generator도 가능
+```
+
+`async for` 또는 `await`를 컴프리헨션 내에서 쓸 때 필요. 일반 컴프리헨션 안에 `await`만 있으면 컴프리헨션 자체는 동기, 호출 함수가 async여야 함.
+
+## async context manager
+
+`__aenter__`, `__aexit__`로 비동기 자원 관리.
+
+```python
+import aiohttp
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            text = await resp.text()
+```
+
+`@asynccontextmanager` (contextlib)로 함수 기반:
+
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def db_connection():
+    conn = await create_connection()
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+async def main():
+    async with db_connection() as conn:
+        await conn.query("SELECT 1")
+```
+
+## 실용 예제
+
+### 페이지네이션 API 스트리밍
+
+```python
+async def list_all_repos(client, org):
+    page = 1
+    while True:
+        repos = await client.get(f"/orgs/{org}/repos?page={page}")
+        if not repos:
+            break
+        for repo in repos:
+            yield repo
+        page += 1
+
+async def main():
+    async for repo in list_all_repos(client, "python"):
+        print(repo["name"])
+        if repo["fork"]:
+            continue
+```
+
+호출자는 한 페이지씩 받아 처리. 메모리에 전체 안 들고 있음. 페이지 사이 await으로 다른 작업 가능.
+
+### 큐에서 비동기로 처리
+
+```python
+import asyncio
+
+async def consume(queue):
+    while True:
+        item = await queue.get()
+        if item is None:    # 종료 신호
+            break
+        await process(item)
+        queue.task_done()
+
+async def main():
+    queue = asyncio.Queue()
+    workers = [asyncio.create_task(consume(queue)) for _ in range(5)]
+
+    for item in items:
+        await queue.put(item)
+
+    for _ in workers:
+        await queue.put(None)
+    await asyncio.gather(*workers)
+```
+
+### SSE / WebSocket 스트림
+
+```python
+async def stream_events(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            async for line in resp.content:
+                if line.startswith(b"data: "):
+                    yield json.loads(line[6:])
+
+async def main():
+    async for event in stream_events("..."):
+        handle(event)
+```
+
+## 함정
+
+### 1. 동기 for vs async for
+
+```python
+# WRONG: 동기 for로 async iterator
+async def bad():
+    for x in async_gen():    # TypeError: 'async_generator' object is not iterable
+        ...
+
+# OK
+async def good():
+    async for x in async_gen():
+        ...
+```
+
+### 2. async generator에서 await asyncio.sleep(0) 없으면 양보 안 함
+
+```python
+async def bad():
+    for i in range(10 ** 6):
+        yield i        # await 없음 → 이벤트 루프 점유
+
+async def good():
+    for i in range(10 ** 6):
+        if i % 1000 == 0:
+            await asyncio.sleep(0)    # 양보
+        yield i
+```
+
+순수 yield는 awaitable이지만 빠르게 끝남. 명시적 양보(`await asyncio.sleep(0)`)가 필요할 수 있음.
+
+### 3. asyncio.gather와 async generator
+
+```python
+# WRONG: gather는 awaitable 받음, async generator는 아님
+results = await asyncio.gather(*async_gen())   # TypeError
+
+# CORRECT
+results = [x async for x in async_gen()]
+```
+
+### 4. close 안 하면 자원 누수
+
+```python
+agen = async_gen()
+async for x in agen:
+    if cond:
+        break
+# break 후 agen이 close 안 됨
+
+# 명시 close
+await agen.aclose()
+
+# 또는 await 가능한 GC 대기
+```
+
+`anyio` 같은 라이브러리가 더 안전한 wrapper 제공.
+
+### 5. async generator 내부에서 yield 중 예외
+
+```python
+async def gen():
+    try:
+        yield 1
+        yield 2
+    finally:
+        print("cleanup")     # 항상 호출 (close 시에도)
+```
+
+generator close 시 `GeneratorExit`이 yield 지점에서 발생 → try/finally가 자원 정리.
+
+## 동기 generator와 비교
+
+| | 동기 generator | async generator |
+|---|---------------|-----------------|
+| 정의 | `def + yield` | `async def + yield` |
+| 호출 결과 | generator | async generator |
+| 순회 | `for x in gen` | `async for x in gen` |
+| return | StopIteration | StopAsyncIteration (자동) |
+| 사용 위치 | 어디서나 | async 컨텍스트 |
+| 양보 | yield에서만 | await에서 (yield는 호출자에게 값) |
+
+## 언제 async generator를 쓰나
+
+- **외부 자원 페이지네이션 (HTTP, DB, S3 등)** - 매 페이지가 비동기 I/O
+- **WebSocket / SSE 스트리밍**
+- **큐 / 이벤트 스트림 처리**
+- **백프레셔 적용** (소비 속도에 맞춰 생산)
+
+CPU 작업이나 단순 변환에는 동기 generator + `asyncio.to_thread` 조합이 더 명확할 수 있다.
+
+## 참고
+
+- [PEP 525 – Asynchronous Generators](https://peps.python.org/pep-0525/)
+- [PEP 530 – Asynchronous Comprehensions](https://peps.python.org/pep-0530/)
+- [PEP 492 – Coroutines with async and await syntax](https://peps.python.org/pep-0492/)
+- [`contextlib.asynccontextmanager`](https://docs.python.org/3/library/contextlib.html#contextlib.asynccontextmanager)
+- [`asyncio` async iteration](https://docs.python.org/3/library/asyncio-stream.html)

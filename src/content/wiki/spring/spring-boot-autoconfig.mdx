@@ -1,0 +1,337 @@
+---
+title: "[Spring Boot] 자동 구성과 @SpringBootApplication"
+aliases: ["spring boot autoconfiguration", "EnableAutoConfiguration", "starter dependencies", "spring.factories", "AutoConfiguration"]
+tags: [spring, spring-boot, autoconfiguration]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring Boot의 핵심 가치 = **자동 구성(autoconfiguration)**. classpath의 라이브러리를 보고 합리적 기본 설정으로 Bean 등록. Tomcat이 있으면 웹 서버 시작, JPA가 있으면 EntityManager 구성. 사용자가 일부만 명시하면 나머지 합리적 default.
+
+## @SpringBootApplication
+
+```java
+@SpringBootApplication
+public class MyApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(MyApplication.class, args);
+    }
+}
+```
+
+= 3개 어노테이션 결합:
+
+```java
+@SpringBootConfiguration    // @Configuration 의 별칭
+@EnableAutoConfiguration    // 자동 구성 활성화
+@ComponentScan              // 이 패키지 이하 스캔
+```
+
+## 자동 구성 메커니즘
+
+`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`에 자동 구성 클래스 목록 (2.7+ 이전엔 `spring.factories`).
+
+Spring Boot starter가 가진 파일 예시:
+
+```
+org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration
+org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+...
+```
+
+각 클래스는 `@ConditionalOnX` 조건을 갖춰 classpath / property / 기존 Bean 유무로 활성화 결정.
+
+## Conditional 어노테이션
+
+```java
+@AutoConfiguration
+@ConditionalOnClass(DataSource.class)
+@ConditionalOnMissingBean(DataSource.class)
+@ConditionalOnProperty(prefix = "spring.datasource", name = "url")
+public class DataSourceAutoConfiguration {
+
+    @Bean
+    public DataSource dataSource(DataSourceProperties props) {
+        return DataSourceBuilder.create()
+            .url(props.getUrl())
+            .username(props.getUsername())
+            .password(props.getPassword())
+            .build();
+    }
+}
+```
+
+자주 쓰는 conditional:
+
+| 어노테이션 | 조건 |
+|-----------|------|
+| `@ConditionalOnClass` | 클래스가 classpath에 있음 |
+| `@ConditionalOnMissingClass` | 없음 |
+| `@ConditionalOnBean` | 다른 Bean이 있음 |
+| `@ConditionalOnMissingBean` | 없음 (override 패턴) |
+| `@ConditionalOnProperty` | property 값 조건 |
+| `@ConditionalOnWebApplication` | 웹 앱 |
+| `@ConditionalOnNotWebApplication` | 아님 |
+| `@ConditionalOnExpression` | SpEL |
+| `@Profile` | 활성 프로파일 |
+
+## 사용자 우선
+
+`@ConditionalOnMissingBean`이 핵심. 사용자가 같은 타입 Bean 명시하면 자동 구성이 양보.
+
+```java
+@Configuration
+public class MyConfig {
+    @Bean
+    public DataSource dataSource() {
+        return new MyCustomDataSource();    // 자동 구성 무시됨
+    }
+}
+```
+
+## application.properties / yml
+
+자동 구성된 Bean의 설정을 외부에서.
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost/mydb
+    username: app
+    password: secret
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+  compression:
+    enabled: true
+
+logging:
+  level:
+    root: INFO
+    org.springframework.web: DEBUG
+    com.example.myapp: DEBUG
+  file:
+    name: logs/app.log
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+```
+
+타입 안전 접근:
+
+```java
+@ConfigurationProperties(prefix = "spring.datasource")
+public record DataSourceProperties(String url, String username, String password) { }
+```
+
+## 자동 구성 디버깅
+
+```bash
+java -jar app.jar --debug
+```
+
+콘솔에 "CONDITIONS EVALUATION REPORT" 출력. 어떤 자동 구성이 매치/미매치인지.
+
+Actuator endpoint:
+```
+GET /actuator/conditions
+GET /actuator/configprops
+GET /actuator/beans
+```
+
+## 자주 보는 자동 구성
+
+| Starter | 자동 구성 |
+|---------|----------|
+| `web` | Tomcat, DispatcherServlet, Jackson, error handling |
+| `webflux` | Netty, Reactor, JSON |
+| `data-jpa` | DataSource, EntityManager, HibernateJpaVendor |
+| `data-redis` | RedisTemplate, LettuceConnectionFactory |
+| `security` | SecurityFilterChain, AuthenticationManager |
+| `validation` | JSR-380 (Hibernate Validator) |
+| `actuator` | Endpoints, metrics, health |
+| `cache` | CacheManager |
+
+## 사용자 자동 구성 작성
+
+라이브러리 만들 때 자동 구성을 함께 패키징.
+
+```java
+// my-lib/src/main/java/com/example/MyAutoConfiguration.java
+@AutoConfiguration
+@ConditionalOnClass(MyService.class)
+public class MyAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public MyService myService(MyProperties props) {
+        return new MyService(props.getUrl());
+    }
+}
+
+// my-lib/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+com.example.MyAutoConfiguration
+```
+
+사용자가 라이브러리만 추가하면 자동 구성 활성화. Spring Boot starter 패턴.
+
+## EnableAutoConfiguration 제외
+
+```java
+@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})
+public class App { }
+
+// 또는
+@EnableAutoConfiguration(exclude = {DataSourceAutoConfiguration.class})
+
+// property
+spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+```
+
+DB 없는 앱에서 DataSource 자동 구성 실패 방지 등.
+
+## SpringApplication 커스터마이즈
+
+```java
+public static void main(String[] args) {
+    SpringApplication app = new SpringApplication(MyApp.class);
+    app.setBannerMode(Banner.Mode.OFF);
+    app.setWebApplicationType(WebApplicationType.NONE);    // 웹 앱 아닌
+    app.setAdditionalProfiles("dev");
+    app.run(args);
+}
+```
+
+## CommandLineRunner / ApplicationRunner
+
+앱 시작 후 코드 실행.
+
+```java
+@Component
+public class StartupRunner implements CommandLineRunner {
+    @Override
+    public void run(String... args) {
+        System.out.println("App started");
+    }
+}
+
+// 또는
+@Bean
+public CommandLineRunner runner() {
+    return args -> { ... };
+}
+
+// ApplicationRunner는 ApplicationArguments 받음 (parsed args)
+@Bean
+public ApplicationRunner runner() {
+    return args -> {
+        if (args.containsOption("import")) { ... }
+    };
+}
+```
+
+데이터 초기화, 헬스체크 등.
+
+## 자주 보는 함정
+
+### 1. 자동 구성 미적용
+
+```java
+@Service
+public class Bean {
+    public Bean(SomeAutoConfiguredService s) { }
+}
+```
+
+starter 의존성 빠뜨림 → NoSuchBeanDefinitionException. `--debug`로 확인.
+
+### 2. @ComponentScan 범위
+
+`@SpringBootApplication`은 자기 패키지와 하위만. 라이브러리의 `@Component`는 안 잡힘.
+
+```java
+@SpringBootApplication(scanBasePackages = {"com.example", "com.lib"})
+```
+
+또는 라이브러리가 자동 구성 제공.
+
+### 3. property 명명
+
+```yaml
+my:
+  api-key: ...        # kebab-case
+  apiKey: ...         # camelCase 도 OK
+  api_key: ...        # snake_case 도 (relaxed binding)
+```
+
+```java
+@Value("${my.api.key}")    # @Value는 점만
+@ConfigurationProperties("my")    # 자동 매핑
+```
+
+### 4. application.properties vs application.yml
+
+둘 다 가능. yml이 더 가독성 좋음. 동시 존재 가능 (yml 우선).
+
+### 5. 자동 구성 순서
+
+`@AutoConfigureBefore`, `@AutoConfigureAfter`, `@AutoConfigureOrder`로 의존 순서 명시. 보통 자동 추론.
+
+## ENV 변수와 시스템 property
+
+```bash
+# 우선순위 (위가 높음):
+# 1. command line: --server.port=9000
+# 2. JNDI
+# 3. System property: -Dserver.port=9000
+# 4. 환경 변수: SERVER_PORT=9000 (점/대시 → 언더스코어, 대문자)
+# 5. application-{profile}.yml
+# 6. application.yml
+# 7. default
+
+SERVER_PORT=9000 java -jar app.jar
+java -Dserver.port=9000 -jar app.jar
+java -jar app.jar --server.port=9000
+```
+
+12-factor app과 잘 어울림.
+
+## Bean override
+
+테스트나 특수 환경에서 자동 구성된 Bean을 override.
+
+```java
+@TestConfiguration
+public class TestConfig {
+
+    @Bean
+    @Primary
+    public DataSource testDataSource() {
+        return new EmbeddedDatabaseBuilder().build();
+    }
+}
+```
+
+`spring.main.allow-bean-definition-overriding=true` (디폴트 false).
+
+## 참고
+
+- [Spring Boot Auto-configuration](https://docs.spring.io/spring-boot/docs/current/reference/html/using.html#using.auto-configuration)
+- [Conditional annotations](https://docs.spring.io/spring-boot/docs/current/reference/html/features.html#features.developing-auto-configuration.condition-annotations)
+- [Externalized Configuration](https://docs.spring.io/spring-boot/docs/current/reference/html/features.html#features.external-config)
+- [@ConfigurationProperties](https://docs.spring.io/spring-boot/docs/current/reference/html/features.html#features.external-config.typesafe-configuration-properties)
+- [Spring Boot Starters](https://docs.spring.io/spring-boot/docs/current/reference/html/using.html#using.build-systems.starters)

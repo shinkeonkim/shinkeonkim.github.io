@@ -1,0 +1,389 @@
+---
+title: "[Rails] 보안: CSRF, XSS, SQL injection, encrypted credentials"
+aliases: ["rails security", "rails CSRF", "strong parameters", "encrypted credentials", "secret_key_base"]
+tags: [rails, security, csrf, xss, encryption]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails는 OWASP Top 10 대부분을 기본 방어한다. 그러나 설정 누락, `html_safe` 남용, raw SQL 등이 흔한 함정. **보안은 기본 활성**이고 명시적으로 우회해야 비활성.
+
+## CSRF (Cross-Site Request Forgery)
+
+기본 활성. `ApplicationController`에 자동 포함:
+
+```ruby
+class ApplicationController < ActionController::Base
+  protect_from_forgery with: :exception    # 5.0+ 기본
+end
+```
+
+`form_with`가 자동 토큰 포함. CSRF 누락 → `ActionController::InvalidAuthenticityToken`.
+
+### AJAX
+
+```javascript
+// 기본 application.js에 포함됨
+const csrfToken = document.querySelector("meta[name='csrf-token']").content;
+
+fetch("/api/posts", {
+    method: "POST",
+    headers: {
+        "X-CSRF-Token": csrfToken,
+        "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+});
+```
+
+### API only
+
+```ruby
+class Api::BaseController < ActionController::API    # CSRF 없음 (API 베이스)
+end
+
+# 또는 특정 액션 skip
+class WebhooksController < ApplicationController
+  skip_forgery_protection only: :stripe
+end
+```
+
+세션 인증 + skip은 위험. JWT 등 별도 인증 시만.
+
+## XSS
+
+ERB 자동 escape:
+
+```erb
+<%= user_input %>     <%# 자동 escape #}
+<%== user_input %>    <%# raw (위험) %>
+<%= raw user_input %>  <%# raw %>
+<%= user_input.html_safe %>  <%# raw %>
+```
+
+### 안전한 HTML 출력
+
+```ruby
+# helper에서
+def my_html
+  content_tag(:b, user_input)    # 안전
+end
+
+def my_html
+  "<b>#{user_input}</b>".html_safe   # 위험 (escape 안 함)
+end
+
+def my_html
+  format_html("<b>{}</b>", user_input)   # 안전 (인자만 escape)
+end
+```
+
+### sanitize 헬퍼
+
+```erb
+<%= sanitize(user_html, tags: %w[p br a], attributes: %w[href]) %>
+```
+
+화이트리스트만 허용. 나머지 태그/속성 제거.
+
+## SQL Injection
+
+ActiveRecord는 기본적으로 placeholder 사용 → 자동 방어.
+
+```ruby
+# 안전
+User.where(email: params[:email])
+User.where("email = ?", params[:email])
+User.where("email = :email", email: params[:email])
+
+# 위험
+User.where("email = '#{params[:email]}'")
+User.find_by_sql("SELECT * FROM users WHERE email = '#{params[:email]}'")
+```
+
+문자열 interpolation 금지. placeholder 또는 hash 인자.
+
+### order, where with raw
+
+```ruby
+# 위험: column 명을 사용자 입력으로
+User.order(params[:sort])    # SQL 인젝션 가능 (5.x)
+
+# 안전: 화이트리스트
+allowed = %w[name email created_at]
+sort_col = allowed.include?(params[:sort]) ? params[:sort] : "id"
+User.order(sort_col)
+
+# 6.0+ Arel
+User.order(Arel.sql(sort_col))
+```
+
+## Strong Parameters
+
+mass assignment 방어:
+
+```ruby
+def user_params
+  params.require(:user).permit(:name, :email, address: [:street, :city])
+end
+
+# 위험
+User.create(params[:user])    # admin: true 같은 악성 입력 통과
+```
+
+`permit`된 키만 통과. 컨트롤러마다 명시.
+
+## 비밀 정보 관리
+
+### encrypted credentials (5.2+)
+
+```bash
+bin/rails credentials:edit
+bin/rails credentials:edit --environment production
+```
+
+`config/credentials.yml.enc` (암호화) + `config/master.key` (서명 키).
+
+```yaml
+# credentials.yml.enc (편집 시 plain)
+secret_key_base: ...
+stripe:
+  api_key: sk_test_...
+  webhook_secret: whsec_...
+aws:
+  access_key_id: ...
+  secret_access_key: ...
+```
+
+```ruby
+Rails.application.credentials.stripe[:api_key]
+Rails.application.credentials.dig(:stripe, :api_key)
+```
+
+`master.key`는 `.gitignore`. credentials.yml.enc는 git 커밋 OK.
+
+### 환경별
+
+```bash
+bin/rails credentials:edit -e production
+# config/credentials/production.yml.enc + production.key
+```
+
+각 환경 다른 키로 분리.
+
+### ENV variable
+
+```ruby
+ENV["STRIPE_KEY"]
+ENV.fetch("STRIPE_KEY")    # 누락 시 raise
+```
+
+Docker, k8s, CI/CD에서 자연스러움.
+
+## HTTPS 강제
+
+```ruby
+# config/environments/production.rb
+config.force_ssl = true
+config.ssl_options = {
+  hsts: { expires: 1.year, subdomains: true, preload: true },
+  redirect: { exclude: ->(request) { request.path =~ /healthcheck/ } },
+}
+```
+
+자동 HTTPS 리다이렉트 + HSTS 헤더.
+
+## 헤더 보안
+
+```ruby
+# config/initializers/secure_headers.rb (gem)
+SecureHeaders::Configuration.default do |config|
+  config.csp = {
+    default_src: %w['self'],
+    script_src: %w['self' https://cdn.example.com],
+    style_src: %w['self' 'unsafe-inline'],
+    img_src: %w['self' data: https:],
+  }
+  config.x_frame_options = "DENY"
+  config.x_content_type_options = "nosniff"
+  config.referrer_policy = "strict-origin-when-cross-origin"
+end
+```
+
+또는 Rails 기본 `default_headers`:
+
+```ruby
+config.action_dispatch.default_headers = {
+  "X-Frame-Options" => "SAMEORIGIN",
+  "X-Content-Type-Options" => "nosniff",
+  "Referrer-Policy" => "strict-origin-when-cross-origin",
+}
+```
+
+## Active Record Encryption (7.0+)
+
+```ruby
+class User < ApplicationRecord
+  encrypts :ssn, deterministic: true    # 검색 가능
+  encrypts :api_key                      # 비결정 (검색 X)
+  encrypts :credit_card, downcase: true
+end
+
+user.ssn = "..."
+user.save
+# DB에는 암호화된 값
+user.ssn    # 자동 복호화
+```
+
+`bin/rails db:encryption:init`으로 키 생성.
+
+쿼리:
+```ruby
+User.where(ssn: "...")    # deterministic만 가능
+```
+
+## 비밀번호 (has_secure_password)
+
+```ruby
+class User < ApplicationRecord
+  has_secure_password    # password_digest 필드 필요
+end
+
+user = User.create(email: "...", password: "secret", password_confirmation: "secret")
+user.authenticate("secret")    # User 또는 false
+```
+
+bcrypt 자동. `password`는 메모리만, DB엔 `password_digest`만.
+
+## 인증 (Rails 8 generator)
+
+```bash
+bin/rails generate authentication
+```
+
+기본적인 로그인/가입/세션 컨트롤러 자동 생성. Devise/Sorcery 같은 풀스택 라이브러리 대안.
+
+## 자주 보는 패턴
+
+### Rate limit
+
+```ruby
+# Rails 8+ 내장
+class LoginsController < ApplicationController
+  rate_limit to: 5, within: 1.minute, only: :create
+end
+
+# 또는 rack-attack gem
+Rack::Attack.throttle("logins/ip", limit: 5, period: 60) do |req|
+  req.ip if req.path == "/login" && req.post?
+end
+```
+
+### Audit log
+
+```ruby
+gem "audited"
+
+class Post < ApplicationRecord
+  audited
+end
+
+post.audits    # 모든 변경 이력
+```
+
+### 권한 (Pundit)
+
+```ruby
+class PostPolicy < ApplicationPolicy
+  def update?
+    record.author == user || user.admin?
+  end
+end
+
+class PostsController < ApplicationController
+  def update
+    authorize @post
+    ...
+  end
+end
+```
+
+## 함정
+
+### 1. RAILS_MASTER_KEY 노출
+
+`.env` 파일 git 커밋, README에 키 적기 등. 노출 시 즉시 회전:
+
+```bash
+bin/rails credentials:edit    # 새 키로 재암호화
+```
+
+### 2. parameter logging 비밀
+
+```ruby
+# config/initializers/filter_parameter_logging.rb
+Rails.application.config.filter_parameters += [
+  :password, :secret, :token, :api_key, :credit_card,
+]
+```
+
+`[FILTERED]`로 표시. 신규 민감 필드는 직접 추가.
+
+### 3. CORS 잘못
+
+```ruby
+# Gemfile
+gem "rack-cors"
+```
+
+```ruby
+Rails.application.config.middleware.insert_before 0, Rack::Cors do
+  allow do
+    origins "*"    # 위험!
+    resource "*", methods: [:get, :post, :put, :delete]
+  end
+end
+```
+
+명시 origin:
+
+```ruby
+origins "https://app.example.com"
+```
+
+### 4. open redirect
+
+```ruby
+redirect_to params[:redirect_to]    # 위험: //evil.com 가능
+redirect_to params[:redirect_to], allow_other_host: false    # 7.0+
+```
+
+### 5. timing attack
+
+```ruby
+user.api_token == params[:token]    # timing attack 가능
+ActiveSupport::SecurityUtils.secure_compare(user.api_token, params[:token])
+```
+
+상수 시간 비교.
+
+## 보안 도구
+
+- **Brakeman**: 정적 분석 (CVE, 코드 패턴)
+  ```bash
+  gem install brakeman
+  brakeman
+  ```
+- **bundler-audit**: gem CVE 검사
+- **dependabot**: GitHub의 의존성 업데이트
+
+CI에 포함.
+
+## 참고
+
+- [Securing Rails Applications](https://guides.rubyonrails.org/security.html)
+- [Brakeman](https://brakemanscanner.org/)
+- [secure_headers](https://github.com/github/secure_headers)
+- [bundler-audit](https://github.com/rubysec/bundler-audit)
+- [OWASP Rails Cheatsheet](https://cheatsheetseries.owasp.org/cheatsheets/Ruby_on_Rails_Cheat_Sheet.html)

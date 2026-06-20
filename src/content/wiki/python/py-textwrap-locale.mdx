@@ -1,0 +1,351 @@
+---
+title: "[Python] textwrap, locale, unicodedata: 텍스트 처리"
+aliases: ["python textwrap", "locale", "unicodedata", "string normalization", "NFC", "NFD"]
+tags: [python, textwrap, locale, unicodedata, stdlib, string]
+updated: 2026-06-20
+---
+
+## 정의
+
+텍스트 처리 표준 모듈 3개.
+
+- **`textwrap`**: 줄바꿈, 들여쓰기 정렬
+- **`locale`**: 지역화 (숫자/통화/날짜 포맷)
+- **`unicodedata`**: 유니코드 정규화·분류·검색
+
+## textwrap
+
+긴 텍스트를 일정 폭으로 줄바꿈.
+
+```python
+import textwrap
+
+text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."
+
+print(textwrap.fill(text, width=40))
+# Lorem ipsum dolor sit amet,
+# consectetur adipiscing elit, sed do
+# eiusmod tempor incididunt ut labore et
+# dolore magna aliqua.
+
+lines = textwrap.wrap(text, width=40)    # 리스트로
+print(len(lines))
+```
+
+### dedent, indent
+
+```python
+from textwrap import dedent, indent
+
+# dedent: 공통 들여쓰기 제거 (멀티라인 문자열 정리)
+def helper():
+    text = dedent("""
+        Hello
+            Indented
+        World
+    """).strip()
+    return text
+
+# indent: 모든 줄에 prefix
+print(indent("line 1\nline 2", "    "))
+```
+
+`dedent`는 docstring/긴 문자열을 자연스럽게 들여쓰기로 작성하면서 결과는 깔끔하게.
+
+### shorten
+
+```python
+textwrap.shorten("The quick brown fox jumps over the lazy dog", width=20)
+# 'The quick brown [...]'
+
+textwrap.shorten("...", width=20, placeholder="…")
+```
+
+긴 텍스트 잘라내기 (단어 경계 유지).
+
+## locale
+
+OS 지역 설정 기반 포매팅.
+
+```python
+import locale
+
+# 시스템 기본
+locale.setlocale(locale.LC_ALL, "")
+
+# 또는 명시
+locale.setlocale(locale.LC_ALL, "ko_KR.UTF-8")
+locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
+
+# 숫자
+print(locale.format_string("%d", 1234567, grouping=True))   # 1,234,567
+
+# 통화
+print(locale.currency(1234.56, grouping=True))
+# 한국: '₩1,234.56' 또는 '\u20a91,234'
+# 미국: '$1,234.56'
+
+# 날짜
+import time
+print(time.strftime("%c"))    # 로케일에 따른 표현
+```
+
+### 비교·정렬
+
+```python
+import locale
+
+words = ["zebra", "Apple", "banana", "Cherry"]
+
+# 기본 (ASCII 순)
+print(sorted(words))    # ['Apple', 'Cherry', 'banana', 'zebra']
+
+# 로케일 인식
+locale.setlocale(locale.LC_COLLATE, "en_US.UTF-8")
+print(sorted(words, key=locale.strxfrm))    # ['Apple', 'banana', 'Cherry', 'zebra']
+```
+
+한글 가나다 순도 로케일 정렬로.
+
+### 함정
+
+- 전역 상태라 멀티스레드에서 위험
+- 로케일 사용 가능 여부가 OS 의존
+- 대부분 사용자는 직접 포맷 (`f"{n:,}"`)이 더 명시적
+
+```python
+# 일반적으로 locale보다 명시 포맷
+f"{1234567:,}"        # '1,234,567' (영문)
+f"{1234.56:.2f}"      # '1234.56'
+
+# 한국 원화는 보통 직접
+def krw(n):
+    return f"{n:,}원"
+```
+
+본격 i18n은 `babel` 라이브러리.
+
+## unicodedata
+
+유니코드 문자의 속성과 정규화.
+
+```python
+import unicodedata
+
+print(unicodedata.name("A"))           # 'LATIN CAPITAL LETTER A'
+print(unicodedata.name("한"))           # 'HANGUL SYLLABLE HAN'
+print(unicodedata.name("😀"))            # 'GRINNING FACE'
+
+print(unicodedata.category("A"))       # 'Lu' (대문자)
+print(unicodedata.category("a"))       # 'Ll' (소문자)
+print(unicodedata.category(" "))       # 'Zs' (공백)
+print(unicodedata.category("1"))       # 'Nd' (숫자)
+print(unicodedata.category("😀"))        # 'So' (기호)
+```
+
+카테고리 코드:
+- L=Letter (Lu/Ll/Lt/Lm/Lo)
+- N=Number (Nd/Nl/No)
+- P=Punctuation
+- S=Symbol
+- Z=Separator (Zs/Zl/Zp)
+- M=Mark (Mn/Mc/Me)
+- C=Control/format
+
+## 정규화: NFC, NFD, NFKC, NFKD
+
+같은 글자가 다른 코드포인트 조합으로 표현될 수 있다.
+
+```python
+import unicodedata
+
+s1 = "안"               # NFC: 한 코드포인트 U+C548
+s2 = "\u110b\u1161\u11ab"   # NFD: 자모 분해 ㅇ + ㅏ + ㄴ
+print(s1, s2)
+print(len(s1), len(s2))     # 1, 3
+print(s1 == s2)              # False (다른 코드포인트)
+
+# 정규화
+nfc1 = unicodedata.normalize("NFC", s1)
+nfc2 = unicodedata.normalize("NFC", s2)
+print(nfc1 == nfc2)          # True
+```
+
+### NFC vs NFD vs NFKC vs NFKD
+
+| | C (Composed) | D (Decomposed) |
+|---|--------------|----------------|
+| 일반 | NFC: 결합형 | NFD: 분해형 |
+| 호환 | NFKC: 호환 + 결합 | NFKD: 호환 + 분해 |
+
+- **NFC**: ㄱㅏ → 가. **기본 권장**. JSON·DB 저장에.
+- **NFD**: 가 → ㄱㅏ. macOS 파일시스템 기본 (HFS+).
+- **NFKC**: 호환 문자 통합. ① → 1, ㉠ → 가. 검색 정규화에.
+- **NFKD**: KC의 분해.
+
+### 실용: 사용자 입력 정규화
+
+```python
+def normalize_korean(s):
+    """가급적 NFC로."""
+    return unicodedata.normalize("NFC", s)
+
+# DB 저장 전, 비교 전 적용
+input_name = normalize_korean(form_data["name"])
+```
+
+macOS 파일명을 그대로 받으면 NFD라 다른 표현. 항상 정규화.
+
+### accent 제거 (transliteration)
+
+```python
+import unicodedata
+
+def strip_accents(s):
+    nfd = unicodedata.normalize("NFD", s)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+print(strip_accents("café"))       # 'cafe'
+print(strip_accents("résumé"))     # 'resume'
+print(strip_accents("naïve"))      # 'naive'
+```
+
+검색 인덱스, slug 생성에 흔히 사용.
+
+### 슬러그 생성
+
+```python
+import unicodedata
+import re
+
+def slugify(s):
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")    # 비ASCII 제거
+    s = re.sub(r"[^\w\s-]", "", s).strip().lower()
+    return re.sub(r"[-\s]+", "-", s)
+
+print(slugify("Hello, World!"))         # 'hello-world'
+print(slugify("Café résumé"))            # 'cafe-resume'
+print(slugify("한글 제목"))               # '' (한글은 제거됨)
+```
+
+한글까지 보존하려면 `python-slugify` 라이브러리.
+
+```bash
+pip install python-slugify
+```
+
+## 자주 보는 패턴
+
+### 한국어 텍스트 분리 (음절/자모)
+
+```python
+import unicodedata
+
+def to_jamo(text):
+    """음절 → 자모 분해."""
+    return unicodedata.normalize("NFD", text)
+
+def from_jamo(text):
+    """자모 → 음절 결합."""
+    return unicodedata.normalize("NFC", text)
+
+print(list(to_jamo("한글")))    # ['ㅎ', 'ㅏ', 'ㄴ', 'ㄱ', 'ㅡ', 'ㄹ']
+print(from_jamo("ㅎㅏㄴㄱㅡㄹ"))  # '한글'
+```
+
+### 이모지 검사
+
+```python
+import unicodedata
+
+def has_emoji(s):
+    return any(unicodedata.category(c).startswith("So") for c in s)
+
+print(has_emoji("hello 😀"))     # True
+print(has_emoji("hello"))        # False
+```
+
+복잡한 이모지(ZWJ, skin tone)는 `emoji` 라이브러리.
+
+### 텍스트 폭 (CJK 고려)
+
+```python
+import unicodedata
+
+def display_width(s):
+    """터미널 표시 폭 추정."""
+    w = 0
+    for c in s:
+        if unicodedata.east_asian_width(c) in ("W", "F"):
+            w += 2
+        else:
+            w += 1
+    return w
+
+print(display_width("hello"))         # 5
+print(display_width("안녕하세요"))     # 10 (한글 = 2칸)
+print(display_width("hello 안녕"))    # 11
+```
+
+CLI 출력 폭 정렬, 터미널 UI에 활용.
+
+### Codepoint 검색
+
+```python
+import unicodedata
+
+print(unicodedata.lookup("BLACK STAR"))    # '★'
+print(unicodedata.lookup("CHECK MARK"))    # '✓'
+
+# 반대로
+print(unicodedata.name("★"))               # 'BLACK STAR'
+```
+
+`\N{NAME}` 이스케이프와 같은 메커니즘.
+
+```python
+s = "\N{BLACK STAR}"    # '★'
+```
+
+## 함정
+
+### 1. 표면적으로 같은 문자
+
+```python
+"ㅏ" == "ᅡ"      # False (다른 코드포인트)
+"K" == "К"      # False (라틴 K vs 키릴 К)
+```
+
+특히 보안: 도메인 이름 phishing(`paypal.com` vs `pаypal.com`)에 활용. 검증에 NFKC 정규화.
+
+### 2. textwrap의 CJK 폭 무시
+
+```python
+import textwrap
+print(textwrap.fill("한글한글한글한글한글한글한글", width=10))
+# CJK가 2칸이지만 1칸으로 계산 → 폭 초과
+```
+
+CJK 안전 wrapping은 `wcwidth` 또는 직접 구현 필요.
+
+### 3. locale 멀티스레드
+
+```python
+import locale, threading
+
+def worker():
+    locale.setlocale(locale.LC_ALL, "...")    # 전역! 다른 스레드 영향
+```
+
+스레드 안전성 약함. 가능하면 명시 포맷 사용.
+
+## 참고
+
+- [`textwrap` documentation](https://docs.python.org/3/library/textwrap.html)
+- [`locale` documentation](https://docs.python.org/3/library/locale.html)
+- [`unicodedata` documentation](https://docs.python.org/3/library/unicodedata.html)
+- [Unicode Normalization Forms](https://unicode.org/reports/tr15/)
+- [`babel` library](https://babel.pocoo.org/) - 본격 i18n
+- [`python-slugify`](https://github.com/un33k/python-slugify)
+- [`wcwidth`](https://github.com/jquast/wcwidth) - CJK 폭 측정

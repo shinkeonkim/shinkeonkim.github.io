@@ -1,0 +1,164 @@
+---
+title: "[Pandas] rolling / expanding"
+aliases: ["Pandas rolling", "Pandas expanding", "이동 평균", "windowed pandas"]
+tags: [python, pandas, rolling, window, time-series]
+updated: 2026-06-18
+---
+
+## 정의
+
+- **`rolling(window)`** : 고정 크기 슬라이딩 윈도우 (이동 평균 등)
+- **`expanding()`** : 시작부터 누적 윈도우 (cumulative)
+- **`ewm(alpha=)`** : 지수 가중 이동 평균
+
+## 시각화
+
+```anim:pandas-rolling-window
+{}
+```
+
+## rolling 기본
+
+```python
+s.rolling(window=3).mean()      # 3-point 이동 평균
+s.rolling(window=7).sum()       # 7일 합계 (시계열)
+s.rolling(window=5).std()
+s.rolling(window=10).max()
+```
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+s = pd.Series([1, 2, 3, 4, 5, 6, 7, 8])
+print(s.rolling(window=3).mean().tolist())`}
+  output={`[nan, nan, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]`}
+/>
+
+| index | value | rolling(3).mean |
+|---|---|---|
+| 0 | 1 | NaN |
+| 1 | 2 | NaN |
+| 2 | 3 | 2.0 (1+2+3)/3 |
+| 3 | 4 | 3.0 (2+3+4)/3 |
+| 4 | 5 | 4.0 (3+4+5)/3 |
+| 5 | 6 | 5.0 |
+| 6 | 7 | 6.0 |
+| 7 | 8 | 7.0 |
+
+처음 N-1 개는 NaN (window 가 안 채워짐).
+
+## min_periods (최소 데이터 수)
+
+```python
+s.rolling(window=3, min_periods=1).mean()
+# [1.0, 1.5, 2.0, 3.0, 4.0, ...]  ← 처음 2 개도 계산
+```
+
+## time-based rolling (시계열)
+
+```python
+# index 가 DatetimeIndex 일 때
+df.rolling('7D').sum()       # 지난 7일
+df.rolling('30min').mean()   # 지난 30분
+```
+
+데이터 빈도가 불규칙해도 시간 기반으로 정확히 윈도우 형성.
+
+## center=True
+
+```python
+s.rolling(window=3, center=True).mean()
+# 중심 정렬, [NaN, 2.0, 3.0, 4.0, ..., NaN]
+```
+
+기본은 right-aligned (윈도우의 마지막 위치에 결과). `center=True` 는 중앙.
+
+## expanding (누적)
+
+```python
+s.expanding().mean()       # 시작부터 현재까지 평균
+s.expanding().sum()        # 누적합 (== cumsum)
+s.expanding(min_periods=5).mean()
+```
+
+## ewm (지수 가중)
+
+```python
+s.ewm(alpha=0.3).mean()        # alpha 클수록 최근 가중
+s.ewm(span=10).mean()           # span = (2/alpha - 1)
+s.ewm(halflife=5).mean()
+```
+
+최근 데이터에 더 큰 가중치, **이전 데이터는 점진적 감소**. 금융 / 신호 처리.
+
+## groupby + rolling
+
+```python
+df.groupby('user_id')['amount'].rolling(window=7).sum()
+# 각 user 별 7-day 합계 (MultiIndex 결과)
+```
+
+## 자주 쓰는 패턴
+
+### 7일 이동 평균 (smoothing)
+
+```python
+df['ma7'] = df['sales'].rolling(7).mean()
+```
+
+### 누적 합 / 평균
+
+```python
+df['cumulative_revenue'] = df['revenue'].expanding().sum()
+df['running_avg'] = df['revenue'].expanding().mean()
+```
+
+### Bollinger Bands
+
+```python
+ma = s.rolling(20).mean()
+std = s.rolling(20).std()
+upper = ma + 2 * std
+lower = ma - 2 * std
+```
+
+### 윈도우 안에서 사용자 함수
+
+```python
+s.rolling(window=5).apply(lambda x: x.max() - x.min(), raw=True)
+# raw=True 면 numpy array 가 전달되어 빠름
+```
+
+## 함정
+
+### 1. window 가 너무 커서 NaN 만
+
+```python
+short_series.rolling(window=100).mean()
+# 데이터가 99 개라면 모두 NaN
+```
+
+`min_periods=1` 로 부분 결과.
+
+### 2. shift 와 혼동
+
+```python
+s.rolling(3).mean()       # 현재 포함 3 개
+s.shift(1).rolling(3).mean()    # 이전 3 개 (오늘 제외)
+```
+
+미래 정보 누설 방지 (lookahead bias) 가 필요할 때 `shift`.
+
+### 3. 성능
+
+- 큰 데이터 + 작은 윈도우: 빠름
+- 큰 데이터 + 큰 윈도우: 느림
+- `numba` engine 사용: `s.rolling(window=10).mean(engine='numba')` (pandas 1.x+)
+
+## 참고
+
+- [[Pandas resample]]
+- [[Pandas groupby]]
+- [[Pandas DataFrame]]
+- 공식 문서, [rolling](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.rolling.html)

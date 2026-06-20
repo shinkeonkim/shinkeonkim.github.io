@@ -1,0 +1,335 @@
+---
+title: "[Python] sqlite3: 내장 SQL 데이터베이스"
+aliases: ["python sqlite3", "SQLite", "Connection", "Cursor", "DB-API 2.0", "executemany"]
+tags: [python, sqlite3, database, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`sqlite3`는 Python 표준 라이브러리에 포함된 **SQLite 데이터베이스 래퍼**. 별도 서버 없이 단일 파일에 저장하는 임베디드 SQL DB. PEP 249 (DB-API 2.0) 호환. 작은 앱·테스트·로컬 캐시·CLI 도구에 최적.
+
+## 기본
+
+```python
+import sqlite3
+
+conn = sqlite3.connect("app.db")    # 파일 없으면 생성
+cur = conn.cursor()
+
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        age INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+
+cur.execute("INSERT INTO users (name, age) VALUES (?, ?)", ("Alice", 30))
+conn.commit()
+
+cur.execute("SELECT * FROM users")
+for row in cur.fetchall():
+    print(row)
+
+conn.close()
+```
+
+`?` 플레이스홀더로 SQL 인젝션 방지. **문자열 포매팅 절대 금지**.
+
+## SQL 인젝션 방지
+
+```python
+# WRONG
+name = user_input
+cur.execute(f"SELECT * FROM users WHERE name = '{name}'")
+# user_input = "'; DROP TABLE users;--" → 테이블 삭제
+
+# CORRECT
+cur.execute("SELECT * FROM users WHERE name = ?", (name,))
+```
+
+named parameter도 지원:
+
+```python
+cur.execute("SELECT * FROM users WHERE name = :name AND age > :age",
+             {"name": "Alice", "age": 18})
+```
+
+## fetchone / fetchmany / fetchall
+
+```python
+cur.execute("SELECT * FROM users")
+
+row = cur.fetchone()        # 한 행 (tuple), 없으면 None
+rows = cur.fetchmany(10)    # 최대 10행
+rows = cur.fetchall()       # 전부
+
+# iterator로도 (메모리 효율)
+for row in cur:
+    print(row)
+```
+
+큰 결과는 iterator 권장.
+
+## Row factory: dict 같은 row
+
+기본은 tuple. dict 또는 named tuple로 받기.
+
+```python
+import sqlite3
+
+conn = sqlite3.connect("app.db")
+conn.row_factory = sqlite3.Row    # 빌트인
+
+cur = conn.execute("SELECT * FROM users")
+for row in cur:
+    print(row["name"], row["age"])    # dict-like + index 둘 다 가능
+```
+
+dataclass로 직접 매핑:
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class User:
+    id: int
+    name: str
+    age: int
+
+def row_to_user(cursor, row):
+    return User(*row)
+
+conn.row_factory = row_to_user
+```
+
+## executemany: 대량 INSERT
+
+```python
+data = [("Bob", 25), ("Carol", 35), ("Dave", 40)]
+cur.executemany("INSERT INTO users (name, age) VALUES (?, ?)", data)
+conn.commit()
+```
+
+한 번에 여러 행. for + execute보다 훨씬 빠름 (트랜잭션 1회).
+
+## 트랜잭션
+
+Python `sqlite3`는 **암시적 트랜잭션** 모드. INSERT/UPDATE/DELETE 시작 시 자동 BEGIN, `commit()` 호출 전까지 미반영.
+
+```python
+conn.execute("INSERT INTO users (name) VALUES ('A')")
+conn.execute("INSERT INTO users (name) VALUES ('B')")
+conn.commit()    # 둘 다 한 트랜잭션
+```
+
+명시적 트랜잭션 권장:
+
+```python
+with conn:    # 자동 commit (예외 시 rollback)
+    conn.execute("INSERT ...")
+    conn.execute("UPDATE ...")
+```
+
+3.12+ `autocommit` 인자가 명확:
+
+```python
+conn = sqlite3.connect("app.db", autocommit=False)    # 명시적 트랜잭션
+conn = sqlite3.connect("app.db", autocommit=True)     # 즉시 commit
+```
+
+## context manager 활용
+
+```python
+import sqlite3
+
+with sqlite3.connect("app.db") as conn:
+    conn.row_factory = sqlite3.Row
+    with conn:    # 트랜잭션 (commit/rollback 자동)
+        cur = conn.execute("INSERT INTO users (name, age) VALUES (?, ?)",
+                            ("Alice", 30))
+        user_id = cur.lastrowid
+        conn.execute("INSERT INTO logs (user_id, action) VALUES (?, ?)",
+                      (user_id, "created"))
+```
+
+connection은 close되지 않으므로 finally 필요할 수도 (또는 contextlib.closing).
+
+## 데이터 타입 변환
+
+| SQLite | Python |
+|--------|--------|
+| NULL | None |
+| INTEGER | int |
+| REAL | float |
+| TEXT | str |
+| BLOB | bytes |
+
+datetime, JSON 등은 별도 처리.
+
+### detect_types
+
+```python
+import sqlite3
+from datetime import datetime
+
+conn = sqlite3.connect(
+    "app.db",
+    detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+)
+
+# 컬럼 타입을 보고 변환
+conn.execute("CREATE TABLE events (when TIMESTAMP)")
+conn.execute("INSERT INTO events VALUES (?)", (datetime.now(),))
+cur = conn.execute("SELECT when FROM events")
+print(cur.fetchone())    # datetime 객체
+```
+
+### adapter / converter
+
+커스텀 타입 등록.
+
+```python
+import json
+
+sqlite3.register_adapter(dict, json.dumps)
+sqlite3.register_converter("JSON", json.loads)
+
+conn = sqlite3.connect("app.db", detect_types=sqlite3.PARSE_DECLTYPES)
+conn.execute("CREATE TABLE configs (data JSON)")
+conn.execute("INSERT INTO configs VALUES (?)", ({"theme": "dark"},))
+
+cur = conn.execute("SELECT data FROM configs")
+print(cur.fetchone()[0])    # {'theme': 'dark'}
+```
+
+## 인덱스, 제약, EXPLAIN
+
+```python
+conn.execute("CREATE INDEX idx_users_name ON users(name)")
+conn.execute("CREATE UNIQUE INDEX idx_users_email ON users(email)")
+
+# 쿼리 플랜 분석
+cur = conn.execute("EXPLAIN QUERY PLAN SELECT * FROM users WHERE name = ?", ("Alice",))
+for row in cur:
+    print(row)
+```
+
+## WAL 모드 (동시성)
+
+기본 journal 모드는 writer가 readers를 막음. WAL은 reader와 writer 동시 가능.
+
+```python
+conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("PRAGMA synchronous=NORMAL")    # 약간 빠름, 충돌 시 약간 위험
+```
+
+웹 서버 등 동시 접속에 권장.
+
+## 메모리 DB
+
+```python
+conn = sqlite3.connect(":memory:")
+```
+
+테스트나 임시 분석. 프로세스 종료 시 사라짐.
+
+```python
+# 여러 connection이 같은 메모리 DB 공유
+conn = sqlite3.connect("file::memory:?cache=shared", uri=True)
+```
+
+## 자주 보는 패턴
+
+### Repository 패턴
+
+```python
+class UserRepo:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def find(self, id):
+        cur = self.conn.execute("SELECT * FROM users WHERE id = ?", (id,))
+        row = cur.fetchone()
+        return User(*row) if row else None
+
+    def create(self, name, age):
+        cur = self.conn.execute(
+            "INSERT INTO users (name, age) VALUES (?, ?)", (name, age)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+```
+
+### 마이그레이션
+
+```python
+def migrate(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS schema_version (version INTEGER);
+        INSERT OR IGNORE INTO schema_version VALUES (0);
+    """)
+    cur = conn.execute("SELECT version FROM schema_version")
+    version = cur.fetchone()[0]
+
+    if version < 1:
+        conn.execute("CREATE TABLE users (...)")
+        conn.execute("UPDATE schema_version SET version = 1")
+    if version < 2:
+        conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        conn.execute("UPDATE schema_version SET version = 2")
+    conn.commit()
+```
+
+본격적 ORM이라면 SQLAlchemy + Alembic.
+
+## 함정
+
+### 1. SQL 인젝션
+
+문자열 포매팅 절대 금지. 항상 placeholder.
+
+### 2. 트랜잭션 미커밋
+
+```python
+conn.execute("INSERT ...")
+# commit 빼먹으면 close 시 rollback (변경 손실)
+```
+
+### 3. 동시 쓰기
+
+SQLite는 한 시점에 writer 1개. 동시 INSERT/UPDATE 충돌 시 `database is locked`. WAL 또는 retry 로직.
+
+### 4. None vs NULL
+
+```python
+conn.execute("INSERT INTO t VALUES (?)", (None,))    # NULL 저장
+cur = conn.execute("SELECT * FROM t WHERE x IS NULL")    # IS NULL, = NULL X
+```
+
+### 5. 큰 BLOB
+
+큰 바이너리는 메모리 부담. `sqlite3.Blob` (3.11+)으로 스트리밍 가능.
+
+## 언제 SQLite vs PostgreSQL
+
+| 상황 | 선택 |
+|------|------|
+| 임베디드 (CLI, mobile) | SQLite |
+| 단일 사용자 / 1~10 동시 | SQLite |
+| 빠른 prototype | SQLite |
+| 다중 사용자 웹앱 | PostgreSQL/MySQL |
+| 복잡한 트랜잭션 / replication | PostgreSQL |
+| 분석 쿼리 (OLAP) | PostgreSQL, DuckDB |
+
+SQLite도 의외로 강력 (수십 GB까지 OK). [SQLite의 적용 사례](https://www.sqlite.org/whentouse.html).
+
+## 참고
+
+- [`sqlite3` documentation](https://docs.python.org/3/library/sqlite3.html)
+- [SQLite official site](https://www.sqlite.org/)
+- [PEP 249 – Python Database API Specification 2.0](https://peps.python.org/pep-0249/)
+- [SQLAlchemy](https://www.sqlalchemy.org/) - SQL toolkit + ORM
+- [Alembic](https://alembic.sqlalchemy.org/) - 마이그레이션 도구

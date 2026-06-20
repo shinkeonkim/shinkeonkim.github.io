@@ -1,0 +1,334 @@
+---
+title: "[Django] Celery: 비동기 태스크와 큐"
+aliases: ["django celery", "celery task", "celery worker", "celery beat", "task queue", "delay apply_async"]
+tags: [django, celery, queue, async, worker]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Celery**는 Python의 분산 태스크 큐. 비동기·예약·재시도 작업을 워커가 처리. Django와 통합되어 이메일 발송, 이미지 처리, ML 추론, 스크래핑 같은 무거운 작업을 HTTP 요청 처리에서 분리.
+
+브로커: Redis 또는 RabbitMQ가 주류. 결과 저장: 같은 브로커 또는 별도 DB.
+
+## 설치
+
+```bash
+pip install celery redis
+```
+
+## 설정
+
+```python
+# myproject/celery.py
+import os
+from celery import Celery
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+
+app = Celery("myproject")
+app.config_from_object("django.conf:settings", namespace="CELERY")
+app.autodiscover_tasks()
+
+# myproject/__init__.py
+from .celery import app as celery_app
+__all__ = ("celery_app",)
+```
+
+```python
+# settings.py
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_RESULT_BACKEND = "redis://localhost:6379/1"
+CELERY_TASK_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TIMEZONE = "Asia/Seoul"
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60    # 30분
+```
+
+## Task 정의
+
+```python
+# blog/tasks.py
+from celery import shared_task
+
+@shared_task
+def send_welcome_email(user_id):
+    user = User.objects.get(id=user_id)
+    send_mail("환영합니다", "...", "no-reply@example.com", [user.email])
+
+@shared_task
+def process_image(image_path):
+    img = Image.open(image_path)
+    img.thumbnail((1024, 1024))
+    img.save(image_path + ".small.jpg")
+```
+
+`@shared_task`는 모든 Celery 앱에서 발견. `@app.task`는 특정 앱.
+
+## 호출
+
+```python
+# 비동기 호출 (워커가 처리)
+send_welcome_email.delay(user.id)
+
+# 더 세밀한 옵션
+send_welcome_email.apply_async(
+    args=[user.id],
+    countdown=10,                  # 10초 후
+    eta=datetime(...),             # 특정 시각
+    expires=60,                    # 60초 후 expire
+    retry=True,
+    retry_policy={"max_retries": 3, "interval_start": 0, "interval_step": 0.2},
+    queue="emails",
+    priority=5,
+)
+```
+
+`delay`는 `apply_async`의 단축형 (인자만).
+
+## 결과
+
+```python
+result = send_welcome_email.delay(user.id)
+result.id                          # task UUID
+result.status                      # PENDING, STARTED, SUCCESS, FAILURE
+result.ready()
+result.get(timeout=10)             # 결과 대기 (블록)
+```
+
+대부분 fire-and-forget. result 안 필요하면 `ignore_result=True`.
+
+## 재시도
+
+```python
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def call_api(self, url):
+    try:
+        return requests.get(url, timeout=10).json()
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=2 ** self.request.retries)
+```
+
+`bind=True`로 `self` 받음. exponential backoff. `autoretry_for=(ExceptionType,)` 옵션도.
+
+```python
+@shared_task(autoretry_for=(requests.RequestException,), retry_backoff=True, max_retries=5)
+def call_api(url):
+    return requests.get(url, timeout=10).json()
+```
+
+## Worker 실행
+
+```bash
+celery -A myproject worker -l info
+celery -A myproject worker -l info -Q emails,default    # 특정 큐만
+celery -A myproject worker -l info --concurrency=8       # 워커 프로세스 수
+```
+
+## Celery Beat (스케줄러)
+
+```bash
+celery -A myproject beat -l info
+```
+
+```python
+# settings.py
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    "send-daily-digest": {
+        "task": "blog.tasks.send_daily_digest",
+        "schedule": crontab(hour=9, minute=0),
+    },
+    "cleanup-temp": {
+        "task": "blog.tasks.cleanup",
+        "schedule": 3600.0,    # 1시간마다
+    },
+}
+```
+
+DB 기반 동적 스케줄은 `django-celery-beat`:
+
+```python
+INSTALLED_APPS += ["django_celery_beat"]
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+```
+
+admin에서 스케줄 변경 가능.
+
+## Task 체이닝
+
+```python
+from celery import chain, group, chord
+
+# 순차
+chain(fetch.s(url), process.s(), save.s())()
+
+# 병렬
+group(process.s(item) for item in items)()
+
+# 병렬 후 합산
+chord(group(crunch.s(i) for i in range(100)))(summarize.s())
+```
+
+`.s()` (signature)로 인자 일부 고정. 함수형 컴포지션.
+
+## Worker 종류
+
+```bash
+celery -A myproject worker --pool=prefork    # 기본 (Unix)
+celery -A myproject worker --pool=gevent --concurrency=1000    # I/O 바운드
+celery -A myproject worker --pool=threads --concurrency=20
+celery -A myproject worker --pool=solo                          # 디버그
+```
+
+- **prefork**: CPU 분리 + 안정성
+- **gevent**: greenlet, 수천 동시 I/O
+- **threads**: GIL 영향
+- **solo**: 단일 스레드 (디버그)
+
+## 모니터링: Flower
+
+```bash
+pip install flower
+celery -A myproject flower    # http://localhost:5555
+```
+
+활성 워커, 큐 길이, 태스크 통계 시각화.
+
+## Sentry, Prometheus 통합
+
+Celery 태스크 안의 예외도 Sentry로:
+
+```python
+import sentry_sdk
+sentry_sdk.init(dsn=..., integrations=[...])
+```
+
+`celery-prometheus-exporter`로 메트릭 수집.
+
+## 자주 보는 패턴
+
+### Django Signal에서 Celery
+
+```python
+@receiver(post_save, sender=Post)
+def reindex(sender, instance, **kwargs):
+    reindex_post.delay(instance.id)
+```
+
+Signal handler는 동기 빠른 처리만 → Celery로 위임.
+
+### 트랜잭션 안에서 호출
+
+```python
+from django.db import transaction
+
+def view(request):
+    post = Post.objects.create(...)
+    transaction.on_commit(lambda: process_image.delay(post.id))
+```
+
+트랜잭션 commit 후에 task 호출. 안 그러면 워커가 아직 commit 안 된 데이터 못 찾음.
+
+### 큰 작업 청크 분할
+
+```python
+@shared_task
+def process_chunk(start, end):
+    for item in Item.objects.filter(id__range=(start, end)):
+        process(item)
+
+def trigger_all():
+    total = Item.objects.count()
+    chunk_size = 1000
+    for start in range(0, total, chunk_size):
+        process_chunk.delay(start, start + chunk_size)
+```
+
+100만 행을 1000 → 1000개 워커 또는 직렬 처리.
+
+### Task lock (동일 작업 중복 방지)
+
+```python
+from django.core.cache import cache
+
+@shared_task(bind=True)
+def sync_external_data(self):
+    lock_id = "sync-lock"
+    if cache.add(lock_id, "1", timeout=600):    # 10분 lock
+        try:
+            do_sync()
+        finally:
+            cache.delete(lock_id)
+    else:
+        self.retry(countdown=30)
+```
+
+또는 `celery_once`, `redbeat` 같은 라이브러리.
+
+## 함정
+
+### 1. 큰 객체 인자
+
+```python
+process.delay(huge_queryset)    # serialize 안 됨, 메모리 폭발
+```
+
+인자는 작은 ID나 primitive. 워커가 다시 DB 조회.
+
+```python
+process.delay(post.id)    # 워커: Post.objects.get(id=post_id)
+```
+
+### 2. self.request 이용해 status update
+
+```python
+@shared_task(bind=True)
+def long_task(self):
+    for i in range(100):
+        self.update_state(state="PROGRESS", meta={"progress": i})
+        ...
+```
+
+클라이언트에서 polling으로 진행률 확인 가능.
+
+### 3. Celery 큐 broker로 사용
+
+Celery 자체 큐 외에 일반 Redis/RabbitMQ 큐를 동시 활용 가능. 혼동 주의.
+
+### 4. 디버깅 어려움
+
+워커가 다른 프로세스라 print/breakpoint 안 보임. `--pool=solo`로 동기 실행 또는 `eager mode`:
+
+```python
+# 테스트
+CELERY_TASK_ALWAYS_EAGER = True    # 즉시 동기 실행
+CELERY_TASK_EAGER_PROPAGATES = True
+```
+
+### 5. 메모리 누수
+
+worker가 장시간 실행 → 메모리 증가. `--max-tasks-per-child=1000`으로 주기적 재시작.
+
+## 대안: Django Q, RQ, Huey
+
+| 도구 | 특징 |
+|------|------|
+| Celery | 표준, 강력, 복잡 |
+| Django-Q2 | Django 통합, 간단 |
+| RQ | Redis 전용, 가벼움 |
+| Huey | SQLite/Redis, 작은 앱 |
+| Dramatiq | Celery 대안, 디자인 단순 |
+
+작은 앱은 RQ/Huey, 복잡한 워크플로는 Celery.
+
+## 참고
+
+- [Celery documentation](https://docs.celeryq.dev/)
+- [First steps with Django](https://docs.celeryq.dev/en/stable/django/first-steps-with-django.html)
+- [django-celery-beat](https://django-celery-beat.readthedocs.io/)
+- [Flower](https://flower.readthedocs.io/)
+- [django-q2](https://django-q2.readthedocs.io/)
+- [RQ](https://python-rq.org/)

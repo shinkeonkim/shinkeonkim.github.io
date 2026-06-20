@@ -1,0 +1,245 @@
+---
+title: "[Javascript] Error / try-catch"
+aliases: ["JS Error", "JS try catch", "JavaScript 에러", "custom error"]
+tags: [javascript, error, exception, fundamentals]
+updated: 2026-06-18
+---
+
+## 정의
+
+JS 의 에러 처리. **`throw`** 로 던지고 **`try/catch/finally`** 로 잡는다. 내장 Error 타입과 사용자 정의 Error.
+
+## throw / try / catch
+
+```javascript
+try {
+    throw new Error('Something bad');
+} catch (e) {
+    console.error(e.message);
+} finally {
+    cleanup();
+}
+```
+
+`finally` 는 에러 유무와 무관하게 실행.
+
+## 내장 Error 타입
+
+| 타입 | 의미 |
+|:---|:---|
+| `Error` | 기본 |
+| `TypeError` | 타입 불일치 (`null.foo`) |
+| `ReferenceError` | 선언 안 된 변수 |
+| `SyntaxError` | 구문 오류 |
+| `RangeError` | 범위 (`new Array(-1)`) |
+| `URIError` | URI 함수 |
+| `EvalError` | eval 관련 (사실상 deprecated) |
+| `AggregateError` | 여러 에러 묶음 (Promise.any) |
+
+## Error 객체의 속성
+
+```javascript
+const e = new Error('oops');
+e.message     // 'oops'
+e.name         // 'Error'
+e.stack        // 스택 트레이스
+```
+
+## 사용자 정의 Error
+
+```javascript
+class ValidationError extends Error {
+    constructor(field, message) {
+        super(message);
+        this.name = 'ValidationError';
+        this.field = field;
+    }
+}
+
+try {
+    throw new ValidationError('email', 'invalid format');
+} catch (e) {
+    if (e instanceof ValidationError) {
+        console.log(e.field, e.message);
+    }
+}
+```
+
+`super(message)` 로 부모 (`Error`) 의 `message` 설정. `name` 명시 권장.
+
+## 에러 체인 (cause, ES2022)
+
+```javascript
+try {
+    riskyOperation();
+} catch (originalError) {
+    throw new Error('High-level failure', { cause: originalError });
+}
+```
+
+`Error.cause` 로 원인 에러 보존. 디버깅에 매우 유용.
+
+```javascript
+try { ... } catch (e) {
+    console.error(e.message);
+    console.error(e.cause);   // 원인 에러
+}
+```
+
+## catch 의 인자 옵션 (ES2019+)
+
+```javascript
+try { ... } catch (e) { ... }
+try { ... } catch { ... }      // 인자 생략 가능 (ES2019)
+```
+
+에러 객체를 안 쓸 때 더 깔끔.
+
+## try-catch 의 한계
+
+### 비동기 에러
+
+```javascript
+try {
+    setTimeout(() => { throw new Error('lost'); }, 0);
+} catch (e) {
+    // 잡히지 않음!
+}
+```
+
+`setTimeout` 콜백은 다른 스택. try-catch 범위 밖.
+
+### Promise / async
+
+```javascript
+// promise
+fetch('/api').then(...).catch(e => handle(e));
+
+// async/await (가능!)
+try {
+    const r = await fetch('/api');
+    return await r.json();
+} catch (e) {
+    handle(e);
+}
+```
+
+`async/await` 안에서는 비동기도 try-catch 로 잡힌다.
+
+## global handler
+
+```javascript
+// 브라우저
+window.addEventListener('error', e => { ... });
+window.addEventListener('unhandledrejection', e => { ... });
+
+// Node.js
+process.on('uncaughtException', e => { ... });
+process.on('unhandledRejection', e => { ... });
+```
+
+처리 안 된 에러를 마지막에 잡는 안전망.
+
+## 자주 쓰는 패턴
+
+### 에러 타입별 분기
+
+```javascript
+try {
+    await api();
+} catch (e) {
+    if (e instanceof ValidationError) showFormError(e.field);
+    else if (e instanceof NetworkError) showRetry();
+    else throw e;        // 알 수 없는 에러는 위로 전달
+}
+```
+
+### finally 로 리소스 정리
+
+```javascript
+const conn = await openConnection();
+try {
+    await doWork(conn);
+} finally {
+    await conn.close();    // 에러 유무 무관 정리
+}
+```
+
+### sentinel pattern
+
+```javascript
+let result;
+try {
+    result = computeRisky();
+} catch {
+    result = DEFAULT;
+}
+```
+
+### Result&lt;T&gt; 패턴 (함수형)
+
+```javascript
+function safeDivide(a, b) {
+    if (b === 0) return { ok: false, error: 'div by zero' };
+    return { ok: true, value: a / b };
+}
+
+const r = safeDivide(10, 0);
+if (!r.ok) handle(r.error);
+else use(r.value);
+```
+
+throw 보다 명시적.
+
+## 함정
+
+### 1. catch 의 e 가 any
+
+```typescript
+try { ... } catch (e) {
+    // e 는 unknown (TypeScript 4.4+)
+    if (e instanceof Error) console.log(e.message);
+}
+```
+
+`throw` 가 무엇이든 던질 수 있어서 (`throw 'string'`, `throw 42`) 검사 필요.
+
+### 2. throw new Error vs throw '...'
+
+```javascript
+throw 'oops';                  // 문자열 (스택 없음)
+throw new Error('oops');       // ✓ 스택 트레이스 포함
+```
+
+항상 `new Error` 권장.
+
+### 3. async 함수 안의 throw
+
+```javascript
+async function foo() {
+    throw new Error('x');
+}
+// foo() 가 rejected Promise 반환
+foo().catch(handle);
+```
+
+`async` 함수의 throw 는 자동으로 rejection.
+
+### 4. finally 의 return
+
+```javascript
+function foo() {
+    try { return 1; }
+    finally { return 2; }
+}
+foo();    // 2 (finally 의 return 이 우선)
+```
+
+`finally` 에서 return / throw 하면 try 의 결과 덮어씀. 일반적으로 피한다.
+
+## 참고
+
+- [[JS Promise]]
+- [[JS async/await]]
+- [[JS Class]]
+- MDN, [Error](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error)

@@ -1,0 +1,352 @@
+---
+title: "[Spring] WebSocket과 STOMP"
+aliases: ["spring websocket", "spring stomp", "WebSocketHandler", "messaging", "spring sock-js"]
+tags: [spring, websocket, stomp, messaging, realtime]
+updated: 2026-06-20
+---
+
+## 정의
+
+Spring은 raw **WebSocket API**와 메시징 프로토콜 **STOMP** 둘 다 지원한다. STOMP는 publish/subscribe 기반 메시지 broker (`/topic`, `/queue`, `/user`)와 통합. 채팅, 실시간 알림, 협업 도구에 표준.
+
+## 의존성
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-websocket")
+```
+
+## Raw WebSocket
+
+### Handler
+
+```java
+@Component
+public class EchoHandler extends TextWebSocketHandler {
+
+    @Override
+    public void afterConnectionEstablished(WebSocketSession session) throws Exception {
+        session.sendMessage(new TextMessage("Connected"));
+    }
+
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        String payload = message.getPayload();
+        session.sendMessage(new TextMessage("Echo: " + payload));
+    }
+
+    @Override
+    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
+        log.info("Closed: {}", status);
+    }
+}
+```
+
+### 등록
+
+```java
+@Configuration
+@EnableWebSocket
+public class WebSocketConfig implements WebSocketConfigurer {
+
+    private final EchoHandler echoHandler;
+
+    @Override
+    public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
+        registry.addHandler(echoHandler, "/ws/echo")
+            .setAllowedOrigins("*");
+    }
+}
+```
+
+### 클라이언트
+
+```javascript
+const ws = new WebSocket("ws://localhost:8080/ws/echo");
+ws.onopen = () => ws.send("hello");
+ws.onmessage = (e) => console.log(e.data);
+```
+
+## STOMP (권장)
+
+### 활성화
+
+```java
+@Configuration
+@EnableWebSocketMessageBroker
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    @Override
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        registry.addEndpoint("/ws")
+            .setAllowedOriginPatterns("*")
+            .withSockJS();    // fallback for older browsers
+    }
+
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry config) {
+        config.enableSimpleBroker("/topic", "/queue");
+        config.setApplicationDestinationPrefixes("/app");
+        config.setUserDestinationPrefix("/user");
+    }
+}
+```
+
+- `/app/*`: 서버로 보내는 메시지 (controller가 처리)
+- `/topic/*`: broadcast (모든 구독자)
+- `/queue/*`: point-to-point
+- `/user/*`: 특정 사용자
+
+### Controller
+
+```java
+@Controller
+public class ChatController {
+
+    @MessageMapping("/chat.send/{roomId}")
+    @SendTo("/topic/chat.{roomId}")
+    public ChatMessage send(@DestinationVariable String roomId, ChatMessage message) {
+        message.setTimestamp(Instant.now());
+        return message;    // 모든 /topic/chat.{roomId} 구독자에 전송
+    }
+
+    @MessageMapping("/chat.join/{roomId}")
+    public void join(@DestinationVariable String roomId, Principal principal) {
+        log.info("{} joined room {}", principal.getName(), roomId);
+    }
+
+    // 특정 사용자에게 (errorChannel)
+    @MessageExceptionHandler
+    @SendToUser("/queue/errors")
+    public String handleException(Throwable ex) {
+        return ex.getMessage();
+    }
+}
+```
+
+### 클라이언트 (stomp.js)
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/stompjs@2/lib/stomp.min.js"></script>
+```
+
+```javascript
+const socket = new SockJS("/ws");
+const stompClient = Stomp.over(socket);
+
+stompClient.connect({}, () => {
+    // 구독
+    stompClient.subscribe("/topic/chat.room1", (message) => {
+        const msg = JSON.parse(message.body);
+        appendMessage(msg);
+    });
+
+    // 전송
+    stompClient.send("/app/chat.send/room1", {}, JSON.stringify({
+        from: "Alice",
+        content: "Hello!",
+    }));
+});
+```
+
+## 메시지를 서버에서 직접 전송
+
+```java
+@Service
+public class NotificationService {
+    private final SimpMessagingTemplate messagingTemplate;
+
+    public void notifyAll(String message) {
+        messagingTemplate.convertAndSend("/topic/notifications", message);
+    }
+
+    public void notifyUser(String username, String message) {
+        messagingTemplate.convertAndSendToUser(username, "/queue/notifications", message);
+    }
+}
+```
+
+스케줄러, 다른 컨트롤러 등에서 호출 가능.
+
+## 인증
+
+### 세션 기반
+
+`SecurityFilterChain`이 STOMP 엔드포인트도 인증. 연결 시 SecurityContext 그대로 전파.
+
+### Token (JWT 등)
+
+CONNECT frame에서 token 검증.
+
+```java
+@Component
+public class StompAuthChannelInterceptor implements ChannelInterceptor {
+
+    private final JwtService jwtService;
+
+    @Override
+    public Message<?> preSend(Message<?> message, MessageChannel channel) {
+        StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+
+        if (StompCommand.CONNECT.equals(accessor.getCommand())) {
+            String authHeader = accessor.getFirstNativeHeader("Authorization");
+            if (authHeader != null && authHeader.startsWith("Bearer ")) {
+                String token = authHeader.substring(7);
+                Authentication auth = jwtService.toAuthentication(token);
+                accessor.setUser(auth);
+            }
+        }
+        return message;
+    }
+}
+
+@Configuration
+@EnableWebSocketMessageBroker
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(stompAuthChannelInterceptor);
+    }
+}
+```
+
+## External broker (RabbitMQ, ActiveMQ)
+
+SimpleBroker는 in-memory. 여러 인스턴스 간 메시지 공유 못 함.
+
+```java
+@Override
+public void configureMessageBroker(MessageBrokerRegistry config) {
+    config.enableStompBrokerRelay("/topic", "/queue")
+        .setRelayHost("rabbitmq")
+        .setRelayPort(61613)
+        .setClientLogin("guest")
+        .setClientPasscode("guest");
+}
+```
+
+RabbitMQ STOMP plugin 또는 ActiveMQ 등으로 분산.
+
+## 자주 보는 패턴
+
+### 채팅방
+
+```java
+@MessageMapping("/chat.send/{roomId}")
+@SendTo("/topic/chat.{roomId}")
+public ChatMessage send(
+    @DestinationVariable String roomId,
+    ChatMessage message,
+    Principal principal
+) {
+    message.setSender(principal.getName());
+    message.setTimestamp(Instant.now());
+    chatRepository.save(message);
+    return message;
+}
+```
+
+### Presence (온라인 사용자)
+
+```java
+@Component
+public class PresenceTracker {
+    private final Set<String> online = ConcurrentHashMap.newKeySet();
+    private final SimpMessagingTemplate template;
+
+    @EventListener
+    public void onConnect(SessionConnectedEvent event) {
+        String user = event.getUser().getName();
+        online.add(user);
+        broadcast();
+    }
+
+    @EventListener
+    public void onDisconnect(SessionDisconnectEvent event) {
+        String user = event.getUser().getName();
+        online.remove(user);
+        broadcast();
+    }
+
+    private void broadcast() {
+        template.convertAndSend("/topic/presence", online);
+    }
+}
+```
+
+### 알림 push
+
+```java
+// 어디서나
+notificationService.notifyUser("alice", new Notification("새 댓글"));
+
+// 클라이언트는 /user/queue/notifications 구독
+stompClient.subscribe("/user/queue/notifications", ...);
+```
+
+## 함정
+
+### 1. 메시지 순서
+
+같은 세션 내에서만 보장. 다중 세션은 broker 의존.
+
+### 2. SimpleBroker 한계
+
+- in-memory만
+- 다중 인스턴스 X
+- 메시지 영속화 X
+
+프로덕션은 RabbitMQ/ActiveMQ.
+
+### 3. CORS / WebSocket
+
+```java
+registry.addEndpoint("/ws").setAllowedOriginPatterns("https://app.example.com");
+```
+
+origin 제한.
+
+### 4. 큰 메시지
+
+```yaml
+spring:
+  websocket:
+    max-text-message-buffer-size: 8192
+```
+
+기본 8KB. 큰 메시지는 fragmenting 필요.
+
+### 5. 인증 frame
+
+STOMP `CONNECT` frame에서 인증. 매 메시지마다 검사하면 비효율.
+
+## SSE 대안
+
+단방향 push만이면 Server-Sent Events가 단순.
+
+```java
+@GetMapping(value = "/notifications", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public SseEmitter notifications() {
+    SseEmitter emitter = new SseEmitter();
+    // ...
+    return emitter;
+}
+```
+
+WebFlux의 `Flux<ServerSentEvent>` 더 자연스러움.
+
+## 모니터링
+
+- WebSocket 연결 수
+- 메시지 throughput
+- 연결 끊김 비율
+
+Actuator metrics 자동 + 커스텀.
+
+## 참고
+
+- [Spring WebSocket](https://docs.spring.io/spring-framework/reference/web/websocket.html)
+- [STOMP protocol](https://stomp.github.io/)
+- [SockJS](https://github.com/sockjs/sockjs-client)
+- [STOMP over Spring](https://docs.spring.io/spring-framework/reference/web/websocket/stomp.html)

@@ -1,0 +1,295 @@
+---
+title: "[Django] Signals: 모델 이벤트 hook"
+aliases: ["django signal", "post_save", "pre_save", "signal receiver", "@receiver", "AppConfig.ready"]
+tags: [django, signal, event, hook]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django signal은 **발신자(sender)가 특정 이벤트를 알리면 등록된 수신자(receiver)들이 호출**되는 옵저버 패턴. 모델 저장/삭제, 요청 시작/종료, 마이그레이션 적용 등에 hook을 걸 수 있다. 결합을 줄이지만 흐름이 비명시적이라 남용은 디버깅 난이도를 키운다.
+
+## 빌트인 signal
+
+| 신호 | 발생 시점 |
+|------|----------|
+| `pre_save` | 모델 저장 전 |
+| `post_save` | 저장 후 |
+| `pre_delete` | 삭제 전 |
+| `post_delete` | 삭제 후 |
+| `m2m_changed` | M2M 관계 변경 |
+| `pre_migrate` / `post_migrate` | 마이그레이션 전후 |
+| `request_started` / `request_finished` | 요청 사이클 |
+| `got_request_exception` | 요청 처리 중 예외 |
+| `user_logged_in` / `user_logged_out` / `user_login_failed` | 인증 |
+| `setting_changed` | 테스트에서 settings 변경 |
+| `template_rendered` | 템플릿 렌더링 (테스트 한정) |
+
+## 기본 사용
+
+```python
+# blog/signals.py
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from .models import Post
+
+@receiver(post_save, sender=Post)
+def post_saved(sender, instance, created, **kwargs):
+    if created:
+        log.info(f"new post: {instance.title}")
+    else:
+        log.info(f"updated: {instance.title}")
+```
+
+`@receiver` 데코레이터로 연결. 또는 명시적:
+
+```python
+def my_handler(sender, instance, **kwargs): ...
+
+post_save.connect(my_handler, sender=Post)
+```
+
+해제:
+
+```python
+post_save.disconnect(my_handler, sender=Post)
+```
+
+## AppConfig.ready()에 등록
+
+signal이 로드되도록 앱 시작 시 import.
+
+```python
+# blog/apps.py
+from django.apps import AppConfig
+
+class BlogConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "blog"
+
+    def ready(self):
+        import blog.signals    # signal 등록
+```
+
+```python
+# blog/__init__.py
+default_app_config = "blog.apps.BlogConfig"     # 3.2 미만만 필요
+```
+
+`AppConfig.ready()`가 신호 import의 표준 위치.
+
+## post_save 시그니처
+
+```python
+@receiver(post_save, sender=Post)
+def handler(sender, instance, created, raw, using, update_fields, **kwargs):
+    # sender: 모델 클래스 (Post)
+    # instance: 저장된 인스턴스
+    # created: True면 새로 생성, False면 업데이트
+    # raw: loaddata 등 raw save 시 True
+    # using: DB alias
+    # update_fields: update_fields= 인자로 저장 시 set
+    ...
+```
+
+`raw=True`일 때 시그널 안에서 DB 접근하면 fixture 로드 깨질 수 있어 보통 early return:
+
+```python
+if raw:
+    return
+```
+
+## 자주 보는 패턴
+
+### Profile 자동 생성
+
+```python
+from django.contrib.auth import get_user_model
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from .models import Profile
+
+User = get_user_model()
+
+@receiver(post_save, sender=User)
+def create_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.create(user=instance)
+```
+
+### slug 자동 생성
+
+```python
+from django.utils.text import slugify
+
+@receiver(pre_save, sender=Post)
+def fill_slug(sender, instance, **kwargs):
+    if not instance.slug:
+        instance.slug = slugify(instance.title)
+```
+
+`save()` 오버라이드와 비교: signal은 외부에서 import만 하면 동작. 단 명시성이 떨어짐.
+
+### 캐시 무효화
+
+```python
+from django.core.cache import cache
+
+@receiver([post_save, post_delete], sender=Post)
+def invalidate_cache(sender, instance, **kwargs):
+    cache.delete(f"post:{instance.slug}")
+    cache.delete("post:latest")
+```
+
+### 검색 인덱스 갱신
+
+```python
+@receiver(post_save, sender=Post)
+def reindex_search(sender, instance, **kwargs):
+    if instance.is_published:
+        search_engine.index(instance)
+```
+
+비동기로 (Celery):
+
+```python
+@receiver(post_save, sender=Post)
+def reindex_search(sender, instance, **kwargs):
+    from .tasks import reindex_post
+    reindex_post.delay(instance.id)
+```
+
+### M2M 추적
+
+```python
+from django.db.models.signals import m2m_changed
+
+@receiver(m2m_changed, sender=Post.tags.through)
+def tags_changed(sender, instance, action, reverse, model, pk_set, **kwargs):
+    # action: 'pre_add', 'post_add', 'pre_remove', 'post_remove', 'pre_clear', 'post_clear'
+    if action == "post_add":
+        log.info(f"tags added to post {instance.id}: {pk_set}")
+```
+
+## 커스텀 signal
+
+```python
+# signals.py
+from django.dispatch import Signal
+
+order_completed = Signal()    # providing_args는 deprecated, 그냥 보내고 받으면 됨
+
+# 발신
+order_completed.send(sender=Order, instance=order, total=order.total)
+
+# 수신
+@receiver(order_completed)
+def send_confirmation_email(sender, instance, total, **kwargs):
+    send_mail(...)
+```
+
+특정 도메인 이벤트 (주문 완료, 결제 처리, 알림 발송 등)를 signal로 디커플링.
+
+## signal 등록 위치
+
+핸들러 함수는 어디에 둬도 OK지만 **반드시 import되어야** receiver가 등록된다.
+
+권장 구조:
+- `blog/signals.py`: 핸들러 함수
+- `blog/apps.py`의 `AppConfig.ready()`에서 `import blog.signals`
+
+## 함정
+
+### 1. signals.py를 import 안 함
+
+핸들러 코드가 있어도 import 안 되면 등록 안 됨. → `AppConfig.ready()`에서 명시.
+
+### 2. `update()`, `bulk_create()` 신호 안 발생
+
+```python
+Post.objects.filter(...).update(views=F("views") + 1)    # post_save 안 발생
+Post.objects.bulk_create([...])                           # 안 발생 (대부분 DB)
+```
+
+이런 우회 시 신호 의존 로직 깨짐. 명시적 처리 필요.
+
+### 3. signal 안에서 같은 모델 저장 → 무한 루프
+
+```python
+@receiver(post_save, sender=Post)
+def update_summary(sender, instance, **kwargs):
+    instance.summary = ...
+    instance.save()    # post_save 다시 호출! 무한 루프
+```
+
+해결:
+- `update_fields`로 분기
+- `pre_save`에서 처리 (save 전이라 추가 save 불필요)
+- 플래그/lock
+- queryset.update()로 시그널 우회
+
+### 4. signal로 인한 N+1
+
+```python
+@receiver(post_save, sender=Comment)
+def update_post_count(sender, instance, **kwargs):
+    instance.post.comment_count = instance.post.comments.count()
+    instance.post.save()
+```
+
+100개 comment bulk 처리 → 100번 post 업데이트. 배치 후 한 번에 처리하는 게 나음.
+
+### 5. 너무 많은 signal
+
+10+ signal이 한 모델 save에 걸려 있으면 디버깅·테스트 어려움. 명시적 메서드(`Post.publish()`)나 service layer가 더 추적 가능.
+
+## signal vs alternatives
+
+| 패턴 | 장점 | 단점 |
+|------|------|------|
+| signal | 디커플링 | 흐름 비명시 |
+| save() 오버라이드 | 명시적 | 모델 결합 |
+| service layer | 명시적, 테스트 쉬움 | 보일러플레이트 |
+| Celery task | 비동기, 격리 | 인프라 필요 |
+
+규칙: 핵심 비즈니스 로직은 service/모델 메서드. 부수효과(로깅, 알림, 캐시 무효화)는 signal 적합.
+
+## post_migrate 활용
+
+마이그레이션 후 데이터 초기화.
+
+```python
+from django.db.models.signals import post_migrate
+from django.dispatch import receiver
+
+@receiver(post_migrate)
+def create_default_groups(sender, **kwargs):
+    if sender.name != "myapp":
+        return
+    from django.contrib.auth.models import Group
+    for name in ["Editors", "Viewers"]:
+        Group.objects.get_or_create(name=name)
+```
+
+## 테스트 시 signal disable
+
+```python
+from django.test import TestCase
+from django.db.models.signals import post_save
+
+class MyTest(TestCase):
+    def setUp(self):
+        post_save.disconnect(my_handler, sender=Post)
+
+    def tearDown(self):
+        post_save.connect(my_handler, sender=Post)
+```
+
+또는 `factory_boy`의 `@factory.django.mute_signals(post_save)`.
+
+## 참고
+
+- [Signals documentation](https://docs.djangoproject.com/en/stable/topics/signals/)
+- [Signals reference](https://docs.djangoproject.com/en/stable/ref/signals/)
+- [AppConfig.ready()](https://docs.djangoproject.com/en/stable/ref/applications/#django.apps.AppConfig.ready)
+- [factory_boy mute_signals](https://factoryboy.readthedocs.io/en/stable/reference.html#django-mute-signals)

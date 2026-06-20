@@ -1,0 +1,423 @@
+---
+title: "[Django] DRF 개요: Serializer, ViewSet, Router"
+aliases: ["django rest framework", "DRF", "APIView", "ViewSet", "Serializer", "Router"]
+tags: [django, drf, api, rest]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Django REST Framework (DRF)**는 Django 위에 REST API 구축을 위한 사실상 표준 라이브러리. **Serializer**(데이터 변환·검증), **View/ViewSet**(엔드포인트), **Router**(URL 자동 생성), **Permission/Throttle/Filter** 시스템을 제공한다. OpenAPI 자동 생성도 가능.
+
+## 설치
+
+```bash
+pip install djangorestframework
+```
+
+```python
+INSTALLED_APPS = [
+    ...,
+    "rest_framework",
+]
+```
+
+## Serializer
+
+```python
+# blog/serializers.py
+from rest_framework import serializers
+from .models import Post
+
+class PostSerializer(serializers.ModelSerializer):
+    author = serializers.StringRelatedField(read_only=True)
+    tag_count = serializers.IntegerField(source="tags.count", read_only=True)
+
+    class Meta:
+        model = Post
+        fields = ["id", "title", "body", "author", "tag_count", "created_at"]
+        read_only_fields = ["created_at"]
+```
+
+직렬화:
+
+```python
+post = Post.objects.first()
+serializer = PostSerializer(post)
+serializer.data       # {"id": 1, "title": "...", ...}
+```
+
+역직렬화 + 검증 + 저장:
+
+```python
+serializer = PostSerializer(data=request.data)
+if serializer.is_valid():
+    post = serializer.save(author=request.user)
+else:
+    print(serializer.errors)
+```
+
+## 일반 Serializer (Form 비슷)
+
+```python
+class CommentSerializer(serializers.Serializer):
+    post_id = serializers.IntegerField()
+    body = serializers.CharField(max_length=500)
+
+    def validate_body(self, value):
+        if "스팸" in value:
+            raise serializers.ValidationError("부적절한 내용")
+        return value
+
+    def validate(self, data):
+        if not Post.objects.filter(id=data["post_id"]).exists():
+            raise serializers.ValidationError("존재하지 않는 글")
+        return data
+
+    def create(self, validated_data):
+        return Comment.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        instance.body = validated_data["body"]
+        instance.save()
+        return instance
+```
+
+ModelSerializer가 대부분 자동화하지만 일반 Serializer는 더 자유로움.
+
+## APIView (function-based 권장 안 함)
+
+```python
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+
+class PostListAPI(APIView):
+    def get(self, request):
+        posts = Post.objects.all()
+        serializer = PostSerializer(posts, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = PostSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        post = serializer.save(author=request.user)
+        return Response(PostSerializer(post).data, status=status.HTTP_201_CREATED)
+```
+
+## generic views
+
+```python
+from rest_framework import generics
+
+class PostListCreate(generics.ListCreateAPIView):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+
+class PostDetail(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+    lookup_field = "slug"
+```
+
+자주 쓰는 패턴 즉시 사용.
+
+## ViewSet
+
+```python
+from rest_framework import viewsets
+
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.select_related("author")
+    serializer_class = PostSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if q := self.request.query_params.get("q"):
+            qs = qs.filter(title__icontains=q)
+        return qs
+```
+
+CRUD 모두 한 클래스에. `ModelViewSet`은 list, retrieve, create, update, partial_update, destroy 액션 자동.
+
+## Router
+
+```python
+# urls.py
+from rest_framework.routers import DefaultRouter
+from .views import PostViewSet
+
+router = DefaultRouter()
+router.register("posts", PostViewSet, basename="post")
+
+urlpatterns = [
+    path("api/", include(router.urls)),
+]
+```
+
+자동 생성된 URL:
+
+```
+GET    /api/posts/         → list
+POST   /api/posts/         → create
+GET    /api/posts/{pk}/    → retrieve
+PUT    /api/posts/{pk}/    → update
+PATCH  /api/posts/{pk}/    → partial_update
+DELETE /api/posts/{pk}/    → destroy
+```
+
+## @action: 커스텀 액션
+
+```python
+from rest_framework.decorators import action
+
+class PostViewSet(ModelViewSet):
+    @action(detail=True, methods=["post"])
+    def publish(self, request, pk=None):
+        post = self.get_object()
+        post.is_published = True
+        post.save()
+        return Response({"status": "published"})
+
+    @action(detail=False, methods=["get"])
+    def featured(self, request):
+        qs = self.get_queryset().filter(is_featured=True)
+        page = self.paginate_queryset(qs)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+```
+
+URL: `POST /api/posts/{pk}/publish/`, `GET /api/posts/featured/`.
+
+## Permission
+
+```python
+# settings.py
+REST_FRAMEWORK = {
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
+
+# 또는 view 별
+class PostViewSet(ModelViewSet):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+```
+
+자주 쓰는 것:
+- `AllowAny`
+- `IsAuthenticated`
+- `IsAdminUser`
+- `IsAuthenticatedOrReadOnly`
+- 커스텀
+
+### 커스텀 권한
+
+```python
+from rest_framework import permissions
+
+class IsAuthorOrReadOnly(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.method in permissions.SAFE_METHODS or request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return obj.author == request.user
+```
+
+## Authentication
+
+```python
+# settings.py
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
+    ],
+}
+```
+
+- **SessionAuthentication**: Django 세션 (브라우저)
+- **BasicAuthentication**: HTTP Basic (디버그용)
+- **TokenAuthentication**: DB에 저장된 토큰
+- **JWTAuthentication** (simplejwt): stateless JWT
+
+### JWT 설정
+
+```bash
+pip install djangorestframework-simplejwt
+```
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ],
+}
+
+# urls.py
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+urlpatterns = [
+    path("api/token/", TokenObtainPairView.as_view()),
+    path("api/token/refresh/", TokenRefreshView.as_view()),
+]
+```
+
+## Pagination
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+}
+```
+
+자동 적용. 응답:
+
+```json
+{
+    "count": 100,
+    "next": "https://.../api/posts/?page=3",
+    "previous": "https://.../api/posts/?page=1",
+    "results": [...]
+}
+```
+
+다른 페이지네이션:
+- `LimitOffsetPagination`: `?limit=10&offset=20`
+- `CursorPagination`: 안정적 큰 데이터셋
+
+## Filter / Search / Ordering
+
+```bash
+pip install django-filter
+```
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ],
+}
+
+class PostViewSet(ModelViewSet):
+    filterset_fields = ["author", "is_published"]
+    search_fields = ["title", "body"]
+    ordering_fields = ["created_at", "views"]
+```
+
+쿼리:
+```
+GET /api/posts/?author=1&is_published=true
+GET /api/posts/?search=django
+GET /api/posts/?ordering=-views
+```
+
+## Throttle
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/day",
+        "user": "1000/day",
+    },
+}
+```
+
+레이트 리밋. Redis 백엔드 권장 (`django-throttle`).
+
+## OpenAPI / Swagger
+
+```bash
+pip install drf-spectacular
+```
+
+```python
+INSTALLED_APPS += ["drf_spectacular"]
+REST_FRAMEWORK["DEFAULT_SCHEMA_CLASS"] = "drf_spectacular.openapi.AutoSchema"
+
+# urls.py
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+
+urlpatterns += [
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger"),
+]
+```
+
+자동으로 OpenAPI 3 스펙 + Swagger UI 생성.
+
+## 함정
+
+### 1. ModelSerializer로 노출 위험
+
+```python
+class UserSerializer(ModelSerializer):
+    class Meta:
+        model = User
+        fields = "__all__"    # password 해시 노출!
+```
+
+`fields`/`exclude` 명시. password, 내부 필드 제외.
+
+### 2. N+1 in serializer
+
+```python
+class PostSerializer(ModelSerializer):
+    author_name = serializers.CharField(source="author.username")
+    # author 매번 조회 → N+1
+
+# ViewSet에서
+class PostViewSet(ModelViewSet):
+    queryset = Post.objects.select_related("author")    # 미리 JOIN
+```
+
+### 3. PUT vs PATCH
+
+- `PUT`: 전체 교체 (모든 필드 필요)
+- `PATCH`: 부분 업데이트 (`partial=True`)
+
+```python
+serializer = PostSerializer(post, data=request.data, partial=True)
+```
+
+`ModelViewSet`은 `partial_update` 액션이 자동 처리.
+
+### 4. validate_&lt;field&gt; vs validate
+
+- `validate_<field>`: 단일 필드
+- `validate`: 다중 필드 관계 (cleaned data 전체)
+
+### 5. Write/Read 분리
+
+```python
+class PostSerializer(ModelSerializer):
+    tags = serializers.PrimaryKeyRelatedField(many=True, queryset=Tag.objects.all())
+    tag_names = TagSerializer(many=True, source="tags", read_only=True)
+
+    class Meta:
+        model = Post
+        fields = ["id", "title", "tags", "tag_names"]
+```
+
+write는 ID로 받고 read는 nested로.
+
+## 참고
+
+- [Django REST Framework](https://www.django-rest-framework.org/)
+- [Serializers](https://www.django-rest-framework.org/api-guide/serializers/)
+- [ViewSets](https://www.django-rest-framework.org/api-guide/viewsets/)
+- [drf-spectacular](https://drf-spectacular.readthedocs.io/)
+- [Simple JWT](https://django-rest-framework-simplejwt.readthedocs.io/)
+- [django-filter](https://django-filter.readthedocs.io/)

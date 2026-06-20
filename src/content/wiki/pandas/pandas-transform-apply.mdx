@@ -1,0 +1,116 @@
+---
+title: "[Pandas] transform / apply"
+aliases: ["Pandas transform", "Pandas apply", "Pandas transform / apply", "groupby transform"]
+tags: [python, pandas, groupby, transform, apply]
+updated: 2026-06-18
+---
+
+## 정의
+
+| 메서드 | 입력 | 출력 | 용도 |
+|:---|:---|:---|:---|
+| **`.transform(fn)`** | 그룹 | **같은 shape** | 정규화, 보충 |
+| **`.apply(fn)`** | 그룹 | 임의 shape | 가장 유연, 가장 느림 |
+| **`.agg(fn)`** | 그룹 | 그룹당 1 row | 집계 |
+
+## transform, 같은 shape
+
+각 그룹에 함수를 적용해도 결과가 **원본 DataFrame 과 같은 행 수**. 그룹별 정규화에 적합.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+df = pd.DataFrame({
+    'team': ['A','A','A','B','B'],
+    'score': [80, 90, 100, 60, 80],
+})
+df['team_mean'] = df.groupby('team')['score'].transform('mean')
+df['team_z'] = df.groupby('team')['score'].transform(lambda s: (s - s.mean()) / s.std())
+print(df)`}
+  output={`  team  score   team_mean    team_z
+0    A     80   90.000000 -1.000000
+1    A     90   90.000000  0.000000
+2    A    100   90.000000  1.000000
+3    B     60   70.000000 -0.707107
+4    B     80   70.000000  0.707107`}
+/>
+
+| team | score | team_mean | team_z |
+|---|---|---|---|
+| A | 80 | 90.0 | -1.0 |
+| A | 90 | 90.0 | 0.0 |
+| A | 100 | 90.0 | 1.0 |
+| B | 60 | 70.0 | -0.707 |
+| B | 80 | 70.0 | 0.707 |
+
+각 행에 **그 행이 속한 그룹의 평균** 이 채워졌다. 핵심 패턴.
+
+## 자주 쓰는 transform 예
+
+```python
+# 그룹별 평균으로 NaN 채우기
+df['salary'] = df.groupby('dept')['salary'].transform(lambda s: s.fillna(s.mean()))
+
+# 그룹별 max 대비 비율
+df['pct_of_max'] = df['sales'] / df.groupby('region')['sales'].transform('max')
+
+# 그룹 내 순위
+df['rank_in_team'] = df.groupby('team')['score'].rank(ascending=False)
+```
+
+## apply, 가장 유연
+
+`.apply` 는 각 그룹에 **임의의 함수** 를 적용. 결과 shape 는 함수가 결정.
+
+```python
+def top3_with_total(g):
+    return g.nlargest(3, 'score').assign(total=g['score'].sum())
+
+df.groupby('team').apply(top3_with_total)
+```
+
+### apply 의 단점
+
+- **느리다** (Python 함수 호출 오버헤드)
+- 결과 타입 추론이 까다로움 (warn 자주 발생)
+- 같은 효과를 `agg` / `transform` 으로 표현 가능하면 그것이 더 빠름
+
+## 언제 무엇을 쓸까
+
+| 시나리오 | 권장 |
+|:---|:---|
+| 그룹별 평균/합계 | **`agg`** |
+| 결과를 원본 행에 매핑 | **`transform`** |
+| 그룹별 정렬, 상위 N | **`groupby + sort + head`** |
+| 임의 복합 로직 | `apply` (마지막 수단) |
+
+## 벡터 연산 우선
+
+```python
+# ❌ apply 로 행마다 처리
+df['bmi'] = df.apply(lambda r: r['weight'] / (r['height']/100)**2, axis=1)
+
+# ✓ 벡터 연산
+df['bmi'] = df['weight'] / (df['height']/100)**2
+```
+
+벡터 연산이 종종 100배 이상 빠르다.
+
+## transform 의 제약
+
+- 함수가 **같은 길이 결과** 를 반환해야 함
+- 그룹별 단일 값 (예: mean) → 자동 broadcast
+- 길이 불일치 → ValueError
+
+```python
+df.groupby('x').transform(lambda s: s.head(2))   # ❌ 그룹마다 다른 길이
+df.groupby('x').apply(lambda s: s.head(2))       # ✓ apply 가 적절
+```
+
+## 참고
+
+- [[Pandas groupby]]
+- [[Pandas agg]]
+- [[Pandas pivot_table]]
+- 공식 문서, [transform](https://pandas.pydata.org/docs/reference/api/pandas.core.groupby.DataFrameGroupBy.transform.html), [apply](https://pandas.pydata.org/docs/reference/api/pandas.core.groupby.DataFrameGroupBy.apply.html)

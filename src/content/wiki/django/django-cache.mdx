@@ -1,0 +1,325 @@
+---
+title: "[Django] Caching: per-site, per-view, low-level"
+aliases: ["django cache", "cache_page", "Redis cache", "Memcached", "cache.get", "vary_on_cookie"]
+tags: [django, cache, redis, memcached, performance]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django 캐싱은 **데이터/페이지 재생성 비용 회피**의 핵심. 4단계 그래뉴얼리티 제공: site-wide → per-view → template fragment → low-level. Redis, Memcached, DB, 로컬 메모리, 파일 시스템 등 백엔드 선택.
+
+## 캐시 백엔드 설정
+
+```python
+# settings.py
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": "redis://127.0.0.1:6379/1",
+    }
+}
+```
+
+빌트인 백엔드:
+
+| BACKEND | 용도 |
+|---------|------|
+| `redis.RedisCache` (4.0+) | 프로덕션 표준 |
+| `memcached.PyMemcacheCache` | 프로덕션 표준 |
+| `db.DatabaseCache` | DB 활용 (간단하지만 느림) |
+| `locmem.LocMemCache` | 프로세스 로컬 (기본) |
+| `filebased.FileBasedCache` | 파일 시스템 |
+| `dummy.DummyCache` | 캐시 안 함 (개발) |
+
+여러 캐시 동시 설정 가능:
+
+```python
+CACHES = {
+    "default": {"BACKEND": "...Redis...", "LOCATION": "redis://..."},
+    "sessions": {"BACKEND": "...Redis...", "LOCATION": "redis://..."},
+    "fast": {"BACKEND": "...LocMem..."},
+}
+
+cache = caches["sessions"]
+```
+
+## low-level cache API
+
+```python
+from django.core.cache import cache
+
+cache.set("key", "value", timeout=300)    # 5분 (기본 300)
+cache.set("key", "value", timeout=None)    # 영구
+cache.get("key")                            # None if 없음
+cache.get("key", default="fallback")
+cache.add("key", "value")                   # 이미 있으면 무시
+cache.get_or_set("key", lambda: expensive())
+cache.delete("key")
+cache.clear()                                # 전체 (위험)
+
+# 원자적 증감
+cache.incr("counter")
+cache.decr("counter")
+
+# 다중 키
+cache.set_many({"a": 1, "b": 2})
+cache.get_many(["a", "b"])
+cache.delete_many(["a", "b"])
+```
+
+## per-view cache
+
+```python
+from django.views.decorators.cache import cache_page
+
+@cache_page(60 * 15)    # 15분
+def my_view(request):
+    return render(request, "...")
+
+# URL에서
+from django.urls import path
+urlpatterns = [
+    path("posts/", cache_page(60 * 5)(post_list)),
+]
+```
+
+요청 URL + 쿼리스트링이 캐시 키. 사용자별로 다른 응답엔 부적합 (모두에게 같은 응답).
+
+`vary_on_cookie` / `vary_on_headers`:
+
+```python
+from django.views.decorators.vary import vary_on_cookie, vary_on_headers
+
+@cache_page(60 * 15)
+@vary_on_cookie    # 쿠키에 따라 다른 캐시 (로그인 등)
+def my_view(request):
+    ...
+
+@vary_on_headers("Accept-Language")
+def view(request):
+    ...
+```
+
+## per-site cache (모든 페이지)
+
+```python
+MIDDLEWARE = [
+    "django.middleware.cache.UpdateCacheMiddleware",    # 가장 먼저
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.cache.FetchFromCacheMiddleware",  # 가장 나중
+    ...
+]
+
+CACHE_MIDDLEWARE_SECONDS = 600
+CACHE_MIDDLEWARE_KEY_PREFIX = ""
+CACHE_MIDDLEWARE_ALIAS = "default"
+```
+
+전체 사이트가 익명 사용자에게 같은 응답이면 OK. 거의 안 씀.
+
+## template fragment cache
+
+```html
+{% load cache %}
+
+{% cache 600 sidebar request.user.id %}
+    ... 비싼 sidebar 렌더링 ...
+{% endcache %}
+```
+
+vary 키를 인자로 추가. 600초.
+
+```html
+{% cache 600 sidebar request.user.id LANGUAGE_CODE %}
+```
+
+## QuerySet cache
+
+```python
+def get_top_posts():
+    key = "top_posts"
+    posts = cache.get(key)
+    if posts is None:
+        posts = list(Post.objects.order_by("-views")[:10])
+        cache.set(key, posts, 300)
+    return posts
+
+# 또는 get_or_set
+def get_top_posts():
+    return cache.get_or_set("top_posts", lambda: list(Post.objects.order_by("-views")[:10]), 300)
+```
+
+ORM 결과를 list로 변환해야 pickle 가능.
+
+## 캐시 무효화
+
+캐싱의 진짜 어려움은 무효화.
+
+### signal 기반
+
+```python
+@receiver([post_save, post_delete], sender=Post)
+def invalidate(sender, instance, **kwargs):
+    cache.delete(f"post:{instance.slug}")
+    cache.delete("top_posts")
+```
+
+### versioned key
+
+```python
+def get_post(slug):
+    version = cache.get(f"post:{slug}:version", 0)
+    return cache.get_or_set(
+        f"post:{slug}:v{version}",
+        lambda: Post.objects.get(slug=slug),
+    )
+
+@receiver(post_save, sender=Post)
+def bump_version(sender, instance, **kwargs):
+    cache.incr(f"post:{instance.slug}:version", initial=1)
+```
+
+이전 버전은 TTL로 자연 만료.
+
+### tag/group invalidation
+
+`django-cachalot` 또는 `django-cache-utils` 같은 라이브러리.
+
+## Redis 직접 사용 (고급)
+
+Django cache API는 추상화라 Redis 특화 기능(Sorted Set, Pub/Sub, Stream) 못 씀. 필요 시 redis-py 직접.
+
+```python
+import redis
+
+r = redis.from_url(settings.REDIS_URL)
+r.zadd("leaderboard", {user_id: score})
+r.zrevrange("leaderboard", 0, 10, withscores=True)
+```
+
+## Session backend로 cache
+
+```python
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+SESSION_CACHE_ALIAS = "default"
+```
+
+세션을 Redis에 저장. 빠르나 evict 시 로그아웃 위험 → cached_db (DB 백업).
+
+## 함정
+
+### 1. cache.set 후 즉시 get → None
+
+```python
+cache.set("k", "v", 0)    # timeout 0이면 즉시 만료 (Memcached 일부 버전)
+cache.get("k")             # None
+```
+
+timeout=0의 의미가 백엔드마다 다름. 명시적 양수.
+
+### 2. cache.clear()
+
+모든 키 삭제. 다른 앱과 백엔드 공유 시 위험. 키 prefix 명확히.
+
+```python
+CACHES = {"default": {..., "KEY_PREFIX": "myapp:"}}
+```
+
+### 3. cache thunder herd
+
+캐시 만료 순간 동시 다수 요청이 DB로 → 폭주.
+
+해결:
+- 미리 갱신 (TTL 도달 전)
+- lock 기반 단일 갱신
+- Stale-while-revalidate 패턴
+
+### 4. 큰 객체 캐싱
+
+```python
+cache.set("queryset", list(Post.objects.all()), 300)    # 10만 개면 메모리 폭발
+```
+
+크기 제한.
+
+### 5. pickle 안 됨
+
+```python
+cache.set("func", lambda x: x)    # PicklingError
+```
+
+함수, 클래스 인스턴스 일부는 캐시 불가.
+
+### 6. cache stampede with `get_or_set`
+
+```python
+cache.get_or_set("k", expensive)    # 만료 직후 동시 호출 → 모두 expensive 호출
+```
+
+`add` + lock으로 보호.
+
+## 자주 보는 패턴
+
+### conditional view cache
+
+```python
+from django.views.decorators.cache import cache_page
+from django.views.decorators.vary import vary_on_cookie
+
+@cache_page(60 * 5)
+@vary_on_cookie
+def article_detail(request, slug):
+    ...
+```
+
+### template caching for partials
+
+```html
+{% cache 600 post_card post.id post.updated_at %}
+    {# post 카드 (updated_at 변경 시 자동 무효화) #}
+{% endcache %}
+```
+
+vary 키에 `updated_at` 포함 → 모델 저장 시 새 키, 옛 키는 자연 만료.
+
+### Cache layer 추상
+
+```python
+def cached(key_fn, ttl=300):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = key_fn(*args, **kwargs)
+            value = cache.get(key)
+            if value is None:
+                value = fn(*args, **kwargs)
+                cache.set(key, value, ttl)
+            return value
+        return wrapper
+    return decorator
+
+@cached(lambda slug: f"post:{slug}")
+def get_post(slug):
+    return Post.objects.get(slug=slug)
+```
+
+직접 만들기보다 `django-cacheops`, `django-cachalot` 등 검토.
+
+## 모니터링
+
+- 캐시 히트율 (메트릭)
+- 캐시 키 분포 (`redis-cli --bigkeys`)
+- TTL 분포
+- 메모리 사용량
+
+`django-cache-memoize`, Sentry, Datadog 등.
+
+## 참고
+
+- [Django cache framework](https://docs.djangoproject.com/en/stable/topics/cache/)
+- [Cache backends](https://docs.djangoproject.com/en/stable/topics/cache/#setting-up-the-cache)
+- [django-redis](https://github.com/jazzband/django-redis) (4.0 이전 자주 사용)
+- [django-cacheops](https://github.com/Suor/django-cacheops)
+- [django-cachalot](https://django-cachalot.readthedocs.io/)
+- [Redis caching strategies](https://redis.io/docs/manual/eviction/)

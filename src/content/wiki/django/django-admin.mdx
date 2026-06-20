@@ -1,0 +1,383 @@
+---
+title: "[Django] Admin: 자동 생성 관리자 페이지"
+aliases: ["django admin", "django admin site", "ModelAdmin", "admin register", "django admin customization"]
+tags: [django, admin, ui]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django Admin은 **모델 등록만으로 CRUD UI 자동 생성**하는 내장 백오피스. 내부 운영 도구, 콘텐츠 관리(CMS) 등에 강력. 권한 시스템 통합. Rails에는 표준에 없는 차별점.
+
+## 활성화
+
+`django.contrib.admin`이 기본 INSTALLED_APPS에 있고 URL conf에도 기본 포함.
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    ...
+]
+
+# urls.py
+from django.contrib import admin
+urlpatterns = [
+    path("admin/", admin.site.urls),
+]
+```
+
+```bash
+python manage.py createsuperuser
+python manage.py runserver
+# /admin/ 접속
+```
+
+## 모델 등록
+
+```python
+# blog/admin.py
+from django.contrib import admin
+from .models import Post, Tag
+
+admin.site.register(Post)
+admin.site.register(Tag)
+```
+
+또는 데코레이터:
+
+```python
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    list_display = ["title", "author", "created_at", "is_published"]
+```
+
+## ModelAdmin 핵심 옵션
+
+```python
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    # 목록 페이지
+    list_display = ["title", "author", "created_at", "is_published", "view_count"]
+    list_display_links = ["title"]
+    list_filter = ["is_published", "created_at", "author"]
+    search_fields = ["title", "body"]
+    list_select_related = ["author"]      # N+1 회피
+    list_per_page = 50
+    date_hierarchy = "created_at"          # 날짜 드릴다운
+    ordering = ["-created_at"]
+    list_editable = ["is_published"]       # 인라인 편집
+
+    # 상세 페이지
+    fields = ["title", "slug", "body", "author"]      # 또는
+    fieldsets = [
+        ("기본", {"fields": ["title", "slug", "body"]}),
+        ("메타", {"fields": ["author", "is_published"], "classes": ["collapse"]}),
+    ]
+    readonly_fields = ["created_at", "updated_at"]
+    prepopulated_fields = {"slug": ["title"]}    # JS로 자동 채움
+    autocomplete_fields = ["author"]              # 검색형 select
+    raw_id_fields = ["category"]                  # ID 입력 + popup
+    filter_horizontal = ["tags"]                  # M2M 위젯
+
+    # 커스텀 메서드
+    def view_count(self, obj):
+        return obj.views
+    view_count.short_description = "조회수"
+    view_count.admin_order_field = "views"
+```
+
+`list_display`에 함수/메서드도 가능.
+
+## 커스텀 액션
+
+목록 페이지의 체크박스 + 액션 드롭다운.
+
+```python
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    actions = ["make_published", "make_draft"]
+
+    @admin.action(description="선택 항목 발행")
+    def make_published(self, request, queryset):
+        updated = queryset.update(is_published=True)
+        self.message_user(request, f"{updated}건 발행됨")
+
+    @admin.action(description="선택 항목 임시저장으로")
+    def make_draft(self, request, queryset):
+        queryset.update(is_published=False)
+```
+
+## InlineModelAdmin: 자식 편집
+
+부모-자식 관계를 한 화면에서.
+
+```python
+class CommentInline(admin.TabularInline):    # 또는 StackedInline
+    model = Comment
+    extra = 1
+    fields = ["author", "body", "approved"]
+    readonly_fields = ["created_at"]
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    inlines = [CommentInline]
+```
+
+`TabularInline`은 표 형식, `StackedInline`은 박스 형식.
+
+## Form 커스터마이즈
+
+```python
+from django import forms
+
+class PostAdminForm(forms.ModelForm):
+    class Meta:
+        model = Post
+        fields = "__all__"
+        widgets = {
+            "body": forms.Textarea(attrs={"rows": 20, "cols": 80}),
+        }
+
+    def clean_title(self):
+        title = self.cleaned_data["title"]
+        if "스팸" in title:
+            raise forms.ValidationError("부적절한 단어 포함")
+        return title
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    form = PostAdminForm
+```
+
+## save_model: 저장 전후 hook
+
+```python
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    def save_model(self, request, obj, form, change):
+        if not change:    # 새로 생성
+            obj.author = request.user
+        super().save_model(request, obj, form, change)
+
+    def delete_model(self, request, obj):
+        log.info(f"Deleting {obj}")
+        super().delete_model(request, obj)
+```
+
+## get_queryset: 권한별 필터링
+
+```python
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if request.user.is_superuser:
+            return qs
+        return qs.filter(author=request.user)
+```
+
+일반 staff는 자기 글만 보이게.
+
+## 권한
+
+Django 기본 권한: `app.add_model`, `change_model`, `delete_model`, `view_model`.
+
+```python
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        if obj is None:
+            return True
+        return obj.author == request.user or request.user.is_superuser
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.is_superuser
+```
+
+## 검색 with autocomplete
+
+```python
+@admin.register(Author)
+class AuthorAdmin(admin.ModelAdmin):
+    search_fields = ["name", "email"]    # autocomplete의 검색 필드
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    autocomplete_fields = ["author"]      # Author admin이 search_fields 정의해야
+```
+
+대량 데이터에서 모든 옵션 로드(`Select`)는 느림. autocomplete로 검색형 selection.
+
+## list_display 추가 표시
+
+```python
+from django.utils.html import format_html
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    list_display = ["title", "colored_status", "preview"]
+
+    @admin.display(description="상태", ordering="is_published")
+    def colored_status(self, obj):
+        color = "green" if obj.is_published else "gray"
+        return format_html('<span style="color:{}">{}</span>',
+                            color, "발행" if obj.is_published else "임시저장")
+
+    def preview(self, obj):
+        return obj.body[:50] + ("..." if len(obj.body) > 50 else "")
+```
+
+## 커스텀 admin site
+
+여러 사이트, 다른 URL/디자인.
+
+```python
+# myadmin.py
+from django.contrib import admin
+
+class MyAdminSite(admin.AdminSite):
+    site_header = "My Blog 관리"
+    site_title = "My Blog Admin"
+    index_title = "환영합니다"
+
+    def get_app_list(self, request, app_label=None):
+        # 앱 순서 커스텀
+        return super().get_app_list(request, app_label)
+
+my_admin = MyAdminSite(name="myadmin")
+my_admin.register(Post, PostAdmin)
+
+# urls.py
+path("myadmin/", my_admin.urls),
+```
+
+기본 `admin.site` 외부에서.
+
+## 함정
+
+### 1. list_display + 외래키 → N+1
+
+```python
+list_display = ["title", "author"]    # author 조회마다 SQL
+
+# 해결
+list_select_related = ["author"]
+```
+
+자동 안 됨. 명시 필요.
+
+### 2. 큰 ForeignKey 드롭다운
+
+```python
+author = ForeignKey(User, ...)
+# admin에서 select에 모든 사용자 → 10만 명이면 멈춤
+
+# 해결
+raw_id_fields = ["author"]            # ID + popup
+# 또는
+autocomplete_fields = ["author"]      # 검색형 (User admin이 search_fields 필요)
+```
+
+### 3. list_editable + ordering 충돌
+
+```python
+list_editable = ["title"]
+list_display = ["title", "author"]    # 첫 항목이 list_display_links와 같으면 안 됨
+```
+
+list_editable 항목은 link 아닌 위치에 둘 것.
+
+### 4. fieldsets vs fields 동시 사용
+
+둘 중 하나만. fieldsets가 더 유연.
+
+### 5. 관리자 화면을 일반 사용자에게 노출 X
+
+관리자는 내부 도구. 일반 사용자용 대시보드는 별도 view로 작성.
+
+## 자주 보는 패턴
+
+### 다중 DB / Cross-app
+
+```python
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    def get_queryset(self, request):
+        return super().get_queryset(request).using("orders_db")
+```
+
+`MULTI_DB`에서 활용.
+
+### 다국어 admin
+
+```python
+# settings.py
+LANGUAGE_CODE = "ko-kr"
+USE_I18N = True
+
+# models.py
+class Post(models.Model):
+    class Meta:
+        verbose_name = "포스트"
+        verbose_name_plural = "포스트들"
+```
+
+verbose_name이 admin 표시 이름.
+
+### 대용량 export
+
+기본 admin은 export 안 함. `django-import-export` 라이브러리:
+
+```bash
+pip install django-import-export
+```
+
+```python
+from import_export.admin import ImportExportModelAdmin
+
+@admin.register(Post)
+class PostAdmin(ImportExportModelAdmin):
+    ...
+```
+
+CSV/Excel import/export 자동.
+
+### Admin 액션으로 비동기 작업
+
+```python
+@admin.action(description="발송 큐 등록")
+def queue_send(self, request, queryset):
+    for obj in queryset:
+        send_email.delay(obj.id)    # Celery
+    self.message_user(request, f"{queryset.count()}건 큐 등록")
+```
+
+대량 작업은 Celery로 위임. admin은 큐만.
+
+## Django Admin vs Custom Dashboard
+
+| | Django Admin | 커스텀 대시보드 |
+|---|--------------|----------------|
+| 빠른 구축 | O | X |
+| UI/UX 자유도 | 낮음 | 높음 |
+| 권한 시스템 | 내장 | 직접 구현 |
+| 외부 사용자 노출 | X (내부용) | O |
+
+내부 운영 + 빠른 구축 → Admin. 사용자 대상 → 직접 작성.
+
+## 참고
+
+- [Django admin documentation](https://docs.djangoproject.com/en/stable/ref/contrib/admin/)
+- [ModelAdmin options](https://docs.djangoproject.com/en/stable/ref/contrib/admin/#modeladmin-options)
+- [Admin actions](https://docs.djangoproject.com/en/stable/ref/contrib/admin/actions/)
+- [django-import-export](https://django-import-export.readthedocs.io/)
+- [django-admin-interface](https://github.com/fabiocaccamo/django-admin-interface) - 테마

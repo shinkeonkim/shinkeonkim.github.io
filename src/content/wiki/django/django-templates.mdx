@@ -1,0 +1,399 @@
+---
+title: "[Django] Template 언어: 태그, 필터, 상속"
+aliases: ["django template", "django template language", "DTL", "template tag", "template filter", "include extends"]
+tags: [django, template, dtl, jinja2]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django Template Language (DTL)는 **HTML과 Python 사이의 안전한 표현 언어**. 임의 Python 실행 차단(보안), `{{ }}`로 변수, `{% %}`로 태그, `|`로 필터.
+
+대안: Jinja2 (더 빠르고 강력). 둘 다 동시 사용도 가능.
+
+## 기본 문법
+
+```html
+{# 주석 #}
+
+{{ variable }}                 {# 변수 출력 (HTML escape 자동) #}
+{{ variable|filter }}           {# 필터 적용 #}
+{{ obj.attr }}                  {# 속성 #}
+{{ list.0 }}                    {# 인덱스 #}
+{{ dict.key }}                  {# 딕셔너리 키 #}
+
+{% tag %}                       {# 태그 #}
+{% if condition %}...{% endif %}
+{% for item in items %}...{% endfor %}
+```
+
+## 변수 평가 순서
+
+`{{ obj.x }}`는 다음 순서로 시도:
+1. 딕셔너리 룩업: `obj["x"]`
+2. 속성 접근: `obj.x`
+3. 인덱스: `obj[int("x")]`
+4. 호출 (인자 없이): `obj.x()`
+
+위 모두 실패 시 `TEMPLATE_STRING_IF_INVALID` (기본 빈 문자열).
+
+## 자주 쓰는 태그
+
+### if/elif/else
+
+```html
+{% if user.is_authenticated %}
+    Hello, {{ user.username }}
+{% elif user.is_anonymous %}
+    Please log in
+{% endif %}
+
+{% if posts %}...{% endif %}
+{% if a and b or c %}...{% endif %}
+{% if "django" in tags %}...{% endif %}
+{% if x == 0 %}...{% endif %}
+```
+
+### for
+
+```html
+{% for post in posts %}
+    {{ forloop.counter }}: {{ post.title }}
+    {% if forloop.first %}첫 글{% endif %}
+    {% if forloop.last %}마지막{% endif %}
+{% empty %}
+    No posts.
+{% endfor %}
+```
+
+`forloop` 변수:
+- `forloop.counter`: 1부터
+- `forloop.counter0`: 0부터
+- `forloop.first`, `.last`: bool
+- `forloop.parentloop`: 중첩 시 부모
+
+### url
+
+```html
+<a href="{% url 'blog:post-detail' slug=post.slug %}">읽기</a>
+<a href="{% url 'blog:post-list' %}">목록</a>
+```
+
+reverse() 호출과 동등. 하드코딩 금지.
+
+### static
+
+```html
+{% load static %}
+<img src="{% static 'images/logo.png' %}">
+<link rel="stylesheet" href="{% static 'css/main.css' %}">
+```
+
+`STATIC_URL` 기준 경로 생성. `{% load static %}`이 페이지 상단에 필요.
+
+### csrf_token
+
+```html
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">저장</button>
+</form>
+```
+
+POST 폼엔 필수. 누락 시 403 Forbidden.
+
+### with
+
+지역 변수 할당.
+
+```html
+{% with total=business.employees.count %}
+    {{ total }} 명
+{% endwith %}
+
+{% with author=post.author %}
+    {{ author.username }} ({{ author.email }})
+{% endwith %}
+```
+
+비싼 메서드 호출을 캐싱.
+
+### include
+
+```html
+{% include "partials/header.html" %}
+{% include "partials/post_card.html" with post=p %}
+{% include "partials/comment.html" with comment=c only %}
+```
+
+`only`는 현재 컨텍스트 전달 X.
+
+### block, extends (상속)
+
+```html
+{# templates/base.html #}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{% block title %}My Site{% endblock %}</title>
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <header>{% include "partials/nav.html" %}</header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    <footer>{% block footer %}© 2026{% endblock %}</footer>
+</body>
+</html>
+```
+
+```html
+{# templates/blog/post_list.html #}
+{% extends "base.html" %}
+
+{% block title %}Posts | {{ block.super }}{% endblock %}
+
+{% block content %}
+    {% for post in posts %}
+        <h2>{{ post.title }}</h2>
+    {% endfor %}
+{% endblock %}
+```
+
+`{{ block.super }}`로 부모 block 내용 포함.
+
+## 필터
+
+| 필터 | 동작 |
+|------|------|
+| `default:"-"` | None/falsy면 대체 |
+| `default_if_none:"-"` | None이면 대체 |
+| `length` | 길이 |
+| `upper` / `lower` / `title` | 케이스 |
+| `truncatechars:30` | 문자 자르기 + "..." |
+| `truncatewords:10` | 단어 자르기 |
+| `safe` | HTML 이스케이프 안 함 (위험!) |
+| `escape` | HTML 이스케이프 (기본 적용됨) |
+| `linebreaks` | \n → `<p>`/`<br>` |
+| `linebreaksbr` | \n → `<br>` |
+| `urlize` | URL을 링크로 |
+| `date:"Y-m-d"` | 날짜 포맷 |
+| `time:"H:i"` | 시간 포맷 |
+| `timesince` | "3시간 전" |
+| `floatformat:2` | 소수점 |
+| `pluralize` | 복수형 (예: n개에 따라 단수/복수) |
+| `join:", "` | 리스트 결합 |
+| `slice:":5"` | 슬라이스 |
+| `add:1` | 더하기 |
+| `divisibleby:3` | 나누어떨어지는지 |
+| `striptags` | HTML 태그 제거 |
+
+체이닝:
+
+```html
+{{ post.body|striptags|truncatewords:30|safe }}
+```
+
+## 커스텀 태그/필터
+
+```python
+# blog/templatetags/blog_tags.py (반드시 templatetags 디렉터리)
+from django import template
+
+register = template.Library()
+
+@register.filter
+def reading_time(text):
+    words = len(text.split())
+    minutes = max(1, round(words / 200))
+    return f"{minutes}분"
+
+@register.simple_tag
+def get_recent_posts(count=5):
+    from blog.models import Post
+    return Post.objects.filter(is_published=True)[:count]
+
+@register.inclusion_tag("blog/recent_posts.html")
+def recent_posts(count=5):
+    from blog.models import Post
+    return {"posts": Post.objects.filter(is_published=True)[:count]}
+```
+
+사용:
+
+```html
+{% load blog_tags %}
+
+{{ post.body|reading_time }}
+
+{% get_recent_posts 3 as recent %}
+{% for p in recent %}...{% endfor %}
+
+{% recent_posts 5 %}
+```
+
+## 컨텍스트 프로세서
+
+모든 템플릿에 자동 주입되는 변수.
+
+```python
+# settings.py
+TEMPLATES = [{
+    ...,
+    "OPTIONS": {
+        "context_processors": [
+            "django.template.context_processors.debug",
+            "django.template.context_processors.request",
+            "django.contrib.auth.context_processors.auth",
+            "django.contrib.messages.context_processors.messages",
+            "myapp.context_processors.site_info",     # 커스텀
+        ],
+    },
+}]
+
+# myapp/context_processors.py
+def site_info(request):
+    return {
+        "SITE_NAME": "My Blog",
+        "current_year": timezone.now().year,
+    }
+```
+
+이제 모든 템플릿에서 `{{ SITE_NAME }}` 사용.
+
+## 자동 escape
+
+```html
+{{ user_input }}          {# 자동 escape (안전) #}
+{{ user_input|safe }}     {# escape 안 함 (위험) #}
+
+{% autoescape off %}
+    {{ html_content }}    {# 블록 내 escape 끔 #}
+{% endautoescape %}
+```
+
+`safe` 또는 `autoescape off`는 신뢰할 수 있는 HTML에만. 사용자 입력엔 절대 X.
+
+`mark_safe()` (Python):
+
+```python
+from django.utils.safestring import mark_safe
+html = mark_safe(f"<b>{escape(user_input)}</b>")
+```
+
+## Jinja2 사용
+
+```python
+# settings.py
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.jinja2.Jinja2",
+        "DIRS": [BASE_DIR / "jinja2"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "environment": "myapp.jinja2.environment",
+        },
+    },
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        ...
+    },
+]
+```
+
+Jinja2가 더 빠름 (10x+). 표현력 풍부 (Python 함수 호출, 산술 등). Django 특정 기능 일부 차이.
+
+## 자주 보는 패턴
+
+### Pagination
+
+```html
+{% if is_paginated %}
+    <nav>
+        {% if page_obj.has_previous %}
+            <a href="?page=1">«</a>
+            <a href="?page={{ page_obj.previous_page_number }}">이전</a>
+        {% endif %}
+
+        <span>{{ page_obj.number }} / {{ page_obj.paginator.num_pages }}</span>
+
+        {% if page_obj.has_next %}
+            <a href="?page={{ page_obj.next_page_number }}">다음</a>
+            <a href="?page={{ page_obj.paginator.num_pages }}">»</a>
+        {% endif %}
+    </nav>
+{% endif %}
+```
+
+ListView의 `paginate_by` 설정 시 자동 제공.
+
+### 폼 렌더링
+
+```html
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}            {# <p> 래퍼 #}
+    {# {{ form.as_table }} {{ form.as_ul }} 도 가능 #}
+    <button type="submit">저장</button>
+</form>
+
+{# 더 세밀히 #}
+<form method="post">
+    {% csrf_token %}
+    {% for field in form %}
+        <div>
+            {{ field.label_tag }}
+            {{ field }}
+            {{ field.errors }}
+            {% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}
+        </div>
+    {% endfor %}
+</form>
+```
+
+## 함정
+
+### 1. 임포트 없이 메서드 호출
+
+```html
+{{ post.get_absolute_url }}    {# 호출 (인자 없는) 자동 #}
+{{ posts.count }}              {# 동일 #}
+```
+
+DTL은 인자 있는 메서드 호출 X. 인자 필요하면 커스텀 태그 또는 view에서 전달.
+
+### 2. 컨텍스트 변수 없을 때
+
+```html
+{{ missing_var }}    {# 조용히 빈 문자열 (TEMPLATE_STRING_IF_INVALID 기본) #}
+```
+
+오타가 조용히 통과. `TEMPLATE_STRING_IF_INVALID = "MISSING: %s"` 같이 디버그 모드에서 강조 권장.
+
+### 3. forloop.last + comma
+
+```html
+{% for tag in post.tags.all %}
+    {{ tag.name }}{% if not forloop.last %}, {% endif %}
+{% endfor %}
+```
+
+또는 필터:
+
+```html
+{{ post.tags.all|join:", " }}
+```
+
+### 4. block 이름 충돌
+
+여러 단계 상속에서 같은 block 이름. `{{ block.super }}`로 부모 추가.
+
+## 참고
+
+- [Django Template Language](https://docs.djangoproject.com/en/stable/ref/templates/language/)
+- [Built-in template tags and filters](https://docs.djangoproject.com/en/stable/ref/templates/builtins/)
+- [Custom template tags](https://docs.djangoproject.com/en/stable/howto/custom-template-tags/)
+- [Jinja2 backend](https://docs.djangoproject.com/en/stable/topics/templates/#jinja2)

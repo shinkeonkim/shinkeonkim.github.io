@@ -1,0 +1,222 @@
+---
+title: "[Javascript] Proxy / Reflect"
+aliases: ["JS Proxy", "JS Reflect", "meta-programming"]
+tags: [javascript, proxy, reflect, meta-programming]
+updated: 2026-06-18
+---
+
+## 정의
+
+- **`Proxy`** : 객체의 기본 동작 (get, set, delete 등) 을 **가로채는 (intercept)** 객체
+- **`Reflect`** : Proxy 의 기본 동작을 호출하는 표준 API
+
+메타 프로그래밍, 데이터 바인딩, validation 등에 활용. Vue 3 의 reactive 시스템이 대표.
+
+## Proxy 기본
+
+```javascript
+const target = { a: 1 };
+const handler = {
+    get(obj, prop) {
+        console.log('get', prop);
+        return obj[prop];
+    },
+    set(obj, prop, value) {
+        console.log('set', prop, value);
+        obj[prop] = value;
+        return true;
+    }
+};
+
+const p = new Proxy(target, handler);
+p.a;          // 'get a' → 1
+p.b = 99;     // 'set b 99'
+```
+
+## 13 가지 trap
+
+| trap | 메서드 | 발동 |
+|:---|:---|:---|
+| `get(target, prop, receiver)` | property 읽기 | `obj.x` |
+| `set(target, prop, value)` | property 쓰기 | `obj.x = v` |
+| `has(target, prop)` | in | `'x' in obj` |
+| `deleteProperty(target, prop)` | delete | `delete obj.x` |
+| `apply(target, thisArg, args)` | 함수 호출 | `fn()` |
+| `construct(target, args)` | new | `new Fn()` |
+| `getPrototypeOf` | Object.getPrototypeOf | |
+| `setPrototypeOf` | Object.setPrototypeOf | |
+| `isExtensible` | Object.isExtensible | |
+| `preventExtensions` | Object.preventExtensions | |
+| `getOwnPropertyDescriptor` | | |
+| `defineProperty` | | |
+| `ownKeys` | Object.keys 등 | |
+
+## 자주 쓰는 패턴
+
+### 1. validation
+
+```javascript
+const user = new Proxy({}, {
+    set(obj, prop, value) {
+        if (prop === 'age' && typeof value !== 'number') {
+            throw new TypeError('age must be number');
+        }
+        obj[prop] = value;
+        return true;
+    }
+});
+
+user.age = 30;       // OK
+user.age = '30';     // ❌ TypeError
+```
+
+### 2. default value
+
+```javascript
+const safe = new Proxy({}, {
+    get(obj, prop) {
+        return prop in obj ? obj[prop] : 'default';
+    }
+});
+
+safe.foo;    // 'default' (not undefined)
+```
+
+### 3. negative array index
+
+```javascript
+function negativeArray(arr) {
+    return new Proxy(arr, {
+        get(target, prop) {
+            const i = Number(prop);
+            if (!Number.isNaN(i) && i < 0) {
+                return target[target.length + i];
+            }
+            return target[prop];
+        }
+    });
+}
+
+const a = negativeArray([1, 2, 3, 4]);
+a[-1];    // 4
+a[-2];    // 3
+```
+
+### 4. logging / observability
+
+```javascript
+function observe(obj, onChange) {
+    return new Proxy(obj, {
+        set(target, prop, value) {
+            const old = target[prop];
+            target[prop] = value;
+            onChange(prop, old, value);
+            return true;
+        }
+    });
+}
+
+const tracked = observe({ x: 1 }, (k, o, n) => console.log(`${k}: ${o} → ${n}`));
+tracked.x = 99;    // 'x: 1 → 99'
+```
+
+### 5. reactive (Vue 3 스타일)
+
+```javascript
+const dependencies = new Map();
+
+function reactive(target) {
+    return new Proxy(target, {
+        get(obj, prop) {
+            track(obj, prop);
+            return obj[prop];
+        },
+        set(obj, prop, value) {
+            obj[prop] = value;
+            trigger(obj, prop);
+            return true;
+        }
+    });
+}
+```
+
+## Reflect
+
+Proxy 의 기본 동작을 호출하는 표준 API. `obj[prop]` 보다 더 정확하고 일관된 형태.
+
+```javascript
+Reflect.get(obj, prop)              // = obj[prop]
+Reflect.set(obj, prop, value)       // = obj[prop] = value
+Reflect.has(obj, prop)              // = prop in obj
+Reflect.deleteProperty(obj, prop)   // = delete obj[prop]
+Reflect.apply(fn, thisArg, args)    // = fn.apply(thisArg, args)
+Reflect.construct(Fn, args)         // = new Fn(...args)
+Reflect.ownKeys(obj)                 // = Object.getOwnPropertyNames + Symbols
+```
+
+### Proxy 안에서 Reflect
+
+```javascript
+new Proxy(target, {
+    get(obj, prop, receiver) {
+        // obj[prop] 보다 Reflect.get 권장
+        return Reflect.get(obj, prop, receiver);
+    }
+});
+```
+
+`receiver` 가 getter/setter 의 `this` 를 올바르게 전달. 직접 `obj[prop]` 하면 getter 의 `this` 가 잘못될 수 있음.
+
+## 함정
+
+### 1. Proxy 는 원본을 대체하지 않음
+
+```javascript
+const target = { x: 1 };
+const p = new Proxy(target, {});
+target.x = 99;
+p.x;        // 99 (원본 통과)
+
+p.x = 100;
+target.x;   // 100 (Proxy 가 target 수정)
+```
+
+대상 객체를 가지고 있으면 Proxy 우회 가능.
+
+### 2. 일부 trap 의 반환값 규칙
+
+```javascript
+new Proxy(target, {
+    set(obj, prop, value) {
+        // 반드시 true / false 반환 (strict 에서 false 면 TypeError)
+        return true;
+    }
+});
+```
+
+set, deleteProperty, defineProperty 등은 boolean 반환 필수.
+
+### 3. 성능
+
+```javascript
+const p = new Proxy(obj, handler);
+p.x;    // 일반 obj.x 보다 수배 느림
+```
+
+hot path 에는 부적합.
+
+### 4. private field 접근 불가
+
+```javascript
+class Foo {
+    #secret = 42;
+}
+const p = new Proxy(new Foo(), {});
+p.#secret;    // ❌ TypeError (Proxy 가 receiver)
+```
+
+## 참고
+
+- [[JS Object]]
+- [[JS Class]]
+- MDN, [Proxy](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy), [Reflect](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Reflect)

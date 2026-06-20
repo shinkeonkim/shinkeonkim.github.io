@@ -1,0 +1,364 @@
+---
+title: "[Spring] Security: Filter Chain, JWT, OAuth2"
+aliases: ["spring security", "SecurityFilterChain", "JWT", "OAuth2", "PasswordEncoder", "authentication"]
+tags: [spring, security, authentication, authorization, jwt]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Security**는 인증·인가의 사실상 표준. 서블릿 필터 체인 위에 다양한 인증/권한 처리를 모듈식으로. 6.0+ 부터 Lambda DSL 표준, `SecurityFilterChain` Bean 방식.
+
+## 설정 (6.x)
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-security")
+```
+
+기본 자동 구성: 모든 endpoint 인증 필요, 폼 로그인, 임의 생성 비밀번호 출력.
+
+```java
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/", "/public/**", "/login", "/signup").permitAll()
+                .requestMatchers("/admin/**").hasRole("ADMIN")
+                .requestMatchers(HttpMethod.POST, "/api/**").authenticated()
+                .anyRequest().authenticated()
+            )
+            .formLogin(form -> form
+                .loginPage("/login")
+                .defaultSuccessUrl("/")
+                .permitAll()
+            )
+            .logout(logout -> logout
+                .logoutSuccessUrl("/")
+                .permitAll()
+            )
+            .csrf(csrf -> csrf.ignoringRequestMatchers("/api/**"))
+            .headers(headers -> headers
+                .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'self'"))
+                .frameOptions(frame -> frame.deny())
+            );
+        return http.build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+## UserDetailsService
+
+DB에서 사용자 로드.
+
+```java
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+    private final UserRepository userRepository;
+
+    @Override
+    public UserDetails loadUserByUsername(String username) {
+        User user = userRepository.findByEmail(username)
+            .orElseThrow(() -> new UsernameNotFoundException(username));
+
+        return org.springframework.security.core.userdetails.User
+            .withUsername(user.getEmail())
+            .password(user.getPassword())
+            .roles(user.getRole().name())
+            .build();
+    }
+}
+```
+
+## PasswordEncoder
+
+```java
+@Bean
+public PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();    // 권장
+    // return new DelegatingPasswordEncoder("bcrypt", Map.of(...));
+}
+
+// 저장
+String encoded = passwordEncoder.encode(plainPassword);
+
+// 검증 (Spring Security가 자동)
+passwordEncoder.matches(plain, encoded);
+```
+
+BCrypt, SCrypt, Argon2 (argon2 의존성 추가 시). 절대 평문 저장 X.
+
+## CSRF
+
+기본 활성. POST/PUT/DELETE에 CSRF 토큰 필요. SPA/API에서 사용 안 하면 disable:
+
+```java
+.csrf(csrf -> csrf.disable())    // JWT 등 stateless
+.csrf(csrf -> csrf.ignoringRequestMatchers("/api/**"))
+```
+
+## CORS
+
+```java
+@Bean
+public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration config = new CorsConfiguration();
+    config.setAllowedOrigins(List.of("https://app.example.com"));
+    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+    config.setAllowedHeaders(List.of("*"));
+    config.setAllowCredentials(true);
+
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/api/**", config);
+    return source;
+}
+
+// SecurityFilterChain
+.cors(cors -> cors.configurationSource(corsConfigurationSource()))
+```
+
+## JWT 인증
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
+```
+
+```yaml
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://auth.example.com/realms/myrealm
+          # 또는
+          jwk-set-uri: https://auth.example.com/.well-known/jwks.json
+```
+
+```java
+.oauth2ResourceServer(oauth2 -> oauth2
+    .jwt(jwt -> jwt
+        .jwtAuthenticationConverter(jwtAuthenticationConverter())
+    )
+)
+```
+
+Token에서 권한 추출:
+
+```java
+JwtAuthenticationConverter jwtAuthenticationConverter() {
+    JwtGrantedAuthoritiesConverter authoritiesConverter = new JwtGrantedAuthoritiesConverter();
+    authoritiesConverter.setAuthoritiesClaimName("roles");
+    authoritiesConverter.setAuthorityPrefix("ROLE_");
+
+    JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+    converter.setJwtAuthenticationConverter(authoritiesConverter);
+    return converter;
+}
+```
+
+## 자체 JWT 발급/검증 (간단)
+
+복잡한 OAuth 없이 자체 JWT.
+
+```kotlin
+implementation("com.auth0:java-jwt:4.4.0")
+```
+
+```java
+public class JwtService {
+    private final Algorithm algorithm;
+
+    public String issue(String userId) {
+        return JWT.create()
+            .withSubject(userId)
+            .withIssuedAt(Instant.now())
+            .withExpiresAt(Instant.now().plus(1, ChronoUnit.HOURS))
+            .sign(algorithm);
+    }
+
+    public DecodedJWT verify(String token) {
+        return JWT.require(algorithm).build().verify(token);
+    }
+}
+```
+
+`OncePerRequestFilter` 커스텀 필터:
+
+```java
+public class JwtAuthFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain) {
+        String auth = req.getHeader("Authorization");
+        if (auth != null && auth.startsWith("Bearer ")) {
+            try {
+                DecodedJWT decoded = jwtService.verify(auth.substring(7));
+                Authentication authentication = new UsernamePasswordAuthenticationToken(
+                    decoded.getSubject(), null, List.of(new SimpleGrantedAuthority("ROLE_USER")));
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            } catch (JWTVerificationException e) {
+                // ignore, 인증 안 됨 상태
+            }
+        }
+        chain.doFilter(req, res);
+    }
+}
+```
+
+```java
+.addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+```
+
+## Method security
+
+```java
+@EnableMethodSecurity
+
+@PreAuthorize("hasRole('ADMIN')")
+public void deleteUser(Long id) { ... }
+
+@PreAuthorize("hasAuthority('SCOPE_users:write')")
+public User create(...) { ... }
+
+@PreAuthorize("#userId == authentication.principal.id")
+public User get(Long userId) { ... }
+
+@PostAuthorize("returnObject.owner == authentication.name")
+public Document load(Long id) { ... }
+
+@Secured("ROLE_ADMIN")    // 옛 어노테이션
+public void admin() { ... }
+```
+
+SpEL로 복잡한 조건 표현 가능. 비즈니스 로직 메서드에 인가 표현.
+
+## OAuth2 Login (소셜)
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-oauth2-client")
+```
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            scope: openid, profile, email
+          github:
+            client-id: ${GITHUB_CLIENT_ID}
+            client-secret: ${GITHUB_CLIENT_SECRET}
+```
+
+```java
+.oauth2Login(oauth2 -> oauth2
+    .loginPage("/login")
+    .defaultSuccessUrl("/")
+    .userInfoEndpoint(userInfo -> userInfo.userService(customUserService()))
+)
+```
+
+`/oauth2/authorization/google`로 리다이렉트 → Google 로그인 → 콜백 → Spring이 사용자 정보 가져옴.
+
+## 현재 사용자 조회
+
+```java
+@GetMapping("/me")
+public User me(@AuthenticationPrincipal UserDetails user) {
+    return userService.findByEmail(user.getUsername());
+}
+
+// 또는
+@GetMapping("/me")
+public User me(Authentication auth) {
+    return userService.findByEmail(auth.getName());
+}
+
+// SecurityContextHolder
+Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+```
+
+## Rate limiting
+
+표준은 없음. `bucket4j` 또는 API Gateway / nginx.
+
+## 헤더 보안
+
+```java
+.headers(headers -> headers
+    .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'self'"))
+    .httpStrictTransportSecurity(hsts -> hsts.maxAgeInSeconds(31536000).includeSubDomains(true))
+    .frameOptions(frame -> frame.sameOrigin())
+    .referrerPolicy(ref -> ref.policy(ReferrerPolicy.NO_REFERRER))
+)
+```
+
+## 함정
+
+### 1. 비밀번호 평문 저장
+
+DB에 평문 → 절대 X. `PasswordEncoder` 필수.
+
+### 2. 토큰 만료 처리
+
+JWT는 stateless라 서버에서 폐기 어려움. blacklist + 짧은 만료 + refresh token.
+
+### 3. CSRF disable의 함정
+
+```java
+.csrf(csrf -> csrf.disable())
+```
+
+세션 기반인데 CSRF 끄면 위험. JWT/API 전용일 때만.
+
+### 4. PreAuthorize SpEL 에러
+
+```java
+@PreAuthorize("#user.id == authentication.principal.id")
+public void update(User user) { ... }
+```
+
+런타임에 평가. 표현식 오류 발견 어려움. 테스트 필수.
+
+### 5. Filter 순서
+
+커스텀 필터의 위치를 명시. 잘못된 순서는 인증 우회 가능.
+
+```java
+.addFilterBefore(myFilter, UsernamePasswordAuthenticationFilter.class)
+.addFilterAfter(...)
+```
+
+## 보안 체크리스트
+
+- HTTPS 강제
+- HSTS
+- CSRF (또는 stateless + 안전 헤더)
+- CORS allowedOrigins 명시
+- 비밀번호 BCrypt/Argon2
+- JWT 짧은 만료
+- Method security
+- SQL injection: Spring Data parameterized
+- XSS: Thymeleaf 자동 escape
+- 의존성 보안 업데이트
+- 로깅에 비밀 정보 X
+- 에러 응답에 stacktrace X
+
+## 참고
+
+- [Spring Security Documentation](https://docs.spring.io/spring-security/reference/)
+- [SecurityFilterChain](https://docs.spring.io/spring-security/reference/servlet/configuration/java.html)
+- [Method Security](https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html)
+- [OAuth2 Resource Server](https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html)
+- [OAuth2 Login](https://docs.spring.io/spring-security/reference/servlet/oauth2/login/index.html)

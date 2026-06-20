@@ -1,0 +1,416 @@
+---
+title: "[Django] 테스트: TestCase, Client, factory_boy"
+aliases: ["django test", "TestCase", "django.test.Client", "pytest-django", "factory_boy", "RequestFactory"]
+tags: [django, testing, pytest, factory]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django는 표준 라이브러리 `unittest` 기반 TestCase를 제공한다. 트랜잭션 격리, fixtures, test client, DB 셋업 자동화. 실무는 `pytest-django` + `factory_boy`가 사실상 표준.
+
+## 기본 TestCase
+
+```python
+# blog/tests/test_models.py
+from django.test import TestCase
+from blog.models import Post
+
+class PostTestCase(TestCase):
+    def setUp(self):
+        self.post = Post.objects.create(title="Hello", body="...")
+
+    def test_str(self):
+        self.assertEqual(str(self.post), "Hello")
+
+    def test_is_published_default(self):
+        self.assertFalse(self.post.is_published)
+```
+
+```bash
+python manage.py test
+python manage.py test blog
+python manage.py test blog.tests.test_models
+python manage.py test blog.tests.test_models.PostTestCase.test_str
+python manage.py test --parallel 4    # 병렬
+python manage.py test --keepdb         # DB 재생성 안 함 (빠름)
+```
+
+`TestCase`는 매 메서드를 트랜잭션 안에서 실행 후 rollback → 격리.
+
+## 4가지 TestCase
+
+| 클래스 | 격리 | 용도 |
+|--------|------|------|
+| `SimpleTestCase` | DB 사용 X | DB 안 건드리는 단위 테스트 |
+| `TransactionTestCase` | DB truncate | 트랜잭션 자체 테스트 |
+| `TestCase` | 트랜잭션 rollback | 일반 (가장 빠름) |
+| `LiveServerTestCase` | 실제 서버 띄움 | Selenium 등 E2E |
+
+## Client (통합 테스트)
+
+```python
+from django.test import TestCase, Client
+from django.urls import reverse
+
+class PostViewTest(TestCase):
+    def test_list(self):
+        response = self.client.get(reverse("post-list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "blog/post_list.html")
+
+    def test_create_authenticated(self):
+        user = User.objects.create_user("alice", password="pw")
+        self.client.login(username="alice", password="pw")
+        response = self.client.post(
+            reverse("post-create"),
+            data={"title": "T", "body": "B"},
+        )
+        self.assertEqual(response.status_code, 302)    # redirect
+        self.assertTrue(Post.objects.filter(title="T").exists())
+```
+
+`Client`는 가상 브라우저. URL 호출, 세션 유지, 쿠키, follow 등.
+
+## 자주 쓰는 assertion
+
+```python
+self.assertEqual(a, b)
+self.assertTrue(x)
+self.assertFalse(x)
+self.assertIn(item, container)
+self.assertIsNone(x)
+self.assertIsInstance(obj, Cls)
+self.assertRaises(ExceptionType)
+
+# Django 전용
+self.assertContains(response, "expected string")
+self.assertNotContains(response, "...")
+self.assertTemplateUsed(response, "template.html")
+self.assertRedirects(response, "/expected-url/")
+self.assertFormError(form, "field", "error message")
+self.assertQuerySetEqual(qs, expected, transform=str)
+```
+
+## RequestFactory (단위 테스트)
+
+view를 직접 호출 (라우팅 거치지 않음).
+
+```python
+from django.test import RequestFactory
+
+class ViewTest(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_get(self):
+        request = self.factory.get("/posts/")
+        request.user = AnonymousUser()
+        response = post_list(request)
+        self.assertEqual(response.status_code, 200)
+```
+
+미들웨어 거치지 않으므로 더 빠르고 격리. CBV는:
+
+```python
+view = PostListView.as_view()
+response = view(request)
+```
+
+## DB fixtures
+
+```python
+class PostTest(TestCase):
+    fixtures = ["test_posts.json"]    # blog/fixtures/test_posts.json
+
+    def test_count(self):
+        self.assertEqual(Post.objects.count(), 5)
+```
+
+```bash
+python manage.py dumpdata blog.Post > fixtures/test_posts.json
+```
+
+큰 데이터에 적합. 작은 데이터는 setUp에서 생성하는 게 명시적.
+
+## factory_boy (권장)
+
+```bash
+pip install factory-boy
+```
+
+```python
+# blog/tests/factories.py
+import factory
+from blog.models import Post, User
+
+class UserFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = User
+
+    username = factory.Sequence(lambda n: f"user{n}")
+    email = factory.LazyAttribute(lambda o: f"{o.username}@example.com")
+    password = factory.PostGenerationMethodCall("set_password", "secret")
+
+class PostFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Post
+
+    title = factory.Faker("sentence")
+    body = factory.Faker("paragraph")
+    author = factory.SubFactory(UserFactory)
+    is_published = True
+
+# 사용
+post = PostFactory()
+posts = PostFactory.create_batch(10)
+PostFactory(title="Custom", author__username="alice")
+```
+
+훨씬 깔끔하고 유지보수 쉬움. M2M, 관련 객체 자동 생성.
+
+## pytest-django
+
+```bash
+pip install pytest pytest-django
+```
+
+```ini
+# pytest.ini
+[pytest]
+DJANGO_SETTINGS_MODULE = myproject.settings.test
+python_files = test_*.py *_test.py
+```
+
+```python
+# blog/tests/test_post.py
+import pytest
+
+@pytest.mark.django_db
+def test_post_create():
+    post = Post.objects.create(title="T", body="B")
+    assert post.title == "T"
+
+@pytest.fixture
+def post():
+    return Post.objects.create(title="Hello")
+
+@pytest.mark.django_db
+def test_str(post):
+    assert str(post) == "Hello"
+```
+
+`pytest-django`가 제공:
+- `@pytest.mark.django_db`: DB 접근 허용
+- `client` fixture: Django Client
+- `admin_client`: 자동 로그인된 admin
+- `db`: DB 마커
+- `transactional_db`: TransactionTestCase 동등
+- `settings`: settings override
+
+```python
+def test_view(client, db):
+    response = client.get("/posts/")
+    assert response.status_code == 200
+```
+
+## API 테스트 (DRF)
+
+```python
+from rest_framework.test import APITestCase, APIClient
+
+class PostAPITest(APITestCase):
+    def test_create(self):
+        user = User.objects.create_user("alice")
+        self.client.force_authenticate(user)
+        response = self.client.post("/api/posts/", {"title": "T", "body": "B"}, format="json")
+        self.assertEqual(response.status_code, 201)
+```
+
+`format="json"` 명시 (기본은 multipart).
+
+## Mock
+
+```python
+from unittest.mock import patch
+
+class EmailTest(TestCase):
+    @patch("blog.views.send_mail")
+    def test_email_sent(self, mock_send):
+        self.client.post("/contact/", {...})
+        mock_send.assert_called_once()
+```
+
+`pytest-mock`은 `mocker` fixture로 더 깔끔.
+
+## 시간 mock
+
+```bash
+pip install freezegun
+```
+
+```python
+from freezegun import freeze_time
+
+@freeze_time("2026-06-20")
+def test_today(self):
+    self.assertEqual(date.today(), date(2026, 6, 20))
+```
+
+## settings override
+
+```python
+from django.test import override_settings
+
+@override_settings(DEBUG=True)
+class MyTest(TestCase):
+    ...
+
+# 메서드 단위
+class MyTest(TestCase):
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_email(self):
+        ...
+```
+
+## 트랜잭션 / signal 테스트
+
+`TestCase`는 트랜잭션 내에서 실행 → `on_commit` 콜백은 안 실행.
+
+```python
+class MyTest(TransactionTestCase):    # 또는 TestCase 안에서
+    def test_commit(self):
+        ...
+```
+
+또는 `@pytest.mark.django_db(transaction=True)`.
+
+## 커버리지
+
+```bash
+pip install coverage
+
+coverage run --source=blog manage.py test
+coverage report -m
+coverage html    # htmlcov/index.html
+```
+
+`.coveragerc`로 exclude 패턴.
+
+## CI 통합
+
+```yaml
+# .github/workflows/test.yml
+- name: Test
+  run: |
+    python manage.py test --parallel auto --keepdb
+```
+
+또는 pytest:
+
+```yaml
+- name: pytest
+  run: pytest -n auto    # pytest-xdist
+```
+
+## 자주 보는 패턴
+
+### Service layer 단위 테스트
+
+```python
+class PostService:
+    @staticmethod
+    def publish(post, user):
+        if post.author != user:
+            raise PermissionError
+        post.is_published = True
+        post.save()
+
+# 테스트
+def test_publish_by_author(self):
+    post = PostFactory(author=self.user, is_published=False)
+    PostService.publish(post, self.user)
+    post.refresh_from_db()
+    self.assertTrue(post.is_published)
+
+def test_publish_by_other(self):
+    post = PostFactory(is_published=False)
+    with self.assertRaises(PermissionError):
+        PostService.publish(post, self.user)
+```
+
+비즈니스 로직을 view 밖으로 → 테스트 쉬움.
+
+### 셀레늄 / Playwright E2E
+
+```python
+from django.contrib.staticfiles.testing import StaticLiveServerTestCase
+
+class FrontTest(StaticLiveServerTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.browser = webdriver.Chrome()
+
+    def test_home(self):
+        self.browser.get(self.live_server_url)
+        ...
+```
+
+Playwright는 더 빠르고 안정적.
+
+## 함정
+
+### 1. setUp vs setUpTestData
+
+```python
+class MyTest(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("alice")    # 클래스 1회
+
+    def setUp(self):
+        self.client.force_login(self.user)    # 메서드마다
+```
+
+`setUpTestData`는 클래스 단위 1회, 모든 테스트에서 같은 객체 공유 → 변경하면 위험. 읽기 전용으로만.
+
+### 2. assertNumQueries
+
+```python
+with self.assertNumQueries(3):
+    list(Post.objects.all())
+    ...
+```
+
+N+1 회귀 방지에 강력.
+
+### 3. faker로 랜덤 데이터
+
+```python
+factory.Faker("name")    # "Alice Smith"
+factory.Faker("email")
+factory.Faker("text")
+factory.Faker("date_of_birth")
+```
+
+랜덤이라 재현성 위해 seed 고정 가능.
+
+### 4. 외부 호출 mock 필수
+
+```python
+def test_signup(self):
+    # 실수로 진짜 SMTP 호출하면 테스트 환경 영향
+    self.client.post("/signup/", {...})
+```
+
+`EMAIL_BACKEND` test settings로 dummy 백엔드. HTTP는 `responses`, `vcr`, `pytest-httpx`.
+
+## 참고
+
+- [Testing in Django](https://docs.djangoproject.com/en/stable/topics/testing/)
+- [Test tools](https://docs.djangoproject.com/en/stable/topics/testing/tools/)
+- [pytest-django](https://pytest-django.readthedocs.io/)
+- [factory_boy](https://factoryboy.readthedocs.io/)
+- [freezegun](https://github.com/spulec/freezegun)
+- [Coverage.py](https://coverage.readthedocs.io/)

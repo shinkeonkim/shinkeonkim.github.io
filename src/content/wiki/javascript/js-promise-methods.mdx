@@ -1,0 +1,209 @@
+---
+title: "[Javascript] Promise.all / race / any / allSettled"
+aliases: ["JS Promise.all", "Promise.race", "Promise.any", "Promise.allSettled"]
+tags: [javascript, promise, async, concurrency]
+updated: 2026-06-18
+---
+
+## 정의
+
+`Promise` 의 정적 메서드 4 형제. 여러 Promise 를 동시에 다루는 도구.
+
+| 메서드 | fulfilled 조건 | rejected 조건 | 결과 |
+|:---|:---|:---|:---|
+| **`all`** | 모두 fulfilled | 하나라도 rejected | 값 배열 / 첫 rejection |
+| **`allSettled`** | 모두 정착 | 절대 안 됨 | `{status, value/reason}` 배열 |
+| **`race`** | 가장 먼저 fulfilled | 가장 먼저 rejected | 첫 정착값/사유 |
+| **`any`** | 하나라도 fulfilled | 모두 rejected | 첫 fulfilled / AggregateError |
+
+## Promise.all
+
+```javascript
+const [users, posts, comments] = await Promise.all([
+    fetch('/api/users').then(r => r.json()),
+    fetch('/api/posts').then(r => r.json()),
+    fetch('/api/comments').then(r => r.json()),
+]);
+```
+
+**모두 성공해야 결과**. 하나라도 실패하면 즉시 throw, 나머지는 계속 실행되지만 결과 못 받음.
+
+```javascript
+try {
+    const results = await Promise.all([p1, p2, p3]);
+} catch (e) {
+    // 가장 먼저 실패한 reason
+}
+```
+
+## Promise.allSettled
+
+```javascript
+const results = await Promise.allSettled([p1, p2, p3]);
+results.forEach((r, i) => {
+    if (r.status === 'fulfilled') console.log(i, r.value);
+    else console.log(i, r.reason);
+});
+```
+
+**모두 정착 (성공/실패 무관)** 까지 대기. 부분 실패가 OK 일 때.
+
+## Promise.race
+
+```javascript
+// 타임아웃 패턴
+function timeout(ms) {
+    return new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('timeout')), ms));
+}
+
+const result = await Promise.race([
+    fetch('/api/slow'),
+    timeout(3000),
+]);
+```
+
+**가장 먼저 정착** (성공/실패 무관) 한 Promise 결과.
+
+## Promise.any (ES2021)
+
+```javascript
+// 여러 CDN mirror 중 하나라도 응답하면
+const data = await Promise.any([
+    fetch('https://mirror1/data'),
+    fetch('https://mirror2/data'),
+    fetch('https://mirror3/data'),
+]);
+```
+
+**하나라도 성공** 하면 그 값. 모두 실패하면 `AggregateError` (errors 배열).
+
+```javascript
+try {
+    const data = await Promise.any([...]);
+} catch (e) {
+    if (e instanceof AggregateError) {
+        e.errors.forEach(err => console.error(err));
+    }
+}
+```
+
+## 비교 매트릭스
+
+| 상황 | 권장 |
+|:---|:---|
+| 모두 필요 | `all` |
+| 부분 실패 OK | `allSettled` |
+| 가장 빠른 응답 (성공/실패 무관) | `race` |
+| 하나라도 성공 | `any` |
+| 타임아웃 | `race` + timeout Promise |
+
+## 흔히 만나는 패턴
+
+### concurrent fetch
+
+```javascript
+const users = await Promise.all(
+    userIds.map(id => fetch(`/api/users/${id}`).then(r => r.json()))
+);
+```
+
+배열의 map 콜백에서 Promise 반환 → all 로 모음.
+
+### concurrent with limit
+
+```javascript
+// 동시 5 개로 제한
+async function pool(items, fn, concurrency = 5) {
+    const results = [];
+    for (let i = 0; i < items.length; i += concurrency) {
+        const chunk = items.slice(i, i + concurrency);
+        const r = await Promise.all(chunk.map(fn));
+        results.push(...r);
+    }
+    return results;
+}
+
+await pool(urls, fetch, 5);
+```
+
+라이브러리: `p-limit`, `p-queue`.
+
+### timeout wrapper
+
+```javascript
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('timeout')), ms))
+    ]);
+}
+
+const r = await withTimeout(fetch('/api'), 5000);
+```
+
+### 부분 실패 통계
+
+```javascript
+const results = await Promise.allSettled(
+    items.map(item => process(item))
+);
+const success = results.filter(r => r.status === 'fulfilled').length;
+const failed = results.length - success;
+console.log(`${success}/${results.length} succeeded`);
+```
+
+## 함정
+
+### 1. Promise.all 의 fail-fast
+
+```javascript
+Promise.all([slow_p, fail_p])
+// fail_p 가 즉시 throw → slow_p 의 결과는 못 받음
+// 그러나 slow_p 는 background 에서 계속 실행됨 (cancel 안 됨)
+```
+
+진짜 cancel 은 `AbortController` 사용.
+
+### 2. 빈 배열
+
+```javascript
+Promise.all([])             // [] (즉시 resolve)
+Promise.allSettled([])      // []
+Promise.race([])             // 영원히 pending ⚠️
+Promise.any([])              // AggregateError
+```
+
+`race` / `any` 에 빈 배열 주의.
+
+### 3. await Promise.all vs 순차
+
+```javascript
+// ❌ 순차 (2 sec)
+const a = await fetch('/a');   // 1 sec
+const b = await fetch('/b');   // 1 sec
+
+// ✓ 동시 (1 sec)
+const [a, b] = await Promise.all([
+    fetch('/a'),
+    fetch('/b'),
+]);
+```
+
+의존성 없으면 항상 `all` 로 묶기.
+
+### 4. 큰 배열의 메모리
+
+```javascript
+Promise.all(arr.map(fn))     // 100,000 개면 모두 동시 시작
+```
+
+concurrency limit 권장.
+
+## 참고
+
+- [[Promise]]
+- [[async/await]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- MDN, [Promise.all](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all)

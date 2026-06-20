@@ -1,0 +1,267 @@
+---
+title: "[Python] TypedDict, Protocol, runtime_checkable"
+aliases: ["python typeddict", "python protocol", "structural subtyping", "runtime_checkable", "PEP 544", "PEP 589"]
+tags: [python, typing, typeddict, protocol, advanced]
+updated: 2026-06-20
+---
+
+## TypedDict (PEP 589, 3.8+)
+
+dict의 키와 값 타입을 명시. JSON API 응답이나 설정처럼 dict로 들어오지만 스키마가 정해진 경우.
+
+```python
+from typing import TypedDict
+
+class User(TypedDict):
+    id: int
+    name: str
+    email: str
+    age: int
+
+def process(user: User) -> None:
+    print(user["name"])
+
+u: User = {"id": 1, "name": "Alice", "email": "a@x.com", "age": 30}
+process(u)
+```
+
+런타임엔 그냥 dict. 타입 체커가 키/값 타입을 검증.
+
+### total=False: 선택적 키
+
+```python
+from typing import TypedDict
+
+class Settings(TypedDict, total=False):
+    theme: str
+    language: str
+    debug: bool
+
+s: Settings = {"theme": "dark"}    # OK, 다른 키 생략 가능
+```
+
+기본 `total=True`(모든 키 필수). 일부만 필수면 PEP 655(3.11+) `Required`/`NotRequired`.
+
+```python
+from typing import TypedDict, NotRequired, Required
+
+class User(TypedDict):
+    id: Required[int]              # 필수
+    name: str                      # 필수 (기본)
+    email: NotRequired[str]        # 선택
+```
+
+### 상속
+
+```python
+class BaseUser(TypedDict):
+    id: int
+    name: str
+
+class AdminUser(BaseUser):
+    permissions: list[str]
+```
+
+### 사용 시점
+
+- 외부에서 들어오는 JSON, config dict
+- 기존 코드가 dict를 사용 중이라 dataclass로 옮기기 어려움
+- pydantic 모델보다 가볍게
+
+**새 도메인 객체**는 `@dataclass` 또는 `pydantic.BaseModel`이 더 안전. TypedDict는 검증 없음(타입 체커만 확인).
+
+## Protocol (PEP 544, 3.8+)
+
+**구조적 서브타이핑(structural subtyping)** = duck typing의 정적 버전. 명시 상속 없이 "모양"으로 호환.
+
+```python
+from typing import Protocol
+
+class Drawable(Protocol):
+    def draw(self) -> None: ...
+
+class Circle:
+    def draw(self) -> None:
+        print("○")
+
+class Square:
+    def draw(self) -> None:
+        print("□")
+
+def render(d: Drawable) -> None:
+    d.draw()
+
+render(Circle())      # OK (Circle은 Drawable 명시 상속 안 함)
+render(Square())      # OK
+```
+
+타입 체커가 `Circle`이 `Drawable`의 모든 메서드를 가지는지 확인. 명시 상속(`class Circle(Drawable)`) 불필요.
+
+### Protocol vs ABC
+
+| | Protocol | ABC |
+|---|----------|-----|
+| 상속 필요 | X (구조) | O (명시) |
+| 검사 시점 | 정적 (타입 체커) | 런타임 (isinstance) |
+| 기존 코드 호환 | O | X (상속 추가 필요) |
+| 추상 메서드 강제 | X | O |
+
+기존 라이브러리의 클래스를 인터페이스에 맞출 때 Protocol이 강력. 외부 코드 수정 없이 호환 표현.
+
+### runtime_checkable
+
+기본적으로 `isinstance(x, MyProtocol)`은 못 쓴다. `@runtime_checkable`로 활성화.
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Closeable(Protocol):
+    def close(self) -> None: ...
+
+class File:
+    def close(self): pass
+
+print(isinstance(File(), Closeable))    # True
+print(isinstance(42, Closeable))         # False
+```
+
+런타임 검사는 **메서드 이름만** 본다 (시그니처 미검증). 정적 검사보다 약함. 신중히 사용.
+
+### Protocol 메서드 vs 속성
+
+```python
+from typing import Protocol
+
+class HasName(Protocol):
+    name: str             # 속성
+
+class Greetable(Protocol):
+    name: str
+    def greet(self) -> str: ...    # 메서드
+```
+
+class 변수도 매칭 가능. dataclass와 잘 어울림.
+
+## 함정
+
+### TypedDict는 isinstance 못 함
+
+```python
+class User(TypedDict):
+    id: int
+
+d = {"id": 1}
+isinstance(d, User)    # TypeError (TypedDict는 런타임에 그냥 dict)
+```
+
+런타임 검증은 별도 라이브러리(`typeguard`, `cattrs`, `pydantic`) 사용.
+
+### Protocol의 generic
+
+```python
+from typing import Protocol, TypeVar
+
+T = TypeVar("T", covariant=True)
+
+class Container(Protocol[T]):
+    def __getitem__(self, i: int) -> T: ...
+```
+
+`covariant=True`/`contravariant=True`는 분산 명시. 잘 모르면 일단 생략 후 타입 체커 에러 보고 조정.
+
+### Protocol과 ABC 동시 사용
+
+```python
+from typing import Protocol, runtime_checkable
+from abc import abstractmethod
+
+@runtime_checkable
+class Closeable(Protocol):
+    @abstractmethod
+    def close(self) -> None: ...
+```
+
+`@abstractmethod`를 Protocol에 붙이면 서브클래스가 명시 상속할 때 강제됨. duck typing 호환은 그대로.
+
+## 실용 예제
+
+### dict 응답 파싱
+
+```python
+from typing import TypedDict
+
+class GitHubUser(TypedDict):
+    login: str
+    id: int
+    name: str | None
+    public_repos: int
+
+def parse_user(json_data: dict) -> GitHubUser:
+    # 런타임 검증 X, 타입 힌트만
+    return json_data    # type: ignore[return-value]
+
+# 실무에선 pydantic.BaseModel 사용 권장
+```
+
+### 인터페이스 추상 (라이브러리 작성)
+
+```python
+from typing import Protocol
+
+class Repository(Protocol):
+    def find(self, id: int) -> User | None: ...
+    def save(self, user: User) -> None: ...
+
+class InMemoryRepo:
+    def __init__(self): self._db = {}
+    def find(self, id): return self._db.get(id)
+    def save(self, user): self._db[user.id] = user
+
+class SqlRepo:
+    def find(self, id): ...
+    def save(self, user): ...
+
+def service(repo: Repository) -> None:
+    user = repo.find(1)
+    if user is None:
+        user = User(...)
+        repo.save(user)
+```
+
+`InMemoryRepo`/`SqlRepo`가 `Repository` 명시 상속 없이 호환. 테스트에서 fake 객체 만들기 쉬움.
+
+### __contains__만 있는 객체
+
+```python
+from typing import Protocol
+
+class Container(Protocol):
+    def __contains__(self, x: object) -> bool: ...
+
+def member_of(x, c: Container) -> bool:
+    return x in c
+
+member_of(1, [1, 2, 3])             # OK
+member_of("a", {"a", "b"})          # OK
+member_of("ab", "abc")              # OK (str도 __contains__)
+```
+
+## 정리: 무엇을 언제 쓰나
+
+| 상황 | 선택 |
+|------|------|
+| 외부 dict 응답 타입 명시 | TypedDict |
+| 클래스 인터페이스 표현 + 명시 상속 OK | ABC |
+| 인터페이스 표현 + 기존 클래스 수정 안 함 | Protocol |
+| 런타임 검증 + 직렬화 | pydantic.BaseModel |
+| 내부 데이터 클래스 | @dataclass |
+
+## 참고
+
+- [PEP 544 – Protocols: Structural subtyping](https://peps.python.org/pep-0544/)
+- [PEP 589 – TypedDict](https://peps.python.org/pep-0589/)
+- [PEP 655 – Marking individual TypedDict items as required or not](https://peps.python.org/pep-0655/)
+- [PEP 692 – Using TypedDict for more precise **kwargs typing](https://peps.python.org/pep-0692/)
+- [`typing.Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol)
+- [`typing.TypedDict`](https://docs.python.org/3/library/typing.html#typing.TypedDict)

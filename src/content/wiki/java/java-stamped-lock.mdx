@@ -1,0 +1,119 @@
+---
+title: "[Java] StampedLock"
+aliases: ["StampedLock", "java.util.concurrent.locks.StampedLock", "스탬프락", "optimistic read"]
+tags: [java, concurrent, lock, optimistic, read-write]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.locks.StampedLock`** 는 JDK 1.8 도입의 새 락. 세 가지 모드 제공.
+
+1. **Write lock** (배타)
+2. **Read lock** (공유)
+3. **Optimistic read** (락 안 잡고 시도, 변경 감지 시 retry)
+
+`stamp` 라는 long 토큰으로 락 상태를 추적. acquire 시 stamp 반환, release 시 stamp 전달.
+
+## 시각화
+
+```anim:java-stamped-lock
+{}
+```
+
+## 핵심 메서드
+
+```java
+StampedLock lock = new StampedLock();
+
+long stamp = lock.writeLock();
+try { ... } finally { lock.unlockWrite(stamp); }
+
+long stamp = lock.readLock();
+try { ... } finally { lock.unlockRead(stamp); }
+
+// Optimistic read
+long stamp = lock.tryOptimisticRead();
+int value = data.get();                       // 락 없이 읽기
+if (!lock.validate(stamp)) {                  // 변경 발생?
+    stamp = lock.readLock();                  // 폴백: read lock
+    try {
+        value = data.get();
+    } finally {
+        lock.unlockRead(stamp);
+    }
+}
+```
+
+## Optimistic Read 의 사상
+
+writer 가 거의 없을 것이라 가정하고 **락 없이 일단 읽는다**. 끝나고 "내가 읽는 동안 write 가 있었나?" 를 `validate(stamp)` 로 검사. 없었다면 데이터가 일관, 있었다면 read lock 으로 폴백.
+
+[[volatile]] read 한 번 정도의 비용으로 끝나는 best case.
+
+## 사용 패턴
+
+```java
+class Point {
+    private double x, y;
+    private final StampedLock lock = new StampedLock();
+
+    public void move(double dx, double dy) {
+        long stamp = lock.writeLock();
+        try {
+            x += dx;
+            y += dy;
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    public double distanceFromOrigin() {
+        long stamp = lock.tryOptimisticRead();
+        double cx = x, cy = y;                   // 락 없이 읽기
+        if (!lock.validate(stamp)) {
+            stamp = lock.readLock();
+            try {
+                cx = x; cy = y;
+            } finally {
+                lock.unlockRead(stamp);
+            }
+        }
+        return Math.sqrt(cx * cx + cy * cy);
+    }
+}
+```
+
+`Point` 의 두 필드를 atomic 하게 읽기 위해 락 없이 시도 → 변경 발생 시 폴백.
+
+## 제약사항
+
+- **재진입 불가**. 같은 스레드가 두 번 write lock 잡으면 deadlock.
+- **Condition 미지원**. wait/notify 같은 조건 변수 사용 불가.
+- **인터럽트 처리 메서드별로 다름**, 모두 인터럽트 응답하는 건 아님.
+- **upgrading / downgrading** 가능 (다른 stamp 발급).
+
+## 언제 적절한가
+
+**읽기 압도적으로 많고, 쓰기는 거의 없으며, 짧은 읽기** 인 경우. Point 처럼 두세 필드를 읽는 정도.
+
+긴 read 작업이라면 optimistic read 도중 변경 발생 가능성이 높아 폴백 비용이 누적된다.
+
+## ReentrantReadWriteLock vs StampedLock
+
+| 항목 | [[ReentrantReadWriteLock]] | StampedLock |
+|:---|:---|:---|
+| 재진입 | ✓ | ✗ |
+| 조건 변수 | ✓ | ✗ |
+| optimistic read | ✗ | ✓ |
+| 코드 복잡도 | 단순 | 복잡 |
+| 성능 (read 99%) | 좋음 | **더 좋음** |
+| 성능 (read 50%) | 비슷 | 비슷 또는 더 나쁨 |
+
+## 참고
+
+- [[ReentrantLock]]
+- [[ReentrantReadWriteLock]]
+- [[volatile]]
+- [[Non-Blocking]]
+- Oracle, [StampedLock (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/StampedLock.html)

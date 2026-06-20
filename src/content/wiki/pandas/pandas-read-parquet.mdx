@@ -1,0 +1,159 @@
+---
+title: "[Pandas] read_parquet / to_parquet"
+aliases: ["Pandas read_parquet", "Pandas to_parquet", "Parquet pandas", "Apache Parquet"]
+tags: [python, pandas, io, parquet, arrow]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Parquet** 은 **column-oriented binary 포맷**. CSV 대비 **수십 배 빠르고 작다**. dtype 보존, 압축, 부분 컬럼 읽기 지원. 데이터 분석의 사실상 표준.
+
+```python
+df.to_parquet('out.parquet')
+df = pd.read_parquet('out.parquet')
+```
+
+## 왜 CSV 가 아닌가
+
+| 항목 | CSV | Parquet |
+|:---|:---|:---|
+| 크기 | 100% | 10-30% |
+| 읽기 속도 | 100% | 5-20x faster |
+| dtype 보존 | ✗ (재추론) | ✓ |
+| 컬럼 선택 읽기 | ✗ (전체 파싱) | ✓ |
+| 압축 | gz 별도 | 내장 (snappy/gzip/zstd) |
+| 사람이 읽기 | ✓ | ✗ (binary) |
+| 부분 schema | ✗ | ✓ |
+
+대규모 데이터 / 반복 분석에는 Parquet 이 명백한 정답.
+
+## 의존성
+
+```bash
+pip install pyarrow      # 가장 흔함 (Apache Arrow)
+pip install fastparquet  # 대안
+```
+
+```python
+df.to_parquet('out.parquet', engine='pyarrow')   # 기본
+df.to_parquet('out.parquet', engine='fastparquet')
+```
+
+## 기본 사용
+
+```python
+df.to_parquet('data.parquet')
+df = pd.read_parquet('data.parquet')
+
+# 일부 컬럼만
+df = pd.read_parquet('data.parquet', columns=['a', 'b'])
+```
+
+## 압축 옵션
+
+```python
+df.to_parquet('out.parquet', compression='snappy')   # 빠름, 기본
+df.to_parquet('out.parquet', compression='zstd')      # 가장 작음
+df.to_parquet('out.parquet', compression='gzip')      # 호환성
+df.to_parquet('out.parquet', compression=None)
+```
+
+`zstd` 가 압축률/속도 균형 가장 좋음.
+
+## partitioned dataset
+
+```python
+df.to_parquet('events/', partition_cols=['year', 'month'])
+# events/year=2024/month=01/part-0.parquet
+# events/year=2024/month=02/part-0.parquet
+# ...
+```
+
+읽을 때 자동으로 필터링.
+
+```python
+import pandas as pd
+df = pd.read_parquet('events/', filters=[
+    ('year', '==', 2024),
+    ('month', '>=', 6),
+])
+```
+
+수십 GB 데이터에서도 메모리 효율적.
+
+## dtype 보존
+
+```python
+df = pd.DataFrame({
+    'id': [1, 2, 3],
+    'name': ['A', 'B', 'C'],
+    'ts': pd.to_datetime(['2024-01-01', '2024-02-01', '2024-03-01']),
+    'flag': [True, False, True],
+})
+df.to_parquet('out.parquet')
+
+df2 = pd.read_parquet('out.parquet')
+df2.dtypes
+# id        int64
+# name      object
+# ts        datetime64[ns]
+# flag      bool
+```
+
+CSV 는 모든 dtype 정보가 사라진다.
+
+## pyarrow backend
+
+```python
+df = pd.read_parquet('out.parquet', dtype_backend='pyarrow')
+# Arrow 기반 dtype (string[pyarrow], Int64 등)
+# 메모리 효율 + 빠름
+```
+
+[[Pandas pyarrow backend]] 참고.
+
+## DataFrame 의 columnar 활용
+
+Parquet 은 column 별 저장이라 **필요한 컬럼만 읽기** 가 자연스럽다.
+
+```python
+# 100 컬럼 중 3 컬럼만 읽어도 그 3 컬럼 비용만
+df = pd.read_parquet('big.parquet', columns=['a', 'b', 'c'])
+```
+
+CSV 는 전체를 파싱해야 함.
+
+## 자주 만나는 함정
+
+### 1. 사람이 못 읽음
+
+binary 포맷이라 `cat data.parquet` 으로 못 본다. CSV 로 변환:
+
+```python
+pd.read_parquet('data.parquet').to_csv('data.csv', index=False)
+```
+
+### 2. 일부 dtype 미지원
+
+```python
+df.to_parquet('out.parquet')
+# category, period, sparse 등은 일부 변환 / 미지원
+```
+
+`engine='pyarrow'` 가 가장 호환성 좋음.
+
+### 3. partitioned 컬럼이 다시 안 들어옴
+
+```python
+df.to_parquet('events/', partition_cols=['year'])
+# 읽을 때 'year' 는 string dtype 으로 복원 (path 파싱이므로)
+pd.read_parquet('events/').dtypes
+# year: object (string)
+```
+
+## 참고
+
+- [[Pandas read_csv]]
+- [[Pandas pyarrow backend]]
+- 공식 문서, [read_parquet](https://pandas.pydata.org/docs/reference/api/pandas.read_parquet.html), [Apache Parquet](https://parquet.apache.org/)

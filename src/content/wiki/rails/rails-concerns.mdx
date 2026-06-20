@@ -1,0 +1,406 @@
+---
+title: "[Rails] Concerns, Engines, Generators"
+aliases: ["rails concerns", "ActiveSupport::Concern", "rails engine", "rails generators", "mountable engine"]
+tags: [rails, concerns, engine, generator, modular]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Concern**은 모듈에 클래스 메서드와 콜백을 한 곳에 모으는 패턴. **Engine**은 별도 gem으로 분리 가능한 미니 Rails 앱. **Generator**는 코드 자동 생성 (모델, 컨트롤러, 마이그레이션 등). 셋 다 코드 재사용·모듈화 도구.
+
+## ActiveSupport::Concern
+
+```ruby
+# app/models/concerns/trashable.rb
+module Trashable
+  extend ActiveSupport::Concern
+
+  included do
+    scope :trashed, -> { where.not(trashed_at: nil) }
+    scope :not_trashed, -> { where(trashed_at: nil) }
+
+    before_destroy :prevent_if_trashed
+  end
+
+  class_methods do
+    def trash_count
+      trashed.count
+    end
+  end
+
+  # 인스턴스 메서드
+  def trash!
+    update!(trashed_at: Time.current)
+  end
+
+  def restore!
+    update!(trashed_at: nil)
+  end
+
+  private
+
+  def prevent_if_trashed
+    throw :abort if trashed_at.present?
+  end
+end
+```
+
+```ruby
+class Post < ApplicationRecord
+  include Trashable
+end
+
+class Comment < ApplicationRecord
+  include Trashable
+end
+
+post.trash!
+Post.trashed
+Post.trash_count
+```
+
+`included do ... end` 블록 안의 모든 코드는 include하는 클래스 컨텍스트에서 실행 → scope, validation, callback 추가.
+
+### 일반 module과 비교
+
+```ruby
+# 일반 module
+module Trashable
+  def self.included(base)
+    base.scope :trashed, -> { where.not(trashed_at: nil) }
+    base.before_destroy :prevent_if_trashed
+  end
+
+  module ClassMethods
+    def trash_count
+      ...
+    end
+  end
+end
+
+class Post < ApplicationRecord
+  include Trashable
+  extend Trashable::ClassMethods
+end
+```
+
+`ActiveSupport::Concern`이 boilerplate 제거.
+
+### 의존성 해결
+
+```ruby
+module A
+  extend ActiveSupport::Concern
+end
+
+module B
+  extend ActiveSupport::Concern
+  include A    # A가 먼저 included됨
+end
+
+class Post
+  include B    # B만 include하면 A도 자동
+end
+```
+
+순서 자동 해결.
+
+## Controller Concern
+
+```ruby
+# app/controllers/concerns/authentication.rb
+module Authentication
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :authenticate_user!
+    helper_method :current_user
+  end
+
+  private
+
+  def current_user
+    @current_user ||= User.find_by(id: session[:user_id])
+  end
+
+  def authenticate_user!
+    redirect_to login_path unless current_user
+  end
+end
+
+class ApplicationController < ActionController::Base
+  include Authentication
+end
+```
+
+## Rails Engine
+
+Mini Rails app을 gem으로.
+
+```bash
+rails plugin new my_engine --mountable
+```
+
+```
+my_engine/
+├── app/
+│   ├── controllers/my_engine/
+│   ├── models/my_engine/
+│   └── views/my_engine/
+├── config/routes.rb
+├── lib/my_engine/engine.rb
+└── my_engine.gemspec
+```
+
+`engine.rb`:
+
+```ruby
+module MyEngine
+  class Engine < ::Rails::Engine
+    isolate_namespace MyEngine
+  end
+end
+```
+
+호스트 앱에서:
+
+```ruby
+# Gemfile
+gem "my_engine", path: "../my_engine"
+# 또는 git/path 등
+
+# config/routes.rb
+mount MyEngine::Engine => "/my_engine"
+```
+
+URL: `/my_engine/posts/...`
+
+### 자주 보는 Engine
+
+- **Devise** (인증)
+- **Sidekiq Web UI** (`mount Sidekiq::Web => "/sidekiq"`)
+- **Mission Control** (`mount MissionControl::Jobs::Engine => "/jobs"`)
+- **Rails admin / ActiveAdmin** (관리자 UI)
+- **Wagtail** Ruby 버전: NO (Wagtail은 Django)
+
+대규모 앱을 여러 모듈로 분리하는 데도 사용.
+
+## Generator
+
+### 빌트인
+
+```bash
+bin/rails g model Post title:string body:text
+bin/rails g controller Posts index show
+bin/rails g migration AddSlugToPosts slug:string:uniq
+bin/rails g scaffold Post title:string body:text
+bin/rails g mailer UserMailer welcome
+bin/rails g job CleanupJob
+bin/rails g channel Chat
+bin/rails g system_test posts
+```
+
+### 커스텀 Generator
+
+```bash
+bin/rails g generator service
+```
+
+```ruby
+# lib/generators/service/service_generator.rb
+class ServiceGenerator < Rails::Generators::NamedBase
+  source_root File.expand_path("templates", __dir__)
+
+  def create_service_file
+    template "service.rb.tt", "app/services/#{file_name}_service.rb"
+  end
+
+  def create_test_file
+    template "service_test.rb.tt", "test/services/#{file_name}_service_test.rb"
+  end
+end
+```
+
+```erb
+# lib/generators/service/templates/service.rb.tt
+class <%= class_name %>Service
+  def call
+    # TODO
+  end
+end
+```
+
+사용:
+
+```bash
+bin/rails g service CreatePost
+# app/services/create_post_service.rb 생성
+# test/services/create_post_service_test.rb 생성
+```
+
+### Generator 옵션
+
+```bash
+bin/rails g model Post --skip-migration --skip-test --skip-fixture
+```
+
+`config/application.rb`로 기본 옵션:
+
+```ruby
+config.generators do |g|
+  g.test_framework :rspec, fixture: false
+  g.factory_bot dir: "spec/factories"
+  g.skip_routes true
+end
+```
+
+새 generator 호출 시 자동 적용.
+
+## 자주 보는 Concern 패턴
+
+### Sluggable
+
+```ruby
+module Sluggable
+  extend ActiveSupport::Concern
+
+  included do
+    before_validation :generate_slug, on: :create
+    validates :slug, presence: true, uniqueness: true
+  end
+
+  def to_param
+    slug
+  end
+
+  private
+
+  def generate_slug
+    self.slug ||= title.parameterize
+  end
+end
+```
+
+### Notifiable
+
+```ruby
+module Notifiable
+  extend ActiveSupport::Concern
+
+  included do
+    has_many :notifications, as: :notifiable, dependent: :destroy
+
+    after_create_commit :notify_subscribers
+  end
+
+  private
+
+  def notify_subscribers
+    subscribers.each do |user|
+      Notification.create!(user: user, notifiable: self)
+    end
+  end
+end
+```
+
+### Searchable
+
+```ruby
+module Searchable
+  extend ActiveSupport::Concern
+
+  class_methods do
+    def search(query)
+      where("title ILIKE :q OR body ILIKE :q", q: "%#{query}%")
+    end
+  end
+end
+```
+
+## Concern 안티패턴
+
+### 1. Concern으로 god module
+
+```ruby
+module Post::Behaviors
+  extend ActiveSupport::Concern
+  # 300줄
+end
+```
+
+작은 concern으로 분리.
+
+### 2. concern 의존성
+
+```ruby
+module A
+  def call
+    do_b   # B의 메서드 필요
+  end
+end
+
+module B
+  def do_b; ... end
+end
+
+class C
+  include A    # B 빠뜨림 → 런타임 NoMethodError
+  include B
+end
+```
+
+명시적 include 의존 위험. 서비스 객체로 분리가 더 안전.
+
+### 3. service object 대체
+
+```ruby
+# 컨트롤러 concern으로 비즈니스 로직
+module CreatePost
+  def create_post(params)
+    Post.transaction do
+      post = Post.create!(params)
+      Notification.create!(...)
+      post
+    end
+  end
+end
+```
+
+→ Service object 클래스가 더 명확:
+
+```ruby
+class CreatePostService
+  def call(params)
+    Post.transaction do
+      post = Post.create!(params)
+      Notification.create!(...)
+      post
+    end
+  end
+end
+```
+
+## Engine 함정
+
+### 1. 호스트 앱과 라우트 충돌
+
+```ruby
+mount MyEngine::Engine => "/"    # 충돌 가능
+mount MyEngine::Engine => "/admin"    # 안전
+```
+
+### 2. asset compile
+
+Engine asset도 host에서 collectstatic / asset compile 필요.
+
+### 3. 의존성 관리
+
+Engine의 gem 의존성이 host와 충돌. `gemspec`에서 정확한 버전.
+
+## 참고
+
+- [ActiveSupport::Concern](https://api.rubyonrails.org/classes/ActiveSupport/Concern.html)
+- [Rails Engines Guide](https://guides.rubyonrails.org/engines.html)
+- [Rails Generators](https://guides.rubyonrails.org/generators.html)
+- [Service Object Pattern (DHH 반대 의견도 참고)](https://world.hey.com/dhh/code-i-like-iii-good-concerns-7544aa9c)

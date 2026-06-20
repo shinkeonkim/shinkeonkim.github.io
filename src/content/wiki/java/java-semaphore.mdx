@@ -1,0 +1,135 @@
+---
+title: "[Java] Semaphore"
+aliases: ["Semaphore", "java.util.concurrent.Semaphore", "세마포어", "permit"]
+tags: [java, concurrent, synchronizer, permit, rate-limit]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.concurrent.Semaphore`** 는 **N 개의 permit (허가) 을 발급/회수** 하는 synchronizer. permit 이 있으면 진행, 없으면 [[Blocking]] 또는 즉시 실패.
+
+자원 풀, rate limiting, 동시 접근 수 제한 같은 패턴의 표준 도구.
+
+## 시각화
+
+```anim:java-semaphore-permits
+{}
+```
+
+## 핵심 메서드
+
+```java
+Semaphore s = new Semaphore(10);       // 10 permit 발급
+
+s.acquire();                            // 1 permit 획득, 없으면 block
+s.acquire(3);                           // 3 permit
+s.tryAcquire();                         // 즉시 시도, 실패 시 false
+s.tryAcquire(timeout, unit);
+
+s.release();                            // permit 1 반환
+s.release(3);
+
+s.availablePermits();                   // 남은 permit 수
+```
+
+## 가장 흔한 두 패턴
+
+### 1. 동시 접근 제한 (concurrency limiter)
+
+```java
+Semaphore limiter = new Semaphore(5);   // 동시 5명만 접근
+
+public void callExpensiveApi() throws InterruptedException {
+    limiter.acquire();
+    try {
+        externalApi.call();
+    } finally {
+        limiter.release();
+    }
+}
+```
+
+외부 API 가 동시 5 요청까지만 허용한다면 이렇게 제한.
+
+### 2. 자원 풀
+
+```java
+class ConnectionPool {
+    private final Semaphore semaphore;
+    private final Queue<Connection> pool;
+
+    public ConnectionPool(int size) {
+        semaphore = new Semaphore(size);
+        pool = createPool(size);
+    }
+
+    public Connection acquire() throws InterruptedException {
+        semaphore.acquire();
+        return pool.poll();
+    }
+
+    public void release(Connection c) {
+        pool.offer(c);
+        semaphore.release();
+    }
+}
+```
+
+JDBC connection pool, thread pool 같은 패턴의 핵심.
+
+## binary semaphore (= mutex 와 비슷)
+
+```java
+Semaphore mutex = new Semaphore(1);
+mutex.acquire();
+try { ... }
+finally { mutex.release(); }
+```
+
+`ReentrantLock` 과 비슷하지만 다른 점.
+
+- `Semaphore` 는 **누가 acquire 했는지 추적 안 함**, A 가 acquire 하고 B 가 release 가능
+- `ReentrantLock` 은 reentrant, 같은 스레드 여러 번 acquire 가능
+
+mutex 라면 [[ReentrantLock]] 또는 `synchronized` 가 일반적.
+
+## 공정성 옵션
+
+```java
+Semaphore fair = new Semaphore(5, true);
+```
+
+`true` 면 FIFO. 대기 중인 가장 오래된 스레드부터 acquire. `false` (기본) 면 어떤 스레드든 양보 시 가져갈 수 있음.
+
+[[ReentrantLock]] 처럼 공정 모드는 throughput 이 낮다.
+
+## 함정
+
+### 1. release 빠뜨리면 permit 소실
+
+```java
+limiter.acquire();
+doWork();             // ❌ 예외 시 release 안 됨
+limiter.release();
+```
+
+반드시 `try/finally`.
+
+### 2. permit 수가 변할 수 있다
+
+`release()` 가 acquire 보다 더 많이 호출되면 permit 수가 초기값보다 늘어난다 (의도적 사용 가능).
+
+`reducePermits(int)` 로 줄일 수도 있다.
+
+### 3. tryAcquire 의 다른 의미
+
+`tryAcquire()` 는 즉시 false 반환, `tryAcquire(timeout)` 는 그 시간만큼 대기 후 false. 헷갈리기 쉬움.
+
+## 참고
+
+- [[CountDownLatch]]
+- [[CyclicBarrier]]
+- [[ReentrantLock]]
+- [[Blocking]]
+- Oracle, [Semaphore (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/Semaphore.html)

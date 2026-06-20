@@ -1,0 +1,218 @@
+---
+title: "[Python] 바이트코드와 dis 모듈"
+aliases: ["python bytecode", "dis module", "PYC", "specializing adaptive interpreter", "PEP 659"]
+tags: [python, bytecode, dis, internals, compiler, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+CPython 인터프리터는 Python 소스를 **바이트코드**로 컴파일해 평가 루프(`ceval.c`의 메인 switch)에서 실행한다. 바이트코드는 스택 기반 가상 머신을 위한 작은 명령어 시퀀스로, `__pycache__` 아래 `.pyc` 파일로 캐싱된다.
+
+```python
+def add(a, b):
+    return a + b
+```
+
+내부적으로 다음 같은 명령어 시퀀스로 변환:
+
+```
+LOAD_FAST       a
+LOAD_FAST       b
+BINARY_OP       0 (+)
+RETURN_VALUE
+```
+
+## dis 모듈
+
+`dis`로 함수의 바이트코드를 디스어셈블할 수 있다.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import dis
+
+def add(a, b):
+    return a + b
+
+dis.dis(add)`}
+  output={`  2           0 RESUME                   0
+
+  3           2 LOAD_FAST                a
+              4 LOAD_FAST                b
+              6 BINARY_OP                0 (+)
+             10 RETURN_VALUE`}
+/>
+
+`dis.dis()`는 함수, 메서드, 클래스, 모듈, 소스 문자열 모두 받는다.
+
+```python
+dis.dis("[x ** 2 for x in range(5)]")
+```
+
+## 주요 opcode
+
+| opcode | 의미 |
+|--------|-----|
+| `LOAD_FAST` | 로컬 변수 로드 (배열 인덱스 접근) |
+| `LOAD_GLOBAL` | 전역 변수 로드 (dict 조회) |
+| `LOAD_CONST` | 상수 로드 (튜플/리터럴) |
+| `STORE_FAST` | 로컬 변수 저장 |
+| `LOAD_ATTR` | 속성 조회 (`obj.attr`) |
+| `CALL` | 함수 호출 (3.11+) |
+| `BINARY_OP` | 산술/비교 (3.11+에서 통합됨) |
+| `COMPARE_OP` | 비교 연산 |
+| `POP_JUMP_FORWARD_IF_FALSE` | 조건부 분기 |
+| `BUILD_LIST` / `BUILD_TUPLE` / `BUILD_DICT` | 컨테이너 생성 |
+| `LIST_APPEND` | 컴프리헨션 전용 빠른 append |
+| `RETURN_VALUE` | 반환 |
+| `YIELD_VALUE` | generator의 yield |
+| `MAKE_FUNCTION` | 함수 객체 생성 |
+
+## LOAD_FAST vs LOAD_GLOBAL
+
+이름 룩업 비용 차이를 보여준다.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import dis
+
+def f():
+    x = 1          # 로컬
+    return x + len([])
+
+dis.dis(f)`}
+  output={`  4           2 LOAD_CONST               1 (1)
+              4 STORE_FAST               x
+
+  5           6 LOAD_FAST                x
+              8 LOAD_GLOBAL              1 (NULL + len)
+             20 BUILD_LIST               0
+             22 CALL                     1
+             30 BINARY_OP                0 (+)
+             34 RETURN_VALUE`}
+/>
+
+`LOAD_FAST`는 함수 로컬 배열의 정수 인덱스 접근 (가장 빠름). `LOAD_GLOBAL`은 모듈 dict, 빌트인 dict 순으로 조회 (느림). **자주 쓰는 빌트인을 로컬로 캐싱**하는 미세 최적화가 있는 이유.
+
+```python
+def hot_loop():
+    _len = len     # 로컬 캐싱
+    for x in data:
+        if _len(x) > 10: ...
+```
+
+마이크로벤치 외엔 거의 의미 없음. 가독성 손해가 보통 크다.
+
+## .pyc 파일
+
+```bash
+python -c "import my_module"
+# __pycache__/my_module.cpython-313.pyc 생성
+```
+
+`.pyc`는 매직 넘버 + 타임스탬프(또는 hash) + 직렬화된 코드 객체. 다음 import 시 소스가 변경되지 않았으면 컴파일 단계 생략.
+
+```python
+import sys
+print(sys.implementation.cache_tag)    # cpython-313
+```
+
+소스 없이 `.pyc`만 배포 가능 (코드 보호엔 약함, 디컴파일 도구 존재).
+
+## 컴파일 단계
+
+1. **렉서**(tokenizer): 소스 → 토큰
+2. **파서**(PEP 617, PEG): 토큰 → AST
+3. **컴파일러**: AST → 중간 표현 → 바이트코드
+4. **인터프리터**(`ceval.c`): 바이트코드 평가 루프
+
+```python
+import ast
+
+tree = ast.parse("a + b")
+print(ast.dump(tree, indent=2))
+```
+
+`ast` 모듈로 AST를 직접 다룰 수 있어 코드 분석/변환 도구의 기반.
+
+## PEP 659: Specializing Adaptive Interpreter (3.11+)
+
+런타임 프로파일링으로 opcode를 **특화 버전**으로 자동 교체. 예를 들어 `BINARY_OP`가 int+int만 받으면 `BINARY_OP_ADD_INT`로 바뀌어 타입 체크 생략.
+
+```python
+import dis
+
+def add_ints(n):
+    total = 0
+    for i in range(n):
+        total = total + i
+    return total
+
+add_ints(1000)
+dis.dis(add_ints, adaptive=True)    # 3.11+ adaptive=True
+```
+
+이전 호출 패턴이 적용된 특화 opcode가 보임 (`BINARY_OP_ADD_INT` 등).
+
+3.11에서 약 25%, 3.12에서 추가 5% 평균 성능 향상의 핵심 동력. 자세한 건 `py-pep-659` 참고 (미작성 시 PEP 659 직접 링크).
+
+## 코드 객체 (code object)
+
+함수 안에는 `__code__` 속성이 있고, 그게 진짜 바이트코드를 담는 객체다.
+
+```python
+def f(a, b):
+    x = a + b
+    return x
+
+print(f.__code__.co_code)         # 바이트열
+print(f.__code__.co_consts)       # 상수
+print(f.__code__.co_varnames)     # 로컬 변수명
+print(f.__code__.co_names)        # 참조하는 전역명
+print(f.__code__.co_argcount)     # 위치 인수 개수
+print(f.__code__.co_filename)
+```
+
+`exec(f.__code__)`로 바이트코드 직접 실행 가능 (어떤 글로벌에서 실행할지 지정).
+
+## 컴파일 함수
+
+```python
+src = "x = 1 + 2"
+code = compile(src, "<string>", "exec")
+exec(code)
+print(x)    # 3
+
+# 표현식
+code = compile("1 + 2", "<string>", "eval")
+print(eval(code))    # 3
+```
+
+`exec`/`eval`을 신뢰할 수 없는 입력에 쓰면 보안 위험. AST 검증 후 실행하는 패턴(`ast.literal_eval`) 등으로 한정.
+
+## 디버그 팁
+
+- `dis.show_code(fn)`: 메타데이터 요약
+- `dis.Bytecode(fn)`: 명령어를 객체로 순회
+- `python -m dis script.py`: CLI로 디스어셈블
+- `__pycache__` 삭제 후 다시 실행으로 컴파일 강제
+
+## 실용 가치는?
+
+- 마이크로 최적화 (LOAD_FAST 활용, 로컬 캐싱) → 거의 무가치
+- 알고리즘이 정말 동등한지 확인 (`is` vs `==`, list comp vs map)
+- 디버거·프로파일러 동작 이해
+- 코드 변환 도구(린터, AST 기반 자동 수정) 개발
+- C 익스텐션 작성 시 opcode 동작 이해
+
+평상시 작성에는 별 영향 없지만, "왜 이게 빠른가?"를 이해하는 데 필수.
+
+## 참고
+
+- [`dis` documentation](https://docs.python.org/3/library/dis.html)
+- [`ast` documentation](https://docs.python.org/3/library/ast.html)
+- [PEP 659 – Specializing Adaptive Interpreter](https://peps.python.org/pep-0659/)
+- [PEP 617 – New PEG parser](https://peps.python.org/pep-0617/)
+- [CPython Internals: Compiler](https://devguide.python.org/internals/compiler/)

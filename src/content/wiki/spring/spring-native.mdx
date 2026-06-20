@@ -1,0 +1,302 @@
+---
+title: "[Spring] Native Image: GraalVM, 빠른 시작"
+aliases: ["spring native", "graalvm native", "AOT compilation", "spring boot native", "buildpacks native"]
+tags: [spring, native, graalvm, aot]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Native** (3.0+)는 Spring Boot 앱을 **GraalVM Native Image**로 컴파일해 즉시 시작·낮은 메모리·작은 바이너리를 얻는다. JIT 없이 ahead-of-time (AOT) 컴파일. Serverless, CLI, edge 환경에 강점. 일부 기능 제약 + 빌드 시간 길음.
+
+## 장단점
+
+| 항목 | JVM | Native |
+|------|-----|--------|
+| 시작 시간 | 5~30초 | 0.05~0.5초 |
+| 메모리 | 200~500MB | 50~150MB |
+| 처리량 (warm) | 매우 빠름 | 약간 느릴 수도 |
+| 빌드 시간 | 30초 | 3~10분 |
+| 동적 클래스 로딩 | O | X |
+| 리플렉션 | 자동 | 힌트 필요 |
+| 디버깅 | 풍부 | 제한적 |
+
+## 빌드
+
+### Gradle (Spring Boot 3+)
+
+```kotlin
+plugins {
+    id("org.springframework.boot") version "3.4.0"
+    id("io.spring.dependency-management") version "1.1.6"
+    id("org.graalvm.buildtools.native") version "0.10.3"
+    java
+}
+
+graalvmNative {
+    binaries {
+        named("main") {
+            imageName = "myapp"
+            buildArgs.add("--no-fallback")
+            buildArgs.add("--enable-url-protocols=http,https")
+        }
+    }
+}
+```
+
+### 빌드 명령
+
+```bash
+# AOT 처리 (메타데이터 생성)
+./gradlew nativeCompile
+
+# 결과: build/native/nativeCompile/myapp
+./build/native/nativeCompile/myapp
+```
+
+GraalVM 21+ JDK 필요:
+
+```bash
+sdk install java 21.0.5-graal
+sdk use java 21.0.5-graal
+```
+
+### Buildpacks (Docker)
+
+```bash
+./gradlew bootBuildImage --imageName=myapp --pullPolicy=IF_NOT_PRESENT \
+    -Pnative=true
+```
+
+또는 `pack` CLI. native image 포함 Docker 이미지.
+
+## 코드 변경 사항
+
+### Reflection / Resources
+
+리플렉션, 동적 프록시, 리소스 로딩은 빌드 시 hint 필요. Spring AOT가 대부분 자동:
+
+```java
+@RegisterReflectionForBinding(MyClass.class)
+public class Config { ... }
+```
+
+또는:
+
+```java
+@Bean
+public RuntimeHintsRegistrar hintsRegistrar() {
+    return (hints, classLoader) -> {
+        hints.reflection().registerType(MyClass.class, MemberCategory.INVOKE_DECLARED_CONSTRUCTORS);
+        hints.resources().registerPattern("messages/*.properties");
+    };
+}
+```
+
+### Conditional 평가 시점
+
+`@ConditionalOnProperty` 같은 어노테이션은 빌드 시점 평가됨 → 런타임 환경변수로 다른 동작은 제약.
+
+```yaml
+# application.yml에서 결정해야
+spring:
+  profiles:
+    active: prod
+```
+
+런타임 ENV로 toggling은 가능하지만 conditional bean 등록은 빌드 시 고정.
+
+### 사용 가능한 라이브러리
+
+대부분의 Spring Framework는 호환. 일부 라이브러리 제약:
+- ✅ Spring MVC, WebFlux, Data JPA, Security
+- ✅ JDBC, Hibernate (일부 옵션 제한)
+- ⚠️ Mockito (테스트는 JVM)
+- ⚠️ 일부 동적 라이브러리
+
+## Reachability metadata
+
+GraalVM Reachability Metadata Repository에서 자주 사용되는 라이브러리의 메타데이터 자동 제공.
+
+```kotlin
+graalvmNative {
+    metadataRepository {
+        enabled = true
+        version = "0.3.7"
+    }
+}
+```
+
+자동 적용. 라이브러리가 native 호환되도록.
+
+## AOT 처리
+
+Spring Boot 3+ `org.springframework.aot` 모듈이 빌드 시:
+1. 모든 Bean 정의 분석
+2. Conditional 평가
+3. 동적 등록 → 정적 코드로 변환
+4. 리플렉션 hint 자동 등록
+5. `target/spring-aot/` 또는 `build/generated/` 에 코드 생성
+
+이 코드 + GraalVM이 native binary로.
+
+## 빌드 시간 단축
+
+```bash
+./gradlew nativeCompile --no-daemon -Pnative.optimization=true
+```
+
+```kotlin
+graalvmNative {
+    binaries {
+        named("main") {
+            buildArgs.add("-Ob")    // 디버그 빌드 (빠르지만 큰 binary)
+            buildArgs.add("--gc=G1") // 메모리 trade-off
+        }
+    }
+}
+```
+
+CI에서 매 PR마다 native 빌드는 비현실적. release/main 브랜치만.
+
+## Container size
+
+```dockerfile
+FROM ubuntu:22.04
+COPY build/native/nativeCompile/myapp /myapp
+EXPOSE 8080
+CMD ["/myapp"]
+```
+
+기본 50~150MB. distroless 또는 scratch:
+
+```dockerfile
+FROM gcr.io/distroless/cc-debian12
+COPY build/native/nativeCompile/myapp /myapp
+EXPOSE 8080
+CMD ["/myapp"]
+```
+
+20MB까지 가능.
+
+## 테스트
+
+```bash
+./gradlew nativeTest
+```
+
+JUnit 테스트를 native로 컴파일 후 실행. 느림 (각 테스트 클래스마다 빌드). 보통 unit test는 JVM, integration test 일부만 native.
+
+## 자주 보는 패턴
+
+### Serverless (Lambda)
+
+```bash
+# AWS Lambda
+./gradlew nativeCompile
+zip lambda.zip build/native/nativeCompile/myapp bootstrap
+
+aws lambda create-function \
+    --function-name myapp \
+    --runtime provided.al2 \
+    --handler myapp \
+    --zip-file fileb://lambda.zip
+```
+
+cold start ~100ms (JVM은 1-5초).
+
+### CLI 도구
+
+```java
+@SpringBootApplication
+public class CliApp implements CommandLineRunner {
+    public static void main(String[] args) {
+        SpringApplication.run(CliApp.class, args);
+    }
+
+    @Override
+    public void run(String... args) {
+        System.out.println("Hello, native!");
+    }
+}
+```
+
+Native binary로 컴파일 → CLI 도구처럼 빠른 실행.
+
+### Edge / IoT
+
+작은 메모리·CPU 디바이스. 짧은 시작.
+
+### Function-as-a-Service
+
+Cloud Run, Knative 등 scale-to-zero 환경. cold start 짧음이 가치.
+
+## 함정
+
+### 1. 빌드 실패
+
+```
+Error: Detected a MissingReflectionRegistrationError ...
+```
+
+리플렉션 hint 누락. `@RegisterReflectionForBinding` 또는 `RuntimeHintsRegistrar`.
+
+### 2. 동적 클래스 로딩
+
+```java
+Class.forName(className)    // 런타임 동적 → native 어려움
+```
+
+빌드 시 알려진 클래스만. dynamic plugin 시스템 등 native 부적합.
+
+### 3. JPA + lazy proxy
+
+Hibernate의 bytecode 향상이 일부 native에서 문제. 명시 fetch / DTO projection 권장.
+
+### 4. 디버깅
+
+```bash
+gdb ./myapp
+```
+
+C 디버거 사용 가능하나 Java level 디버깅 어려움. 로깅 의존.
+
+### 5. 메모리 측정
+
+```bash
+./myapp -Xmx256m    # 가능
+```
+
+`-Xmx`, `-Xms` 모두 지원. 단 동적 변경은 일부 제약.
+
+## 언제 Native를 쓰나
+
+✅ 적합:
+- Serverless (Lambda, Cloud Functions)
+- CLI 도구
+- Edge / IoT
+- 짧은 작업 (cron job)
+- 메모리 제약 환경
+
+❌ 부적합:
+- Long-running 서버 (JIT warm-up 후 JVM이 더 빠름)
+- 동적 플러그인 시스템
+- 빈번한 배포 + CI 비용 부담
+- 복잡한 디버깅 필요
+
+## 대안
+
+- **Quarkus**: 처음부터 native 우선
+- **Micronaut**: AOT compilation
+- **Helidon**: Native 지원
+- **OpenJ9 + JIT**: JVM 메모리 절감 (Native만큼은 아님)
+
+Spring Native는 generality는 좋으나 Quarkus가 native 최적화 우위.
+
+## 참고
+
+- [Spring Boot Native](https://docs.spring.io/spring-boot/docs/current/reference/html/native-image.html)
+- [GraalVM Native Image](https://www.graalvm.org/latest/reference-manual/native-image/)
+- [Reachability Metadata Repository](https://github.com/oracle/graalvm-reachability-metadata)
+- [Buildpacks](https://buildpacks.io/)
+- [Quarkus](https://quarkus.io/)

@@ -1,0 +1,284 @@
+---
+title: "[Python] datetime, timezone, zoneinfo"
+aliases: ["python datetime", "timezone", "zoneinfo", "timedelta", "naive vs aware", "UTC"]
+tags: [python, datetime, stdlib, time]
+updated: 2026-06-20
+---
+
+## 정의
+
+`datetime` 모듈은 날짜·시각·기간 처리를 제공한다. 핵심 클래스:
+
+- `date`: 연-월-일
+- `time`: 시-분-초-마이크로초 (날짜 정보 없음)
+- `datetime`: date + time
+- `timedelta`: 기간 (날짜 간 차이)
+- `timezone`: UTC 오프셋 기반 타임존
+- `zoneinfo.ZoneInfo` (3.9+): IANA 타임존 DB ("Asia/Seoul" 등)
+
+## naive vs aware
+
+가장 중요한 구분.
+
+- **naive datetime**: 타임존 정보 없음. `tzinfo is None`
+- **aware datetime**: 타임존 정보 있음. UTC 환산 가능
+
+```python
+from datetime import datetime, timezone
+
+naive = datetime(2026, 6, 20, 12, 0)
+print(naive.tzinfo)        # None
+
+aware = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+print(aware.tzinfo)        # UTC
+```
+
+**서버/저장은 aware UTC가 표준**. naive는 로컬 표현이나 입력 파싱 직후 등 한정적으로만.
+
+```python
+# UTC now (aware) - 권장
+now = datetime.now(timezone.utc)
+
+# 로컬 now (naive) - 비권장 (TZ 모호)
+now = datetime.now()
+```
+
+## 생성
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from datetime import datetime, date, time, timedelta, timezone
+
+# 직접 생성
+d = date(2026, 6, 20)
+t = time(14, 30, 0)
+dt = datetime(2026, 6, 20, 14, 30, 0, tzinfo=timezone.utc)
+
+# 현재
+now = datetime.now(timezone.utc)
+today = date.today()
+
+# 문자열 파싱 (ISO 8601)
+parsed = datetime.fromisoformat("2026-06-20T14:30:00+00:00")
+print(parsed)
+
+# 임의 포맷
+custom = datetime.strptime("20/06/2026 14:30", "%d/%m/%Y %H:%M")
+print(custom)`}
+  output={`2026-06-20 14:30:00+00:00
+2026-06-20 14:30:00`}
+/>
+
+`strptime` 포맷 코드: `%Y` 4자리 연도, `%m` 월, `%d` 일, `%H` 24시, `%M` 분, `%S` 초, `%z` UTC 오프셋, `%Z` 타임존 이름.
+
+## 출력: isoformat과 strftime
+
+```python
+dt = datetime(2026, 6, 20, 14, 30, tzinfo=timezone.utc)
+
+print(dt.isoformat())              # '2026-06-20T14:30:00+00:00'
+print(dt.strftime("%Y-%m-%d %H:%M %z"))   # '2026-06-20 14:30 +0000'
+print(dt.strftime("%A, %B %d"))    # 'Saturday, June 20'
+```
+
+ISO 8601 형식이 직렬화 표준. `isoformat()`을 우선.
+
+## timedelta
+
+기간 표현. datetime 간 뺄셈 결과.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from datetime import datetime, timedelta, timezone
+
+start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+end = datetime(2026, 6, 20, tzinfo=timezone.utc)
+
+diff = end - start
+print(diff)                # 170 days, 0:00:00
+print(diff.days)
+print(diff.total_seconds())
+
+# 시간 더하기
+later = end + timedelta(days=7, hours=2)
+print(later)
+
+# 음수 timedelta
+backwards = end - timedelta(weeks=2)
+print(backwards)`}
+  output={`170 days, 0:00:00
+170
+14688000.0
+2026-06-27 02:00:00+00:00
+2026-06-06 00:00:00+00:00`}
+/>
+
+`timedelta` 인자: `days`, `hours`, `minutes`, `seconds`, `microseconds`, `milliseconds`, `weeks`. 모두 누적.
+
+## zoneinfo (3.9+, PEP 615)
+
+IANA 타임존 DB 기반 정확한 타임존 처리. `pytz`를 대체.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# Asia/Seoul 시각
+seoul = ZoneInfo("Asia/Seoul")
+ny = ZoneInfo("America/New_York")
+
+dt = datetime(2026, 6, 20, 14, 0, tzinfo=seoul)
+print(dt)
+print(dt.astimezone(ny))           # 변환
+
+# UTC로
+print(dt.astimezone())            # 시스템 기본 TZ
+print(dt.astimezone(ZoneInfo("UTC")))`}
+  output={`2026-06-20 14:00:00+09:00
+2026-06-20 01:00:00-04:00
+2026-06-20 14:00:00+09:00
+2026-06-20 05:00:00+00:00`}
+/>
+
+윈도우에선 별도 패키지 필요: `pip install tzdata`.
+
+### 일광절약시간(DST)
+
+```python
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+ny = ZoneInfo("America/New_York")
+spring = datetime(2026, 3, 8, 1, 30, tzinfo=ny)  # 02:00에 03:00으로 점프
+later = spring + timedelta(hours=2)
+print(later)    # 2026-03-08 04:30 EDT
+```
+
+`zoneinfo`가 DST 전환을 자동 처리. timezone 오프셋이 시기별로 다르다.
+
+## astimezone vs replace
+
+```python
+dt = datetime(2026, 6, 20, 14, 0, tzinfo=ZoneInfo("UTC"))
+
+# astimezone: 같은 순간을 다른 TZ로 표현
+dt.astimezone(ZoneInfo("Asia/Seoul"))     # 2026-06-20 23:00 KST
+
+# replace: TZ만 바꿈 (실제 순간이 달라짐!) - 위험
+dt.replace(tzinfo=ZoneInfo("Asia/Seoul")) # 2026-06-20 14:00 KST (다른 순간!)
+```
+
+`replace`는 naive에 TZ를 입힐 때만 사용. 이미 aware인 dt를 다른 TZ로 보려면 항상 `astimezone`.
+
+## UNIX timestamp 변환
+
+```python
+from datetime import datetime, timezone
+
+# datetime → timestamp
+ts = datetime.now(timezone.utc).timestamp()
+print(ts)    # 1750395600.123456 (float)
+
+# timestamp → datetime
+dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+print(dt)
+
+# naive timestamp는 로컬 TZ로 해석되어 혼란 위험
+naive = datetime.fromtimestamp(ts)   # 로컬 TZ 해석
+```
+
+`timestamp()`는 항상 UTC epoch 초. 안전.
+
+## 비교와 정렬
+
+`datetime`은 비교 가능. 단 naive와 aware 비교는 `TypeError`.
+
+```python
+now = datetime.now(timezone.utc)
+later = now + timedelta(hours=1)
+print(now < later)    # True
+
+# WRONG: 혼합
+naive = datetime.now()
+aware = datetime.now(timezone.utc)
+naive < aware    # TypeError
+```
+
+## 자주 보는 함정
+
+### 1. `datetime.utcnow()` 비권장
+
+```python
+# 비권장 (naive 반환)
+datetime.utcnow()      # tzinfo=None인데 사실 UTC 시각... 함정!
+
+# 권장
+datetime.now(timezone.utc)    # aware UTC
+```
+
+3.12+ 부터 `utcnow()`는 deprecated.
+
+### 2. `datetime.fromtimestamp()` 기본은 로컬 TZ
+
+```python
+datetime.fromtimestamp(ts)               # 로컬 TZ로 해석 → naive
+datetime.fromtimestamp(ts, tz=timezone.utc)   # UTC aware (권장)
+```
+
+### 3. ISO 파싱 한계
+
+`fromisoformat`(3.7+)은 엄격한 ISO 8601만. 3.11+에서 더 관대해졌지만 여전히 `Z`(UTC) 제대로 처리하려면 3.11+ 필요.
+
+```python
+# 3.10 이하에선 'Z' 안 됨
+datetime.fromisoformat("2026-06-20T14:30:00Z")   # ValueError (3.10-)
+datetime.fromisoformat("2026-06-20T14:30:00+00:00")   # OK
+```
+
+전 버전 호환은 `dateutil.parser.parse` 또는 `pendulum`.
+
+### 4. month/year 더하기
+
+`timedelta`엔 `months`나 `years`가 없다 (월/년은 길이 가변).
+
+```python
+# 한 달 후?
+from dateutil.relativedelta import relativedelta
+dt + relativedelta(months=1)
+
+# 또는 직접 계산
+def add_months(dt, months):
+    year = dt.year + (dt.month - 1 + months) // 12
+    month = (dt.month - 1 + months) % 12 + 1
+    day = min(dt.day, last_day_of_month(year, month))
+    return dt.replace(year=year, month=month, day=day)
+```
+
+## time vs datetime
+
+| 모듈 | 용도 |
+|------|------|
+| `time` | 낮은 수준, UNIX timestamp, monotonic clock |
+| `datetime` | 사람이 읽는 날짜·시각 |
+| `calendar` | 달력 (월 길이, 윤년) |
+
+```python
+import time
+time.time()              # UNIX timestamp (float)
+time.monotonic()         # 단조 증가 (시간 차이 측정용, 절대 시각 아님)
+time.perf_counter()      # 고해상도 (성능 측정)
+time.sleep(0.5)
+```
+
+벤치마크엔 `perf_counter`. 사용자 시각 표시엔 `datetime`.
+
+## 참고
+
+- [`datetime` documentation](https://docs.python.org/3/library/datetime.html)
+- [`zoneinfo` documentation](https://docs.python.org/3/library/zoneinfo.html)
+- [PEP 615 – Support for the IANA Time Zone Database](https://peps.python.org/pep-0615/)
+- [strftime/strptime format codes](https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes)

@@ -1,0 +1,372 @@
+---
+title: "[Spring] Spring for Apache Kafka"
+aliases: ["spring kafka", "KafkaTemplate", "@KafkaListener", "kafka producer", "kafka consumer"]
+tags: [spring, kafka, messaging, event]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Spring Kafka**는 Apache Kafka 클라이언트의 Spring 친화 래퍼. `KafkaTemplate` (producer), `@KafkaListener` (consumer), `KafkaAdmin` (topic 관리), Spring Boot 자동 구성, 트랜잭션 통합 등.
+
+## 설정
+
+```kotlin
+implementation("org.springframework.kafka:spring-kafka")
+```
+
+```yaml
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      group-id: my-app
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.example.events"
+    listener:
+      ack-mode: manual
+      concurrency: 3
+```
+
+## Producer
+
+```java
+@Service
+public class OrderEventPublisher {
+
+    private final KafkaTemplate<String, OrderEvent> kafkaTemplate;
+
+    public void publish(OrderEvent event) {
+        kafkaTemplate.send("orders", event.orderId(), event)
+            .whenComplete((result, ex) -> {
+                if (ex == null) {
+                    log.info("Sent to {}-{}", result.getRecordMetadata().topic(), result.getRecordMetadata().partition());
+                } else {
+                    log.error("Failed to send", ex);
+                }
+            });
+    }
+
+    public void publishSync(OrderEvent event) throws Exception {
+        SendResult<String, OrderEvent> result = kafkaTemplate
+            .send("orders", event.orderId(), event)
+            .get(10, TimeUnit.SECONDS);
+    }
+}
+```
+
+`send()`는 `CompletableFuture` 반환. async 처리.
+
+### 직접 ProducerRecord
+
+```java
+ProducerRecord<String, OrderEvent> record = new ProducerRecord<>(
+    "orders",
+    partition,    // null이면 key hash로 결정
+    timestamp,
+    key,
+    value,
+    headers
+);
+kafkaTemplate.send(record);
+```
+
+## Consumer
+
+```java
+@Service
+public class OrderEventListener {
+
+    @KafkaListener(topics = "orders", groupId = "order-processor")
+    public void handle(OrderEvent event) {
+        log.info("Received: {}", event);
+        process(event);
+    }
+
+    @KafkaListener(topics = "orders", groupId = "fraud-checker")
+    public void checkFraud(
+        @Payload OrderEvent event,
+        @Header(KafkaHeaders.RECEIVED_PARTITION) int partition,
+        @Header(KafkaHeaders.OFFSET) long offset,
+        Acknowledgment ack
+    ) {
+        try {
+            fraudService.check(event);
+            ack.acknowledge();
+        } catch (Exception e) {
+            log.error("Failed", e);
+            // ack 안 하면 재시도
+        }
+    }
+}
+```
+
+`@KafkaListener`가 자동으로 consumer 등록. 메서드 시그니처에서 인자 추출.
+
+### 다중 토픽
+
+```java
+@KafkaListener(topics = {"orders", "payments"}, groupId = "audit")
+public void audit(ConsumerRecord<String, Object> record) {
+    log.info("Topic: {}, Value: {}", record.topic(), record.value());
+}
+```
+
+### 토픽 패턴
+
+```java
+@KafkaListener(topicPattern = "user-.*", groupId = "user-monitor")
+public void monitor(String message) { ... }
+```
+
+## ConsumerFactory / ContainerFactory
+
+세밀한 설정.
+
+```java
+@Bean
+public ConcurrentKafkaListenerContainerFactory<String, OrderEvent> orderEventContainerFactory(
+    ConsumerFactory<String, OrderEvent> consumerFactory
+) {
+    ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory =
+        new ConcurrentKafkaListenerContainerFactory<>();
+    factory.setConsumerFactory(consumerFactory);
+    factory.setConcurrency(3);
+    factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+    factory.setCommonErrorHandler(new DefaultErrorHandler(
+        new FixedBackOff(1000L, 3)    // 1초 간격 3회 재시도
+    ));
+    return factory;
+}
+
+@KafkaListener(topics = "orders", containerFactory = "orderEventContainerFactory")
+public void handle(OrderEvent event) { ... }
+```
+
+## 직렬화: JSON
+
+```yaml
+spring:
+  kafka:
+    producer:
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.example.events"
+        spring.json.value.default.type: "com.example.events.OrderEvent"
+```
+
+`spring.json.trusted.packages: "*"`는 보안 위험. 명시 패키지.
+
+### Avro / Protobuf
+
+```kotlin
+implementation("io.confluent:kafka-avro-serializer:7.5.0")
+```
+
+Schema Registry 통합. 스키마 진화에 안전.
+
+## 에러 처리
+
+### DefaultErrorHandler + DLT
+
+```java
+@Bean
+public DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
+    return new DefaultErrorHandler(
+        new DeadLetterPublishingRecoverer(template),
+        new FixedBackOff(1000L, 3)
+    );
+}
+```
+
+3회 재시도 후 `orders.DLT` 토픽으로 전송. 별도 consumer가 DLT 처리 / 알림.
+
+### RetryableTopic
+
+```java
+@RetryableTopic(
+    attempts = "4",
+    backoff = @Backoff(delay = 1000, multiplier = 2.0),
+    dltStrategy = DltStrategy.FAIL_ON_ERROR
+)
+@KafkaListener(topics = "orders")
+public void handle(OrderEvent event) {
+    process(event);    // 실패 시 retry topic으로
+}
+
+@DltHandler
+public void handleDlt(OrderEvent event) {
+    log.error("Failed after retries: {}", event);
+}
+```
+
+`orders-retry-0`, `orders-retry-1`, ..., `orders-dlt` 자동 생성.
+
+## 트랜잭션
+
+```yaml
+spring:
+  kafka:
+    producer:
+      transaction-id-prefix: tx-
+```
+
+```java
+@Service
+public class OrderService {
+
+    @Transactional("kafkaTransactionManager")
+    public void process(Order order) {
+        orderRepository.save(order);    // DB
+        kafkaTemplate.send("orders", new OrderEvent(...));    // Kafka
+        // 둘 다 commit or rollback
+    }
+}
+```
+
+DB + Kafka 동시 트랜잭션. ChainedKafkaTransactionManager로 두 트랜잭션 매니저 통합.
+
+## 자주 보는 패턴
+
+### Event-driven 도메인
+
+```java
+public record OrderCreatedEvent(String orderId, BigDecimal amount, Instant createdAt) { }
+public record PaymentCompletedEvent(String orderId, String paymentId) { }
+
+@Service
+public class OrderService {
+    @Transactional
+    public void create(OrderRequest req) {
+        Order order = orderRepository.save(...);
+        kafkaTemplate.send("orders", new OrderCreatedEvent(...));
+    }
+}
+
+@Service
+public class PaymentService {
+    @KafkaListener(topics = "orders")
+    public void onOrderCreated(OrderCreatedEvent event) {
+        Payment payment = chargePayment(event.amount());
+        kafkaTemplate.send("payments", new PaymentCompletedEvent(...));
+    }
+}
+```
+
+### CDC (Change Data Capture)
+
+Debezium으로 DB 변경 → Kafka topic. 다른 서비스가 consume.
+
+```yaml
+# Debezium connector 설정
+{
+  "name": "users-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.dbname": "myapp",
+    "table.include.list": "public.users",
+    "topic.prefix": "myapp"
+  }
+}
+```
+
+```java
+@KafkaListener(topics = "myapp.public.users")
+public void onUserChange(UserChangeEvent event) {
+    // op: c (create), u (update), d (delete)
+    searchIndex.update(event.after());
+}
+```
+
+### Outbox Pattern
+
+DB와 Kafka 동기화 문제 해결.
+
+```java
+@Transactional
+public void create(...) {
+    Order order = orderRepository.save(...);
+    outboxRepository.save(new OutboxEvent("orders", new OrderEvent(...)));
+}
+
+// 별도 worker가 outbox 폴링 → Kafka 전송 → 삭제
+```
+
+또는 Debezium으로 outbox 테이블 CDC.
+
+## 함정
+
+### 1. consumer lag
+
+처리 속도 < 생산 속도 → lag 증가. `concurrency` 늘리거나 partition 추가, 또는 batch 처리.
+
+### 2. at-least-once vs exactly-once
+
+```yaml
+spring:
+  kafka:
+    producer:
+      acks: all
+      enable-idempotence: true
+    consumer:
+      isolation-level: read_committed
+```
+
++ transactional producer = exactly-once. 단 성능 저하.
+
+기본은 at-least-once. consumer가 idempotent해야 안전.
+
+### 3. 큰 메시지
+
+```yaml
+spring:
+  kafka:
+    producer:
+      properties:
+        max.request.size: 5242880    # 5MB
+    consumer:
+      properties:
+        max.partition.fetch.bytes: 5242880
+```
+
+너무 큰 메시지는 anti-pattern. ID만 보내고 별도 storage 조회.
+
+### 4. consumer group rebalance
+
+새 consumer 추가/제거 → rebalance → 잠시 정지. cooperative rebalancer로 영향 감소:
+
+```yaml
+properties:
+  partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+```
+
+### 5. 메시지 순서
+
+같은 partition 내에서만 순서 보장. key를 잘 선택 (예: userId).
+
+## 모니터링
+
+- Consumer lag (Burrow, Confluent Control Center)
+- Throughput
+- Topic offset / size
+
+Spring Kafka는 Micrometer 메트릭 자동.
+
+## 참고
+
+- [Spring for Apache Kafka](https://docs.spring.io/spring-kafka/reference/)
+- [@KafkaListener](https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/listener-annotation.html)
+- [Confluent Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html)
+- [Debezium](https://debezium.io/)
+- [Kafka official docs](https://kafka.apache.org/documentation/)

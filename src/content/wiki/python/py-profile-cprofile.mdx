@@ -1,0 +1,299 @@
+---
+title: "[Python] cProfile, timeit, perf: 성능 프로파일링"
+aliases: ["python cprofile", "timeit", "py-spy", "scalene", "performance profiling", "프로파일링"]
+tags: [python, profiling, performance, cProfile, timeit, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+Python 성능 분석 도구 선택지.
+
+- **`timeit`** (stdlib): 작은 코드 조각 벤치마크
+- **`cProfile`** (stdlib): 함수 호출 단위 프로파일링, deterministic
+- **`profile`** (stdlib): cProfile의 순수 Python 버전 (느림)
+- **`py-spy`** (third-party): sampling profiler, 프로덕션 안전
+- **`scalene`** (third-party): CPU + GPU + 메모리 통합
+
+## timeit: 마이크로 벤치마크
+
+```python
+import timeit
+
+# CLI
+# python -m timeit -s "x = list(range(1000))" "x.copy()"
+
+# 코드
+t = timeit.timeit("sum(range(100))", number=10000)
+print(f"{t * 1000:.3f}ms total")
+
+t = timeit.repeat("sum(range(100))", number=10000, repeat=5)
+print(f"best of 5: {min(t) * 1000:.3f}ms")
+```
+
+`number`는 한 라운드의 반복 횟수. `repeat`는 라운드 수. `min(repeat)`이 보통 가장 신뢰할 만한 값 (시스템 노이즈).
+
+### setup vs stmt
+
+```python
+timeit.timeit(
+    stmt="x.copy()",
+    setup="x = list(range(1000))",
+    number=10000,
+)
+```
+
+setup은 측정에서 제외. 매 라운드 한 번 실행.
+
+### IPython %timeit
+
+```python
+%timeit sum(range(100))
+# 880 ns ± 5 ns per loop (mean ± std. dev. of 7 runs, ...)
+
+%%timeit
+x = list(range(1000))
+x.sort()
+# 셀 단위 측정
+```
+
+자동으로 반복 횟수 조정.
+
+### 비교
+
+```python
+import timeit
+
+t1 = timeit.timeit("sum([x for x in xs])", setup="xs = list(range(1000))", number=10000)
+t2 = timeit.timeit("sum(x for x in xs)",   setup="xs = list(range(1000))", number=10000)
+t3 = timeit.timeit("sum(xs)",              setup="xs = list(range(1000))", number=10000)
+print(t1, t2, t3)
+```
+
+마이크로 벤치는 미세한 환경 차이에 민감. 여러 번 측정 후 최솟값 비교.
+
+## cProfile: 함수 단위 프로파일링
+
+```python
+import cProfile
+
+cProfile.run("main()", "profile.out")    # 실행 후 파일 저장
+
+# 또는 직접
+pr = cProfile.Profile()
+pr.enable()
+main()
+pr.disable()
+pr.print_stats("cumulative")
+```
+
+CLI:
+
+```bash
+python -m cProfile -o profile.out script.py
+python -m cProfile -s cumulative script.py    # 누적 시간 정렬
+```
+
+## pstats: 결과 분석
+
+```python
+import pstats
+
+p = pstats.Stats("profile.out")
+p.sort_stats("cumulative").print_stats(20)    # 상위 20개
+
+p.sort_stats("tottime").print_stats(20)       # 자기 시간만
+p.print_callers("hot_function")                # 누가 hot_function을 부르는가
+p.print_callees("hot_function")                # hot_function이 누구를 부르는가
+```
+
+주요 열:
+
+| 열 | 의미 |
+|----|------|
+| ncalls | 호출 횟수 |
+| tottime | 함수 자체 시간 (하위 호출 제외) |
+| percall | tottime / ncalls |
+| cumtime | 누적 시간 (하위 호출 포함) |
+| percall | cumtime / ncalls |
+
+**최적화 타겟**: tottime이 큰 것 (이 함수 안에서 시간 소비). cumtime은 누가 비싼 호출을 하는지 보는 용도.
+
+## 시각화: snakeviz / gprof2dot
+
+```bash
+pip install snakeviz
+snakeviz profile.out    # 브라우저에서 인터랙티브 sunburst
+```
+
+```bash
+pip install gprof2dot
+gprof2dot -f pstats profile.out | dot -Tpng > profile.png    # 콜 그래프
+```
+
+콜 그래프와 누적 시간을 시각적으로 보면 hot path가 즉시 드러난다.
+
+## py-spy: sampling profiler
+
+`cProfile`은 매 호출에 후킹 → 5-30% 오버헤드.
+
+`py-spy`는 별도 프로세스에서 주기적으로 스택 샘플링 → 거의 0 오버헤드. **프로덕션 안전**.
+
+```bash
+pip install py-spy
+
+py-spy record -o profile.svg -- python script.py    # FlameGraph
+py-spy top --pid 12345                               # top 명령
+py-spy dump --pid 12345                              # 현재 스택
+```
+
+이미 실행 중인 프로세스에 attach 가능. 디버깅에 강력.
+
+## scalene: CPU + 메모리 통합
+
+```bash
+pip install scalene
+
+scalene script.py
+scalene --html --outfile profile.html script.py
+```
+
+CPU 시간뿐 아니라 메모리 할당, GPU 사용까지 한 번에 분석. line-level 통계.
+
+## line_profiler
+
+함수 단위가 아닌 **줄 단위** CPU 프로파일.
+
+```bash
+pip install line_profiler
+```
+
+```python
+@profile    # kernprof 데코레이터
+def hot_function():
+    x = [i ** 2 for i in range(1000)]    # 줄별 시간
+    y = sum(x)
+    return y
+```
+
+```bash
+kernprof -l -v script.py
+```
+
+특정 함수가 hot하다는 걸 cProfile로 찾은 뒤 줄 단위 분석에.
+
+## 자주 보는 패턴
+
+### Hot path 식별
+
+1. cProfile로 전체 실행 → tottime 상위 함수 식별
+2. line_profiler 또는 py-spy로 그 함수 내부 분석
+3. 최적화 → 다시 측정 (회귀 방지)
+
+### 알고리즘 비교
+
+```python
+import timeit
+
+def algo_a(data): ...
+def algo_b(data): ...
+
+setup = "from __main__ import algo_a, algo_b, data; data = list(range(10000))"
+
+a = min(timeit.repeat("algo_a(data)", setup=setup, number=100, repeat=5))
+b = min(timeit.repeat("algo_b(data)", setup=setup, number=100, repeat=5))
+print(f"A: {a:.4f}s, B: {b:.4f}s, speedup: {a/b:.2f}x")
+```
+
+### CI에 회귀 검출
+
+```python
+import pytest
+
+@pytest.mark.benchmark(group="parsing")
+def test_parse_speed(benchmark):
+    result = benchmark(parse, sample_data)
+    assert result.is_valid
+```
+
+`pytest-benchmark`로 자동 비교. 회귀 발견 시 CI fail.
+
+### 비동기 코드 프로파일
+
+cProfile은 async도 측정 가능. 단 단일 코루틴의 cumulative time이 진짜 그 시간이 아니라 await가 진행되는 동안 다른 작업이 진행된 시간도 포함될 수 있음.
+
+py-spy는 async profiling 좀 더 자연스러움.
+
+## 최적화 원칙
+
+1. **측정 먼저** ("Premature optimization is the root of all evil")
+2. **알고리즘 우선**: O(n^2) → O(n log n) 이 마이크로 최적화보다 훨씬 큼
+3. **stdlib과 numpy/pandas 활용**: 순수 Python 루프보다 C 구현이 100x+ 빠름
+4. **JIT/C extension**: 정말 hot한 부분은 Cython, mypyc, PyPy, 또는 Rust extension
+
+### 흔한 hot spot 패턴
+
+- 큰 list `in` 검사 → set 변환 (O(n) → O(1))
+- 문자열 누적 `+=` → `"".join(...)` (O(n^2) → O(n))
+- 반복 dict lookup → 로컬 변수에 캐싱
+- Python 루프 → numpy/pandas 벡터화
+- 동기 I/O 직렬 → asyncio 또는 threading
+- pickle 자주 사용 → MessagePack 또는 marshal
+
+## 함정
+
+### 1. 캐시 효과로 첫 호출이 느림
+
+```python
+%timeit my_func()       # 첫 호출은 import, JIT 등 비용 포함
+```
+
+warm up 후 측정. `repeat` + `min`.
+
+### 2. 너무 작은 코드의 마이크로벤치
+
+```python
+%timeit x + y           # 호출 오버헤드가 측정의 대부분
+```
+
+미세한 차이는 의미 없음. 실제 워크로드 측정이 우선.
+
+### 3. 옵티마이저가 죽은 코드 제거
+
+```python
+%timeit [x ** 2 for x in range(100)]    # 결과 안 쓰면 컴파일러가 제거?
+```
+
+CPython 인터프리터는 그런 최적화 약함이라 보통 측정됨. 그래도 결과를 변수에 할당하거나 sink로 쓰는 게 안전.
+
+### 4. 다른 프로세스가 CPU 점유
+
+벤치마크 중 다른 프로그램이 무거우면 결과 오염. min 사용으로 어느 정도 보정.
+
+### 5. cProfile의 오버헤드
+
+cProfile 자체 비용으로 측정값이 부풀려짐. 절대값보다 **상대 비율**에 집중.
+
+## 도구 선택 가이드
+
+| 작업 | 도구 |
+|------|------|
+| 마이크로벤치 (코드 한 줄) | timeit |
+| 함수 단위 핫스팟 | cProfile |
+| 줄 단위 분석 | line_profiler |
+| 프로덕션 / 무료 sampling | py-spy |
+| CPU + 메모리 통합 | scalene |
+| 회귀 검출 (CI) | pytest-benchmark |
+| 시각화 | snakeviz, gprof2dot, flamegraph |
+| 메모리만 | tracemalloc, memory_profiler |
+
+## 참고
+
+- [`cProfile` documentation](https://docs.python.org/3/library/profile.html)
+- [`timeit` documentation](https://docs.python.org/3/library/timeit.html)
+- [`pstats`](https://docs.python.org/3/library/profile.html#the-stats-class)
+- [`py-spy`](https://github.com/benfred/py-spy)
+- [`scalene`](https://github.com/plasma-umass/scalene)
+- [`line_profiler`](https://github.com/pyutils/line_profiler)
+- [`snakeviz`](https://jiffyclub.github.io/snakeviz/)
+- [`pytest-benchmark`](https://pytest-benchmark.readthedocs.io/)

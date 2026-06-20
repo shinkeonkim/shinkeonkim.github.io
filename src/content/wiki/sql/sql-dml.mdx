@@ -1,0 +1,441 @@
+---
+title: "[SQL] DML"
+aliases: ["SQL DML", "DML", "Data Manipulation Language", "SELECT", "INSERT", "UPDATE", "DELETE", "Upsert"]
+tags: [sql, dml, select, insert, update, delete, database]
+updated: 2026-06-20
+---
+
+## 정의
+
+**DML** (Data Manipulation Language) 은 **데이터 자체를 조회/삽입/수정/삭제** 하는 SQL 의 하위 집합. 일상 쿼리의 99% 가 여기에 속한다.
+
+| 명령 | 의미 |
+|:---|:---|
+| `SELECT` | 데이터 조회 |
+| `INSERT` | 새 행 삽입 |
+| `UPDATE` | 기존 행 수정 |
+| `DELETE` | 행 삭제 |
+| `MERGE` | UPSERT (표준), dialect 마다 대안 |
+
+전체 SQL 체계는 [[SQL]] 참고. 스키마 정의는 [[SQL DDL]], 권한·트랜잭션은 [[SQL DCL TCL]].
+
+## SELECT, 전체 골격
+
+```sql
+SELECT [DISTINCT] 컬럼1, 컬럼2, 표현식 AS alias
+FROM 테이블 [AS] 별칭
+[JOIN ...]                  -- 결합
+[WHERE  조건]               -- 행 필터
+[GROUP BY 컬럼]              -- 그룹 분할
+[HAVING 그룹조건]            -- 그룹 필터
+[ORDER BY 컬럼 [ASC|DESC]]  -- 정렬
+[LIMIT n [OFFSET m]];       -- 페이징
+```
+
+논리적 실행 순서는 [[SQL]] 의 "쿼리 실행의 논리적 순서" 참고.
+
+## SELECT 기본 예제
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  code={`-- 전체
+SELECT * FROM users;
+
+-- 컬럼 선택 + 별칭
+SELECT id, name AS user_name, salary * 12 AS yearly
+FROM users;
+
+-- 필터 + 정렬 + 페이징
+SELECT name, salary
+FROM users
+WHERE city = 'Seoul' AND salary >= 3000
+ORDER BY salary DESC
+LIMIT 5;
+
+-- 중복 제거
+SELECT DISTINCT city FROM users;`}
+  output={`-- users 전체
+ id |  name   | city  | salary
+----+---------+-------+--------
+  1 | Alice   | Seoul |   3000
+  2 | Bob     | Busan |   4000
+  3 | Charlie | Seoul |   3500
+
+-- Seoul + 3000 이상, 내림차순
+  name   | salary
+---------+--------
+ Charlie |   3500
+ Alice   |   3000`}
+/>
+
+## WHERE 의 연산자
+
+| 연산 | 의미 |
+|:---|:---|
+| `=`, `<>` (`!=`), `<`, `<=`, `>`, `>=` | 비교 |
+| `AND`, `OR`, `NOT` | 부울 |
+| `BETWEEN a AND b` | `>= a AND <= b` |
+| `IN (...)` | 집합 멤버 |
+| `LIKE` / `ILIKE` (PG) | 패턴 (`%`, `_`) |
+| `IS NULL` / `IS NOT NULL` | NULL 검사 |
+| `EXISTS (subquery)` | 결과 존재 여부 |
+
+> [!IMPORTANT]
+> NULL 비교는 `=` 가 안 통한다. `WHERE col = NULL` 은 항상 거짓. `WHERE col IS NULL` 을 써야 한다. [[SQL]] 의 "NULL 의 3-값 논리" 참고.
+
+### LIKE 패턴
+
+```sql
+WHERE name LIKE 'A%'      -- A 로 시작
+WHERE name LIKE '%son'    -- son 으로 끝
+WHERE name LIKE '_lice'   -- 한 글자 + lice
+WHERE name LIKE '%50\\%%' ESCAPE '\\'   -- 리터럴 % 검색
+```
+
+## SELECT 표현식
+
+산술, 문자열, 날짜 함수, `CASE WHEN`. 자세한 타입별 연산은 [[SQL Data Types]] 참고.
+
+```sql
+SELECT
+  name,
+  salary,
+  salary * 12               AS yearly,
+  CASE
+    WHEN salary >= 4000 THEN 'high'
+    WHEN salary >= 3000 THEN 'mid'
+    ELSE                     'low'
+  END AS tier,
+  EXTRACT(YEAR FROM created_at) AS join_year
+FROM users;
+```
+
+## ORDER BY 의 디테일
+
+```sql
+ORDER BY salary DESC                          -- 단일 컬럼
+ORDER BY city ASC, salary DESC                -- 여러 컬럼
+ORDER BY 2 DESC                               -- SELECT 절 N 번째 컬럼 (가독성 나쁨)
+ORDER BY salary DESC NULLS LAST               -- NULL 위치 지정 (PG 표준)
+```
+
+dialect 차이:
+- PostgreSQL: 기본 `NULLS LAST` for DESC, `NULLS FIRST` for ASC. 명시 가능.
+- MySQL: 기본 `NULLS FIRST`. `NULLS LAST` 미지원, `ORDER BY col IS NULL, col` 우회.
+
+## LIMIT / OFFSET 의 함정
+
+```sql
+SELECT * FROM events ORDER BY id LIMIT 20 OFFSET 1000000;
+```
+
+`OFFSET` 은 **스킵하기 위해 그 행들을 다 읽는다**. 깊은 페이지에서 매우 느림.
+
+해법: **Keyset Pagination (cursor)**.
+
+```sql
+-- 첫 페이지
+SELECT * FROM events WHERE id > 0 ORDER BY id LIMIT 20;
+-- 다음 페이지: 마지막 id 를 cursor 로
+SELECT * FROM events WHERE id > 12345 ORDER BY id LIMIT 20;
+```
+
+## 서브쿼리
+
+### 스칼라 서브쿼리
+
+```sql
+SELECT
+  name,
+  salary,
+  (SELECT AVG(salary) FROM users) AS overall_avg
+FROM users;
+```
+
+### IN / EXISTS
+
+```sql
+SELECT name FROM users
+WHERE id IN (SELECT user_id FROM orders WHERE amount > 1000);
+
+SELECT name FROM users u
+WHERE EXISTS (
+  SELECT 1 FROM orders o WHERE o.user_id = u.id AND o.amount > 1000
+);
+```
+
+옵티마이저는 보통 `EXISTS` 가 더 빠르다 (첫 매칭에서 짧게 끊음). `IN` 은 결과 집합 전체를 만든다.
+
+### 상관 서브쿼리 (Correlated)
+
+```sql
+SELECT name,
+  (SELECT MAX(amount) FROM orders o WHERE o.user_id = u.id) AS max_order
+FROM users u;
+```
+
+외부 쿼리의 행마다 내부 쿼리가 실행, 비용 큼. JOIN 으로 풀 수 있는지 검토.
+
+### CTE (Common Table Expression)
+
+`WITH` 절로 이름 붙인 임시 결과셋. 가독성 + 재사용.
+
+```sql
+WITH high_paid AS (
+  SELECT id, name FROM users WHERE salary >= 4000
+),
+their_orders AS (
+  SELECT u.name, o.amount
+  FROM high_paid u
+  JOIN orders o ON o.user_id = u.id
+)
+SELECT name, SUM(amount) AS total
+FROM their_orders
+GROUP BY name;
+```
+
+PG 12+, MySQL 8+ 에서 잘 동작. 옵티마이저가 inline 화 (PG 12+) 또는 머티리얼라이즈 (PG 11-).
+
+### 재귀 CTE
+
+```sql
+WITH RECURSIVE category_tree AS (
+  SELECT id, parent_id, name, 1 AS depth
+  FROM categories
+  WHERE parent_id IS NULL
+  UNION ALL
+  SELECT c.id, c.parent_id, c.name, ct.depth + 1
+  FROM categories c
+  JOIN category_tree ct ON c.parent_id = ct.id
+)
+SELECT * FROM category_tree ORDER BY depth, name;
+```
+
+조직도, 카테고리, BFS/DFS 트리 순회에.
+
+## INSERT
+
+### 단일/다중 행
+
+```sql
+INSERT INTO users (name, city, salary) VALUES ('Alice', 'Seoul', 3000);
+
+INSERT INTO users (name, city, salary) VALUES
+  ('Alice',   'Seoul', 3000),
+  ('Bob',     'Busan', 4000),
+  ('Charlie', 'Seoul', 3500);
+```
+
+### INSERT ... SELECT
+
+```sql
+INSERT INTO users_backup (id, name, city, salary)
+SELECT id, name, city, salary FROM users WHERE created_at < '2024-01-01';
+```
+
+### RETURNING (PostgreSQL)
+
+INSERT/UPDATE/DELETE 의 결과를 즉시 반환. 자동 생성된 PK 받기에 좋다.
+
+```sql
+INSERT INTO users (name, city, salary)
+VALUES ('Diana', 'Seoul', 3200)
+RETURNING id, created_at;
+```
+
+MySQL 은 `RETURNING` 미지원. `LAST_INSERT_ID()` 함수로 마지막 PK 만 조회 가능. MariaDB 는 지원.
+
+## UPDATE
+
+```sql
+UPDATE users
+SET salary = salary * 1.1,
+    updated_at = NOW()
+WHERE city = 'Seoul';
+```
+
+### 다른 테이블 참조해서 UPDATE
+
+<CodeWithOutput
+  variants={[
+    { language: 'sql', label: 'PostgreSQL', code: `UPDATE users u
+SET total_spent = sub.total
+FROM (
+  SELECT user_id, SUM(amount) AS total
+  FROM orders
+  GROUP BY user_id
+) sub
+WHERE u.id = sub.user_id;` },
+    { language: 'sql', label: 'MySQL', code: `UPDATE users u
+JOIN (
+  SELECT user_id, SUM(amount) AS total
+  FROM orders
+  GROUP BY user_id
+) sub ON u.id = sub.user_id
+SET u.total_spent = sub.total;` },
+  ]}
+  outputLabel="결과"
+  output={`-- users.total_spent 가 각 사용자의 누적 주문액으로 갱신됨
+-- 두 dialect 모두 같은 결과
+UPDATE 1234`}
+/>
+
+### WHERE 없는 UPDATE 의 무서움
+
+```sql
+UPDATE users SET salary = 0;     -- ⚠️ 전체 행 갱신!
+```
+
+운영 DB 에선 항상 `BEGIN` → `SELECT` 로 검증 → `UPDATE` → `COMMIT` 의 흐름. [[SQL DCL TCL]] 참고.
+
+## DELETE
+
+```sql
+DELETE FROM users WHERE id = 5;
+DELETE FROM users WHERE created_at < '2020-01-01';
+```
+
+### 다른 테이블 참조해서 DELETE
+
+```sql
+-- PostgreSQL
+DELETE FROM users u
+USING blacklist b
+WHERE u.email = b.email;
+
+-- MySQL
+DELETE u FROM users u
+JOIN blacklist b ON u.email = b.email;
+```
+
+### DELETE vs TRUNCATE
+
+| | DELETE | TRUNCATE |
+|:---|:---|:---|
+| 구분 | DML | DDL |
+| WHERE | ✓ | ✗ (전체만) |
+| 트리거 | 동작 | 동작 안 함 |
+| 시퀀스 리셋 | ✗ | 옵션 (PG) |
+| 속도 | 행 단위, 느림 | 페이지 단위, 빠름 |
+| FK | RESTRICT 가능 | CASCADE 필요 |
+| 트랜잭션 롤백 | 가능 | dialect 따라 |
+
+## UPSERT, dialect 차이
+
+같은 키가 있으면 UPDATE, 없으면 INSERT.
+
+<CodeWithOutput
+  variants={[
+    { language: 'sql', label: 'PostgreSQL', code: `-- INSERT ... ON CONFLICT
+INSERT INTO users (email, name, login_count)
+VALUES ('alice@x.com', 'Alice', 1)
+ON CONFLICT (email) DO UPDATE
+SET name        = EXCLUDED.name,
+    login_count = users.login_count + 1
+RETURNING id, login_count;` },
+    { language: 'sql', label: 'MySQL', code: `-- INSERT ... ON DUPLICATE KEY UPDATE
+INSERT INTO users (email, name, login_count)
+VALUES ('alice@x.com', 'Alice', 1)
+ON DUPLICATE KEY UPDATE
+  name        = VALUES(name),
+  login_count = login_count + 1;
+
+-- 8.0.20+: VALUES() 대신 alias
+INSERT INTO users (email, name, login_count)
+VALUES ('alice@x.com', 'Alice', 1) AS new_row
+ON DUPLICATE KEY UPDATE
+  name        = new_row.name,
+  login_count = login_count + 1;` },
+    { language: 'sql', label: 'ANSI (MERGE)', code: `MERGE INTO users u
+USING (VALUES ('alice@x.com', 'Alice', 1)) AS s(email, name, login_count)
+ON u.email = s.email
+WHEN MATCHED THEN
+  UPDATE SET name = s.name, login_count = u.login_count + 1
+WHEN NOT MATCHED THEN
+  INSERT (email, name, login_count) VALUES (s.email, s.name, s.login_count);` },
+  ]}
+  outputLabel="비고"
+  output={`-- PG 15+ 부터 MERGE 도 지원 (기능 동등은 아님)
+-- ON CONFLICT 가 race-condition 측면에서 가장 안전
+-- MySQL 의 ON DUPLICATE 는 AUTO_INCREMENT 를 일부 소비 (UPDATE 만 일어나도)`}
+/>
+
+## pandas 와 DML 의 대응
+
+| SQL | pandas |
+|:---|:---|
+| `SELECT * FROM t` | `df` |
+| `SELECT col FROM t` | `df[['col']]` |
+| `SELECT * FROM t WHERE c > 10` | `df[df['c'] > 10]` ([[Pandas Boolean Indexing]]) |
+| `ORDER BY c DESC` | `df.sort_values('c', ascending=False)` |
+| `LIMIT 10` | `df.head(10)` |
+| `DISTINCT c` | `df['c'].drop_duplicates()` |
+| `WHERE c IN (...)` | `df[df['c'].isin([...])]` |
+| `WHERE c LIKE '%x%'` | `df[df['c'].str.contains('x', na=False)]` |
+| `CASE WHEN ...` | `np.where(...)`, `df['c'].map(...)` |
+| `INSERT` | `pd.concat([df, new_rows])` 또는 `df.loc[len(df)] = ...` |
+| `UPDATE ... SET c = ... WHERE ...` | `df.loc[mask, 'c'] = ...` |
+| `DELETE ... WHERE ...` | `df = df[~mask]` |
+| `WITH cte AS (...)` | 중간 DataFrame 변수 |
+
+`UPDATE`/`DELETE` 가 mask 한 줄로 처리되는 게 pandas 의 강점, 거꾸로 INSERT 의 효율은 SQL 이 압도적. 적재적소.
+
+## 함정
+
+### 1. SELECT * 를 운영 코드에
+
+- 스키마 변경 시 깨짐
+- 네트워크 비용
+- 인덱스 only-scan 못 씀
+
+명시적으로 컬럼 나열.
+
+### 2. NULL 의 전파
+
+```sql
+SELECT col_a + col_b FROM t;   -- 어느 한쪽이 NULL 이면 결과 NULL
+SELECT COALESCE(col_a, 0) + COALESCE(col_b, 0) FROM t;   -- 0 으로 대체
+```
+
+### 3. 묵시적 형변환
+
+```sql
+WHERE id = '1'    -- id 가 INTEGER 면 문자→숫자 변환, 인덱스 쓸 수 있음
+WHERE CAST(id AS TEXT) = '1'   -- 컬럼에 함수 적용, 인덱스 깨짐
+```
+
+문자열 칼럼에 숫자를 넣으면 PG 는 에러, MySQL 은 묵시적 변환 (조용한 버그의 원천).
+
+### 4. WHERE 와 HAVING 혼동
+
+```sql
+-- ❌ 에러: WHERE 는 집계 결과 못 봄
+SELECT city, AVG(salary) FROM users WHERE AVG(salary) > 3000 GROUP BY city;
+
+-- ✓ HAVING 에 써야 함
+SELECT city, AVG(salary) FROM users GROUP BY city HAVING AVG(salary) > 3000;
+```
+
+자세한 GROUP BY 의 의미와 동작은 [[SQL GROUP BY]].
+
+### 5. 페이지 깊은 OFFSET
+
+운영 환경에서 무한 스크롤은 keyset pagination 으로.
+
+## 참고
+
+- [[SQL]]
+- [[SQL DDL]]
+- [[SQL JOIN]]
+- [[SQL GROUP BY]]
+- [[SQL DCL TCL]]
+- [[SQL Data Types]]
+- [[PostgreSQL]]
+- [[MySQL]]
+- [[Pandas Boolean Indexing]]
+- [[Pandas groupby]]
+- [[Pandas merge]]
+- [[Pandas read_sql]]
+- [PostgreSQL Queries](https://www.postgresql.org/docs/current/queries.html)
+- [MySQL Data Manipulation Statements](https://dev.mysql.com/doc/refman/8.0/en/sql-data-manipulation-statements.html)

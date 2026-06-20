@@ -1,0 +1,292 @@
+---
+title: "[Python] subprocess: 외부 프로세스 실행"
+aliases: ["python subprocess", "subprocess.run", "Popen", "shell injection", "pipe"]
+tags: [python, subprocess, stdlib, process]
+updated: 2026-06-20
+---
+
+## 정의
+
+`subprocess`는 외부 명령을 실행하고 입출력·exit code를 받아오는 표준 모듈. `os.system`, `os.popen` 같은 구식 API를 대체한다. 3.5+ 이후엔 **`subprocess.run`** 이 권장 진입점.
+
+## subprocess.run
+
+```python
+import subprocess
+
+result = subprocess.run(
+    ["ls", "-la"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+
+print(result.returncode)
+print(result.stdout)
+print(result.stderr)
+```
+
+주요 옵션:
+
+| 옵션 | 동작 |
+|------|------|
+| `capture_output=True` | stdout, stderr를 result에 캡처 |
+| `text=True` | stdout/stderr를 문자열로 (기본 bytes) |
+| `check=True` | 0이 아닌 exit code면 `CalledProcessError` |
+| `cwd="..."` | 작업 디렉터리 |
+| `env={...}` | 환경 변수 (None이면 부모 상속) |
+| `timeout=5` | 초과 시 `TimeoutExpired` |
+| `input=b"..."` | stdin으로 보낼 데이터 |
+| `shell=True` | 셸 통해 실행 (보안 위험!) |
+
+## 인자 전달: 리스트 vs 문자열
+
+```python
+# 권장: 리스트로
+subprocess.run(["echo", "hello world"])
+
+# 위험: shell=True + 문자열
+subprocess.run("echo hello world", shell=True)
+```
+
+**리스트 형태가 안전하고 빠르다.** shell=True는 셸 인젝션 위험.
+
+### 셸 인젝션
+
+```python
+filename = user_input    # 신뢰할 수 없음
+
+# 위험
+subprocess.run(f"cat {filename}", shell=True)
+# user_input = "x.txt; rm -rf /" 입력 시 파일 시스템 파괴
+
+# 안전
+subprocess.run(["cat", filename])    # 인자가 분리되어 셸 해석 없음
+```
+
+쉘 기능(파이프, 리다이렉트, glob)이 정말 필요할 때만 shell=True. 그때도 입력은 `shlex.quote`로 escape.
+
+## 예외 처리
+
+```python
+import subprocess
+
+try:
+    result = subprocess.run(
+        ["mycmd", "--arg"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+except subprocess.CalledProcessError as e:
+    print(f"exit {e.returncode}")
+    print(f"stderr: {e.stderr}")
+except subprocess.TimeoutExpired as e:
+    print(f"timed out: {e.cmd}")
+except FileNotFoundError:
+    print("command not found")
+```
+
+`check=True`는 fail-fast. shell의 `set -e`와 비슷한 효과.
+
+## stdin/stdout/stderr 제어
+
+```python
+import subprocess
+
+# stdin 입력
+result = subprocess.run(
+    ["grep", "error"],
+    input="line 1\nerror line\nok\n",
+    capture_output=True,
+    text=True,
+)
+print(result.stdout)    # 'error line\n'
+```
+
+## Popen: 저수준 제어
+
+`run`은 단순 케이스. 복잡한 경우 (대화형, 양방향 통신, 백그라운드)는 `Popen`.
+
+```python
+import subprocess
+
+# 백그라운드로 시작
+proc = subprocess.Popen(
+    ["long-running"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+
+# 다른 일 하기
+do_other_work()
+
+# 완료 대기
+stdout, stderr = proc.communicate(timeout=30)
+print(proc.returncode)
+```
+
+`communicate`는 모든 stdin 입력, stdout/stderr 수집을 한 번에. 데드락 방지에 좋음.
+
+### 한 줄씩 읽기 (스트리밍)
+
+```python
+proc = subprocess.Popen(
+    ["tail", "-f", "log"],
+    stdout=subprocess.PIPE,
+    text=True,
+)
+
+for line in proc.stdout:
+    process(line)
+```
+
+## 파이프 연결: ls | grep py
+
+```python
+import subprocess
+
+p1 = subprocess.Popen(["ls", "/"], stdout=subprocess.PIPE)
+p2 = subprocess.Popen(["grep", "py"], stdin=p1.stdout, stdout=subprocess.PIPE, text=True)
+p1.stdout.close()    # 중요: p2가 EOF 받게
+output, _ = p2.communicate()
+print(output)
+```
+
+또는 shell=True가 더 간단:
+
+```python
+subprocess.run("ls / | grep py", shell=True, capture_output=True, text=True)
+```
+
+여러 파이프가 얽힌 명령이면 shell=True 사용 정당화될 수 있음. 단 입력 신뢰성 확인.
+
+## 환경 변수
+
+```python
+import os
+import subprocess
+
+# 부모 환경 + 추가
+env = os.environ.copy()
+env["DEBUG"] = "1"
+subprocess.run(["mycmd"], env=env)
+
+# 깨끗한 환경
+subprocess.run(["mycmd"], env={"PATH": "/usr/bin"})
+```
+
+`env=None`(기본)은 부모 환경 그대로 상속. 깨끗한 환경 필요 시 명시.
+
+## stderr를 stdout으로 합치기
+
+```python
+result = subprocess.run(
+    ["mycmd"],
+    capture_output=True,
+    text=True,
+    stderr=subprocess.STDOUT,    # stderr → stdout
+)
+# result.stdout에 stderr 메시지 포함
+```
+
+## 파일로 리다이렉트
+
+```python
+with open("output.log", "w") as f:
+    subprocess.run(["mycmd"], stdout=f, stderr=subprocess.STDOUT)
+```
+
+## 자주 보는 함정
+
+### 1. capture_output 안 쓰면 콘솔로 출력됨
+
+```python
+subprocess.run(["ls"])    # 결과가 부모 stdout으로 (캡처 X)
+```
+
+기본 동작이 inherit이라 콘솔에 그대로 나옴. 캡처하려면 `capture_output=True` 명시.
+
+### 2. text=True 빠뜨림
+
+```python
+result = subprocess.run(["ls"], capture_output=True)
+print(result.stdout)    # b'...' (bytes)
+
+# 문자열로 다루려면
+result = subprocess.run(["ls"], capture_output=True, text=True)
+# 또는 result.stdout.decode("utf-8")
+```
+
+### 3. 데드락 (큰 출력)
+
+```python
+proc = subprocess.Popen(["mycmd"], stdout=subprocess.PIPE)
+proc.wait()    # 데드락! stdout 버퍼가 차면 자식이 멈춤
+stdout = proc.stdout.read()    # 도달 못 함
+```
+
+→ `communicate()` 사용 또는 `run()`.
+
+### 4. cwd vs PATH
+
+```python
+subprocess.run(["./script.sh"], cwd="/some/dir")    # 상대 경로는 cwd 기준
+subprocess.run(["script.sh"])    # PATH에서 찾음
+
+# 절대 경로가 가장 명확
+subprocess.run(["/usr/local/bin/mycmd"])
+```
+
+### 5. Windows와의 호환
+
+```python
+import platform
+import subprocess
+
+cmd = ["ls"] if platform.system() != "Windows" else ["dir"]
+subprocess.run(cmd, shell=True)    # Windows의 dir는 cmd.exe 빌트인
+```
+
+크로스 플랫폼 CLI 도구는 `which` 검색이나 `shutil.which` 활용.
+
+## asyncio.subprocess
+
+비동기 컨텍스트에선 `asyncio.create_subprocess_exec` 사용. 이벤트 루프를 막지 않음.
+
+```python
+import asyncio
+
+async def run(cmd):
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, stdout.decode(), stderr.decode()
+
+async def main():
+    code, out, err = await run(["ls", "-la"])
+    print(out)
+
+asyncio.run(main())
+```
+
+## 보안 체크리스트
+
+- 가능한 한 `shell=False` (기본)
+- shell=True 사용 시 입력에 `shlex.quote` 적용
+- 절대 경로 사용 (PATH 의존 X)
+- `check=True`로 fail-fast
+- `timeout` 설정해 무한 대기 방지
+- 환경 변수 명시적 제한 (민감 정보 누출 방지)
+
+## 참고
+
+- [`subprocess` documentation](https://docs.python.org/3/library/subprocess.html)
+- [Subprocess module security – CWE-78](https://cwe.mitre.org/data/definitions/78.html)
+- [`shlex` documentation](https://docs.python.org/3/library/shlex.html)
+- [`asyncio.subprocess`](https://docs.python.org/3/library/asyncio-subprocess.html)

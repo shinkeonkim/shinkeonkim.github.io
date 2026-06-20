@@ -1,0 +1,332 @@
+---
+title: "[Python] unittest.mock: Mock, patch, MagicMock"
+aliases: ["python mock", "unittest.mock", "MagicMock", "patch", "spy", "test double"]
+tags: [python, mock, unittest, testing, stdlib]
+updated: 2026-06-20
+---
+
+## 정의
+
+`unittest.mock`은 **테스트용 대역체(test double) 생성과 패칭**을 위한 표준 라이브러리. `Mock`, `MagicMock`, `patch`를 통해 외부 의존성을 격리하고 호출을 검증한다. pytest와도 잘 어울리며 `pytest-mock` 같은 thin wrapper도 있다.
+
+## Mock 기본
+
+```python
+from unittest.mock import Mock
+
+m = Mock()
+m.foo("a", b=1)
+m.bar.baz()
+
+m.foo.assert_called_once_with("a", b=1)
+m.bar.baz.assert_called()
+print(m.foo.return_value)       # 또 다른 Mock (체이닝 호출 가능)
+```
+
+Mock 객체는 **모든 속성·메서드 호출을 자동으로 받아들이고 기록**한다. 호출되지 않은 메서드 접근도 새 Mock을 반환.
+
+## 반환값 설정
+
+```python
+m = Mock()
+m.fetch.return_value = {"id": 1, "name": "Alice"}
+print(m.fetch())     # {'id': 1, 'name': 'Alice'}
+print(m.fetch())     # 같은 값 반복
+
+# side_effect: 다양한 동작
+m.fetch.side_effect = [1, 2, 3]           # 호출마다 다음 값
+m.fetch.side_effect = Exception("oops")   # 예외
+m.fetch.side_effect = lambda x: x * 2     # 함수 (인자 받음)
+```
+
+`side_effect`가 `return_value`보다 우선. iterable이면 `StopIteration` 시 더 이상 호출 불가.
+
+## MagicMock
+
+`MagicMock`은 매직 메서드(`__len__`, `__iter__`, `__enter__` 등)까지 자동 지원하는 Mock의 강화판. 기본 `Mock`보다 더 자주 쓰인다.
+
+```python
+from unittest.mock import MagicMock
+
+m = MagicMock()
+len(m)              # 0 (기본 반환)
+list(m)             # []
+m[0]                # 또 다른 MagicMock
+
+# with 문도
+with MagicMock() as m:
+    m.read()
+```
+
+대부분의 라이브러리 mocking은 `MagicMock`이 안전.
+
+## patch: 일시적 교체
+
+테스트 동안만 모듈/객체의 속성을 mock으로 대체.
+
+### 컨텍스트 매니저
+
+```python
+from unittest.mock import patch
+
+def test_api():
+    with patch("myapp.api.requests.get") as mock_get:
+        mock_get.return_value.json.return_value = {"id": 1}
+        result = call_api()
+        assert result == {"id": 1}
+```
+
+블록 종료 시 자동 복원.
+
+### 데코레이터
+
+```python
+from unittest.mock import patch
+
+@patch("myapp.api.requests.get")
+def test_api(mock_get):
+    mock_get.return_value.json.return_value = {"id": 1}
+    result = call_api()
+    assert result == {"id": 1}
+```
+
+여러 patch를 쌓을 땐 **아래에서 위 순서**로 인자가 들어옴.
+
+```python
+@patch("myapp.api.requests.post")
+@patch("myapp.api.requests.get")
+def test(mock_get, mock_post):     # get이 안쪽이라 먼저
+    ...
+```
+
+### patch.object
+
+객체의 특정 속성만 패치.
+
+```python
+from unittest.mock import patch
+
+class Service:
+    def fetch(self): ...
+
+with patch.object(Service, "fetch", return_value="mocked"):
+    s = Service()
+    assert s.fetch() == "mocked"
+```
+
+### 어디를 patch할지: 핵심 함정
+
+**사용되는 곳**을 patch해야지, **정의된 곳**을 patch하면 안 됨.
+
+```python
+# myapp/api.py
+import requests
+def fetch(): return requests.get(...)
+
+# myapp/service.py
+from myapp.api import fetch
+def process(): return fetch()
+```
+
+```python
+# WRONG (정의된 곳)
+with patch("myapp.api.fetch") as m:
+    from myapp.service import process
+    process()             # 진짜 fetch 호출 (이미 service에 import됨)
+    m.assert_called()     # 실패
+
+# CORRECT (사용되는 곳)
+with patch("myapp.service.fetch") as m:
+    process()
+    m.assert_called()
+```
+
+`import` 시점에 이름이 바인딩되므로 사용처(`service.fetch`)를 패치해야 한다.
+
+## 어설션
+
+```python
+m.assert_called()                      # 한 번 이상
+m.assert_called_once()                  # 정확히 1번
+m.assert_called_with("a", b=1)          # 마지막 호출이 이 인자로
+m.assert_called_once_with("a", b=1)     # 정확히 한 번 + 인자 일치
+m.assert_any_call("a")                  # 어느 호출이든 이 인자
+m.assert_has_calls([call("a"), call("b")])   # 순서대로 호출됨
+m.assert_not_called()
+
+# 직접 검사
+print(m.called)                         # bool
+print(m.call_count)                     # int
+print(m.call_args)                      # 마지막 (args, kwargs)
+print(m.call_args_list)                 # 모든 호출 기록
+```
+
+## spec / autospec: 시그니처 검증
+
+기본 Mock은 어떤 메서드든 받음. 실제 클래스에 없는 메서드 호출도 통과 → 버그 가능.
+
+```python
+from unittest.mock import Mock, patch
+
+class Service:
+    def fetch(self): ...
+
+m = Mock()
+m.fetc()       # 오타지만 통과 (Mock이라 메서드 자동 생성)
+
+m = Mock(spec=Service)
+m.fetc()       # AttributeError (실제 Service에 없는 메서드)
+m.fetch()      # OK
+```
+
+`autospec=True` (patch에서)로 시그니처도 검증:
+
+```python
+@patch("myapp.fetch", autospec=True)
+def test(mock_fetch):
+    mock_fetch("too", "many", "args")    # TypeError
+```
+
+테스트의 안전성을 크게 높임. 권장.
+
+## side_effect로 동적 응답
+
+```python
+from unittest.mock import MagicMock
+
+m = MagicMock()
+
+def respond(url):
+    if "users" in url:
+        return {"users": []}
+    if "posts" in url:
+        return {"posts": []}
+    raise ValueError
+
+m.get.side_effect = respond
+m.get("/api/users")     # {"users": []}
+m.get("/api/posts")     # {"posts": []}
+```
+
+## pytest와의 조합
+
+`pytest-mock` 설치하면 `mocker` fixture로 더 짧게.
+
+```python
+def test_api(mocker):
+    mock_get = mocker.patch("myapp.requests.get")
+    mock_get.return_value.json.return_value = {"id": 1}
+    assert call_api() == {"id": 1}
+```
+
+fixture라 cleanup 자동, 인자 순서 신경 안 써도 됨.
+
+## AsyncMock (3.8+)
+
+async 함수를 mock할 때.
+
+```python
+from unittest.mock import AsyncMock
+
+m = AsyncMock(return_value="done")
+result = await m()       # "done"
+
+# patch에선 자동 감지
+@patch("myapp.fetch_async", new_callable=AsyncMock)
+async def test(mock_fetch):
+    mock_fetch.return_value = "data"
+    ...
+```
+
+## 자주 보는 패턴
+
+### 시간 mock
+
+```python
+from unittest.mock import patch
+from datetime import datetime
+
+@patch("myapp.datetime")
+def test(mock_dt):
+    mock_dt.now.return_value = datetime(2026, 1, 1)
+    assert get_year() == 2026
+
+# 더 깔끔: freezegun
+from freezegun import freeze_time
+
+@freeze_time("2026-01-01")
+def test():
+    assert get_year() == 2026
+```
+
+### 환경 변수 mock
+
+```python
+@patch.dict("os.environ", {"API_KEY": "test"})
+def test():
+    assert get_api_key() == "test"
+```
+
+### 파일시스템 mock
+
+`unittest.mock`보다 `pyfakefs` 같은 전용 라이브러리가 편함.
+
+```python
+def test_read_config(fs):    # pyfakefs fixture
+    fs.create_file("/etc/config.json", contents='{"key": "value"}')
+    assert read_config() == {"key": "value"}
+```
+
+## 함정
+
+### 1. mock 과다 사용
+
+mocking을 많이 할수록 테스트가 구현 디테일에 결합되어 깨지기 쉬움.
+
+```python
+# BAD: 내부 호출 흐름까지 검증
+def test():
+    with patch("svc.repo") as r:
+        with patch("svc.cache") as c:
+            with patch("svc.logger") as l:
+                svc.process()
+                r.find.assert_called()
+                c.set.assert_called()
+                l.info.assert_called()
+```
+
+→ 의존성을 줄이거나(파라미터 주입), 통합 테스트로 검증.
+
+### 2. mock 객체 비교
+
+```python
+m1 = Mock()
+m2 = Mock()
+m1 == m2    # False (다른 객체)
+m1 == m1    # True
+```
+
+값 비교가 필요하면 spec 사용 또는 dataclass 등 진짜 객체.
+
+### 3. import 시점 패치 누락
+
+위에서 설명한 import location 함정. 항상 "사용되는 곳"을 패치.
+
+### 4. patch 복원 안 됨
+
+```python
+# WRONG: 컨텍스트 매니저/데코레이터 없이
+patcher = patch("myapp.fetch")
+mock = patcher.start()
+# patcher.stop() 안 부르면 다른 테스트에 누수
+```
+
+→ 항상 데코레이터/with 또는 `addCleanup`. pytest의 `mocker` fixture는 자동 처리.
+
+## 참고
+
+- [`unittest.mock` documentation](https://docs.python.org/3/library/unittest.mock.html)
+- [Mock library tutorial](https://docs.python.org/3/library/unittest.mock.html#quick-guide)
+- [`pytest-mock`](https://pytest-mock.readthedocs.io/)
+- [`freezegun`](https://github.com/spulec/freezegun)
+- [`pyfakefs`](https://jmcgeheeiv.github.io/pyfakefs/)

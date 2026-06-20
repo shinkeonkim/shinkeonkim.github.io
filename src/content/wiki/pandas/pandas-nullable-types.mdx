@@ -1,0 +1,159 @@
+---
+title: "[Pandas] Nullable Types (Int64, boolean, string[pyarrow])"
+aliases: ["Pandas nullable", "Pandas Int64", "Pandas boolean", "Pandas string"]
+tags: [python, pandas, dtype, nullable]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Nullable dtypes** 는 NaN/None 을 **타입 그대로** 표현할 수 있는 pandas 의 새 타입 시스템. NumPy 기반의 `int64` (NaN 미허용) 의 한계를 극복.
+
+- **`Int8`, `Int16`, `Int32`, `Int64`** : nullable 정수 (대문자 I)
+- **`UInt8`, ..., `UInt64`** : unsigned
+- **`Float32`, `Float64`** : nullable 실수
+- **`boolean`** : nullable bool
+- **`string`** : 명시적 문자열 (object 대신)
+
+## 왜 필요한가
+
+### NaN 이 있으면 int → float 강등 문제
+
+```python
+import pandas as pd
+import numpy as np
+df = pd.DataFrame({'count': [1, 2, None, 4]})
+df['count'].dtype     # float64 (NaN 때문에 int 못 함)
+```
+
+NumPy 의 `int64` 는 NaN 표현 불가 → NaN 행이 하나라도 있으면 float 로 변환.
+
+### nullable 로 해결
+
+```python
+df['count'] = df['count'].astype('Int64')   # 대문자 I
+df['count']
+# 0       1
+# 1       2
+# 2    <NA>
+# 3       4
+# dtype: Int64
+```
+
+정수 유지 + NaN 표현.
+
+## 사용
+
+```python
+df = df.astype({
+    'id': 'Int32',
+    'is_active': 'boolean',
+    'name': 'string',
+})
+
+# read_csv 에서 직접
+df = pd.read_csv('data.csv', dtype={
+    'id': 'Int32',
+    'is_active': 'boolean',
+})
+
+# pyarrow backend
+df = pd.read_csv('data.csv', dtype_backend='numpy_nullable')
+```
+
+## pd.NA
+
+nullable dtype 의 결측치 표현.
+
+```python
+pd.NA
+# 산술: any op with pd.NA = pd.NA
+pd.NA + 1            # <NA>
+pd.NA == pd.NA       # <NA> (NaN 처럼)
+```
+
+NaN 과 다르게 **boolean context 에서 ambiguous** → 명시적 비교 필요.
+
+```python
+df['x'] == 5     # 결과에 pd.NA 가 섞일 수 있음
+# 필터링은 isna() / notna() 활용
+df[df['x'].notna() & (df['x'] == 5)]
+```
+
+## string dtype
+
+```python
+df['name'] = df['name'].astype('string')   # 명시적 string
+df['name'] = df['name'].astype('string[pyarrow]')   # arrow 백킹 (더 빠름)
+```
+
+### object vs string vs string[pyarrow]
+
+| dtype | 저장 | str accessor | 메모리 |
+|:---|:---|:---:|:---|
+| `object` | Python str 리스트 | ✓ | 큼 |
+| `string` | pandas 내부 | ✓ | 중간 |
+| `string[pyarrow]` | Arrow 백킹 | ✓ | **작음** |
+
+문자열 컬럼은 가능하면 `string[pyarrow]` 권장.
+
+## pyarrow backend (pandas 2.0+)
+
+```python
+pd.options.mode.dtype_backend = 'pyarrow'
+df = pd.read_csv('data.csv', dtype_backend='pyarrow')
+df.dtypes
+# id            int64[pyarrow]
+# name          string[pyarrow]
+# created_at    timestamp[ns][pyarrow]
+```
+
+Arrow 백킹의 장점:
+- 메모리 효율
+- 빠른 IO (Parquet 와 호환)
+- 정밀한 dtype (timezone, decimal 등)
+
+[[Pandas pyarrow backend]] 참고.
+
+## 자주 만나는 함정
+
+### 1. Int64 (NumPy) vs Int64 (nullable)
+
+```python
+df['x'].astype('int64')        # NumPy, NaN 미허용
+df['x'].astype('Int64')        # nullable, NaN 허용
+```
+
+대소문자가 의미를 바꾼다.
+
+### 2. boolean 의 truthiness
+
+```python
+mask = df['active']            # boolean dtype, pd.NA 가능
+if mask.any():                  # ambiguous (NA 때문)
+mask.fillna(False).any()        # ✓ 명시
+```
+
+### 3. 일부 메서드 미지원
+
+일부 numpy 함수는 pandas nullable 을 직접 처리 못 함. 임시로 변환 필요.
+
+```python
+np.where(df['flag'], 'A', 'B')  # boolean dtype 에서 동작 안 할 수 있음
+np.where(df['flag'].fillna(False), 'A', 'B')   # 회피
+```
+
+### 4. arrow string 의 일부 메서드
+
+대부분 동작하지만 일부 (특수 regex 옵션) 는 fallback 가능. 표준 메서드만 쓰는 것이 안전.
+
+## pandas 3.0 의 미래
+
+pandas 3.0 부터 **Arrow 가 기본 백킹**이 될 예정. 지금부터 nullable dtype 에 익숙해지면 마이그레이션이 쉽다.
+
+## 참고
+
+- [[Pandas replace / astype]]
+- [[Pandas pyarrow backend]]
+- [[Pandas read_csv]]
+- 공식 문서, [Nullable integer dtype](https://pandas.pydata.org/docs/user_guide/integer_na.html)

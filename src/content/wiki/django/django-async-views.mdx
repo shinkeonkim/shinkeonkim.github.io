@@ -1,0 +1,284 @@
+---
+title: "[Django] async views와 ASGI"
+aliases: ["django async view", "async def view", "ASGI", "sync_to_async", "async_to_sync", "django channels"]
+tags: [django, async, asgi, channels]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django 3.1+ 부터 **async view**를 지원한다. `async def`로 view를 정의하면 ASGI 서버(Uvicorn, Daphne, Hypercorn) 아래에서 코루틴으로 실행. I/O 바운드(외부 API, DB - 4.1+, 캐시) 작업에서 동시 처리량 향상. CPU 작업이나 동기 라이브러리엔 효과 X 또는 음수.
+
+ORM은 5.0+에서 본격 비동기 (`afilter`, `aget` 등). 그 전엔 `sync_to_async`로 래핑.
+
+## async view 기본
+
+```python
+import asyncio
+from django.http import JsonResponse
+
+async def async_view(request):
+    await asyncio.sleep(1)
+    return JsonResponse({"ok": True})
+
+# 외부 HTTP
+import httpx
+
+async def fetch_data(request):
+    async with httpx.AsyncClient() as client:
+        r = await client.get("https://api.example.com/data")
+    return JsonResponse(r.json())
+```
+
+URL conf에 평소처럼 등록. Django가 async view를 감지하면 적절히 실행.
+
+## 동기 view와 async view 혼재
+
+같은 프로젝트에 둘 다 가능. Django가 자동으로 양방향 변환:
+- 동기 view + 비동기 미들웨어 → 동기를 thread pool에서 실행
+- 비동기 view + 동기 미들웨어 → 미들웨어를 sync_to_async
+
+자동 변환은 작동하지만 성능 손해. 가능한 한 일관 유지.
+
+## ORM의 async (4.1+, 5.0+)
+
+```python
+# 5.0+
+async def view(request):
+    post = await Post.objects.aget(id=1)
+    posts = [p async for p in Post.objects.filter(is_published=True)]
+    count = await Post.objects.acount()
+    return JsonResponse({"count": count})
+```
+
+비동기 메서드는 `a` 접두 (`aget`, `afilter`, `acount`, `acreate`, `asave`, `adelete`, `aupdate`, `afirst`, `alast`, `aexists`, `aiterator`).
+
+5.0 이전에는 sync_to_async로 래핑.
+
+## sync_to_async / async_to_sync
+
+```python
+from asgiref.sync import sync_to_async, async_to_sync
+
+async def view(request):
+    # 동기 함수를 비동기 컨텍스트에서
+    posts = await sync_to_async(list)(Post.objects.all())
+
+    # ORM 직접 호출 (5.0 이전)
+    user = await sync_to_async(User.objects.get)(id=1)
+
+def sync_view(request):
+    # 비동기 함수를 동기에서
+    result = async_to_sync(fetch)("url")
+    return JsonResponse(result)
+```
+
+`thread_sensitive=True`(기본)는 같은 스레드 보장 (DB 트랜잭션 안전). `False`는 더 빠르지만 thread-local에 문제 생길 수 있음.
+
+## ASGI 서버
+
+WSGI(Gunicorn 등)는 동기. 비동기 view를 활용하려면 ASGI 서버:
+
+```bash
+pip install uvicorn
+uvicorn myproject.asgi:application --workers 4
+```
+
+또는 Daphne, Hypercorn, Granian.
+
+```python
+# myproject/asgi.py
+import os
+from django.core.asgi import get_asgi_application
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+application = get_asgi_application()
+```
+
+gunicorn + uvicorn worker도 인기:
+
+```bash
+gunicorn myproject.asgi:application -k uvicorn.workers.UvicornWorker --workers 4
+```
+
+## 자주 보는 패턴
+
+### 동시 외부 API 호출
+
+```python
+import asyncio
+import httpx
+
+async def dashboard(request):
+    async with httpx.AsyncClient() as client:
+        users_resp, orders_resp, metrics_resp = await asyncio.gather(
+            client.get("https://api1.example/users"),
+            client.get("https://api2.example/orders"),
+            client.get("https://api3.example/metrics"),
+        )
+    return JsonResponse({
+        "users": users_resp.json(),
+        "orders": orders_resp.json(),
+        "metrics": metrics_resp.json(),
+    })
+```
+
+세 외부 호출이 1초씩이면 동기는 3초, 비동기는 ~1초.
+
+### Streaming response
+
+```python
+from django.http import StreamingHttpResponse
+import asyncio
+
+async def stream_view(request):
+    async def gen():
+        for i in range(10):
+            yield f"data: {i}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingHttpResponse(gen(), content_type="text/event-stream")
+```
+
+SSE, 실시간 로그 스트림 등.
+
+### LLM/OpenAI 통합
+
+```python
+async def chat(request):
+    body = json.loads(request.body)
+    response = StreamingHttpResponse(content_type="text/event-stream")
+
+    async def stream():
+        async with openai_client.responses.stream(...) as s:
+            async for event in s:
+                yield f"data: {event.text}\n\n"
+
+    return StreamingHttpResponse(stream(), content_type="text/event-stream")
+```
+
+긴 LLM 응답을 토큰 단위로 흘려보냄.
+
+### 백그라운드 작업 트리거
+
+```python
+async def trigger(request):
+    asyncio.create_task(background_job())    # fire-and-forget
+    return JsonResponse({"started": True})
+
+async def background_job():
+    await asyncio.sleep(10)
+    ...
+```
+
+단 ASGI 서버 종료 시 task가 잘릴 수 있어 프로덕션엔 Celery 등 권장.
+
+## 함정
+
+### 1. 동기 ORM in async view
+
+```python
+async def view(request):
+    posts = Post.objects.all()           # OK (lazy)
+    list(posts)                           # WARN: sync 호출 in async context
+
+    # 5.0+
+    posts = [p async for p in Post.objects.all()]    # OK
+```
+
+`SynchronousOnlyOperation` 예외 발생할 수 있음. 명시적 sync_to_async 또는 a- 메서드.
+
+### 2. 동기 라이브러리 사용
+
+```python
+async def view(request):
+    requests.get("...")    # 블로킹! 이벤트 루프 정지
+```
+
+asyncio 친화 라이브러리: `httpx`, `aiohttp`, `aiomysql`, `asyncpg`, `redis.asyncio`.
+
+대체 어렵다면 `sync_to_async(requests.get)("...")` (스레드 풀로 위임).
+
+### 3. 미들웨어 모두 async?
+
+미들웨어가 동기/비동기 혼재면 변환 비용. 가능한 한 통일.
+
+```python
+class AsyncMiddleware:
+    sync_capable = True
+    async_capable = True
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    async def __call__(self, request):
+        response = await self.get_response(request)
+        return response
+```
+
+### 4. 트랜잭션과 sync_to_async
+
+`thread_sensitive=False`로 다른 스레드에서 실행 시 트랜잭션 컨텍스트 누락. 기본 `True` 유지.
+
+### 5. 캐시 백엔드
+
+Django cache 백엔드 일부는 sync만. 비동기 코드 안에서 `cache.get`은 SynchronousOnlyOperation 가능.
+
+`acache.get` (5.0+) 또는 sync_to_async.
+
+## 성능 기대치
+
+- 외부 I/O 동시 호출: 큰 향상 (5-10x)
+- DB 단순 조회: 거의 동등 (5.0+에서 async ORM도 thread pool 위임)
+- CPU 작업: 향상 없음 (또는 단점)
+- 단일 동기 라이브러리 잠시 호출: 미미
+
+async가 만능 아님. 측정 후 결정.
+
+## Django Channels
+
+표준 async view는 WebSocket 지원 X. Channels로 확장.
+
+```bash
+pip install channels[daphne]
+```
+
+```python
+# settings.py
+INSTALLED_APPS = ["daphne", ..., "channels"]
+ASGI_APPLICATION = "myproject.asgi.application"
+
+# asgi.py
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+from myapp.routing import websocket_urlpatterns
+
+application = ProtocolTypeRouter({
+    "http": get_asgi_application(),
+    "websocket": AuthMiddlewareStack(URLRouter(websocket_urlpatterns)),
+})
+```
+
+Consumer:
+
+```python
+from channels.generic.websocket import AsyncWebsocketConsumer
+
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        await self.accept()
+
+    async def receive(self, text_data):
+        await self.send(text_data=f"Echo: {text_data}")
+```
+
+자세한 건 `django-channels` 페이지.
+
+## 참고
+
+- [Async support](https://docs.djangoproject.com/en/stable/topics/async/)
+- [Async views](https://docs.djangoproject.com/en/stable/topics/async/#async-views)
+- [Async ORM (5.0+)](https://docs.djangoproject.com/en/stable/topics/db/queries/#async-queries)
+- [Django Channels](https://channels.readthedocs.io/)
+- [asgiref docs](https://asgi.readthedocs.io/)
+- [Uvicorn](https://www.uvicorn.org/)

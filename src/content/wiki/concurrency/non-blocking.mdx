@@ -1,0 +1,256 @@
+---
+title: "Non-Blocking (논블로킹)"
+aliases: ["non-blocking", "nonblocking", "non blocking", "논블로킹", "넌블로킹", "non-blocking I/O", "NIO", "lock-free"]
+tags: [concurrency, programming-model, blocking-nonblocking, nio, lock-free]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Non-Blocking** 은 호출이 **결과를 기다리지 않고 즉시 반환** 하는 실행 방식. 결과가 준비되지 않았다면 "아직 안 됐다" 라는 신호 (`null`, `false`, `-1`, `Optional.empty()` 등) 를 반환하고, 호출 스레드는 다른 일을 계속 한다.
+
+[[Blocking]] 의 반대 개념. [[Asynchronous]] 와 자주 같이 쓰이지만 별개 차원.
+
+## 두 가지 의미, I/O 와 동시성
+
+"Non-Blocking" 은 두 분야에서 미묘하게 다른 뜻으로 쓰인다.
+
+### 1. Non-Blocking I/O
+
+OS 의 I/O 호출 시, 데이터가 준비되지 않았으면 즉시 "준비 안 됨" 으로 반환.
+
+```java
+// Java NIO non-blocking mode
+SocketChannel ch = SocketChannel.open();
+ch.configureBlocking(false);            // ← non-blocking 모드
+
+ByteBuffer buf = ByteBuffer.allocate(1024);
+int n = ch.read(buf);                   // 즉시 반환
+if (n == 0) {
+    // 아직 데이터 없음, 다른 일 할 수 있음
+} else if (n > 0) {
+    // n 바이트 읽음
+}
+```
+
+`Selector` 또는 epoll / kqueue 등의 OS 메커니즘과 결합해 **한 스레드가 수만 소켓을 동시 처리** 가능.
+
+### 2. Non-Blocking 동시성 (lock-free)
+
+스레드가 락을 기다리지 않고 진행하는 알고리즘. **CAS (Compare-And-Swap)** 같은 atomic 연산으로 구현.
+
+```java
+AtomicInteger counter = new AtomicInteger();
+counter.incrementAndGet();              // CAS 루프, lock-free
+```
+
+`ConcurrentHashMap`, `ConcurrentLinkedQueue`, `AtomicReference` 등이 이 카테고리.
+
+이 글에서는 두 의미를 다 다룬다.
+
+## Non-Blocking I/O 의 흐름
+
+```anim:non-blocking-selector
+{}
+```
+
+Thread T 한 개가 `selector.select()` 로 준비된 소켓 집합을 받아 순차적으로 read/process/write 한다. 각 소켓 작업은 즉시 반환되므로 한 소켓의 지연이 다른 소켓의 처리를 막지 않는다. 작업이 끝나면 다시 `select()` 로 돌아가 다음 ready 이벤트를 기다린다.
+
+같은 흐름을 텍스트로 요약하면 다음과 같다.
+
+```text
+Thread T (1 개):
+  ┌─────────────────────────────────────────────┐
+  │ for each ready socket:                       │
+  │   socket.read(buf)   // 즉시 반환             │
+  │   process(buf)       // CPU 작업              │
+  │   socket.write(...)  // 즉시 반환             │
+  └─────────────────────────────────────────────┘
+        ▲
+        │ Selector.select() 가 준비된 소켓을 알려줌
+```
+
+핵심: **OS 가 어떤 소켓이 read/write 가능한지 알려주고**, 우리는 그 소켓에만 작업한다. block 되지 않는다.
+
+## 가장 단순한 Non-Blocking I/O 코드
+
+```java
+Selector selector = Selector.open();
+ServerSocketChannel server = ServerSocketChannel.open();
+server.bind(new InetSocketAddress(8080));
+server.configureBlocking(false);
+server.register(selector, SelectionKey.OP_ACCEPT);
+
+while (true) {
+    selector.select();   // 이벤트 있을 때까지 대기 (이건 block 임)
+    Set<SelectionKey> keys = selector.selectedKeys();
+    for (SelectionKey key : keys) {
+        if (key.isAcceptable()) {
+            SocketChannel client = server.accept();   // non-blocking
+            client.configureBlocking(false);
+            client.register(selector, SelectionKey.OP_READ);
+        } else if (key.isReadable()) {
+            SocketChannel client = (SocketChannel) key.channel();
+            client.read(buf);   // non-blocking
+            // process buf
+        }
+        keys.remove(key);
+    }
+}
+```
+
+단일 스레드가 수천 ~ 수만 소켓을 처리하는 패턴. **Netty, Vert.x, Node.js** 의 사상 기반.
+
+## Non-Blocking 동시성 (lock-free) 예
+
+### CAS 기반 atomic 연산
+
+```java
+AtomicInteger counter = new AtomicInteger();
+// 내부 구현 (단순화)
+public int incrementAndGet() {
+    int prev, next;
+    do {
+        prev = get();
+        next = prev + 1;
+    } while (!compareAndSet(prev, next));   // CAS 실패 시 재시도
+    return next;
+}
+```
+
+락을 잡지 않고 atomic 하게 증가. 실패하면 그냥 다시 시도.
+
+```anim:java-atomic-cas
+{}
+```
+
+두 스레드가 같은 값을 읽고 동시에 `CAS(prev, next)` 를 시도하면 한 쪽만 성공한다. 실패한 쪽은 어떤 락도 걸지 않은 채 다시 `get()` 부터 시작해 재시도한다. 이 "비관적 lock 없음 + 낙관적 retry" 가 non-blocking 동시성의 핵심.
+
+### Michael & Scott 알고리즘 (ConcurrentLinkedQueue)
+
+```text
+ConcurrentLinkedQueue.offer(x):
+  newNode = Node(x)
+  loop:
+    tail = currentTail
+    next = tail.next
+    if (next == null) {
+      // tail 의 next 를 newNode 로 CAS
+      if (CAS(tail.next, null, newNode)) {
+        CAS(currentTail, tail, newNode)   // tail 도 이동 (best effort)
+        return
+      }
+    } else {
+      CAS(currentTail, tail, next)         // 다른 스레드가 추가 중, tail 따라잡기
+    }
+```
+
+여러 스레드가 동시에 offer 해도 락 없이 일관성 유지. 다만 같은 자리에서 CAS 가 실패하면 재시도하므로 **고경합 시 성능 저하** (livelock 까지 갈 수 있음).
+
+## Non-Blocking 의 장점
+
+### 자원 효율
+- 스레드 1개로 수만 동시 연결
+- 메모리, context switch 비용 절감
+
+### 응답성
+- 빠른 요청이 느린 요청에 막히지 않음
+- "fail-fast" 가능 (즉시 사용 불가 응답)
+
+### 백프레셔 자연스러움
+- 큐가 가득 차면 즉시 "꽉 참" 반환
+- Reactive Streams 의 핵심 메커니즘
+
+## Non-Blocking 의 단점
+
+### 코드 복잡도
+- 상태 머신 같은 흐름, 직선형이 아님
+- callback hell 의 원조
+
+### 디버깅 어려움
+- stack trace 가 callback 마다 끊김
+- "어떤 요청이 이 callback 을 호출했나" 추적 어려움
+
+### CPU 바인드 작업과 충돌
+- non-blocking 스레드가 무거운 계산을 하면 이벤트 루프가 멈춤
+- "이벤트 루프를 절대 블록하지 말라" 가 원칙
+
+## Java 의 Non-Blocking API
+
+| 영역 | API |
+|:---|:---|
+| **I/O** | `java.nio.channels.*` (Channel + Selector + ByteBuffer) |
+| **HTTP** | `java.net.http.HttpClient` (`sendAsync()`) |
+| **Network** | Netty, Vert.x, Reactor Netty |
+| **Atomic** | `java.util.concurrent.atomic.*` (AtomicInteger 등) |
+| **Concurrent collections** | `ConcurrentHashMap`, `ConcurrentLinkedQueue` |
+| **Reactive** | Project Reactor, RxJava |
+| **WebFlux** | Spring 5+ Reactive web stack |
+
+## non-blocking + [[Asynchronous]] = 진짜 비동기
+
+대부분의 "비동기 라이브러리" 가 이 조합.
+
+```java
+HttpClient client = HttpClient.newHttpClient();
+CompletableFuture<HttpResponse<String>> f = client.sendAsync(
+    request,
+    BodyHandlers.ofString()
+);
+f.thenApply(HttpResponse::body)
+ .thenAccept(System.out::println);
+// 호출자는 즉시 풀려나고, response 가 오면 callback 실행
+```
+
+이 모델로 단일 스레드가 수만 요청을 동시 처리 가능.
+
+## non-blocking + [[Synchronous]] (드뭄)
+
+```java
+while (!queue.isEmpty() == false) {
+    Thread.onSpinWait();   // 짧게 양보
+}
+Task t = queue.poll();
+```
+
+busy-waiting 또는 spin-wait. CPU 를 점유하므로 매우 짧은 대기에만 적절. `Atomic*` 의 CAS 루프가 이 패턴.
+
+## Virtual Threads 와의 관계
+
+Java 21+ Virtual Thread (JEP 444) 는 흥미로운 입장. **코드는 blocking 처럼 보이지만 underlying 은 non-blocking** 으로 작동한다.
+
+```java
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    executor.submit(() -> {
+        String r = http.get(url);     // 코드는 blocking
+        // 실제로는 virtual thread 가 unmount 됨
+    });
+}
+```
+
+이제 개발자는 non-blocking 의 복잡함 없이 그 효율을 누린다. 다만 java.io.\* 의 일부는 여전히 native blocking (file I/O 일부) 이라 carrier thread 가 잡힐 수 있다.
+
+## 자주 헷갈리는 표현 정리
+
+| 표현 | 의미 |
+|:---|:---|
+| **blocking** | 호출 스레드가 결과 올 때까지 멈춤 |
+| **non-blocking** | 즉시 반환, 결과는 다른 방법으로 |
+| **synchronous** | 호출자가 결과를 기다린다 (control flow) |
+| **asynchronous** | 호출자가 결과를 안 기다린다 |
+| **lock-free** | 락 없이 동시성 안전 (CAS 등) |
+| **wait-free** | 모든 스레드가 finite step 안에 완료 (lock-free 의 강한 버전) |
+
+특히 lock-free 와 wait-free 는 학술적 구분. 실무에서는 보통 "lock-free" 가 사용됨.
+
+## 참고
+
+- [[Blocking]]
+- [[Synchronous]]
+- [[Asynchronous]]
+- [[volatile]]
+- [[CopyOnWriteArrayList]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- JEP 444, [Virtual Threads](https://openjdk.org/jeps/444)
+- Maurice Herlihy & Nir Shavit, *The Art of Multiprocessor Programming*, §10-12
+- Oracle, [java.nio.channels package](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/package-summary.html)

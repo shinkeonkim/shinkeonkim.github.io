@@ -1,0 +1,207 @@
+---
+title: "[Python] Metaclass: type, __init_subclass__"
+aliases: ["python metaclass", "type metaclass", "__init_subclass__", "metaclass conflict"]
+tags: [python, metaclass, oop, type, advanced]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Metaclass**는 "클래스의 클래스"다. 일반 클래스가 인스턴스의 행동을 결정하듯, metaclass는 **클래스 자체의 행동**(생성, 속성, 메서드 추가)을 결정한다. 모든 클래스의 기본 metaclass는 `type`.
+
+```python
+class C: pass
+print(type(C))         # <class 'type'>
+print(type(C()))       # <class 'C'>
+print(type(type))      # <class 'type'> (type의 type은 자기자신)
+```
+
+> "Metaclasses are deeper magic than 99% of users should ever worry about." - Tim Peters
+
+대부분 `__init_subclass__`나 클래스 데코레이터로 해결 가능하다. metaclass는 정말 필요할 때만.
+
+## type 활용 (간단)
+
+`type(name, bases, namespace)`로 클래스를 동적 생성한다.
+
+```python
+D = type("D", (), {"x": 1, "greet": lambda self: "hi"})
+d = D()
+print(d.x, d.greet())    # 1 hi
+
+# 다음과 동등
+class D:
+    x = 1
+    def greet(self): return "hi"
+```
+
+## metaclass 정의
+
+`type`을 상속해 metaclass 클래스를 만들고, 클래스 선언 시 `metaclass=` 인자로 지정.
+
+```python
+class Logged(type):
+    def __new__(mcs, name, bases, namespace):
+        print(f"creating class {name}")
+        return super().__new__(mcs, name, bases, namespace)
+
+class User(metaclass=Logged):    # 클래스 생성 시 출력
+    pass
+
+class Admin(User):                # 출력
+    pass
+```
+
+`Logged.__new__`는 클래스가 만들어질 때 한 번 호출. 클래스 데코레이터와 비슷하지만 **서브클래스에도 자동 전파**된다는 차이.
+
+## __init_subclass__ (PEP 487, 3.6+)
+
+대부분의 metaclass 용도는 `__init_subclass__`로 대체 가능. 더 간단하고 일반인 친화적.
+
+```python
+class Plugin:
+    registry = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        Plugin.registry[cls.__name__] = cls
+
+class AuthPlugin(Plugin): pass
+class CachePlugin(Plugin): pass
+
+print(Plugin.registry)
+# {'AuthPlugin': <class 'AuthPlugin'>, 'CachePlugin': <class 'CachePlugin'>}
+```
+
+서브클래스가 정의될 때마다 부모의 `__init_subclass__`가 호출된다. **자동 등록, 인터페이스 검사, 클래스 변환** 등 대부분의 metaclass 패턴을 커버.
+
+## 실제 metaclass 사용 사례
+
+### 1. ABCMeta (abc.ABC 내부)
+
+```python
+from abc import ABCMeta, abstractmethod
+
+class Shape(metaclass=ABCMeta):
+    @abstractmethod
+    def area(self): ...
+```
+
+`@abstractmethod` 검사와 가상 서브클래스 등록 메커니즘이 ABCMeta에 구현되어 있다.
+
+### 2. Django Model
+
+```python
+class User(models.Model):
+    name = models.CharField()
+    email = models.EmailField()
+```
+
+`models.Model`의 metaclass(`ModelBase`)가 클래스 본문을 스캔해 필드 메타데이터 수집, manager 생성, SQL 컬럼 매핑.
+
+### 3. Singleton
+
+```python
+class Singleton(type):
+    _instances = {}
+
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+class Config(metaclass=Singleton):
+    pass
+
+a, b = Config(), Config()
+print(a is b)    # True
+```
+
+metaclass의 `__call__`은 클래스 호출(`Config(...)`) 자체를 가로챔. `__new__`나 모듈 변수보다 더 정교한 제어.
+
+### 4. Enum
+
+`enum.Enum`의 metaclass `EnumMeta`가 클래스 본문의 모든 클래스 속성을 멤버로 변환하고, 인스턴스화를 막고, 이름·값 룩업을 구축.
+
+## metaclass 메서드의 호출 시점
+
+```python
+class Meta(type):
+    def __init_subclass__(mcs, **kwargs):
+        # metaclass의 서브클래스가 정의될 때
+        super().__init_subclass__(**kwargs)
+
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        # 클래스 객체 생성 (가장 먼저)
+        return super().__new__(mcs, name, bases, namespace)
+
+    def __init__(cls, name, bases, namespace, **kwargs):
+        # 클래스 객체 초기화 (__new__ 다음)
+        super().__init__(name, bases, namespace)
+
+    def __call__(cls, *args, **kwargs):
+        # 클래스를 호출해 인스턴스 만들 때 (Cls(...))
+        instance = super().__call__(*args, **kwargs)
+        return instance
+```
+
+## metaclass 충돌
+
+다중 상속 시 metaclass가 호환되지 않으면 `TypeError`.
+
+```python
+class M1(type): pass
+class M2(type): pass
+
+class A(metaclass=M1): pass
+class B(metaclass=M2): pass
+
+class C(A, B): pass
+# TypeError: metaclass conflict
+```
+
+해결: 두 metaclass를 묶는 새 metaclass 정의.
+
+```python
+class CombinedMeta(M1, M2): pass
+class C(A, B, metaclass=CombinedMeta): pass
+```
+
+## 키워드 인수로 metaclass에 데이터 전달
+
+PEP 487 이후 `class C(Base, key=value)` 키워드 인수는 `__init_subclass__`와 metaclass에 전달.
+
+```python
+class Registered:
+    def __init_subclass__(cls, *, prefix, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.prefix = prefix
+
+class Item(Registered, prefix="item:"):
+    pass
+
+print(Item.prefix)    # 'item:'
+```
+
+## 디버깅 팁
+
+- 클래스 출력 시 metaclass 보임: `class C(metaclass=MyMeta):` → `MyMeta.__repr__` 호출 가능
+- `inspect.getmro()`로 MRO 확인
+- 신비한 동작은 metaclass / __init_subclass__ / 데코레이터 / Mixin 어디에서나 올 수 있음. `__class__.__mro__` 추적
+
+## 언제 쓰면 안 되는가
+
+- 단순 데이터 클래스 → `@dataclass`
+- 추상 메서드 강제 → `abc.ABC`
+- 서브클래스 등록 → `__init_subclass__`
+- 클래스 속성 변환 → 클래스 데코레이터
+- Singleton → 모듈 변수, 함수, 또는 `__new__`
+
+대부분 metaclass 없이 해결된다. 라이브러리 제작자가 사용자의 클래스 선언 문법을 마법처럼 변환할 때(ORM, 직렬화, DSL) 진가.
+
+## 참고
+
+- [Python tutorial: Classes – Metaclasses](https://docs.python.org/3/reference/datamodel.html#metaclasses)
+- [PEP 3115 – Metaclasses in Python 3000](https://peps.python.org/pep-3115/)
+- [PEP 487 – Simpler customisation of class creation](https://peps.python.org/pep-0487/)
+- [Real Python: Metaclasses](https://realpython.com/python-metaclasses/)

@@ -1,0 +1,455 @@
+---
+title: "MySQL"
+aliases: ["mysql", "MySQL", "MariaDB", "InnoDB", "마이에스큐엘"]
+tags: [database, rdbms, sql, mysql, innodb]
+updated: 2026-06-20
+---
+
+## 정의
+
+**MySQL** 은 1995 년 MySQL AB (스웨덴) 가 만들어 2008 년 Sun → 2010 년 Oracle 로 인수된 오픈소스 RDBMS. GPL + 상용 듀얼 라이선스.
+
+웹 백엔드의 사실상 표준 (LAMP/LEMP 스택). 단순함, 빠른 읽기, 풍부한 호스팅 옵션이 강점.
+
+2010 년 Oracle 인수 직후 원 개발자 Monty Widenius 가 포크해 **MariaDB** 시작. 본 wiki 는 MySQL 8.0 기준, MariaDB 는 차이점만 언급.
+
+표준 SQL 의 골격은 [[SQL]] 참고. 본 wiki 는 MySQL **dialect-specific** 한 부분만 정리.
+
+## 핵심 특성
+
+- **InnoDB 가 기본 스토리지 엔진** (5.5+): ACID, MVCC, 외래키 지원
+- **MyISAM**: 트랜잭션·외래키 없음, 가벼움. 거의 안 씀 (시스템 테이블 외)
+- **격리 수준 기본 REPEATABLE READ**: PG 와 다름. gap lock 으로 phantom 까지 방지
+- **AUTO_INCREMENT**: PK 자동 증가
+- **단순한 복제**: 비동기 master-replica (statement / row / mixed)
+- **상대적으로 느슨한 표준 적합성**: dialect 가 매우 강함
+
+## MySQL 만의 / 두드러진 문법
+
+### AUTO_INCREMENT
+
+```sql
+CREATE TABLE users (
+  id   INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(50) NOT NULL,
+  email VARCHAR(255) NOT NULL UNIQUE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO users (name, email) VALUES ('Alice', 'a@x.com');
+SELECT LAST_INSERT_ID();     -- 방금 INSERT 된 ID
+
+-- 시작값 조정
+ALTER TABLE users AUTO_INCREMENT = 1000;
+```
+
+`AUTO_INCREMENT` 는 **INSERT 가 롤백돼도 소비**. 빈 번호가 생긴다.
+
+[[SQL DDL]] 의 자동 증가 PK 비교 참고.
+
+### ON DUPLICATE KEY UPDATE (UPSERT)
+
+```sql
+INSERT INTO users (email, name, login_count)
+VALUES ('alice@x.com', 'Alice', 1)
+ON DUPLICATE KEY UPDATE
+  name        = VALUES(name),     -- 8.0.20 이하
+  login_count = login_count + 1;
+
+-- 8.0.20+ : alias 권장 (VALUES() 가 deprecated)
+INSERT INTO users (email, name, login_count)
+VALUES ('alice@x.com', 'Alice', 1) AS new_row
+ON DUPLICATE KEY UPDATE
+  name        = new_row.name,
+  login_count = login_count + 1;
+```
+
+> [!CAUTION]
+> `ON DUPLICATE KEY UPDATE` 는 충돌 여부와 무관하게 **AUTO_INCREMENT 카운터를 소비**. 이를 피하려면 `INSERT IGNORE` + `UPDATE` 분리.
+
+### INSERT IGNORE / REPLACE
+
+```sql
+INSERT IGNORE INTO users (email, name) VALUES ('alice@x.com', 'Alice');
+-- 충돌하면 조용히 무시 (다른 에러도 묵살, 위험)
+
+REPLACE INTO users (email, name) VALUES ('alice@x.com', 'Alice');
+-- 충돌하면 DELETE + INSERT, FK CASCADE 와 트리거가 함께 실행
+-- → 외부 관계 끊김 가능, 권장 안 함
+```
+
+### LIMIT + OFFSET
+
+```sql
+SELECT * FROM events ORDER BY id LIMIT 20 OFFSET 1000;
+SELECT * FROM events ORDER BY id LIMIT 1000, 20;     -- 같은 의미 (offset, count)
+```
+
+PG/표준은 `LIMIT n OFFSET m` 또는 `FETCH FIRST n ROWS ONLY`.
+
+### LIMIT 가 있는 UPDATE / DELETE
+
+```sql
+UPDATE events SET archived = TRUE
+WHERE created_at < '2024-01-01'
+ORDER BY id
+LIMIT 1000;
+```
+
+큰 테이블을 청크로 갱신할 때 매우 유용. PG 는 직접 지원하지 않고 CTE 우회.
+
+### GROUP_CONCAT
+
+```sql
+SELECT user_id, GROUP_CONCAT(tag ORDER BY tag SEPARATOR ',') AS tags
+FROM user_tags
+GROUP BY user_id;
+```
+
+PG 의 `STRING_AGG(tag, ',')` 에 대응. 기본 길이 제한 1024 (`group_concat_max_len` 으로 확장 가능).
+
+### JSON
+
+PG 의 JSONB 만큼 강력하진 않지만 충분히 쓸 만하다.
+
+```sql
+CREATE TABLE events (id INT PK AUTO_INCREMENT, payload JSON);
+
+INSERT INTO events (payload) VALUES
+  ('{"user": 42, "tags": ["a","b"], "meta": {"ip": "1.2.3.4"}}');
+
+-- 추출
+SELECT payload -> '$.user',           -- 42 (JSON 값)
+       payload ->> '$.user',          -- '42' (unquote, 문자)
+       JSON_EXTRACT(payload, '$.meta.ip'),
+       JSON_UNQUOTE(payload -> '$.meta.ip');
+
+-- 포함
+SELECT * FROM events
+WHERE JSON_CONTAINS(payload, '42', '$.user');
+
+-- 갱신
+UPDATE events SET payload = JSON_SET(payload, '$.user', 99) WHERE id = 1;
+UPDATE events SET payload = JSON_REMOVE(payload, '$.meta.ip') WHERE id = 1;
+
+-- 인덱싱 (generated column 필요)
+ALTER TABLE events
+  ADD COLUMN user_id INT
+    GENERATED ALWAYS AS (payload ->> '$.user') VIRTUAL,
+  ADD INDEX idx_user_id (user_id);
+
+-- 8.0+ : multi-valued index for JSON arrays
+ALTER TABLE events ADD INDEX idx_tags ((CAST(payload -> '$.tags' AS CHAR(50) ARRAY)));
+```
+
+자세한 PG 와의 비교는 [[SQL Data Types]] 의 JSON 섹션 참고.
+
+### Full-text 인덱스
+
+```sql
+CREATE TABLE articles (
+  id INT PRIMARY KEY,
+  title VARCHAR(255),
+  body  TEXT,
+  FULLTEXT INDEX ft_body (title, body) WITH PARSER ngram     -- 한국어/중국어
+) ENGINE=InnoDB;
+
+SELECT *, MATCH(title, body) AGAINST('database' IN NATURAL LANGUAGE MODE) AS score
+FROM articles
+WHERE MATCH(title, body) AGAINST('database' IN NATURAL LANGUAGE MODE);
+
+-- Boolean Mode
+SELECT * FROM articles
+WHERE MATCH(title, body) AGAINST('+database -mongodb' IN BOOLEAN MODE);
+```
+
+PG 는 `tsvector` + GIN 으로.
+
+### 정규식
+
+```sql
+SELECT * FROM users WHERE name REGEXP '^A';
+SELECT * FROM users WHERE name RLIKE '^A';     -- 동의어
+SELECT REGEXP_REPLACE(name, '[0-9]', '');      -- 8+
+SELECT REGEXP_LIKE(name, '^A.*');              -- 8+
+```
+
+대소문자 구분은 collation 에 따른다 (`utf8mb4_general_ci` 는 무시, `utf8mb4_bin` 은 구분).
+
+### 사용자 변수와 흉내낸 윈도
+
+8.0 이전엔 윈도 함수가 없어 사용자 변수로 흉내.
+
+```sql
+-- 5.7, ROW_NUMBER() 흉내
+SELECT
+  @rn := @rn + 1 AS rn,
+  city,
+  salary
+FROM users, (SELECT @rn := 0) r
+ORDER BY salary DESC;
+
+-- 8.0+, 표준 윈도 함수 권장
+SELECT ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn, city, salary
+FROM users;
+```
+
+8.0+ 에선 `ROW_NUMBER`, `RANK`, `LAG`, `LEAD` 등 표준 윈도 함수 전부 사용 가능.
+
+### CTE
+
+8.0+ 부터 지원 (5.x 엔 없음).
+
+```sql
+WITH RECURSIVE org AS (
+  SELECT id, manager_id, name, 1 AS depth
+  FROM employees WHERE manager_id IS NULL
+  UNION ALL
+  SELECT e.id, e.manager_id, e.name, o.depth + 1
+  FROM employees e JOIN org o ON e.manager_id = o.id
+)
+SELECT * FROM org;
+```
+
+### LATERAL JOIN
+
+8.0.14+ 부터 지원.
+
+```sql
+SELECT u.name, t.amount
+FROM users u,
+LATERAL (
+  SELECT amount FROM orders
+  WHERE user_id = u.id
+  ORDER BY created_at DESC LIMIT 1
+) AS t;
+```
+
+## InnoDB 스토리지 엔진
+
+| 특성 | 의미 |
+|:---|:---|
+| ACID, MVCC | 표준 트랜잭션 |
+| 클러스터드 인덱스 | PK 가 물리적 행 순서 (PG 는 heap) |
+| 보조 인덱스가 PK 참조 | 보조 인덱스 lookup 은 2 단계 |
+| FK 지원 | MyISAM 은 미지원 |
+| 행 단위 잠금 | gap lock 으로 phantom 방지 |
+| 자동 데드락 감지 | 한쪽 트랜잭션 롤백 |
+
+> [!IMPORTANT]
+> InnoDB 의 클러스터드 인덱스 때문에 PK 선택이 매우 중요.
+> - **단조 증가 PK** (AUTO_INCREMENT, ULID): 페이지 끝에 append, 빠름.
+> - **랜덤 PK** (UUIDv4): 페이지 곳곳 쪼개기, 인덱스 fragmentation, 느려짐.
+
+UUID 가 PK 라면 v7 / ULID 같은 시간 정렬 형을 권장. `BINARY(16)` 으로 저장 + `UUID_TO_BIN(uuid, 1)` (swap_flag=1) 로 시간 prefix 정렬.
+
+## sql_mode
+
+MySQL 의 SQL 행동을 제어하는 세션/글로벌 변수.
+
+```sql
+SELECT @@sql_mode;
+-- ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_DATE,...
+
+SET sql_mode = 'STRICT_ALL_TABLES,NO_ZERO_DATE,ONLY_FULL_GROUP_BY';
+```
+
+| 모드 | 의미 |
+|:---|:---|
+| `STRICT_TRANS_TABLES` / `STRICT_ALL_TABLES` | 잘못된 값에 에러 (안 켜면 조용히 잘림/0) |
+| `ONLY_FULL_GROUP_BY` | GROUP BY 표준 강제. [[SQL GROUP BY]] 참고. |
+| `NO_ZERO_DATE` | '0000-00-00' 금지 |
+| `NO_ENGINE_SUBSTITUTION` | 없는 엔진 요청 시 에러 |
+| `ANSI` | 표준 SQL 모드 (큰 비교: `||` 가 문자열 연결) |
+| `TRADITIONAL` | 엄격 모드 묶음 |
+
+5.7+ 부터 strict + ONLY_FULL_GROUP_BY 가 기본. 5.6 이하 마이그레이션 시 데이터 정합성 이슈 다수 발견.
+
+## 문자셋, collation
+
+가장 흔한 함정 중 하나. **항상 utf8mb4**.
+
+```sql
+CREATE DATABASE mydb DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+CREATE TABLE t (...) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+> [!CAUTION]
+> MySQL 의 `utf8` 은 **3 바이트 utf8**, 이모지 (4 바이트) 가 들어가면 에러. **항상 `utf8mb4`** 를 써야 한다. MySQL 의 가장 악명 높은 함정.
+
+| collation | 의미 |
+|:---|:---|
+| `utf8mb4_0900_ai_ci` | 8.0 기본, 악센트/대소문자 무시 |
+| `utf8mb4_unicode_ci` | 5.7 흔함 |
+| `utf8mb4_bin` | 바이트 단위 비교, 가장 엄격 |
+| `utf8mb4_general_ci` | 빠르지만 부정확 (역사적), 권장 안 함 |
+
+## EXPLAIN
+
+```sql
+EXPLAIN SELECT * FROM users WHERE city = 'Seoul';
+EXPLAIN FORMAT=JSON SELECT ...;
+EXPLAIN ANALYZE SELECT ...;     -- 8.0.18+ (실제 실행 포함)
+```
+
+| 컬럼 | 의미 |
+|:---|:---|
+| `type` | 액세스 방법 (`const`, `eq_ref`, `ref`, `range`, `index`, `ALL`) |
+| `key` | 사용된 인덱스 |
+| `rows` | 추정 검사 행 수 |
+| `Extra` | `Using index`, `Using filesort`, `Using temporary` 등 |
+
+`type=ALL` 은 풀스캔, 큰 테이블에선 경고 신호.
+
+## 트랜잭션과 잠금
+
+기본 격리 `REPEATABLE READ` + gap lock. PG 와 다른 점:
+
+- **InnoDB 의 REPEATABLE READ 는 표준의 SERIALIZABLE 에 가까움** (phantom 방지).
+- gap lock 으로 인해 의도치 않은 deadlock 이 발생할 수 있음.
+- 운영 트래픽이 많으면 `READ COMMITTED` 로 낮추는 곳도 많다.
+
+```sql
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+START TRANSACTION;
+SELECT ... FOR UPDATE;     -- 비관 잠금
+SELECT ... FOR SHARE;       -- 공유 잠금
+COMMIT;
+```
+
+자세한 트랜잭션 모델은 [[SQL DCL TCL]].
+
+## 복제 (Replication)
+
+| 방식 | 의미 |
+|:---|:---|
+| Statement-based | 실행한 SQL 을 replica 가 다시 실행 (부동소수, NOW() 등에 문제) |
+| Row-based | 변경된 행을 그대로 (안전, 8.0 기본) |
+| Mixed | 자동 선택 |
+
+GTID (Global Transaction ID) 기반 복제가 8.0 표준. failover 가 단순해진다.
+
+```sql
+SHOW REPLICA STATUS;       -- 8.0.22+ (이전 SLAVE STATUS)
+```
+
+## MariaDB 와의 차이
+
+MariaDB 는 2010 년 포크된 이후 점점 다른 길. 주요 차이:
+
+| | MySQL 8.0 | MariaDB 10.x/11.x |
+|:---|:---|:---|
+| 엔진 | InnoDB | InnoDB, Aria, ColumnStore, ... |
+| JSON | 네이티브 JSON | 텍스트 alias (LONGTEXT + 함수) |
+| 윈도 함수 | 8.0+ | 10.2+ |
+| CTE | 8.0+ | 10.2+ |
+| Sequences | 없음 (AUTO_INCREMENT) | 10.3+ SEQUENCE 지원 |
+| RETURNING | 없음 | 10.5+ 일부 지원 |
+| Roles | 8.0+ | 10.0+ |
+
+라이선스 측면에선 MariaDB 가 BSL 등 점점 비표준 라이선스 도입. MySQL 도 Oracle 영향으로 신뢰 이슈가 있어, 양쪽 다 주의 깊게 봐야 한다.
+
+## MySQL vs PostgreSQL 요약
+
+자세한 비교는 [[PostgreSQL]] 참고.
+
+| 항목 | MySQL | PostgreSQL |
+|:---|:---|:---|
+| 운영 단순성 | 매우 단순 | 보통 (autovacuum, 튜닝) |
+| 읽기 성능 (단순) | 빠름 | 빠름 |
+| 표준 적합성 | 보통 | 매우 높음 |
+| 트랜잭션 DDL | 부분 | 전체 |
+| 복잡한 분석 쿼리 | 약함 | 강함 (CTE, 윈도, GIST) |
+| JSON | JSON + generated col 트릭 | JSONB (GIN 인덱스) |
+| 라이선스 | GPL (Oracle) | PostgreSQL License |
+
+## pandas 와 MySQL
+
+```python
+from sqlalchemy import create_engine
+engine = create_engine('mysql+pymysql://user:pwd@host:3306/db?charset=utf8mb4')
+
+df = pd.read_sql("""
+  SELECT id, JSON_EXTRACT(payload, '$.user') AS user_id, ts
+  FROM events
+  WHERE ts >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+""", engine)
+
+df.to_sql('events_backup', engine, if_exists='append',
+          index=False, chunksize=5000, method='multi')
+```
+
+[[Pandas read_sql]] 의 `chunksize` + `method='multi'` 패턴이 MySQL 대량 적재에 효과적. PG 의 `COPY` 같은 네이티브 bulk 가 없어서.
+
+> charset 미지정 시 latin1 로 해석돼 이모지/한글 깨짐. `?charset=utf8mb4` 필수.
+
+## 함정
+
+### 1. utf8 vs utf8mb4
+
+이미 위에서. **항상 utf8mb4**.
+
+### 2. 묵시적 형변환
+
+```sql
+SELECT '1' + 1;     -- 2
+SELECT 'a' + 1;     -- 1 (조용히 'a' → 0)
+SELECT 1 = '1abc';  -- TRUE (1 = 1)
+```
+
+PG 는 에러, MySQL 은 조용한 버그. `STRICT` 모드 + 명시적 `CAST` 권장.
+
+### 3. AUTO_INCREMENT 의 갭
+
+```sql
+INSERT ... (id 5 할당)
+ROLLBACK;                    -- 5 는 안 돌아옴
+INSERT ... (id 6 할당)
+```
+
+ID 가 연속이라고 가정하는 코드는 깨진다.
+
+### 4. DATETIME vs TIMESTAMP
+
+- `DATETIME`: timezone 없음, 그대로 저장 (1000-9999)
+- `TIMESTAMP`: 세션 timezone 으로 해석 → UTC 저장 → 다시 변환 (1970-2038)
+
+`TIMESTAMP` 의 32-bit Unix time 제한 때문에 2038 년 문제. 큰 시간 범위 필요하면 `DATETIME` + 애플리케이션 timezone 관리.
+
+### 5. ENUM 의 정렬
+
+```sql
+ENUM('low', 'medium', 'high')
+ORDER BY priority;     -- 정의 순으로 정렬 (low < medium < high)
+```
+
+문자열 알파벳 순이 아닌, 정의 순서가 정렬 키. 의도일 수도, 사고일 수도.
+
+### 6. NULL 의 UNIQUE
+
+```sql
+-- MySQL InnoDB
+CREATE TABLE t (email VARCHAR(255) UNIQUE);
+INSERT INTO t VALUES (NULL), (NULL), (NULL);     -- 모두 허용!
+-- UNIQUE 는 NULL 끼리 중복으로 안 봄 (표준)
+```
+
+PG 도 동일. 표준 정의. 의도와 다르면 `NOT NULL` 추가.
+
+### 7. ON DELETE 의 묵시적 동작
+
+InnoDB 의 FK 가 `ON DELETE` 옵션 없이 만들어지면 기본은 `RESTRICT` (참조 있으면 부모 삭제 거부). 명시적으로 적는 게 안전.
+
+## 참고
+
+- [[SQL]]
+- [[SQL DDL]]
+- [[SQL DML]]
+- [[SQL JOIN]]
+- [[SQL GROUP BY]]
+- [[SQL DCL TCL]]
+- [[SQL Data Types]]
+- [[PostgreSQL]]
+- [[Pandas read_sql]]
+- [MySQL 8.0 Reference Manual](https://dev.mysql.com/doc/refman/8.0/en/)
+- [High Performance MySQL (Schwartz, Zaitsev, Tkachenko)](https://www.oreilly.com/library/view/high-performance-mysql/9781492080503/)
+- [PlanetScale, MySQL 인덱스 시각화](https://planetscale.com/learn)

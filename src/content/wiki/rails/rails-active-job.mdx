@@ -1,0 +1,352 @@
+---
+title: "[Rails] Active Job: 백그라운드 워커"
+aliases: ["active job", "perform_later", "sidekiq", "good_job", "solid_queue", "rails background job"]
+tags: [rails, active-job, sidekiq, solid-queue, background]
+updated: 2026-06-20
+---
+
+## 정의
+
+**Active Job**은 백엔드(Sidekiq, Resque, Solid Queue 등) 추상화 계층. 같은 코드로 다른 queue adapter 교체 가능. Rails 8부터 **Solid Queue**(DB 기반)가 기본.
+
+## 기본
+
+```bash
+bin/rails g job SendWelcomeEmail
+```
+
+```ruby
+# app/jobs/send_welcome_email_job.rb
+class SendWelcomeEmailJob < ApplicationJob
+  queue_as :default
+  retry_on Net::OpenTimeout, wait: :exponentially_longer, attempts: 5
+  discard_on ActiveJob::DeserializationError
+
+  def perform(user_id)
+    user = User.find(user_id)
+    WelcomeMailer.welcome(user).deliver_now
+  end
+end
+```
+
+호출:
+
+```ruby
+SendWelcomeEmailJob.perform_later(user.id)            # 백그라운드
+SendWelcomeEmailJob.perform_now(user.id)              # 동기 (테스트)
+SendWelcomeEmailJob.set(wait: 1.hour).perform_later(user.id)
+SendWelcomeEmailJob.set(wait_until: Time.tomorrow.noon).perform_later(user.id)
+SendWelcomeEmailJob.set(priority: 10, queue: :emails).perform_later(user.id)
+```
+
+## queue adapter
+
+```ruby
+# config/application.rb 또는 environments/production.rb
+config.active_job.queue_adapter = :solid_queue
+# 또는 :sidekiq, :resque, :good_job, :delayed_job, :async (개발)
+```
+
+| Adapter | 백엔드 | 특징 |
+|---------|--------|------|
+| `:solid_queue` | DB | 8.0+ 기본. Redis 불필요 |
+| `:sidekiq` | Redis | 성능, 생태계 |
+| `:good_job` | DB (PG) | Active Job 친화 |
+| `:resque` | Redis | 옛 표준 |
+| `:async` | 인메모리 | 개발/테스트만 |
+
+## Sidekiq
+
+```ruby
+# Gemfile
+gem "sidekiq"
+```
+
+```ruby
+# config/sidekiq.yml
+:concurrency: 10
+:queues:
+  - [critical, 5]
+  - [default, 3]
+  - [low, 1]
+```
+
+```bash
+bundle exec sidekiq
+```
+
+Web UI:
+
+```ruby
+# config/routes.rb
+require "sidekiq/web"
+mount Sidekiq::Web => "/sidekiq"
+```
+
+## Solid Queue (Rails 8 기본)
+
+```ruby
+# Gemfile (Rails 8 자동)
+gem "solid_queue"
+```
+
+```bash
+bin/rails db:migrate    # solid_queue 테이블 생성
+bin/jobs                 # 워커 실행
+```
+
+`config/queue.yml`로 설정.
+
+장점:
+- Redis 불필요 (PG/MySQL/SQLite)
+- 인프라 1개 줄임
+- 트랜잭션 안에서 enqueue → DB 일관성
+
+## 재시도
+
+```ruby
+class MyJob < ApplicationJob
+  retry_on Net::OpenTimeout, attempts: 5, wait: :exponentially_longer
+  retry_on Net::ReadTimeout, attempts: 3, wait: 30.seconds
+  discard_on ActiveJob::DeserializationError    # 영구 실패 (재시도 X)
+  discard_on ActiveRecord::RecordNotFound
+
+  def perform(record_id)
+    record = Record.find(record_id)
+    ...
+  end
+end
+```
+
+`wait: :exponentially_longer`는 지수 backoff. `wait: ->(executions) { ... }`로 커스텀.
+
+## 트랜잭션과 안전성
+
+```ruby
+ActiveRecord::Base.transaction do
+  user = User.create!(...)
+  SendWelcomeEmailJob.perform_later(user.id)
+end
+# 트랜잭션 rollback 시 job은 이미 큐에 → user 못 찾음 + 재시도 무한
+```
+
+해결:
+- `after_commit`에서 enqueue
+- Solid Queue는 같은 DB라 트랜잭션 안에서 안전
+
+```ruby
+ActiveRecord::Base.transaction do
+  user = User.create!(...)
+  user.send_welcome_email!    # after_commit 콜백
+end
+```
+
+또는 `Concurrent.with_executor` 패턴, Solid Queue 활용.
+
+## perform_later 인자 직렬화
+
+GlobalID로 ActiveRecord 자동 직렬화/역직렬화.
+
+```ruby
+MyJob.perform_later(user)    # GlobalID "gid://app/User/1"
+```
+
+워커 시작 시 다시 `User.find(1)`. 그 시점에 데이터 없으면 `DeserializationError`.
+
+직렬화 가능: 기본 타입(String, Integer, Float, Bool, Hash, Array, nil), GlobalID 객체.
+
+직렬화 불가: 일반 객체, Proc, IO.
+
+```ruby
+MyJob.perform_later(user.id, options.to_h)    # primitive로 변환
+```
+
+## 큐 분리
+
+```ruby
+class CriticalJob < ApplicationJob
+  queue_as :critical
+end
+
+class LowJob < ApplicationJob
+  queue_as :low
+end
+```
+
+Sidekiq/Solid Queue 모두 큐별 동시성/우선순위 설정 가능. critical 워커 따로 띄우는 등.
+
+## 자주 보는 패턴
+
+### 이메일 발송
+
+```ruby
+WelcomeMailer.welcome(user).deliver_later
+# 내부적으로 ActionMailer::DeliveryJob 사용
+```
+
+### Cron 작업
+
+```ruby
+# Sidekiq + sidekiq-cron 또는 Solid Queue recurring
+
+# Solid Queue config/recurring.yml
+production:
+  daily_report:
+    class: DailyReportJob
+    schedule: every day at 9am
+```
+
+### Idempotency
+
+같은 job이 두 번 실행되어도 안전하게.
+
+```ruby
+class SendInvoiceJob < ApplicationJob
+  def perform(order_id)
+    order = Order.find(order_id)
+    return if order.invoice_sent_at.present?
+
+    InvoiceMailer.send_invoice(order).deliver_now
+    order.update!(invoice_sent_at: Time.current)
+  end
+end
+```
+
+네트워크 끊김, 중복 enqueue로 두 번 실행될 수 있음. DB 트랜잭션 + 상태 체크.
+
+### Bulk enqueue (8.0+)
+
+```ruby
+ActiveJob.perform_all_later(
+  [Job1.new(arg1), Job2.new(arg2), Job3.new(arg3)]
+)
+```
+
+한 번에 다수 enqueue (Sidekiq의 `push_bulk`와 유사).
+
+### 결과를 클라이언트로
+
+긴 작업 → 진행 상황을 Turbo Stream / WebSocket으로 push.
+
+```ruby
+class GenerateReportJob < ApplicationJob
+  def perform(user_id)
+    user = User.find(user_id)
+    100.times do |i|
+      # 작업
+      Turbo::StreamsChannel.broadcast_update_to(
+        "user_#{user_id}",
+        target: "progress",
+        html: "<span>#{i}%</span>",
+      )
+    end
+  end
+end
+```
+
+## 모니터링
+
+- Sidekiq Web UI
+- Solid Queue dashboard (`mission_control-jobs` gem)
+- Sentry/Honeybadger Active Job integration
+- Mission Control jobs (Rails 8+ 권장)
+
+```ruby
+gem "mission_control-jobs"
+mount MissionControl::Jobs::Engine, at: "/jobs"
+```
+
+## 함정
+
+### 1. perform vs perform_later
+
+```ruby
+MyJob.perform(args)           # 즉시 동기 실행 (테스트용)
+MyJob.perform_later(args)     # 큐에 넣고 워커가 처리
+```
+
+`perform_later`가 백그라운드. 혼동 주의.
+
+### 2. job 내부에서 트랜잭션 외부 영향
+
+job 안에서 DB 쓰기 → 트랜잭션 커밋 → 외부 API → 실패 → 재시도 시 DB 변경은 이미 반영. 멱등성 고려.
+
+### 3. job 내부 큰 데이터 전달
+
+```ruby
+MyJob.perform_later(huge_array)    # serialize 느림, Redis 메모리
+```
+
+ID 전달 + 워커가 DB 조회.
+
+### 4. 시간대
+
+```ruby
+MyJob.set(wait_until: Date.tomorrow.beginning_of_day).perform_later
+```
+
+`Date.tomorrow`가 어느 시간대? `Time.current` 사용.
+
+```ruby
+config.active_record.default_timezone = :utc
+config.time_zone = "Asia/Seoul"
+```
+
+### 5. 디버깅 어려움
+
+워커가 별도 프로세스 → print 안 보임. 로깅으로.
+
+```ruby
+class MyJob < ApplicationJob
+  def perform(id)
+    Rails.logger.info("starting #{id}")
+    ...
+    Rails.logger.info("done")
+  end
+end
+```
+
+`perform_now`로 동기 실행하면서 디버거 사용.
+
+## 테스트
+
+```ruby
+# test/jobs/welcome_email_job_test.rb
+class WelcomeEmailJobTest < ActiveJob::TestCase
+  test "perform" do
+    user = users(:alice)
+    perform_enqueued_jobs do
+      WelcomeEmailJob.perform_later(user.id)
+    end
+    # 이메일 발송 확인
+  end
+
+  test "enqueue" do
+    assert_enqueued_with(job: WelcomeEmailJob, args: [1]) do
+      WelcomeEmailJob.perform_later(1)
+    end
+  end
+end
+```
+
+`ActiveJob::TestHelper` 자동 포함.
+
+## Sidekiq vs Solid Queue vs GoodJob
+
+| | Sidekiq | Solid Queue | GoodJob |
+|---|---------|-------------|---------|
+| 백엔드 | Redis | DB | PostgreSQL |
+| Rails 8 기본 | X | O | X |
+| 성능 | 매우 빠름 | 중상 | 중상 |
+| 인프라 | Redis 별도 | DB 공유 | DB 공유 |
+| Pro 기능 | 유료 | 무료 | 무료 |
+
+소규모 → Solid Queue 또는 GoodJob (인프라 단순). 대규모/Sidekiq 익숙 → Sidekiq.
+
+## 참고
+
+- [Active Job Basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [Solid Queue](https://github.com/rails/solid_queue)
+- [Sidekiq](https://github.com/sidekiq/sidekiq)
+- [GoodJob](https://github.com/bensheldon/good_job)
+- [Mission Control Jobs](https://github.com/rails/mission_control-jobs)

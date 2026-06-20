@@ -1,0 +1,310 @@
+---
+title: "[Rails] Caching: fragment, action, low-level, Russian Doll"
+aliases: ["rails caching", "fragment cache", "russian doll caching", "Rails.cache", "solid_cache"]
+tags: [rails, cache, performance, redis, solid-cache]
+updated: 2026-06-20
+---
+
+## 정의
+
+Rails 캐싱은 **fragment, action, page, HTTP, low-level (Rails.cache)** 5단계. 모델·뷰 단위로 자동 무효화 (Russian Doll Caching)가 핵심. Rails 8부터 **Solid Cache** (DB 백엔드) 기본.
+
+## 백엔드
+
+```ruby
+# config/environments/production.rb
+config.cache_store = :solid_cache_store
+# 또는
+config.cache_store = :redis_cache_store, { url: ENV["REDIS_URL"] }
+config.cache_store = :memory_store, { size: 64.megabytes }
+config.cache_store = :file_store, "/tmp/rails-cache"
+config.cache_store = :null_store    # 비활성
+```
+
+| 옵션 | 특징 |
+|------|------|
+| `:solid_cache_store` (8.0+) | DB, Redis 불필요 |
+| `:redis_cache_store` | Redis (빠름, 분산) |
+| `:memcache_store` | Memcached |
+| `:mem_cache_store` | 동일 |
+| `:memory_store` | 프로세스 메모리 (개발) |
+| `:file_store` | 파일 |
+
+## 캐시 활성화 (development)
+
+기본은 dev에서 캐싱 OFF:
+
+```bash
+bin/rails dev:cache    # tmp/caching-dev.txt 토글
+# 다시 끄려면 같은 명령
+```
+
+## low-level: Rails.cache
+
+```ruby
+Rails.cache.write("key", value, expires_in: 1.hour)
+Rails.cache.read("key")
+Rails.cache.fetch("key", expires_in: 1.hour) { expensive_computation }
+Rails.cache.delete("key")
+Rails.cache.delete_matched("prefix:*")    # 와일드카드
+Rails.cache.exist?("key")
+Rails.cache.clear    # 위험 (전체 비움)
+
+# 다중
+Rails.cache.write_multi({ "a" => 1, "b" => 2 })
+Rails.cache.read_multi("a", "b")
+
+# 증감
+Rails.cache.increment("counter", 1)
+Rails.cache.decrement("counter")
+```
+
+### fetch 패턴
+
+```ruby
+def top_posts
+  Rails.cache.fetch("top_posts", expires_in: 5.minutes) do
+    Post.order(views: :desc).limit(10).to_a
+  end
+end
+```
+
+캐시 hit → 즉시 반환. miss → 블록 실행 + 저장.
+
+## fragment cache
+
+```erb
+<% cache @post do %>
+  <h1><%= @post.title %></h1>
+  <p><%= @post.body %></p>
+<% end %>
+
+<% cache [@post, "v2"] do %>
+  <%# 버전 추가 - 코드 변경 시 캐시 무효화 #}
+<% end %>
+
+<% cache_if condition, @post do %>
+  ...
+<% end %>
+```
+
+키 자동 생성: `views/posts/123-20260620143000`. 모델의 `cache_key_with_version`.
+
+### 컬렉션
+
+```erb
+<%= render partial: "post", collection: @posts, cached: true %>
+```
+
+각 post에 대해 fragment cache. 첫 요청 후 hit 비율 매우 높음.
+
+## Russian Doll Caching
+
+부모 + 자식 nested 캐시. 자식 변경 시 부모도 자동 무효화 (updated_at 변경).
+
+```erb
+<% cache @post do %>
+  <h1><%= @post.title %></h1>
+
+  <% @post.comments.each do |comment| %>
+    <% cache comment do %>
+      <%= render comment %>
+    <% end %>
+  <% end %>
+<% end %>
+```
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post, touch: true    # 댓글 저장 시 post.updated_at 갱신
+end
+```
+
+`touch: true`로 부모 cache_key 자동 갱신 → fragment 무효화. 매우 효율적.
+
+## HTTP 캐싱
+
+### Conditional GET
+
+```ruby
+def show
+  @post = Post.find(params[:id])
+  if stale?(@post)    # ETag/Last-Modified 자동
+    render
+  end
+end
+
+# 또는
+def show
+  @post = Post.find(params[:id])
+  fresh_when(@post)    # stale 시 render, fresh 시 304
+end
+```
+
+브라우저가 `If-None-Match` 헤더로 다시 요청 → 변경 없으면 304 Not Modified.
+
+### Cache-Control
+
+```ruby
+def index
+  @posts = Post.featured
+  expires_in 5.minutes, public: true
+  render
+end
+```
+
+`Cache-Control: public, max-age=300` 응답.
+
+## Cache key
+
+```ruby
+post.cache_key                  # "posts/123"
+post.cache_key_with_version     # "posts/123-20260620143000"
+post.cache_version              # "20260620143000"
+
+# 커스텀
+class Post < ApplicationRecord
+  def cache_key
+    "post/#{id}/#{updated_at.to_i}"
+  end
+end
+```
+
+`cache_key` + `cache_version` 자동 결합.
+
+## 자주 보는 패턴
+
+### 비싼 쿼리
+
+```ruby
+def expensive_stats
+  Rails.cache.fetch("stats", expires_in: 1.hour) do
+    {
+      users: User.count,
+      posts: Post.count,
+      active: User.active.count,
+    }
+  end
+end
+```
+
+### 외부 API 결과
+
+```ruby
+def github_user(username)
+  Rails.cache.fetch("github:#{username}", expires_in: 1.day) do
+    Net::HTTP.get(URI("https://api.github.com/users/#{username}"))
+  end
+end
+```
+
+API rate limit + 응답 속도 둘 다 향상.
+
+### 컬렉션 페이지네이션
+
+```erb
+<% cache [@posts, params[:page]] do %>
+  <%= render @posts %>
+<% end %>
+```
+
+페이지별 캐시. 페이지 안의 post 변경 시 자동 무효화.
+
+### 사용자별
+
+```erb
+<% cache [@post, current_user] do %>
+  <%# 사용자별 다른 내용 (좋아요 여부 등) %>
+<% end %>
+```
+
+각 사용자마다 별도 키.
+
+## Solid Cache (Rails 8)
+
+```ruby
+# Gemfile (8.0+ 자동)
+gem "solid_cache"
+```
+
+```yaml
+# config/cache.yml
+production:
+  database: cache
+  store_options:
+    max_age: 14.days
+    max_size: 256.megabytes
+```
+
+DB 기반 → Redis 불필요. LRU eviction. SQL 인덱스로 빠름.
+
+## 함정
+
+### 1. 캐시 무효화
+
+> "There are only two hard things in CS: cache invalidation and naming things."
+
+`touch: true`로 자동 무효화 권장. 수동 `Rails.cache.delete`는 누락 위험.
+
+### 2. fetch 블록 안 예외
+
+```ruby
+Rails.cache.fetch("key") do
+  raise "fail"
+end
+# 다음 호출도 매번 fail (캐시 안 됨)
+```
+
+블록은 정상 반환해야 캐시. nil 반환은 캐시되지 않음 (`skip_nil` 옵션 X).
+
+### 3. cache stampede
+
+만료 직후 동시 다수 요청 → 모두 DB. 해결:
+- `race_condition_ttl`로 약간의 grace
+- 미리 갱신 (TTL 도달 전)
+- lock-based 갱신
+
+```ruby
+Rails.cache.fetch("key", expires_in: 5.minutes, race_condition_ttl: 30.seconds) do
+  ...
+end
+```
+
+### 4. Cache.clear in production
+
+`Rails.cache.clear` 전체 비움. 다른 앱이 같은 store 공유 시 영향. namespace 사용:
+
+```ruby
+config.cache_store = :redis_cache_store, { namespace: "myapp:" }
+```
+
+### 5. 키 너무 길거나 dict 직렬화
+
+```ruby
+Rails.cache.fetch([@user, @post, params])    # params hash → 직렬화 비싼
+```
+
+명시 키 권장.
+
+## 모니터링
+
+- 캐시 hit/miss ratio
+- 메모리 사용량
+- key 분포 (`redis-cli --bigkeys`)
+
+Skylight, NewRelic, AppSignal 같은 APM이 자동 측정.
+
+## 캐시 vs 다른 최적화
+
+- DB 인덱스 추가가 보통 첫 번째
+- N+1 해결
+- 그 다음 캐시
+
+캐시는 정합성 비용 + 디버깅 복잡. 진짜 필요할 때만.
+
+## 참고
+
+- [Rails Caching Guide](https://guides.rubyonrails.org/caching_with_rails.html)
+- [Solid Cache](https://github.com/rails/solid_cache)
+- [redis-rails](https://github.com/redis-store/redis-rails)
+- [Russian Doll Caching by DHH](https://signalvnoise.com/posts/3113-how-key-based-cache-expiration-works)

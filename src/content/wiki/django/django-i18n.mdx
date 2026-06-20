@@ -1,0 +1,344 @@
+---
+title: "[Django] i18n: 다국어와 시간대"
+aliases: ["django i18n", "gettext", "ugettext", "trans tag", "LocaleMiddleware", "django translations"]
+tags: [django, i18n, localization, translation]
+updated: 2026-06-20
+---
+
+## 정의
+
+Django는 **gettext 기반 국제화(i18n)와 지역화(l10n)** 표준 시스템을 제공한다. 코드/템플릿의 문자열을 추출해 `.po` 파일로 번역, 컴파일된 `.mo` 파일을 런타임에 사용. 시간대 인식(timezone-aware datetime)도 핵심.
+
+## 활성화
+
+```python
+# settings.py
+USE_I18N = True
+USE_L10N = True       # 4.0+ 항상 True로 deprecated
+USE_TZ = True         # 시간대 인식 datetime
+LANGUAGE_CODE = "ko-kr"
+TIME_ZONE = "Asia/Seoul"
+
+LANGUAGES = [
+    ("ko", "한국어"),
+    ("en", "English"),
+    ("ja", "日本語"),
+]
+
+LOCALE_PATHS = [BASE_DIR / "locale"]
+
+MIDDLEWARE = [
+    ...,
+    "django.middleware.locale.LocaleMiddleware",   # SessionMiddleware 다음, CommonMiddleware 전
+    ...,
+]
+```
+
+`LocaleMiddleware`가 사용자의 언어를 자동 감지(쿠키, Accept-Language 헤더).
+
+## 문자열 마킹
+
+### Python 코드
+
+```python
+from django.utils.translation import gettext as _, gettext_lazy as _l
+
+def hello(request):
+    msg = _("Hello, world")
+    return HttpResponse(msg)
+
+# 모델 등 import 시 평가는 안 됨 → lazy
+class Profile(models.Model):
+    name = models.CharField(_l("Name"), max_length=100)
+
+    class Meta:
+        verbose_name = _l("Profile")
+        verbose_name_plural = _l("Profiles")
+```
+
+`gettext` (즉시) vs `gettext_lazy` (지연). 모델 필드, 클래스 변수, fn 인수 기본값엔 lazy 필요.
+
+### 보간
+
+```python
+_("Welcome, %(name)s") % {"name": user.name}
+_("You have %(count)d messages") % {"count": n}
+```
+
+직접 `f"Welcome, {name}"`을 _()로 감싸면 추출 단계에서 동적 부분이 포함됨 → 안 됨.
+
+### 복수형
+
+```python
+from django.utils.translation import ngettext
+
+ngettext("%(count)d item", "%(count)d items", count) % {"count": count}
+```
+
+언어별 복수형 규칙이 다르므로 ngettext.
+
+## 템플릿
+
+```html
+{% load i18n %}
+
+<h1>{% translate "Welcome" %}</h1>
+{# 또는 짧은 별칭 #}
+<h1>{% trans "Welcome" %}</h1>
+
+{# blocktrans (긴 문자열 + 보간) #}
+{% blocktranslate with name=user.name %}
+    Hello, {{ name }}!
+{% endblocktranslate %}
+
+{# 복수형 #}
+{% blocktranslate count counter=count %}
+    {{ counter }} item
+{% plural %}
+    {{ counter }} items
+{% endblocktranslate %}
+
+{# 변수 자체 #}
+{% get_current_language as LANGUAGE_CODE %}
+<p>현재 언어: {{ LANGUAGE_CODE }}</p>
+```
+
+## 메시지 파일 생성
+
+```bash
+# 코드에서 _()/trans 찾아 .po 생성
+python manage.py makemessages -l ko -l en
+
+# 결과: locale/ko/LC_MESSAGES/django.po
+```
+
+`django.po` 예시:
+
+```
+msgid "Hello, world"
+msgstr "안녕, 세상"
+
+msgid "Welcome, %(name)s"
+msgstr "%(name)s 님 환영합니다"
+```
+
+### 컴파일
+
+```bash
+python manage.py compilemessages
+# .po → .mo (런타임용 바이너리)
+```
+
+배포 시 잊지 말 것 (Docker entrypoint 등).
+
+## 언어 전환
+
+### URL prefix
+
+```python
+from django.conf.urls.i18n import i18n_patterns
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+]
+
+urlpatterns += i18n_patterns(
+    path("", include("blog.urls")),
+    prefix_default_language=False,    # 기본 언어는 prefix 없이
+)
+```
+
+`/` (한국어), `/en/` (영어), `/ja/` (일본어).
+
+### 사용자 선택
+
+```python
+# urls.py
+path("i18n/", include("django.conf.urls.i18n")),
+
+# 템플릿: 폼으로 set_language view에 POST
+<form action="{% url 'set_language' %}" method="post">
+    {% csrf_token %}
+    <input name="next" value="{{ redirect_to }}" type="hidden">
+    <select name="language">
+        {% get_available_languages as LANGUAGES %}
+        {% for lang in LANGUAGES %}
+            <option value="{{ lang.0 }}">{{ lang.1 }}</option>
+        {% endfor %}
+    </select>
+    <button>변경</button>
+</form>
+```
+
+쿠키 `django_language`에 저장.
+
+## 시간대 (timezone)
+
+`USE_TZ = True`이면 DB는 모두 UTC로 저장. 표시 시 사용자 시간대로 변환.
+
+```python
+from django.utils import timezone
+
+now = timezone.now()              # tz-aware UTC datetime
+local_now = timezone.localtime()  # 현재 TZ
+```
+
+템플릿:
+
+```html
+{% load tz %}
+
+{# 활성 TZ로 표시 #}
+{{ event.start_at }}
+
+{# 특정 TZ로 #}
+{% timezone "America/New_York" %}
+    {{ event.start_at }}
+{% endtimezone %}
+
+{# 명시적으로 UTC #}
+{% localtime off %}
+    {{ event.start_at }}
+{% endlocaltime %}
+```
+
+사용자별 TZ 저장 + 미들웨어로 활성화:
+
+```python
+class TimezoneMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.user.is_authenticated:
+            tz = request.user.profile.timezone
+            if tz:
+                timezone.activate(tz)
+        else:
+            timezone.deactivate()
+        return self.get_response(request)
+```
+
+## 숫자/날짜 형식
+
+```python
+USE_L10N = True    # 사용자 로케일에 맞춤 (deprecated, 항상 True)
+USE_THOUSAND_SEPARATOR = True
+```
+
+```python
+{{ value|date:"Y-m-d" }}                    # 명시 포맷
+{{ value|date }}                            # 로케일 기본
+{{ value|date:"SHORT_DATETIME_FORMAT" }}    # 명명 포맷
+{{ amount|floatformat:2 }}                  # 1234.57
+{{ amount|intcomma }}                       # 1,234,567 (humanize)
+```
+
+`humanize` 활용:
+
+```python
+INSTALLED_APPS += ["django.contrib.humanize"]
+```
+
+```html
+{% load humanize %}
+{{ value|intcomma }}          # 1,234,567
+{{ value|naturaltime }}        # 3 hours ago
+{{ value|apnumber }}           # one, two, ..., nine, 10
+{{ value|naturalday }}         # today, yesterday, ...
+```
+
+## 자주 보는 패턴
+
+### 컨텍스트별 다른 번역
+
+```python
+from django.utils.translation import pgettext, pgettext_lazy
+
+pgettext("month", "May")    # 5월
+pgettext("name", "May")     # 인명 May
+```
+
+같은 영문이 컨텍스트별 다르게 번역됨.
+
+### Markdown / Rich text 번역
+
+```python
+from django.utils.safestring import mark_safe
+content = mark_safe(gettext("**bold** text"))
+```
+
+또는 별도 CMS 모델로 다국어 콘텐츠.
+
+### 모델 필드 다국어
+
+별도 라이브러리: `django-modeltranslation`, `django-parler`.
+
+```python
+# django-parler
+class Post(TranslatableModel):
+    translations = TranslatedFields(
+        title=models.CharField(max_length=200),
+        body=models.TextField(),
+    )
+```
+
+각 언어별로 별도 row.
+
+## 함정
+
+### 1. lazy를 즉시 평가하는 곳
+
+```python
+class Profile(models.Model):
+    role = models.CharField(_("Role"), max_length=10)    # 정상
+
+choices = [("a", _("A"))]    # OK
+choices = [("a", _("A").upper())]    # 추출 단계에 깨질 수 있음
+```
+
+문자열 메서드 호출은 마킹 후가 좋음.
+
+### 2. f-string으로 마킹
+
+```python
+_(f"Hello, {name}")    # 매번 다른 문자열로 보임 → 추출 안 됨
+```
+
+```python
+_("Hello, %(name)s") % {"name": name}
+```
+
+### 3. makemessages 누락
+
+새 _() 추가했는데 `makemessages` 안 돌리면 번역 빈 채로 영어 표시 (msgstr 없으면 msgid 그대로).
+
+### 4. compilemessages 누락
+
+`.po` 번역했는데 `.mo` 컴파일 안 함 → 런타임에 적용 안 됨. CI/배포 단계에 포함.
+
+### 5. JSON content with HTML
+
+```python
+{"label": _("<b>Important</b>")}
+```
+
+번역가가 HTML 깨뜨릴 위험. 마크업 분리:
+
+```python
+{"label": _("Important")}    # "<b>Important</b>"는 템플릿에서
+```
+
+## 대안: django-rosetta, django-modeltranslation
+
+- **django-rosetta**: 웹에서 .po 편집
+- **django-modeltranslation**: 모델 필드 자동 다국어
+- **wagtail-localize**: Wagtail CMS와 통합
+
+## 참고
+
+- [Translation](https://docs.djangoproject.com/en/stable/topics/i18n/translation/)
+- [Internationalization](https://docs.djangoproject.com/en/stable/topics/i18n/)
+- [Time zones](https://docs.djangoproject.com/en/stable/topics/i18n/timezones/)
+- [django-modeltranslation](https://django-modeltranslation.readthedocs.io/)
+- [django-rosetta](https://django-rosetta.readthedocs.io/)

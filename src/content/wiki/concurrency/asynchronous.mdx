@@ -1,0 +1,224 @@
+---
+title: "Asynchronous (비동기)"
+aliases: ["asynchronous", "async", "비동기", "비동기식", "비동기 호출", "asynchronous call"]
+tags: [concurrency, programming-model, sync-async]
+updated: 2026-06-18
+---
+
+## 정의
+
+**Asynchronous (비동기)** 는 호출자가 **결과를 즉시 기다리지 않고** 다음 줄로 진행하는 실행 모델. 결과는 나중에 콜백, Future, Promise, 이벤트 등의 메커니즘으로 전달된다.
+
+[[Synchronous]] 의 정반대 개념. [[Non-Blocking]] 과 자주 같이 쓰이지만 별개의 차원이다.
+
+## 가장 단순한 형태
+
+```java
+// Asynchronous, with Future
+CompletableFuture<String> future = client.getAsync("/api/users");
+// 다음 줄로 즉시 진행, 결과를 안 기다림
+doOtherWork();
+
+// 나중에 결과가 필요할 때
+String result = future.get();   // 그 때 결과를 기다림 (다시 sync 가 됨)
+```
+
+또는 콜백 스타일:
+
+```java
+client.getAsync("/api/users", (err, result) -> {
+    if (err != null) handle(err);
+    else process(result);
+});
+// 즉시 다음 줄로
+doOtherWork();
+```
+
+## 비동기 호출 흐름
+
+```text
+[caller]                    [callee or scheduler]
+   │
+   │── call ───────────────►│ (작업 시작, 별도 컨텍스트)
+   │◄─── 즉시 return ───────│
+   │
+   │ 다른 일 수행            │ (작업 진행 중)
+   │ doOtherWork()           │
+   │                         │
+   │                         │ (작업 완료)
+   │◄─────── callback ──────│
+   │ 결과 처리
+   │
+```
+
+호출자의 일직선 흐름이 **두 갈래** 로 갈라진다. callback 이 진입하는 시점은 호출자의 스택과 다른 context.
+
+## 콜백, Future, 이벤트, 세 가지 패턴
+
+### 1. Callback (콜백)
+
+```java
+service.callAsync(arg, (err, result) -> {
+    if (err != null) onError(err);
+    else onResult(result);
+});
+```
+
+가장 원시적. 깊게 중첩되면 "콜백 지옥" ([[콜백 지옥]]).
+
+### 2. Future / Promise / CompletableFuture
+
+```java
+CompletableFuture<String> f = service.callAsync(arg);
+f.thenApply(this::transform)
+ .thenAccept(this::publish)
+ .exceptionally(this::handle);
+```
+
+체이닝이 가능해 콜백 지옥을 해결. Java 의 `CompletableFuture`, JavaScript 의 `Promise`, C# 의 `Task` 가 같은 개념.
+
+### 3. Event / Reactive Stream
+
+```java
+publisher.subscribe(new Subscriber<>() {
+    public void onNext(String item) { ... }
+    public void onError(Throwable t) { ... }
+    public void onComplete() { ... }
+});
+```
+
+여러 결과가 시간에 걸쳐 도착하는 경우. Reactor, RxJava, Akka Streams, Project Reactor (Spring WebFlux) 등이 이 방식.
+
+## Async 의 두 형태, blocking vs non-blocking
+
+비동기 모델도 [[Blocking]] / [[Non-Blocking]] 두 가지로 갈라진다.
+
+### Async + Non-Blocking (가장 흔함, 진짜 비동기)
+
+```java
+client.getAsync(url).thenAccept(this::process);
+// 호출 스레드는 즉시 풀려나 다른 작업 수행
+```
+
+호출 스레드는 등록만 하고 즉시 반환. OS 또는 framework 가 I/O 완료 시 callback 을 실행. Node.js, Netty, Vert.x, Spring WebFlux 등이 이 모델.
+
+### Async + Blocking (안티패턴, 자주 발견됨)
+
+```java
+new Thread(() -> {
+    String r = http.get(url);   // blocking I/O
+    callback.accept(r);
+}).start();
+```
+
+호출자 입장에서는 비동기지만, 실제로는 다른 스레드에서 blocking. 그래도 호출자 스레드가 즉시 풀려난다는 점은 비동기.
+
+> [!CAUTION]
+> 이 패턴은 **스레드를 많이 만든다**. 동시 1000 요청이면 1000 스레드. 대부분의 sync API 를 async 화하는 ExecutorService 패턴이 이렇게 동작. Virtual Threads (JEP 444) 가 이 문제를 줄여준다.
+
+## Java 의 비동기 API
+
+### CompletableFuture
+
+```java
+CompletableFuture.supplyAsync(() -> fetchData())
+    .thenApply(this::parse)
+    .thenCombine(other, (a, b) -> merge(a, b))
+    .thenAccept(System.out::println)
+    .exceptionally(t -> {
+        log.error("failed", t);
+        return null;
+    });
+```
+
+비동기 + 체이닝 + 예외 처리 모두 가능.
+
+### Reactive (Spring WebFlux, Project Reactor)
+
+```java
+Mono<User> user = userRepo.findById(id)
+    .switchIfEmpty(Mono.error(new NotFoundException()))
+    .map(this::enrich)
+    .timeout(Duration.ofSeconds(5));
+```
+
+backpressure (생산자 / 소비자 속도 조절) 까지 자연스럽게 다룸.
+
+### Virtual Threads (Java 21+)
+
+```java
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    Future<String> f = executor.submit(() -> {
+        return http.get(url);    // sync 같은 코드, virtual thread 에서
+    });
+}
+```
+
+흥미로운 점, **코드는 sync 처럼 보이지만 underlying 은 비동기적으로 스케줄** 된다. Java 의 새로운 동시성 모델.
+
+## 장점
+
+- **확장성**, 같은 스레드 풀로 수만 동시 요청 처리 가능
+- **자원 효율**, I/O 대기 중 스레드를 풀어둠
+- **UI 응답성**, 메인 스레드를 멈추지 않음
+- **자연스러운 병렬**, 여러 작업을 동시에 진행
+
+## 단점
+
+- **읽기 어렵다**, 콜백 지옥, 비순차적 흐름
+- **디버깅이 힘들다**, stack trace 가 단편적
+- **에러 처리가 복잡**, 어디서 catch 할지 분명하지 않음
+- **테스트가 어렵다**, race condition, timing 의존
+
+## sync 코드를 async 로 만드는 흔한 방법
+
+### Java 의 `CompletableFuture.supplyAsync`
+
+```java
+CompletableFuture<String> future = CompletableFuture.supplyAsync(
+    () -> {
+        return blockingCall();    // 원래 sync 였던 코드
+    },
+    threadPool
+);
+```
+
+호출자에게는 비동기지만 내부적으로는 별도 스레드에서 sync 호출. 진짜 non-blocking 으로 만들려면 라이브러리 자체가 NIO 기반으로 다시 작성돼야 한다.
+
+### Spring 의 `@Async`
+
+```java
+@Service
+public class EmailService {
+    @Async
+    public CompletableFuture<Void> sendAsync(String to) {
+        // sync 코드
+        smtpClient.send(...);
+        return CompletableFuture.completedFuture(null);
+    }
+}
+```
+
+annotation 으로 손쉽게 비동기화. 내부는 thread pool 으로 위임.
+
+## 비동기와 동시성 (Concurrency) 의 관계
+
+**비동기 ≠ 병렬 (Parallel) ≠ 동시 (Concurrent)**
+
+- **Concurrent**: 동시에 여러 일이 진행 중 (실제 동시 실행 여부 무관)
+- **Parallel**: 실제로 동시에 실행 (멀티 코어)
+- **Asynchronous**: 호출자가 결과를 즉시 기다리지 않음
+
+비동기 모델은 **single thread 에서도 concurrent** 일 수 있다 (Node.js, JS 의 event loop). 비동기는 동시성을 *가능하게* 하는 도구일 뿐.
+
+## 참고
+
+- [[Synchronous]]
+- [[Blocking]]
+- [[Non-Blocking]]
+- [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- [[콜백 지옥]]
+- [[Promise]]
+- [[async/await]]
+- JEP 444, [Virtual Threads](https://openjdk.org/jeps/444)
+- Oracle, [CompletableFuture (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CompletableFuture.html)

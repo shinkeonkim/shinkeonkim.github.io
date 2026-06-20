@@ -1,0 +1,129 @@
+---
+title: "[Java] LinkedHashMap"
+aliases: ["LinkedHashMap", "java.util.LinkedHashMap", "Java LinkedHashMap", "링크드해시맵"]
+tags: [java, collection, map, hash, linked-list, order]
+updated: 2026-06-18
+---
+
+## 정의
+
+**`java.util.LinkedHashMap<K,V>`** 는 [[HashMap]] 을 상속해 **삽입 순서 (또는 접근 순서) 를 유지** 하는 Map. 모든 [[HashMap]] 의 평균 O(1) 성능을 유지하면서 추가로 순회 순서가 일관된다.
+
+핵심: **이중 연결 리스트 (doubly-linked list)** 가 모든 entry 를 삽입 순서대로 엮어 둔다.
+
+## 시각화
+
+```anim:java-linkedhashmap-lru
+{}
+```
+
+## 내부 구조
+
+`HashMap.Node` 를 확장한 `Entry`.
+
+```java
+static class Entry<K,V> extends HashMap.Node<K,V> {
+    Entry<K,V> before, after;     // ← 추가된 두 포인터
+}
+
+// LinkedHashMap 의 추가 필드
+transient LinkedHashMap.Entry<K,V> head;    // 가장 오래된 entry
+transient LinkedHashMap.Entry<K,V> tail;    // 가장 최근 entry
+final boolean accessOrder;                   // false = 삽입 순서, true = 접근 순서
+```
+
+각 entry 가 해시 버킷의 chain 과는 **별도로** linked list 로도 엮인다. 두 구조를 동시에 관리.
+
+## 두 가지 순회 순서
+
+### 삽입 순서 (기본)
+
+```java
+LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+map.put("a", 1); map.put("b", 2); map.put("c", 3);
+map.put("a", 99);                // 기존 key 갱신, 순서 유지
+
+map.forEach((k, v) -> System.out.println(k + "=" + v));
+// a=99, b=2, c=3
+```
+
+### 접근 순서 (LRU 캐시용)
+
+```java
+Map<String, Integer> lru = new LinkedHashMap<>(16, 0.75f, true);
+//                                                    ^^^^ accessOrder
+
+lru.put("a", 1); lru.put("b", 2); lru.put("c", 3);
+lru.get("a");                    // "a" 가 가장 최근 접근
+lru.forEach(...);                // b, c, a 순으로 출력
+```
+
+`accessOrder = true` 면 `get`, `put` 마다 entry 가 linked list 의 끝으로 이동.
+
+## LRU 캐시 구현
+
+`removeEldestEntry` 를 override 하면 손쉽게 LRU 캐시를 만들 수 있다.
+
+```java
+class LRUCache<K, V> extends LinkedHashMap<K, V> {
+    private final int capacity;
+    public LRUCache(int capacity) {
+        super(capacity, 0.75f, true);       // accessOrder = true
+        this.capacity = capacity;
+    }
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return size() > capacity;            // 초과 시 가장 오래된 항목 제거
+    }
+}
+
+// 사용
+Map<String, String> cache = new LRUCache<>(3);
+cache.put("a", "1"); cache.put("b", "2"); cache.put("c", "3");
+cache.get("a");
+cache.put("d", "4");
+// cache = {b=2, c=3, a=1, d=4}? 아니, "b" 가 제거되어 {c=3, a=1, d=4}
+```
+
+> [!IMPORTANT]
+> 단일 스레드 LRU 라면 LinkedHashMap 이 매우 깔끔하다. 동시성이 필요하면 [Spring] ConcurrentLruCache 또는 Caffeine 같은 외부 라이브러리.
+
+## 복잡도
+
+[[HashMap]] 과 동일.
+
+| 작업 | 평균 | 최악 |
+|:---|:---:|:---:|
+| `get`, `put`, `remove` | O(1) | O(log n) |
+| 순회 | O(n) (linked list 따라가므로 빠름) | 같음 |
+
+> 순회는 **HashMap 보다 빠르다**. HashMap 은 빈 버킷도 모두 거쳐야 하지만, LinkedHashMap 은 linked list 만 따라간다.
+
+## 메모리
+
+각 entry 가 `before`/`after` 두 포인터를 추가로 가지므로 [[HashMap]] 대비 **per-entry 메모리가 ~16-32 바이트 더** 든다. 큰 map 에서는 무시 못 한다.
+
+## 함정
+
+### 1. accessOrder 가 동시성 문제 증폭
+
+`accessOrder = true` 일 때 `get()` 도 구조 변경 (linked list 재정렬). 이는 modCount 를 증가시키지는 않지만, 동시 환경에서 **iterator 와 충돌** 할 수 있다. 동기화 필요.
+
+### 2. removeEldestEntry 가 매 put 후 호출
+
+대용량 데이터를 부어 넣는 경우 매 put 마다 호출되는 비용이 누적된다.
+
+### 3. thread-safe 가 아니다
+
+[[HashMap]] 처럼 단일 스레드 전용.
+
+## 참고
+
+- [[Object]]
+- [[Iterable]]
+- [[Collection]]
+- [[Map]]
+- [[HashMap]]
+- [[TreeMap]]
+- [[ConcurrentHashMap]]
+- Oracle, [LinkedHashMap (Java Platform SE 21)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/LinkedHashMap.html)
