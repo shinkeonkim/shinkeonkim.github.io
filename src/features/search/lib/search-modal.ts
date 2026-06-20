@@ -58,12 +58,14 @@ export function setupSearchModal(): void {
 
   let pagefindModule: { search: (q: string) => Promise<{ results: { data: () => Promise<unknown> }[] }>; options: (o: object) => Promise<void>; init: () => Promise<void> } | null = null;
   let pagefindReady = false;
+  let pagefindLoadFailed = false;
   let searchToken = 0;
   let selectedIndex = -1;
   let currentItems: CurrentItem[] = [];
 
   async function loadPagefind() {
     if (pagefindReady) return pagefindModule;
+    if (pagefindLoadFailed) return null;
     try {
       const pagefindUrl = '/pagefind/pagefind.js';
       const mod = await import(/* @vite-ignore */ pagefindUrl);
@@ -73,9 +75,23 @@ export function setupSearchModal(): void {
       pagefindReady = true;
       return pagefindModule;
     } catch (e) {
+      pagefindLoadFailed = true;
       console.error('Pagefind load failed:', e);
       return null;
     }
+  }
+
+  function renderPagefindUnavailable(stats: HTMLElement, container: HTMLElement): void {
+    stats.textContent = '검색 사용 불가';
+    container.innerHTML = import.meta.env.DEV
+      ? `<p class="search-modal-empty">
+          <strong>전문 검색 인덱스(Pagefind)를 사용할 수 없습니다.</strong><br>
+          개발 서버에서는 인덱스가 만들어지지 않습니다. <code>bun run build</code> 후 <code>bun preview</code> 로 검색을 테스트할 수 있습니다.<br>
+          <kbd>&gt;</kbd> 명령 · <kbd>#</kbd> 태그 · <kbd>?</kbd> 도움말 모드는 정상 동작합니다.
+        </p>`
+      : `<p class="search-modal-empty">검색 인덱스를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.</p>`;
+    currentItems = [];
+    selectedIndex = -1;
   }
 
   function setModeBadge(mode: Mode): void {
@@ -221,7 +237,11 @@ export function setupSearchModal(): void {
     }
     stats.textContent = '검색 중…';
     const pf = await loadPagefind();
-    if (!pf || token !== searchToken) return;
+    if (token !== searchToken) return;
+    if (!pf) {
+      renderPagefindUnavailable(stats, container);
+      return;
+    }
     const start = performance.now();
     const result = await pf.search(trimmed);
     if (token !== searchToken) return;
