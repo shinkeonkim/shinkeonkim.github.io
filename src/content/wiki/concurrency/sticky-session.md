@@ -3,6 +3,13 @@ title: "Sticky Session"
 aliases: ["sticky session", "session affinity", "session persistence", "스티키 세션", "세션 어피니티"]
 tags: [network, load-balancing, architecture]
 updated: 2026-06-13
+references:
+  - title: "AWS, Sticky sessions for your Application Load Balancer"
+    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/sticky-sessions.html"
+  - title: "Nginx, Session persistence"
+    url: "http://nginx.org/en/docs/http/ngx_http_upstream_module.html#sticky"
+  - title: "Socket.IO, Using multiple nodes"
+    url: "https://socket.io/docs/v4/using-multiple-nodes/"
 ---
 
 ## 정의
@@ -107,9 +114,3 @@ Socket.IO + Redis adapter 패턴:
 
 > [!IMPORTANT]
 > Sticky session 은 "**필요악**"이다. 가능하면 외부 store 나 JWT 로 [[Stateless]] 화 하는 게 장기적으로 더 단순하다. 다만 WebSocket 처럼 지속 연결이 본질적인 경우엔 피할 수 없으므로 Pub/Sub 같은 다른 추상화로 대처한다.
-
-## 참고
-
-- [AWS, Sticky sessions for your Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/sticky-sessions.html)
-- [Nginx, Session persistence](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#sticky)
-- [Socket.IO, Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/)
