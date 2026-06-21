@@ -1,0 +1,343 @@
+---
+title: "[Django] Aggregation: annotate, aggregate, F, Q, Window"
+aliases: ["django annotate", "django aggregate", "Q objects", "F expressions", "Window functions"]
+tags: [django, orm, aggregation, query]
+updated: 2026-06-20
+references:
+  - id: django-docs
+    note: "Aggregation - https://docs.djangoproject.com/en/stable/topics/db/aggregation/"
+  - id: django-docs
+    note: "Conditional Expressions - https://docs.djangoproject.com/en/stable/ref/models/conditional-expressions/"
+  - id: django-docs
+    note: "Database Functions - https://docs.djangoproject.com/en/stable/ref/models/database-functions/"
+  - id: django-docs
+    note: "Window Functions - https://docs.djangoproject.com/en/stable/ref/models/expressions/#window-functions"
+---
+
+## 정의
+
+Django ORM의 **annotate / aggregate / F / Q / Window**는 SQL의 GROUP BY, 집계 함수, 동적 조건, 컬럼 참조, Window 함수를 Python으로 표현. N+1 회피 + DB에서 무거운 계산 위임.
+
+## aggregate (전체)
+
+```python
+from django.db.models import Count, Sum, Avg, Max, Min, F
+
+stats = Post.objects.aggregate(
+    total=Count("id"),
+    avg_views=Avg("views"),
+    max_views=Max("views"),
+    total_views=Sum("views"),
+)
+# {"total": 100, "avg_views": 42.5, "max_views": 1000, "total_views": 4250}
+
+stats["avg_views"]    # dict
+```
+
+## annotate (group by)
+
+```python
+# 각 작성자별 글 수
+from django.db.models import Count
+
+authors = User.objects.annotate(post_count=Count("posts"))
+for a in authors:
+    print(a.username, a.post_count)
+
+# 정렬 + 필터
+top = User.objects.annotate(post_count=Count("posts")).filter(post_count__gt=10).order_by("-post_count")
+```
+
+내부적으로 SQL `GROUP BY user.id` + `COUNT(post.id)`. ORM이 자동 처리.
+
+## 여러 annotation 동시 (함정)
+
+```python
+# WRONG: 결과가 곱해짐
+User.objects.annotate(
+    post_count=Count("posts"),
+    comment_count=Count("comments"),
+)
+# JOIN posts × JOIN comments → cartesian product
+```
+
+해결 1: distinct
+
+```python
+User.objects.annotate(
+    post_count=Count("posts", distinct=True),
+    comment_count=Count("comments", distinct=True),
+)
+```
+
+해결 2: Subquery (더 정확)
+
+```python
+from django.db.models import OuterRef, Subquery, Count
+
+post_count = Post.objects.filter(author=OuterRef("pk")).order_by().values("author").annotate(c=Count("*")).values("c")
+comment_count = Comment.objects.filter(author=OuterRef("pk")).order_by().values("author").annotate(c=Count("*")).values("c")
+
+User.objects.annotate(
+    post_count=Subquery(post_count),
+    comment_count=Subquery(comment_count),
+)
+```
+
+## F 표현식 (컬럼 참조)
+
+```python
+from django.db.models import F
+
+# 조회수 1 증가 (원자적)
+Post.objects.filter(id=1).update(views=F("views") + 1)
+
+# 두 컬럼 비교
+Post.objects.filter(updated_at__gt=F("created_at"))
+
+# 컬럼 간 연산
+Post.objects.annotate(net_score=F("likes") - F("dislikes"))
+
+# 다른 테이블 컬럼
+Post.objects.filter(author__points__gt=F("min_points_required"))
+```
+
+## Q 객체 (복합 조건)
+
+```python
+from django.db.models import Q
+
+# OR
+Post.objects.filter(Q(is_published=True) | Q(is_featured=True))
+
+# AND + NOT
+Post.objects.filter(Q(views__gt=100) & ~Q(author=current_user))
+
+# 동적
+q = Q()
+if search:
+    q &= Q(title__icontains=search) | Q(body__icontains=search)
+if author_id:
+    q &= Q(author_id=author_id)
+posts = Post.objects.filter(q)
+```
+
+## Conditional (Case/When)
+
+```python
+from django.db.models import Case, When, Value, IntegerField, CharField
+
+Post.objects.annotate(
+    priority=Case(
+        When(is_featured=True, then=Value(1)),
+        When(views__gt=1000, then=Value(2)),
+        When(views__gt=100, then=Value(3)),
+        default=Value(4),
+        output_field=IntegerField(),
+    )
+).order_by("priority")
+```
+
+```python
+# 라벨링
+status_label=Case(
+    When(status="draft", then=Value("초안")),
+    When(status="published", then=Value("발행")),
+    default=Value("기타"),
+    output_field=CharField(),
+)
+```
+
+## Subquery / OuterRef
+
+```python
+from django.db.models import Subquery, OuterRef
+
+# 각 작성자의 최신 글 제목
+latest_post = Post.objects.filter(
+    author=OuterRef("pk")
+).order_by("-created_at").values("title")[:1]
+
+User.objects.annotate(latest_title=Subquery(latest_post))
+```
+
+```python
+# EXISTS
+from django.db.models import Exists
+
+has_comments = Comment.objects.filter(post=OuterRef("pk"))
+Post.objects.annotate(has_comments=Exists(has_comments))
+```
+
+## Window 함수 (3.2+)
+
+```python
+from django.db.models import Window, F
+from django.db.models.functions import Rank, DenseRank, RowNumber, Lag, Lead, FirstValue, LastValue
+
+# 각 작성자별로 글 순위
+Post.objects.annotate(
+    rank=Window(
+        expression=Rank(),
+        partition_by=[F("author")],
+        order_by=F("views").desc(),
+    )
+).filter(rank__lte=3)    # 작성자별 top 3
+
+# 이전 글
+Post.objects.annotate(
+    prev_id=Window(
+        expression=Lag("id"),
+        partition_by=[F("author")],
+        order_by=F("created_at"),
+    )
+)
+
+# 누적 합
+Post.objects.annotate(
+    running_total=Window(
+        expression=Sum("views"),
+        order_by=F("created_at"),
+    )
+)
+```
+
+DB에서 직접 계산. Python 루프보다 매우 빠름.
+
+## values + annotate (GROUP BY 명시)
+
+```python
+# 작성자별 통계
+Post.objects.values("author__username").annotate(
+    total=Count("id"),
+    avg_views=Avg("views"),
+).order_by("-total")
+# [{"author__username": "alice", "total": 50, "avg_views": 100.0}, ...]
+```
+
+명시적으로 그룹화할 컬럼 지정.
+
+## 자주 보는 패턴
+
+### Pagination + Count 최적화
+
+```python
+posts = Post.objects.all()
+total = posts.count()    # SELECT COUNT(*)
+page = posts[offset:offset + limit]
+```
+
+큰 테이블에서 COUNT가 느림. estimate 또는 cursor pagination.
+
+### 통계 dashboard
+
+```python
+from django.db.models.functions import TruncMonth, TruncDate
+
+# 월별 가입자 수
+User.objects.annotate(
+    month=TruncMonth("date_joined")
+).values("month").annotate(
+    count=Count("id")
+).order_by("month")
+
+# 일별
+User.objects.annotate(day=TruncDate("date_joined")).values("day").annotate(count=Count("id"))
+```
+
+### Conditional aggregation
+
+```python
+from django.db.models import Sum, Q
+
+Post.objects.aggregate(
+    published_views=Sum("views", filter=Q(is_published=True)),
+    draft_views=Sum("views", filter=Q(is_published=False)),
+)
+```
+
+3.0+ `filter` 인자 지원.
+
+### Median / Percentile
+
+기본 ORM에 없지만 raw 또는 percentile_cont (PG):
+
+```python
+from django.db.models import F
+from django.db.models.functions import PercentileCont
+
+# PG 8.4+
+posts = Post.objects.aggregate(
+    median=PercentileCont(0.5).within_group(F("views"))
+)
+```
+
+또는 Subquery + LIMIT/OFFSET.
+
+### 비싼 annotation 캐싱
+
+```python
+@cached_property
+def total_views(self):
+    return self.posts.aggregate(t=Sum("views"))["t"] or 0
+```
+
+또는 denormalize:
+
+```python
+class User(models.Model):
+    total_views = models.PositiveIntegerField(default=0)
+
+# signal로 동기화
+@receiver(post_save, sender=Post)
+def update_total(sender, instance, **kwargs):
+    user = instance.author
+    user.total_views = user.posts.aggregate(t=Sum("views"))["t"] or 0
+    user.save()
+```
+
+## 함정
+
+### 1. JOIN 결과 곱
+
+위에서 설명. 여러 reverse FK를 동시 Count 시 cartesian. distinct 또는 Subquery.
+
+### 2. annotate 순서
+
+```python
+Post.objects.annotate(a=Count("comments")).filter(a__gt=5).annotate(b=Count("tags"))
+# a는 모든 댓글, b는 a 필터 후 태그
+```
+
+순서에 따라 결과 다름.
+
+### 3. F 표현식과 Python 연산
+
+```python
+post.views += 1
+post.save()
+# 동시 다수 요청 → race condition
+```
+
+```python
+Post.objects.filter(id=post.id).update(views=F("views") + 1)
+# DB 레벨 atomic
+post.refresh_from_db()
+```
+
+### 4. Subquery output_field
+
+```python
+Subquery(post_count, output_field=IntegerField())
+```
+
+명시 권장. 추론 실패 시 에러.
+
+### 5. count() vs len(qs)
+
+```python
+qs.count()     # SQL COUNT
+len(qs)        # 모두 로드 후 len
+```
+
+count로 분기.

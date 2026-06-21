@@ -1,0 +1,465 @@
+---
+title: "[Django] Signals 내부 구현: 옵저버 패턴 심층 분석"
+aliases: ["django signal internal", "Signal class internals", "옵저버 패턴 django", "Signal connect dispatch", "weakref signal receiver"]
+tags: [django, signal, observer-pattern, internals, deep-dive]
+updated: 2026-06-20
+references:
+  - title: "django/dispatch/dispatcher.py (소스)"
+    url: "https://github.com/django/django/blob/main/django/dispatch/dispatcher.py"
+  - id: django-docs
+    note: "Signal documentation - https://docs.djangoproject.com/en/stable/topics/signals/"
+  - id: python-peps
+    note: "PEP 487 – Simpler customisation of class creation - https://peps.python.org/pep-0487/"
+  - id: python-docs
+    note: "weakref documentation - https://docs.python.org/3/library/weakref.html"
+  - title: "Observer pattern - GoF"
+    url: "https://en.wikipedia.org/wiki/Observer_pattern"
+---
+
+## 정의
+
+Django signal은 GoF의 **옵저버(Observer) 패턴**을 Python의 동적 디스패치, weakref, threading.lock으로 구현한 것이다. 일반 사용은 [django-signals](django-signals) 참고. 이 문서는 **`django.dispatch.Signal` 클래스 내부 구조와 동작 방식**을 코드 레벨에서 추적한다.
+
+핵심 파일: `django/dispatch/dispatcher.py` (약 300줄).
+
+## Signal 클래스 구조
+
+```python
+# django/dispatch/dispatcher.py (단순화)
+class Signal:
+    def __init__(self, use_caching=False):
+        self.receivers = []                        # [(lookup_key, receiver)] 페어
+        self.lock = threading.Lock()                # 등록/해제 동시성
+        self.use_caching = use_caching              # sender별 receiver 캐시
+        self.sender_receivers_cache = (
+            weakref.WeakKeyDictionary() if use_caching else {}
+        )
+        self._dead_receivers = False                # cleanup 플래그
+```
+
+**필드 의미:**
+- `receivers`: 등록된 모든 receiver의 리스트. 단일 데이터 구조.
+- `lock`: 다중 스레드에서 `connect`/`disconnect` race 방지.
+- `sender_receivers_cache`: `(signal, sender)` → 활성 receivers 캐싱 (선택적).
+- `_dead_receivers`: GC된 weakref가 있다는 힌트.
+
+## connect: receiver 등록
+
+```python
+def connect(self, receiver, sender=None, weak=True, dispatch_uid=None):
+    # 1. lookup_key 생성: (receiver 식별자, sender 식별자)
+    if dispatch_uid:
+        lookup_key = (dispatch_uid, _make_id(sender))
+    else:
+        lookup_key = (_make_id(receiver), _make_id(sender))
+
+    # 2. weak reference 처리
+    if weak:
+        ref = weakref.ref
+        receiver_object = receiver
+
+        # bound method는 WeakMethod (self가 GC되도록)
+        if hasattr(receiver, "__self__") and hasattr(receiver, "__func__"):
+            ref = weakref.WeakMethod
+            receiver_object = receiver.__self__
+
+        receiver = ref(receiver)
+        weakref.finalize(receiver_object, self._remove_receiver)
+
+    # 3. lock + 중복 검사 + append
+    with self.lock:
+        self._clear_dead_receivers()
+        if not any(r_key == lookup_key for r_key, _ in self.receivers):
+            self.receivers.append((lookup_key, receiver))
+        self.sender_receivers_cache.clear()
+```
+
+**핵심 동작 3단계:**
+
+1. **`lookup_key`** 생성으로 중복 등록 방지. `dispatch_uid`가 있으면 명시적 ID, 없으면 receiver의 `id()` 사용.
+2. **weakref**로 감싸 (기본): receiver 소유 객체가 GC되면 자동으로 사라짐. 메모리 누수 회피의 핵심.
+3. **`lock`** 안에서 `receivers` 리스트에 append, 캐시 무효화.
+
+### _make_id의 함정
+
+```python
+def _make_id(target):
+    if hasattr(target, "__func__"):
+        return (id(target.__self__), id(target.__func__))
+    return id(target)
+```
+
+bound method의 경우 `id(self)` + `id(func)` 페어로 식별. 같은 클래스의 같은 메서드도 인스턴스가 다르면 다른 receiver.
+
+## @receiver 데코레이터
+
+```python
+def receiver(signal, **kwargs):
+    def _decorator(func):
+        if isinstance(signal, (list, tuple)):
+            for s in signal:
+                s.connect(func, **kwargs)
+        else:
+            signal.connect(func, **kwargs)
+        return func
+    return _decorator
+```
+
+단순히 `connect`를 호출하는 wrapper. import 시점에 모듈 로드되면서 등록.
+
+```python
+@receiver(post_save, sender=Post)
+def handler(sender, instance, **kwargs): ...
+
+# 동등
+def handler(sender, instance, **kwargs): ...
+post_save.connect(handler, sender=Post)
+```
+
+## send: receiver 호출
+
+```python
+def send(self, sender, **named):
+    if (
+        not self.receivers
+        or self.sender_receivers_cache.get(sender) is NO_RECEIVERS
+    ):
+        return []
+
+    return [
+        (receiver, receiver(signal=self, sender=sender, **named))
+        for receiver in self._live_receivers(sender)
+    ]
+```
+
+**동작:**
+1. receiver 없으면 즉시 빈 리스트 반환 (fast path).
+2. `_live_receivers(sender)`로 현재 sender에 적용되는 receivers 추출.
+3. 각 receiver를 호출하고 `(receiver, return_value)` 리스트 반환.
+
+### _live_receivers: 매칭 + 캐싱
+
+```python
+def _live_receivers(self, sender):
+    receivers = None
+    if self.use_caching and not self._dead_receivers:
+        receivers = self.sender_receivers_cache.get(sender)
+        if receivers is NO_RECEIVERS:
+            return []
+
+    if receivers is None:
+        with self.lock:
+            self._clear_dead_receivers()
+            senderkey = _make_id(sender)
+            receivers = []
+            for (receiverkey, r_senderkey), receiver in self.receivers:
+                if r_senderkey == NONE_ID or r_senderkey == senderkey:
+                    receivers.append(receiver)
+            if self.use_caching:
+                self.sender_receivers_cache[sender] = receivers or NO_RECEIVERS
+
+    # weakref 역참조 + dead 필터
+    non_weak = []
+    for receiver in receivers:
+        if isinstance(receiver, weakref.ReferenceType):
+            receiver = receiver()
+            if receiver is not None:
+                non_weak.append(receiver)
+        else:
+            non_weak.append(receiver)
+    return non_weak
+```
+
+**핵심:**
+- `r_senderkey == NONE_ID`: `connect(sender=None)`로 등록한 receiver는 모든 sender에 매치.
+- `r_senderkey == senderkey`: 특정 sender 매칭.
+- weakref 역참조 시 None이면 GC된 것 → 제외.
+- `use_caching=True`이면 (sender → receivers list) 캐싱.
+
+## send_robust: 예외 격리
+
+```python
+def send_robust(self, sender, **named):
+    responses = []
+    for receiver in self._live_receivers(sender):
+        try:
+            response = receiver(signal=self, sender=sender, **named)
+        except Exception as err:
+            responses.append((receiver, err))
+        else:
+            responses.append((receiver, response))
+    return responses
+```
+
+`send`는 receiver 예외가 호출자에 전파되어 sender의 작업도 깨질 수 있음. `send_robust`는 각 receiver를 try/except로 격리해 전체 chain 보호.
+
+ORM의 `post_save`는 `send`. 한 receiver의 예외가 모델 저장 전체를 깨뜨릴 수 있음 → 자신의 receiver는 예외 격리 책임.
+
+## disconnect
+
+```python
+def disconnect(self, receiver=None, sender=None, dispatch_uid=None):
+    if dispatch_uid:
+        lookup_key = (dispatch_uid, _make_id(sender))
+    else:
+        lookup_key = (_make_id(receiver), _make_id(sender))
+
+    disconnected = False
+    with self.lock:
+        self._clear_dead_receivers()
+        for index in range(len(self.receivers)):
+            r_key, _ = self.receivers[index]
+            if r_key == lookup_key:
+                disconnected = True
+                del self.receivers[index]
+                break
+        self.sender_receivers_cache.clear()
+    return disconnected
+```
+
+`lookup_key`로 정확히 일치하는 receiver만 제거. 캐시 무효화 후 반환.
+
+## weakref + finalize: GC 안전
+
+```python
+weakref.finalize(receiver_object, self._remove_receiver)
+
+def _remove_receiver(self, receiver=None):
+    self._dead_receivers = True
+```
+
+receiver 소유 객체(클래스 인스턴스)가 GC되면 자동으로 `_dead_receivers = True`. 다음 `send`/`connect` 호출 시 `_clear_dead_receivers()`에서 정리.
+
+```python
+def _clear_dead_receivers(self):
+    if self._dead_receivers:
+        self._dead_receivers = False
+        self.receivers = [
+            r for r in self.receivers
+            if not (isinstance(r[1], weakref.ReferenceType) and r[1]() is None)
+        ]
+```
+
+**왜 weakref?** 클래스 인스턴스 메서드를 receiver로 등록하면, signal이 강참조 → 인스턴스 GC 불가 → 메모리 누수. weakref로 등록하면 다른 강참조가 사라질 때 receiver도 자동 사라짐.
+
+### weak=False가 필요한 경우
+
+```python
+def my_handler(sender, **kwargs): ...
+signal.connect(my_handler, weak=True)    # OK
+
+# 함수 안에서 정의한 closure
+def setup():
+    def handler(sender, **kwargs): ...
+    signal.connect(handler)    # WARN: setup() 종료 후 GC → 안 호출됨!
+    # 해결: weak=False 또는 outer scope에 보관
+```
+
+closure나 한 번 정의되고 강참조가 없는 함수는 `weak=False`로 강참조 유지 필요.
+
+## use_caching의 trade-off
+
+```python
+post_save = ModelSignal(use_caching=True)
+```
+
+`ModelSignal`은 `use_caching=True` 기본. 이유:
+- 모델 저장은 자주 일어남
+- 같은 sender(Post 등)의 매칭 결과는 변하지 않음
+- 캐시로 매번 리스트 순회 회피
+
+캐시는 `WeakKeyDictionary` → sender 클래스가 GC되면 캐시도 사라짐.
+
+**무효화 시점:**
+- `connect`/`disconnect` 호출 시
+- `_clear_dead_receivers` 호출 시
+- 명시 `clear` (테스트)
+
+## ModelSignal: sender 문자열 해결
+
+```python
+class ModelSignal(Signal):
+    def _lazy_method(self, method, apps, receiver, sender, **kwargs):
+        from django.db.models.options import Options
+
+        # "blog.Post" 같은 문자열 sender → 실제 클래스
+        if isinstance(sender, str):
+            apps = apps or Apps.get_app_configs()
+            try:
+                sender = apps.get_registered_model(*sender.split("."))
+            except LookupError:
+                # 모델이 아직 등록 안 됨 → 등록 후 재시도
+                ref = (sender, apps)
+                receivers = self.unresolved_references.setdefault(ref, [])
+                receivers.append((receiver, ...))
+                return
+
+        return method(receiver=receiver, sender=sender, **kwargs)
+```
+
+```python
+@receiver(post_save, sender="blog.Post")
+def handler(sender, instance, **kwargs): ...
+```
+
+문자열로 sender 지정 가능. 순환 import 회피. `Apps`가 모델 등록 시 unresolved를 해결.
+
+## 실제 send 호출 흐름
+
+`Model.save()` 내부 (`django/db/models/base.py`):
+
+```python
+def save(self, *, force_insert=False, force_update=False, using=None, update_fields=None):
+    ...
+    self.save_base(using=using, force_insert=force_insert, ...)
+
+def save_base(self, raw=False, force_insert=False, ...):
+    ...
+    if not meta.auto_created:
+        signals.pre_save.send(
+            sender=origin, instance=self, raw=raw, using=using,
+            update_fields=update_fields,
+        )
+
+    # SQL 실행 (INSERT 또는 UPDATE)
+    updated = self._save_table(...)
+
+    if not meta.auto_created:
+        signals.post_save.send(
+            sender=origin, instance=self, created=(not updated),
+            update_fields=update_fields, raw=raw, using=using,
+        )
+```
+
+ORM이 모델 save 전후로 직접 `send`. receiver들이 순차 호출되며, 예외는 save_base 전체에 전파. 트랜잭션 안이면 rollback.
+
+## 함정과 패턴
+
+### 1. signals.py를 import 안 함
+
+```python
+# blog/apps.py
+class BlogConfig(AppConfig):
+    name = "blog"
+
+    def ready(self):
+        import blog.signals    # 명시적 import
+```
+
+`signals.py` 파일이 있어도 import 안 되면 `@receiver` 실행 안 됨 → 등록 안 됨.
+
+### 2. update()는 signal 안 거침
+
+```python
+Post.objects.filter(...).update(views=F("views") + 1)
+```
+
+`save()`를 호출 않으니 `pre_save`/`post_save` 안 발생. 비즈니스 로직이 signal에 의존하면 깨짐.
+
+```python
+# 명시적 처리
+for post in Post.objects.filter(...):
+    post.views += 1
+    post.save()    # signal 발생
+```
+
+### 3. 무한 루프
+
+```python
+@receiver(post_save, sender=Post)
+def update_summary(sender, instance, **kwargs):
+    instance.summary = ...
+    instance.save()    # post_save 다시! 무한 루프
+```
+
+해결:
+- `update_columns` (signal 우회):
+```python
+instance.summary = ...
+type(instance).objects.filter(pk=instance.pk).update(summary=instance.summary)
+```
+- `pre_save`에서 처리 (save 전이라 추가 save 불필요)
+- 플래그/lock
+
+### 4. send vs send_robust
+
+```python
+# 자신의 receiver가 예외 던지면 ORM save가 중단됨
+@receiver(post_save, sender=Post)
+def my_handler(sender, instance, **kwargs):
+    requests.get("...")    # 외부 호출 실패 → save 전체 깨짐
+
+# 격리
+def my_handler(sender, instance, **kwargs):
+    try:
+        requests.get("...")
+    except Exception:
+        log.exception("notify failed")
+```
+
+`send_robust`는 사용자가 명시 호출. ORM은 `send` 사용. receiver 안에서 격리해야.
+
+### 5. dispatch_uid 중복 방지
+
+```python
+post_save.connect(handler, sender=Post, dispatch_uid="my_handler_v1")
+post_save.connect(handler, sender=Post, dispatch_uid="my_handler_v1")    # 중복 차단
+```
+
+같은 receiver가 여러 번 등록되는 문제 방지. import 순서/모듈 reload 시 유용.
+
+## 옵저버 패턴 GoF와의 차이
+
+| GoF Observer | Django Signal |
+|--------------|---------------|
+| Subject가 옵저버 리스트 보유 | Signal 객체가 receivers 보유 |
+| Subject.notify() | signal.send() |
+| Observer.update() | receiver(signal, sender, **kwargs) |
+| 강참조 | weakref (기본) |
+| 단일 type | sender 기반 다중 dispatch |
+| 동기 호출 | 동기 호출 (비동기는 별도) |
+
+Django signal은 Observer + Mediator의 혼합. Signal 객체가 mediator 역할 (sender와 receiver 분리).
+
+## 비동기 signal (4.0+, 5.0+ 강화)
+
+```python
+# 4.0+ asend
+await post_save.asend(sender=Post, instance=instance, created=True)
+```
+
+`asend`/`asend_robust`는 async receiver만 호출. `sync_to_async`/`async_to_sync` 변환 자동.
+
+```python
+@receiver(post_save, sender=Post)
+async def async_handler(sender, instance, **kwargs):
+    await fetch_external_api()
+```
+
+5.0+에서 더 광범위. 모델 save가 async (`asave`)이면 자동으로 asend.
+
+## 성능 특성
+
+- **메모리**: receiver 수 N개에 O(N)
+- **send**: O(N) 매칭 + receiver 수만큼 호출
+- **캐시 hit**: O(K) (K = sender별 receiver 수)
+- **weakref 오버헤드**: 호출 시 deref 비용 (~수십 ns)
+
+수십~수백 receiver는 무시 가능. 수천이면 캐시 + signal 분할.
+
+## 정리
+
+Django signal의 옵저버 패턴 구현 핵심:
+
+1. **단일 리스트** + lookup key로 receiver 관리
+2. **weakref** 기본으로 메모리 누수 회피
+3. **lock** + **캐시**로 동시성과 성능
+4. **lookup_key** = `(receiver_id, sender_id)`로 중복/매칭
+5. **lazy resolution** (ModelSignal)으로 순환 import 회피
+6. **sender 기반 다중 dispatch**: 같은 신호도 sender별 다른 receivers
+
+비명시적 결합을 만들기 때문에 디버깅 어려움 + 무한 루프 + 트랜잭션 함정 등 trade-off가 명확. service layer / 명시적 메서드가 단순 + 추적 쉬움.
+
+## 관련 위키
+
+- [[django-signals]] - 일반 사용

@@ -1,0 +1,280 @@
+---
+title: "[Django] ContentTypes, Generic Relations"
+aliases: ["django contenttypes", "GenericForeignKey", "polymorphic django", "django comment polymorphic"]
+tags: [django, contenttypes, generic-foreign-key, polymorphic]
+updated: 2026-06-20
+references:
+  - id: django-docs
+    note: "Contenttypes framework - https://docs.djangoproject.com/en/stable/ref/contrib/contenttypes/"
+  - id: django-docs
+    note: "GenericForeignKey - https://docs.djangoproject.com/en/stable/ref/contrib/contenttypes/#generic-relations"
+  - title: "django-polymorphic"
+    url: "https://django-polymorphic.readthedocs.io/"
+  - title: "django-taggit"
+    url: "https://django-taggit.readthedocs.io/"
+---
+
+## 정의
+
+`django.contrib.contenttypes`는 **모든 모델을 동적으로 참조**하는 시스템. 댓글이 Post, Photo, Video 등 여러 모델을 가리킬 수 있게 함. `GenericForeignKey` + `ContentType`을 활용.
+
+## 활성화
+
+기본 `INSTALLED_APPS`에 포함됨:
+
+```python
+INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    ...
+]
+```
+
+각 모델마다 `ContentType` row 자동 생성 (app_label + model).
+
+## ContentType 활용
+
+```python
+from django.contrib.contenttypes.models import ContentType
+
+ct = ContentType.objects.get_for_model(Post)
+ct.app_label    # "blog"
+ct.model        # "post"
+ct.model_class()    # Post 클래스
+```
+
+## GenericForeignKey
+
+```python
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+
+class Comment(models.Model):
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    content_object = GenericForeignKey("content_type", "object_id")
+
+    body = models.TextField()
+    author = models.ForeignKey("auth.User", on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+
+```python
+post = Post.objects.first()
+Comment.objects.create(content_object=post, body="좋아요!", author=user)
+
+photo = Photo.objects.first()
+Comment.objects.create(content_object=photo, body="멋져요!", author=user)
+
+# 조회
+for comment in Comment.objects.all():
+    obj = comment.content_object    # Post 또는 Photo
+    print(type(obj), obj)
+```
+
+## GenericRelation (역방향)
+
+```python
+from django.contrib.contenttypes.fields import GenericRelation
+
+class Post(models.Model):
+    title = models.CharField(max_length=200)
+    comments = GenericRelation(Comment)
+
+class Photo(models.Model):
+    url = models.URLField()
+    comments = GenericRelation(Comment)
+
+post.comments.all()    # Post의 모든 댓글
+photo.comments.create(body="...", author=user)
+```
+
+`GenericRelation`은 모델에 정의된 reverse accessor.
+
+## N+1 회피
+
+```python
+# Bad: N+1
+for c in Comment.objects.all():
+    print(c.content_object.title)    # 매번 SQL
+
+# prefetch_related로 자동 처리
+for c in Comment.objects.prefetch_related("content_object"):
+    print(c.content_object)
+```
+
+또는 `prefetch_related_objects`:
+
+```python
+from django.db.models import Prefetch
+
+comments = Comment.objects.all()
+prefetch_related_objects(comments, "content_object")
+```
+
+## ContentTypes로 권한 확인
+
+```python
+# Django auth는 contenttypes 기반
+user.has_perm("blog.add_post")
+```
+
+내부적으로 `ContentType.objects.get(app_label="blog", model="post")` 후 permission row.
+
+## 자주 보는 패턴
+
+### 댓글 / 좋아요 / 북마크
+
+```python
+class Bookmark(models.Model):
+    user = models.ForeignKey("auth.User", on_delete=models.CASCADE)
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    content_object = GenericForeignKey()
+
+    class Meta:
+        unique_together = ("user", "content_type", "object_id")
+
+user.bookmark_set.all()
+Bookmark.objects.create(user=user, content_object=post)
+```
+
+여러 모델 (Post, Photo, Video) 모두 북마크 가능.
+
+### Activity feed
+
+```python
+class Activity(models.Model):
+    actor = models.ForeignKey("auth.User", on_delete=models.CASCADE)
+    verb = models.CharField(max_length=50)    # "created", "liked", "commented"
+
+    target_ct = models.ForeignKey(ContentType, null=True, on_delete=models.CASCADE, related_name="+")
+    target_id = models.PositiveIntegerField(null=True)
+    target = GenericForeignKey("target_ct", "target_id")
+
+    action_object_ct = models.ForeignKey(ContentType, null=True, on_delete=models.CASCADE, related_name="+")
+    action_object_id = models.PositiveIntegerField(null=True)
+    action_object = GenericForeignKey("action_object_ct", "action_object_id")
+
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+# Alice가 Post에 댓글 추가
+Activity.objects.create(
+    actor=alice,
+    verb="commented_on",
+    target=post,
+    action_object=comment,
+)
+```
+
+`django-activity-stream` 라이브러리가 이 패턴.
+
+### Polymorphic 모델 (django-polymorphic 대안)
+
+```python
+class Item(models.Model):
+    name = models.CharField(max_length=200)
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    content_object = GenericForeignKey()    # 실제 객체 (Book, Movie, Game 등)
+```
+
+## 함정
+
+### 1. cascade 없음
+
+```python
+post.delete()
+# post를 참조하는 Comment는 orphan으로 남음!
+```
+
+`GenericForeignKey`는 FK 제약 없음. 부모 삭제 시 자식 안 지워짐.
+
+해결:
+- 부모에 `GenericRelation` + `cascade` 안 됨 (Django 제약)
+- signal로 수동 처리
+- `django-polymorphic` 같은 라이브러리
+
+```python
+from django.db.models.signals import pre_delete
+
+@receiver(pre_delete, sender=Post)
+def delete_comments(sender, instance, **kwargs):
+    ct = ContentType.objects.get_for_model(instance)
+    Comment.objects.filter(content_type=ct, object_id=instance.id).delete()
+```
+
+### 2. 검색/필터 어려움
+
+```python
+Comment.objects.filter(content_object__title__icontains="django")    # 안 됨
+```
+
+특정 타입만 필터:
+
+```python
+post_ct = ContentType.objects.get_for_model(Post)
+Comment.objects.filter(content_type=post_ct, object_id__in=...)
+```
+
+복잡한 쿼리는 일반 FK가 더 편함.
+
+### 3. content_object__title 같은 lookup X
+
+```python
+Comment.objects.filter(content_object__author=user)    # 안 됨
+```
+
+처음부터 일반 FK + STI/MTI 검토.
+
+### 4. 인덱스
+
+```python
+class Comment(models.Model):
+    content_type = ...
+    object_id = ...
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["content_type", "object_id"]),
+        ]
+```
+
+(content_type, object_id) 복합 인덱스로 lookup 빠르게.
+
+### 5. JSON 직렬화
+
+```python
+serializer.data    # GenericForeignKey 자동 직렬화 X
+```
+
+DRF는 수동 처리 필요.
+
+```python
+class CommentSerializer(serializers.ModelSerializer):
+    content_object = SerializerMethodField()
+
+    def get_content_object(self, obj):
+        if isinstance(obj.content_object, Post):
+            return PostSerializer(obj.content_object).data
+        if isinstance(obj.content_object, Photo):
+            return PhotoSerializer(obj.content_object).data
+        return None
+```
+
+## ContentType vs Polymorphic
+
+| 패턴 | 장단점 |
+|------|--------|
+| GenericForeignKey | Django 빌트인, 유연. 쿼리 약함, 무결성 약함 |
+| django-polymorphic | 풍부한 다형성 (서브클래스 자동 매핑) |
+| Single Table Inheritance | 한 테이블 + type 컬럼 (Rails STI 패턴) |
+| Multi-Table Inheritance | Django 기본 (`Book(Item)`) |
+
+대부분 일반 FK + 추상 베이스 또는 MTI가 더 명확. ContentTypes는 정말 다형성 필수일 때만.
+
+## 자주 보는 라이브러리
+
+- **django-polymorphic**: 다형성 모델
+- **django-taggit**: 태그 시스템 (내부적으로 GenericFK)
+- **django-activity-stream**: 활동 피드
+- **django-comments**: 댓글 (deprecated, django-fluent-comments)
