@@ -3,6 +3,19 @@ title: "TLS / SSL"
 aliases: ["TLS", "SSL", "Transport Layer Security", "Secure Sockets Layer", "tls", "ssl"]
 tags: [network, security, protocol, cryptography]
 updated: 2026-06-15
+references:
+  - title: "RFC 8446, TLS 1.3"
+    url: "https://datatracker.ietf.org/doc/html/rfc8446"
+  - title: "RFC 5246, TLS 1.2"
+    url: "https://datatracker.ietf.org/doc/html/rfc5246"
+  - title: "Cloudflare, Why TLS 1.3 is great"
+    url: "https://blog.cloudflare.com/why-tls-1-3-isnt-in-browsers-yet/"
+  - title: "Mozilla SSL Configuration Generator"
+    url: "https://ssl-config.mozilla.org/"
+  - title: "Let's Encrypt, How it works"
+    url: "https://letsencrypt.org/how-it-works/"
+  - title: "Certificate Transparency"
+    url: "https://certificate.transparency.dev/"
 ---
 
 ## 정의
@@ -139,12 +152,3 @@ QUIC 은 핸드셰이크와 전송을 분리하지 않고, 같은 패킷 안에�
 - **0-RTT replay**: TLS 1.3 의 0-RTT 는 부작용 있는 요청에 사용 금지.
 - **SNI 노출**: 어떤 도메인에 접속하는지는 ClientHello 의 SNI 에 평문으로 노출됨. ECH (Encrypted Client Hello) 로 점진적 해결 중.
 - **신뢰 모델 자체의 한계**: 약 150개 Root CA 중 하나라도 침해되면 임의의 도메인을 위장할 수 있음. Certificate Transparency (CT) 로 발급 로그 공개 의무화.
-
-## 참고
-
-- [RFC 8446, TLS 1.3](https://datatracker.ietf.org/doc/html/rfc8446)
-- [RFC 5246, TLS 1.2](https://datatracker.ietf.org/doc/html/rfc5246)
-- [Cloudflare, Why TLS 1.3 is great](https://blog.cloudflare.com/why-tls-1-3-isnt-in-browsers-yet/)
-- [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)
-- [Let's Encrypt, How it works](https://letsencrypt.org/how-it-works/)
-- [Certificate Transparency](https://certificate.transparency.dev/)

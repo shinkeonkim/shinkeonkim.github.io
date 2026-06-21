@@ -3,6 +3,11 @@ title: "UDP"
 aliases: ["User Datagram Protocol", "udp"]
 tags: [network, protocol, transport-layer]
 updated: 2026-06-13
+references:
+  - title: "RFC 768, UDP"
+    url: "https://datatracker.ietf.org/doc/html/rfc768"
+  - id: mdn-web-docs
+    note: "MDN, UDP - https://developer.mozilla.org/en-US/docs/Glossary/UDP"
 ---
 
 ## 정의
@@ -61,8 +66,3 @@ QUIC, WebRTC SCTP, 게임 엔진의 reliable UDP, 모두 UDP 위에서 TCP 와 �
 - **빠른 진화**: 사용자 영역 구현이라 OS 업데이트 없이 개선
 
 UDP 의 "단순함"은 양날의 검, 직접 구현해야 하지만 그만큼 유연하다.
-
-## 참고
-
-- [RFC 768, UDP](https://datatracker.ietf.org/doc/html/rfc768)
-- [MDN, UDP](https://developer.mozilla.org/en-US/docs/Glossary/UDP)

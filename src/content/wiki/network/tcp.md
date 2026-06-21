@@ -3,6 +3,11 @@ title: "TCP"
 aliases: ["Transmission Control Protocol", "tcp"]
 tags: [network, protocol, transport-layer]
 updated: 2026-06-13
+references:
+  - title: "RFC 9293, TCP"
+    url: "https://datatracker.ietf.org/doc/html/rfc9293"
+  - title: "The TCP/IP Guide, TCP"
+    url: "http://www.tcpipguide.com/free/t_TCPIPTransmissionControlProtocolTCP.htm"
 ---
 
 ## 정의
@@ -58,8 +63,3 @@ Client                          Server
 - WebSocket (HTTP Upgrade 후 TCP 그대로 사용)
 - SSH, SMTP, FTP
 - Database 프로토콜 대부분 (PostgreSQL, MySQL wire protocol)
-
-## 참고
-
-- [RFC 9293, TCP](https://datatracker.ietf.org/doc/html/rfc9293)
-- [The TCP/IP Guide, TCP](http://www.tcpipguide.com/free/t_TCPIPTransmissionControlProtocolTCP.htm)

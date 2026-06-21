@@ -3,6 +3,13 @@ title: "DTLS"
 aliases: ["dtls", "Datagram TLS", "Datagram Transport Layer Security"]
 tags: [network, security, protocol, cryptography]
 updated: 2026-06-13
+references:
+  - title: "RFC 9147, DTLS 1.3"
+    url: "https://datatracker.ietf.org/doc/html/rfc9147"
+  - title: "RFC 6347, DTLS 1.2"
+    url: "https://datatracker.ietf.org/doc/html/rfc6347"
+  - title: "W3C WebRTC Security"
+    url: "https://datatracker.ietf.org/doc/html/rfc8826"
 ---
 
 ## 정의
@@ -66,9 +73,3 @@ WebRTC 의 미디어 채널은 SRTP 로 암호화되지만, SRTP 의 키는 DTLS
 - **재전송 비용**: 핸드셰이크 패킷 손실 시 재전송 → 초기 연결이 TCP+TLS 보다 느릴 수 있음
 - **MTU 의존**: UDP 패킷이 MTU 를 넘으면 IP fragmentation → 큰 핸드셰이크 record 는 분할 필요
 - **DoS 공격 노출**: UDP 는 spoofing 이 쉬워 핸드셰이크 시 cookie 메커니즘으로 보호 (HelloVerifyRequest)
-
-## 참고
-
-- [RFC 9147, DTLS 1.3](https://datatracker.ietf.org/doc/html/rfc9147)
-- [RFC 6347, DTLS 1.2](https://datatracker.ietf.org/doc/html/rfc6347)
-- [W3C WebRTC Security](https://datatracker.ietf.org/doc/html/rfc8826)

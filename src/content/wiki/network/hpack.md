@@ -3,6 +3,11 @@ title: "HPACK"
 aliases: ["HPACK 헤더 압축", "hpack"]
 tags: [network, http, http2, compression]
 updated: 2026-06-13
+references:
+  - title: "RFC 7541, HPACK"
+    url: "https://datatracker.ietf.org/doc/html/rfc7541"
+  - title: "RFC 9204, QPACK (HTTP/3)"
+    url: "https://datatracker.ietf.org/doc/html/rfc9204"
 ---
 
 ## 정의
@@ -51,8 +56,3 @@ HTTP/2 의 multiplexing 외의 두 번째 큰 성능 이득.
 HPACK 의 dynamic table 은 **CRIME/BREACH 같은 사이드 채널 공격** 방어를 위해 일부 제약을 둔다 (예: 압축률을 외부에서 측정해 헤더 값을 추측하는 공격). RFC 7541 §7 의 보안 고려사항 참조.
 
 HTTP/3 의 [[QUIC]] 환경에서는 HPACK 의 stream 간 의존성 문제를 해결한 **QPACK** ([RFC 9204](https://datatracker.ietf.org/doc/html/rfc9204)) 이 사용된다.
-
-## 참고
-
-- [RFC 7541, HPACK](https://datatracker.ietf.org/doc/html/rfc7541)
-- [RFC 9204, QPACK (HTTP/3)](https://datatracker.ietf.org/doc/html/rfc9204)

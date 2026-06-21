@@ -3,6 +3,13 @@ title: "QUIC"
 aliases: ["QUIC 프로토콜", "quic", "Quick UDP Internet Connections"]
 tags: [network, http, protocol]
 updated: 2026-06-13
+references:
+  - title: "RFC 9000, QUIC"
+    url: "https://datatracker.ietf.org/doc/html/rfc9000"
+  - title: "RFC 9114, HTTP/3"
+    url: "https://datatracker.ietf.org/doc/html/rfc9114"
+  - title: "Cloudflare, QUIC 소개"
+    url: "https://blog.cloudflare.com/the-road-to-quic/"
 ---
 
 ## 정의
@@ -40,9 +47,3 @@ updated: 2026-06-13
 - HTTP/3 (Google, Facebook, Cloudflare 등 대형 CDN)
 - WebTransport (브라우저 양방향 stream 신 API)
 - 일부 게임·실시간 미디어 프로토콜
-
-## 참고
-
-- [RFC 9000, QUIC](https://datatracker.ietf.org/doc/html/rfc9000)
-- [RFC 9114, HTTP/3](https://datatracker.ietf.org/doc/html/rfc9114)
-- [Cloudflare, QUIC 소개](https://blog.cloudflare.com/the-road-to-quic/)
