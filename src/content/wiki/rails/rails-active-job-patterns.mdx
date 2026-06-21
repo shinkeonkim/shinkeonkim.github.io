@@ -1,0 +1,446 @@
+---
+title: "[Rails] Active Job 고급: retry, schedule, callback"
+aliases: ["active job retry", "discard_on", "ActiveJob callbacks", "rails idempotency", "queue priority"]
+tags: [rails, active-job, background, sidekiq]
+updated: 2026-06-20
+references:
+  - id: rails-guides
+    note: "Active Job Basics - https://guides.rubyonrails.org/active_job_basics.html"
+  - title: "Sidekiq best practices"
+    url: "https://github.com/sidekiq/sidekiq/wiki/Best-Practices"
+  - title: "Solid Queue"
+    url: "https://github.com/rails/solid_queue"
+  - title: "Mission Control"
+    url: "https://github.com/rails/mission_control-jobs"
+---
+
+## 정의
+
+Active Job 기본 사용은 별도 페이지. 이 문서는 **재시도 전략, 콜백, 시리얼라이즈, 멱등성, 우선순위 등 고급 패턴**을 다룬다.
+
+## Retry / Discard
+
+```ruby
+class MyJob < ApplicationJob
+  retry_on Net::OpenTimeout, wait: :exponentially_longer, attempts: 5
+  retry_on ActiveRecord::Deadlocked, wait: :polynomially_longer, attempts: 3
+  retry_on StandardError, wait: 10.seconds, attempts: 2
+
+  discard_on ActiveJob::DeserializationError    # 영구 실패 (재시도 X)
+  discard_on ActiveRecord::RecordNotFound
+
+  def perform(record_id)
+    record = Record.find(record_id)
+    process(record)
+  end
+end
+```
+
+### Wait 전략
+
+```ruby
+retry_on Net::OpenTimeout,
+  wait: :exponentially_longer,    # 5, 25, 125, ...초
+  attempts: 5
+
+retry_on RetryableError,
+  wait: :polynomially_longer,      # 3, 18, 83, 258, 625초
+  attempts: 5
+
+retry_on FlakyError, wait: 30.seconds, attempts: 3
+
+# 커스텀
+retry_on MyError, wait: ->(executions) { 2.seconds * executions ** 2 }
+```
+
+### 무한 재시도 X
+
+```ruby
+discard_on PermanentError
+```
+
+영구 에러는 DLQ 또는 알림. 무한 재시도는 자원 낭비.
+
+## Callbacks
+
+```ruby
+class MyJob < ApplicationJob
+  before_enqueue :log_enqueue
+  after_enqueue :metrics_enqueue
+  around_perform :timing
+
+  before_perform :setup
+  after_perform :cleanup
+
+  def perform(*args)
+    ...
+  end
+
+  private
+
+  def log_enqueue
+    Rails.logger.info("Enqueueing #{self.class}")
+  end
+
+  def timing
+    start = Time.current
+    yield
+    elapsed = Time.current - start
+    Metrics.record("job.duration", elapsed, job: self.class.name)
+  end
+end
+```
+
+## Job arguments serialization
+
+```ruby
+MyJob.perform_later(user)    # GlobalID 자동
+MyJob.perform_later(user.id)    # primitive 권장
+```
+
+GlobalID로 ActiveRecord 자동 직렬화/역직렬화. 단 워커가 처리할 시점에 record가 존재해야:
+
+```ruby
+class MyJob < ApplicationJob
+  discard_on ActiveJob::DeserializationError
+end
+```
+
+또는 ID 사용 + 명시적 처리:
+
+```ruby
+def perform(user_id)
+  user = User.find_by(id: user_id)
+  return if user.nil?    # silently skip
+  process(user)
+end
+```
+
+## 멱등성 (Idempotency)
+
+같은 job이 두 번 실행되어도 안전하게.
+
+```ruby
+class SendInvoiceJob < ApplicationJob
+  def perform(order_id)
+    order = Order.find(order_id)
+    return if order.invoice_sent_at.present?    # 이미 처리됨
+
+    Order.transaction do
+      InvoiceMailer.send_invoice(order).deliver_now
+      order.update!(invoice_sent_at: Time.current)
+    end
+  end
+end
+```
+
+### Lock 기반
+
+```ruby
+class CriticalJob < ApplicationJob
+  def perform(resource_id)
+    key = "lock:#{self.class.name}:#{resource_id}"
+
+    if Redis.current.set(key, "1", nx: true, ex: 5.minutes.to_i)
+      begin
+        do_work(resource_id)
+      ensure
+        Redis.current.del(key)
+      end
+    else
+      raise "Already processing"
+    end
+  end
+end
+```
+
+또는 `acidic_job` gem.
+
+## 큐 우선순위
+
+```ruby
+class HighPriorityJob < ApplicationJob
+  queue_as :high
+end
+
+class LowPriorityJob < ApplicationJob
+  queue_as :low
+end
+```
+
+```yaml
+# Sidekiq config/sidekiq.yml
+:queues:
+  - [high, 5]
+  - [default, 3]
+  - [low, 1]
+```
+
+가중치로 처리 비율.
+
+Solid Queue:
+
+```yaml
+production:
+  workers:
+    - queues: high
+      threads: 5
+      processes: 2
+      polling_interval: 0.1
+    - queues: default
+      threads: 5
+      processes: 1
+      polling_interval: 0.5
+    - queues: low
+      threads: 2
+      processes: 1
+      polling_interval: 1
+```
+
+## 스케줄링
+
+```ruby
+# 즉시
+MyJob.perform_later(arg)
+
+# 5분 후
+MyJob.set(wait: 5.minutes).perform_later(arg)
+
+# 특정 시간에
+MyJob.set(wait_until: Time.current.tomorrow.noon).perform_later(arg)
+
+# 우선순위 (Sidekiq Pro 등)
+MyJob.set(priority: 10).perform_later(arg)
+```
+
+## 정기 작업 (cron)
+
+### Sidekiq + sidekiq-cron
+
+```yaml
+# config/sidekiq.yml
+:schedule:
+  daily_report:
+    cron: "0 9 * * *"    # 매일 09:00
+    class: DailyReportJob
+```
+
+### Solid Queue + recurring
+
+```yaml
+# config/recurring.yml
+production:
+  daily_report:
+    class: DailyReportJob
+    schedule: every day at 9am
+  cleanup:
+    class: CleanupJob
+    schedule: every 1 hour
+```
+
+3.4+ Sidekiq cron 빌트인. 활용 권장.
+
+## Bulk enqueue (8.0+)
+
+```ruby
+ActiveJob.perform_all_later(
+  posts.map { |p| IndexPostJob.new(p.id) }
+)
+```
+
+100 jobs를 한 번에 enqueue → 워커 RTT 감소.
+
+## Worker 모니터링
+
+### Mission Control (Rails 8 권장)
+
+```ruby
+gem "mission_control-jobs"
+mount MissionControl::Jobs::Engine, at: "/jobs"
+```
+
+웹 UI에서 job 큐, 실패, 재시도 관리.
+
+### Sidekiq Web
+
+```ruby
+require "sidekiq/web"
+authenticate :user, ->(u) { u.admin? } do
+  mount Sidekiq::Web => "/sidekiq"
+end
+```
+
+## 트랜잭션 안전
+
+```ruby
+ActiveRecord::Base.transaction do
+  user = User.create!(...)
+  WelcomeEmailJob.perform_later(user.id)
+end
+# 트랜잭션 rollback 시 job은 이미 enqueue → 워커가 user 못 찾음 → 재시도 무한
+```
+
+해결:
+
+### after_commit
+
+```ruby
+class User < ApplicationRecord
+  after_create_commit -> { WelcomeEmailJob.perform_later(id) }
+end
+```
+
+commit 후에만 enqueue.
+
+### Solid Queue (DB 트랜잭션 안전)
+
+같은 DB라 트랜잭션 안에서 enqueue OK. rollback 시 job도 사라짐.
+
+## Exception 처리
+
+```ruby
+class MyJob < ApplicationJob
+  rescue_from(StandardError) do |exception|
+    Sentry.capture_exception(exception)
+    raise    # 재발생 → retry/discard 규칙 적용
+  end
+
+  def perform(*args)
+    ...
+  end
+end
+```
+
+Sentry, Rollbar 등 자동 캡처.
+
+## 자주 보는 패턴
+
+### Webhook 처리
+
+```ruby
+class WebhookProcessJob < ApplicationJob
+  queue_as :webhooks
+
+  retry_on StandardError, wait: 30.seconds, attempts: 5
+
+  def perform(event_id)
+    event = WebhookEvent.find(event_id)
+    return if event.processed?
+
+    WebhookEvent.transaction do
+      ExternalAPI.confirm(event.external_id)
+      event.update!(processed: true, processed_at: Time.current)
+    end
+  end
+end
+```
+
+### Image processing
+
+```ruby
+class ImageProcessJob < ApplicationJob
+  queue_as :media
+
+  def perform(image_id)
+    image = Image.find(image_id)
+    image.variants.each do |size|
+      image.process(size)
+    end
+    image.update!(processed: true)
+  end
+end
+```
+
+### Email digest
+
+```ruby
+class DailyDigestJob < ApplicationJob
+  def perform
+    User.where(daily_digest: true).find_each(batch_size: 100) do |user|
+      DigestMailer.daily(user).deliver_later(queue: :emails)
+    end
+  end
+end
+
+# cron으로 매일 호출
+```
+
+작업 단위를 더 작게 분리 → 워커 효율.
+
+### Batch with progress
+
+```ruby
+class ImportJob < ApplicationJob
+  def perform(import_id)
+    import = Import.find(import_id)
+
+    rows = CSV.read(import.file_path)
+    rows.each_with_index do |row, i|
+      Record.create!(...)
+      if i % 100 == 0
+        import.update!(progress: (i.to_f / rows.size * 100).round)
+        ActionCable.server.broadcast("import_#{import.id}", progress: import.progress)
+      end
+    end
+
+    import.update!(completed_at: Time.current)
+  end
+end
+```
+
+긴 작업 + 실시간 진행률.
+
+## 함정
+
+### 1. 큰 인자
+
+```ruby
+MyJob.perform_later(huge_array)    # serialize 비용 + queue 메모리
+```
+
+ID 전달.
+
+### 2. perform vs perform_now vs perform_later
+
+```ruby
+MyJob.perform(args)         # 클래스 메서드 호출 (NoMethodError)
+MyJob.new.perform(args)     # 인스턴스 직접 호출 (이상함)
+MyJob.perform_now(args)     # 동기 실행 (테스트, 디버그)
+MyJob.perform_later(args)   # 백그라운드
+```
+
+표준은 `perform_later`.
+
+### 3. session/request context 누락
+
+```ruby
+class MyJob < ApplicationJob
+  def perform(user_id)
+    user = User.find(user_id)
+    # request.host, current_user 등 없음 (다른 프로세스)
+  end
+end
+```
+
+URL helper 사용 시 `Rails.application.routes.default_url_options[:host]` 설정.
+
+### 4. 비결정적 처리
+
+```ruby
+def perform(date_string)
+  date = Date.parse(date_string)
+  process(date)
+end
+```
+
+문자열 vs Date 객체. 직렬화는 문자열이 안전.
+
+### 5. 디버깅 어려움
+
+별도 프로세스 → log 의존. `perform_now` 동기 실행으로 디버거 진입.
+
+```ruby
+Rails.logger.info("Starting #{self.class} with #{arguments.inspect}")
+```
+
+각 단계 로깅.

@@ -1,0 +1,457 @@
+---
+title: "[Rails] Form Object, Service Object, Query Object"
+aliases: ["rails form object", "service object", "query object", "rails fat model", "POROs"]
+tags: [rails, design-pattern, refactoring, service]
+updated: 2026-06-20
+references:
+  - title: "Service Objects pattern (Toptal)"
+    url: "https://www.toptal.com/ruby-on-rails/rails-service-objects-tutorial"
+  - title: "DHH on Concerns vs Service Objects"
+    url: "https://world.hey.com/dhh/code-i-like-iii-good-concerns-7544aa9c"
+  - title: "draper"
+    url: "https://github.com/drapergem/draper"
+  - title: "Form Objects in Rails"
+    url: "https://thoughtbot.com/blog/activemodel-form-objects"
+  - title: "pundit"
+    url: "https://github.com/varvet/pundit"
+---
+
+## 정의
+
+Fat Model / Skinny Controller가 한계에 달하면 **POROs (Plain Old Ruby Objects)**로 책임 분리. **Form Object** (다중 모델 입력), **Service Object** (비즈니스 로직), **Query Object** (복잡한 쿼리), **Decorator** (표현 로직) 등.
+
+## Form Object
+
+여러 모델을 한 폼에서 처리 (signup with profile, order with items).
+
+```ruby
+# app/forms/signup_form.rb
+class SignupForm
+  include ActiveModel::Model
+  include ActiveModel::Attributes
+
+  attribute :email, :string
+  attribute :name, :string
+  attribute :password, :string
+  attribute :company_name, :string
+  attribute :company_size, :integer
+
+  validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }
+  validates :name, presence: true
+  validates :password, length: { minimum: 8 }
+  validates :company_name, presence: true
+
+  attr_reader :user, :company
+
+  def save
+    return false unless valid?
+
+    ActiveRecord::Base.transaction do
+      @company = Company.create!(name: company_name, size: company_size)
+      @user = User.create!(email: email, name: name, password: password, company: @company)
+      true
+    end
+  rescue ActiveRecord::RecordInvalid => e
+    errors.add(:base, e.message)
+    false
+  end
+end
+```
+
+```ruby
+# Controller
+class SignupController < ApplicationController
+  def new
+    @form = SignupForm.new
+  end
+
+  def create
+    @form = SignupForm.new(signup_params)
+    if @form.save
+      session[:user_id] = @form.user.id
+      redirect_to root_path
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+
+  private
+
+  def signup_params
+    params.require(:signup_form).permit(:email, :name, :password, :company_name, :company_size)
+  end
+end
+```
+
+```erb
+<%# View %>
+<%= form_with model: @form, url: signup_path do |f| %>
+  <%= f.text_field :email %>
+  <%= f.text_field :name %>
+  <%= f.password_field :password %>
+  <%= f.text_field :company_name %>
+  <%= f.number_field :company_size %>
+  <%= f.submit "가입" %>
+<% end %>
+```
+
+`ActiveModel::Model`로 form_with 호환 + validation.
+
+## Service Object
+
+복잡한 비즈니스 로직 캡슐화.
+
+```ruby
+# app/services/orders/create_order.rb
+module Orders
+  class CreateOrder
+    Result = Struct.new(:success?, :order, :errors, keyword_init: true)
+
+    def initialize(user:, items:, address:)
+      @user = user
+      @items = items
+      @address = address
+    end
+
+    def call
+      validate!
+      order = create_order
+      send_confirmation(order)
+      Result.new(success?: true, order: order, errors: [])
+    rescue ValidationError => e
+      Result.new(success?: false, errors: e.errors)
+    end
+
+    private
+
+    attr_reader :user, :items, :address
+
+    def validate!
+      raise ValidationError, ["No items"] if items.empty?
+      ...
+    end
+
+    def create_order
+      Order.transaction do
+        order = Order.create!(user: user, address: address)
+        items.each do |item|
+          order.line_items.create!(product: item.product, quantity: item.quantity)
+        end
+        order.calculate_total!
+        order
+      end
+    end
+
+    def send_confirmation(order)
+      OrderConfirmationJob.perform_later(order.id)
+    end
+
+    class ValidationError < StandardError
+      attr_reader :errors
+      def initialize(errors)
+        @errors = errors
+        super(errors.join(", "))
+      end
+    end
+  end
+end
+```
+
+```ruby
+# Controller
+def create
+  result = Orders::CreateOrder.new(
+    user: current_user,
+    items: cart_items,
+    address: shipping_address,
+  ).call
+
+  if result.success?
+    redirect_to result.order
+  else
+    flash[:error] = result.errors.join(", ")
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+### 표준 인터페이스
+
+```ruby
+class ApplicationService
+  def self.call(...)
+    new(...).call
+  end
+end
+
+class CreateOrder < ApplicationService
+  def initialize(user:, items:)
+    @user = user
+    @items = items
+  end
+
+  def call
+    ...
+  end
+end
+
+# 사용
+Orders::CreateOrder.call(user: current_user, items: items)
+```
+
+## Query Object
+
+복잡한 ActiveRecord 쿼리 분리.
+
+```ruby
+# app/queries/posts/featured_posts_query.rb
+module Posts
+  class FeaturedPostsQuery
+    def initialize(relation = Post.all)
+      @relation = relation
+    end
+
+    def call
+      @relation
+        .joins(:author, :tags)
+        .where(is_published: true)
+        .where("views > ?", 1000)
+        .where(authors: { active: true })
+        .where(tags: { name: ["featured", "trending"] })
+        .group(:id)
+        .having("COUNT(tags.id) >= ?", 2)
+        .order(views: :desc)
+        .limit(10)
+    end
+  end
+end
+
+# 사용
+posts = Posts::FeaturedPostsQuery.new.call
+posts = Posts::FeaturedPostsQuery.new(current_user.posts).call    # scope 가능
+```
+
+Model에서 분리해 단일 책임 + 테스트 용이.
+
+## Decorator (Presenter)
+
+표현 로직 (formatting, display)을 모델에서 분리.
+
+### draper gem
+
+```bash
+gem "draper"
+```
+
+```ruby
+# app/decorators/post_decorator.rb
+class PostDecorator < Draper::Decorator
+  delegate_all
+
+  def published_at
+    object.published_at&.strftime("%Y년 %-m월 %-d일") || "발행 안 됨"
+  end
+
+  def excerpt
+    h.truncate(h.strip_tags(object.body), length: 200)
+  end
+
+  def status_badge
+    h.content_tag(:span, status_label, class: "badge bg-#{status_color}")
+  end
+
+  private
+
+  def status_label
+    { draft: "초안", published: "발행" }[object.status.to_sym]
+  end
+
+  def status_color
+    object.published? ? "green" : "gray"
+  end
+end
+```
+
+```ruby
+# Controller
+@post = Post.find(params[:id]).decorate
+@posts = Post.all.decorate
+```
+
+```erb
+<%= @post.published_at %>    <%# "2026년 6월 20일" %>
+<%= @post.excerpt %>
+<%= @post.status_badge %>
+```
+
+`h` = helpers. 데코레이터에서 view 헬퍼 사용.
+
+### POROs
+
+draper 없이 단순 PORO:
+
+```ruby
+class PostPresenter
+  def initialize(post, view_context)
+    @post = post
+    @h = view_context
+  end
+
+  def title
+    @h.content_tag(:h1, @post.title)
+  end
+
+  def published_at
+    @post.published_at&.strftime("%Y-%m-%d")
+  end
+end
+
+# Controller
+@post = PostPresenter.new(Post.find(params[:id]), view_context)
+```
+
+## Policy Object (Pundit)
+
+```ruby
+class PostPolicy < ApplicationPolicy
+  def update?
+    user.admin? || record.author == user
+  end
+
+  def destroy?
+    user.admin?
+  end
+
+  class Scope < Scope
+    def resolve
+      if user.admin?
+        scope.all
+      else
+        scope.where(author: user)
+      end
+    end
+  end
+end
+```
+
+## 자주 보는 패턴
+
+### 모델은 단순화
+
+```ruby
+class Post < ApplicationRecord
+  belongs_to :author
+  has_many :comments
+
+  validates :title, presence: true
+
+  scope :published, -> { where(is_published: true) }
+  # 복잡한 쿼리는 Query Object로
+  # 복잡한 비즈니스 로직은 Service로
+  # 표현은 Decorator로
+end
+```
+
+### Controller도 단순화
+
+```ruby
+def create
+  result = Posts::CreatePost.call(user: current_user, params: post_params)
+  if result.success?
+    redirect_to result.post.decorate
+  else
+    @form = result.form
+    render :new
+  end
+end
+```
+
+### 테스트
+
+```ruby
+# Form Object
+describe SignupForm do
+  it "creates user and company" do
+    form = SignupForm.new(email: "a@x.com", name: "Alice", password: "secret123", company_name: "Acme")
+    expect(form.save).to be true
+    expect(User.last.email).to eq("a@x.com")
+    expect(Company.last.name).to eq("Acme")
+  end
+end
+
+# Service
+describe Orders::CreateOrder do
+  it "creates order with items" do
+    result = described_class.new(user: user, items: items, address: address).call
+    expect(result).to be_success
+    expect(result.order.line_items.count).to eq(items.size)
+  end
+end
+
+# Query
+describe Posts::FeaturedPostsQuery do
+  it "returns top featured posts" do
+    create_list(:post, 5, views: 2000, is_published: true)
+    posts = described_class.new.call
+    expect(posts.size).to eq(5)
+  end
+end
+```
+
+각 PORO를 독립 단위로 테스트. 빠르고 명확.
+
+## DHH의 반대 의견
+
+DHH는 "Service Object 패턴"에 반대. Concern과 모델 자체로 충분하다는 입장. 트레이드오프:
+
+- **모델에 모두**: 응집, 단순. 그러나 거대화.
+- **Service Object**: 분리, 테스트 쉬움. 그러나 클래스 폭발.
+
+소규모 프로젝트는 모델로 충분. 복잡해지면 분리 검토.
+
+## 함정
+
+### 1. 너무 많은 service object
+
+```
+app/services/
+  create_user.rb
+  update_user.rb
+  delete_user.rb
+  send_user_email.rb
+  ...
+```
+
+CRUD 단순 작업까지 service면 boilerplate. 진짜 복잡한 것만.
+
+### 2. service에 너무 많은 의존성
+
+```ruby
+class CreateOrder
+  def initialize(user:, items:, payment:, shipping:, tax:, discount:, ...)
+    ...
+  end
+end
+```
+
+너무 많으면 책임이 큼. 더 작은 단위로 분리.
+
+### 3. Form object와 모델 검증 중복
+
+같은 규칙을 둘 다 정의 → 동기화 비용. Form은 폼 특화, 모델은 데이터 무결성.
+
+### 4. Query object 남용
+
+```ruby
+class PostByIdQuery
+  def call(id)
+    Post.find(id)
+  end
+end
+```
+
+단순 lookup은 그냥 `Post.find(id)`.
+
+### 5. Decorator의 view 의존
+
+Decorator가 view helper에 강결합 → 단위 테스트 어려움. helper 의존을 최소화.
