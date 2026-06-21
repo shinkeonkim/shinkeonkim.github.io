@@ -3,6 +3,11 @@ title: "SIMT"
 aliases: ["Single Instruction Multiple Threads", "simt", "warp", "SIMT 모델"]
 tags: [gpu, parallel-computing, architecture, cuda]
 updated: 2026-06-13
+references:
+  - title: "NVIDIA CUDA C++ Programming Guide, SIMT Architecture"
+    url: "https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#simt-architecture"
+  - title: "AMD ROCm, Wavefront"
+    url: "https://rocm.docs.amd.com/"
 ---
 
 ## 정의
@@ -102,9 +107,7 @@ SIMT 와 비슷하지만 더 일반적인 모델로 **SPMD** (Single Program Mul
 
 SIMT 는 SPMD 의 GPU 하드웨어 구현 정도로 보면 맞다.
 
-## 참고
+## 관련 위키
 
 - [[HBM]] - SIMT thread 수만큼 메모리 대역폭이 중요한 이유
 - [[Systolic Array]] - SIMT 와 다른 행렬 곱셈 전용 구조
-- [NVIDIA CUDA C++ Programming Guide, SIMT Architecture](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#simt-architecture)
-- [AMD ROCm, Wavefront](https://rocm.docs.amd.com/)

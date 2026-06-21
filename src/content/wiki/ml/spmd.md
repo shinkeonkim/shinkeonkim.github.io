@@ -3,6 +3,11 @@ title: "SPMD"
 aliases: ["Single Program Multiple Data", "spmd", "단일 프로그램 다중 데이터"]
 tags: [parallel-computing, programming-model, distributed]
 updated: 2026-06-14
+references:
+  - title: "Darema 1988, SPMD model"
+    url: "https://www.computer.org/csdl/proceedings-article/icpp/1988"
+  - title: "MPI Standard"
+    url: "https://www.mpi-forum.org/"
 ---
 
 ## 정의
@@ -133,9 +138,7 @@ new_params = step(replicate(params), sharded_batch)
 
 `all_reduce`, `all_gather` 같은 collective 가 노드 수에 따라 비용 급증. 100 노드 → 10,000 노드 확장 시 통신 패턴 재설계 필요.
 
-## 참고
+## 관련 위키
 
 - [[SIMT]] - GPU 하드웨어 구현
 - [[분산 학습]] - 대규모 모델 학습의 SPMD 패턴
-- [Darema 1988, SPMD model](https://www.computer.org/csdl/proceedings-article/icpp/1988)
-- [MPI Standard](https://www.mpi-forum.org/)
