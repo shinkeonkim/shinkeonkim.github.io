@@ -1,0 +1,400 @@
+---
+title: "[Spring] JdbcTemplate, NamedParameterJdbcTemplate"
+aliases: ["spring jdbc", "JdbcTemplate", "NamedParameterJdbcTemplate", "RowMapper", "spring sql"]
+tags: [spring, jdbc, sql, database]
+updated: 2026-06-20
+references:
+  - id: spring-docs
+    note: "JdbcTemplate - https://docs.spring.io/spring-framework/reference/data-access/jdbc/core.html"
+  - id: spring-docs
+    note: "NamedParameterJdbcTemplate - https://docs.spring.io/spring-framework/reference/data-access/jdbc/core.html#jdbc-NamedParameterJdbcTemplate"
+  - id: spring-docs
+    note: "SimpleJdbcInsert - https://docs.spring.io/spring-framework/reference/data-access/jdbc/simple.html"
+  - id: spring-docs
+    note: "Spring Data JDBC - https://docs.spring.io/spring-data/relational/reference/"
+---
+
+## 정의
+
+**JdbcTemplate**은 JPA 없이 raw SQL을 안전하게 다루는 Spring 표준. boilerplate 제거 (try-with-resources, exception 변환). 복잡한 쿼리, 성능 critical, ORM 없는 환경에 적합. Spring Data JDBC와 다름.
+
+## 의존성
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-jdbc")
+runtimeOnly("org.postgresql:postgresql")
+```
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost/myapp
+    username: app
+    password: secret
+    hikari:
+      maximum-pool-size: 20
+```
+
+## 기본 사용
+
+```java
+@Repository
+public class UserRepository {
+    private final JdbcTemplate jdbcTemplate;
+
+    public UserRepository(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    // Query for single value
+    public int count() {
+        return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM users", Integer.class);
+    }
+
+    // Query for object
+    public User findById(Long id) {
+        return jdbcTemplate.queryForObject(
+            "SELECT id, email, name FROM users WHERE id = ?",
+            (rs, rowNum) -> new User(rs.getLong("id"), rs.getString("email"), rs.getString("name")),
+            id
+        );
+    }
+
+    // Query for list
+    public List<User> findAll() {
+        return jdbcTemplate.query(
+            "SELECT id, email, name FROM users ORDER BY id",
+            (rs, rowNum) -> new User(rs.getLong("id"), rs.getString("email"), rs.getString("name"))
+        );
+    }
+
+    // Update
+    public int updateName(Long id, String name) {
+        return jdbcTemplate.update("UPDATE users SET name = ? WHERE id = ?", name, id);
+    }
+
+    // Insert
+    public int insert(String email, String name) {
+        return jdbcTemplate.update(
+            "INSERT INTO users (email, name) VALUES (?, ?)",
+            email, name
+        );
+    }
+
+    // Delete
+    public int delete(Long id) {
+        return jdbcTemplate.update("DELETE FROM users WHERE id = ?", id);
+    }
+}
+```
+
+## RowMapper
+
+재사용:
+
+```java
+private static final RowMapper<User> USER_ROW_MAPPER = (rs, rowNum) -> new User(
+    rs.getLong("id"),
+    rs.getString("email"),
+    rs.getString("name"),
+    rs.getTimestamp("created_at").toInstant()
+);
+
+public List<User> findActive() {
+    return jdbcTemplate.query(
+        "SELECT * FROM users WHERE active = true",
+        USER_ROW_MAPPER
+    );
+}
+```
+
+또는 `BeanPropertyRowMapper`:
+
+```java
+public class User {
+    private Long id;
+    private String email;
+    private String name;
+    // getter/setter
+}
+
+return jdbcTemplate.query(
+    "SELECT id, email, name FROM users",
+    BeanPropertyRowMapper.newInstance(User.class)
+);
+```
+
+record는 자동 매핑 어려움 → 커스텀 mapper 또는 `DataClassRowMapper` (5.3+).
+
+```java
+record UserDto(Long id, String email, String name) {}
+
+jdbcTemplate.query(
+    "SELECT id, email, name FROM users",
+    new DataClassRowMapper<>(UserDto.class)
+);
+```
+
+## NamedParameterJdbcTemplate
+
+`?` 대신 `:name`.
+
+```java
+@Repository
+public class UserRepository {
+    private final NamedParameterJdbcTemplate jdbc;
+
+    public List<User> search(String query, int minAge) {
+        return jdbc.query(
+            "SELECT * FROM users WHERE name ILIKE :q AND age > :minAge",
+            Map.of("q", "%" + query + "%", "minAge", minAge),
+            USER_ROW_MAPPER
+        );
+    }
+
+    public User findByEmail(String email) {
+        return jdbc.queryForObject(
+            "SELECT * FROM users WHERE email = :email",
+            new MapSqlParameterSource("email", email),
+            USER_ROW_MAPPER
+        );
+    }
+}
+```
+
+가독성 + 다중 동일 파라미터 (`:name` 여러 곳) 편함.
+
+## BatchUpdate
+
+```java
+public int[] batchInsert(List<User> users) {
+    return jdbcTemplate.batchUpdate(
+        "INSERT INTO users (email, name) VALUES (?, ?)",
+        new BatchPreparedStatementSetter() {
+            @Override
+            public void setValues(PreparedStatement ps, int i) throws SQLException {
+                User user = users.get(i);
+                ps.setString(1, user.email());
+                ps.setString(2, user.name());
+            }
+
+            @Override
+            public int getBatchSize() {
+                return users.size();
+            }
+        }
+    );
+}
+
+// 또는 더 간단히
+List<Object[]> batchArgs = users.stream()
+    .map(u -> new Object[]{u.email(), u.name()})
+    .toList();
+jdbcTemplate.batchUpdate("INSERT INTO ...", batchArgs);
+```
+
+대량 insert에 critical.
+
+## GeneratedKeys
+
+```java
+public Long insertReturningId(String email, String name) {
+    KeyHolder keyHolder = new GeneratedKeyHolder();
+    jdbcTemplate.update(connection -> {
+        PreparedStatement ps = connection.prepareStatement(
+            "INSERT INTO users (email, name) VALUES (?, ?)",
+            Statement.RETURN_GENERATED_KEYS
+        );
+        ps.setString(1, email);
+        ps.setString(2, name);
+        return ps;
+    }, keyHolder);
+
+    return keyHolder.getKey().longValue();
+}
+
+// 또는 NamedParameter + SimpleJdbcInsert
+SimpleJdbcInsert insert = new SimpleJdbcInsert(dataSource)
+    .withTableName("users")
+    .usingGeneratedKeyColumns("id");
+Number key = insert.executeAndReturnKey(Map.of("email", email, "name", name));
+```
+
+## 트랜잭션
+
+```java
+@Service
+@Transactional
+public class UserService {
+    private final JdbcTemplate jdbcTemplate;
+
+    @Transactional
+    public void transfer(Long fromId, Long toId, BigDecimal amount) {
+        jdbcTemplate.update("UPDATE accounts SET balance = balance - ? WHERE id = ?", amount, fromId);
+        jdbcTemplate.update("UPDATE accounts SET balance = balance + ? WHERE id = ?", amount, toId);
+    }
+}
+```
+
+`@Transactional`로 multiple statement 트랜잭션.
+
+## 자주 보는 패턴
+
+### Repository 구현
+
+```java
+@Repository
+public class UserRepository {
+    private final NamedParameterJdbcTemplate jdbc;
+    private static final RowMapper<User> MAPPER = new DataClassRowMapper<>(User.class);
+
+    public Optional<User> findById(Long id) {
+        try {
+            return Optional.ofNullable(jdbc.queryForObject(
+                "SELECT * FROM users WHERE id = :id",
+                Map.of("id", id),
+                MAPPER
+            ));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public List<User> findByEmailDomain(String domain) {
+        return jdbc.query(
+            "SELECT * FROM users WHERE email LIKE :pattern",
+            Map.of("pattern", "%@" + domain),
+            MAPPER
+        );
+    }
+}
+```
+
+### Dynamic query (StringBuilder)
+
+```java
+public List<Post> search(PostSearchCriteria criteria) {
+    StringBuilder sql = new StringBuilder("SELECT * FROM posts WHERE 1=1");
+    Map<String, Object> params = new HashMap<>();
+
+    if (criteria.title() != null) {
+        sql.append(" AND title ILIKE :title");
+        params.put("title", "%" + criteria.title() + "%");
+    }
+    if (criteria.minViews() != null) {
+        sql.append(" AND views >= :minViews");
+        params.put("minViews", criteria.minViews());
+    }
+
+    sql.append(" ORDER BY created_at DESC LIMIT :limit");
+    params.put("limit", 100);
+
+    return jdbc.query(sql.toString(), params, POST_MAPPER);
+}
+```
+
+복잡한 dynamic은 jOOQ 같은 query builder도 검토.
+
+### COUNT for pagination
+
+```java
+public Page<User> findPaged(int page, int size) {
+    int offset = page * size;
+
+    List<User> content = jdbc.query(
+        "SELECT * FROM users ORDER BY id LIMIT :size OFFSET :offset",
+        Map.of("size", size, "offset", offset),
+        MAPPER
+    );
+
+    long total = jdbc.queryForObject("SELECT COUNT(*) FROM users", Map.of(), Long.class);
+
+    return new PageImpl<>(content, PageRequest.of(page, size), total);
+}
+```
+
+### JSON column (PG)
+
+```java
+public Optional<JsonNode> getMetadata(Long id) {
+    String json = jdbcTemplate.queryForObject(
+        "SELECT metadata::text FROM posts WHERE id = ?",
+        String.class,
+        id
+    );
+    return Optional.ofNullable(json).map(j -> {
+        try { return mapper.readTree(j); } catch (Exception e) { throw new RuntimeException(e); }
+    });
+}
+```
+
+PG의 JSONB 활용.
+
+## 함정
+
+### 1. SQL Injection
+
+```java
+jdbcTemplate.query("SELECT * FROM users WHERE name = '" + name + "'", ...)  // 위험!
+jdbcTemplate.query("SELECT * FROM users WHERE name = ?", ..., name)         // 안전
+```
+
+항상 파라미터.
+
+### 2. queryForObject + 0 results
+
+```java
+User user = jdbcTemplate.queryForObject(...)    // 없으면 EmptyResultDataAccessException
+```
+
+`try-catch` 또는 `query` + `stream().findFirst()`.
+
+### 3. 큰 결과셋
+
+```java
+jdbcTemplate.query("SELECT * FROM huge_table", ...);    // 모두 메모리
+```
+
+스트리밍:
+
+```java
+jdbcTemplate.query("SELECT * FROM huge_table", rs -> {
+    while (rs.next()) {
+        process(rs);
+    }
+});
+```
+
+또는 `setFetchSize`, 페이지.
+
+### 4. BeanPropertyRowMapper 대소문자
+
+```java
+class User { String firstName; ... }
+
+SELECT first_name FROM users    // snake_case → camelCase 자동
+SELECT firstName FROM users     // ALIAS 필요
+```
+
+DB convention과 일치.
+
+### 5. NamedParameter + ?
+
+```java
+NamedParameterJdbcTemplate은 ? 사용 시 에러
+```
+
+`:name`만.
+
+## JdbcTemplate vs JPA vs Spring Data JDBC
+
+| | JdbcTemplate | JPA | Spring Data JDBC |
+|---|--------------|-----|------------------|
+| 추상화 | 낮음 | 높음 | 중 |
+| 학습 곡선 | 쉬움 | 가파름 | 중 |
+| 성능 | 빠름 | 보통 | 빠름 |
+| 동적 쿼리 | 직접 작성 | Criteria/QueryDSL | 직접 작성 |
+| 관계 | 직접 처리 | 자동 (LAZY/EAGER) | 단순 |
+| 복잡한 쿼리 | SQL 그대로 | JPQL 변환 | SQL 그대로 |
+
+복잡한 SQL, 성능 critical → JdbcTemplate. 일반 CRUD → JPA. 단순 + 명시 SQL → Spring Data JDBC.

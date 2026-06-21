@@ -1,0 +1,377 @@
+---
+title: "[Spring] Resilience4j: CircuitBreaker, Retry, RateLimiter"
+aliases: ["resilience4j", "circuit breaker pattern", "spring retry", "rate limiter", "bulkhead"]
+tags: [spring, resilience4j, circuit-breaker, retry, fault-tolerance]
+updated: 2026-06-20
+references:
+  - title: "Resilience4j Documentation"
+    url: "https://resilience4j.readme.io/"
+  - title: "Spring Cloud CircuitBreaker"
+    url: "https://spring.io/projects/spring-cloud-circuitbreaker"
+  - title: "Hystrix Dashboard 대안"
+    url: "https://github.com/Netflix/Hystrix"
+  - title: "Bulkhead pattern"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/bulkhead"
+---
+
+## 정의
+
+**Resilience4j**는 Java용 fault-tolerance 라이브러리. Hystrix(maintenance) 대체. Spring Boot 통합으로 어노테이션 (`@CircuitBreaker`, `@Retry`, `@RateLimiter`, `@Bulkhead`, `@TimeLimiter`) 또는 함수형 API. 외부 API 장애 격리.
+
+## 의존성
+
+```kotlin
+implementation("io.github.resilience4j:resilience4j-spring-boot3:2.2.0")
+implementation("org.springframework.boot:spring-boot-starter-aop")
+implementation("org.springframework.boot:spring-boot-starter-actuator")
+```
+
+## CircuitBreaker
+
+외부 호출 실패율이 임계치 넘으면 회로 차단 → 즉시 실패 또는 fallback.
+
+```java
+@Service
+public class UserService {
+
+    private final UserClient client;
+
+    @CircuitBreaker(name = "userService", fallbackMethod = "getUserFallback")
+    public User getUser(Long id) {
+        return client.findById(id);
+    }
+
+    public User getUserFallback(Long id, Throwable t) {
+        log.warn("Circuit open, fallback for {}", id, t);
+        return User.empty();
+    }
+}
+```
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    instances:
+      userService:
+        register-health-indicator: true
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 100        # 최근 100개 호출 기준
+        minimum-number-of-calls: 10      # 최소 10번 호출 후 평가
+        failure-rate-threshold: 50       # 50% 실패면 OPEN
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 100
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+```
+
+### 상태
+
+- **CLOSED**: 정상
+- **OPEN**: 차단 (즉시 실패)
+- **HALF_OPEN**: 테스트 (소수 호출 허용)
+
+## Retry
+
+일시적 장애 자동 재시도.
+
+```java
+@Retry(name = "userService", fallbackMethod = "getUserFallback")
+public User getUser(Long id) {
+    return client.findById(id);
+}
+```
+
+```yaml
+resilience4j:
+  retry:
+    instances:
+      userService:
+        max-attempts: 3
+        wait-duration: 1s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - java.io.IOException
+          - org.springframework.web.client.ResourceAccessException
+        ignore-exceptions:
+          - com.example.ValidationException
+```
+
+지수 backoff: 1s, 2s, 4s.
+
+## RateLimiter
+
+```java
+@RateLimiter(name = "userService", fallbackMethod = "getUserFallback")
+public User getUser(Long id) {
+    return client.findById(id);
+}
+```
+
+```yaml
+resilience4j:
+  ratelimiter:
+    instances:
+      userService:
+        limit-for-period: 100        # 1초당 100 요청
+        limit-refresh-period: 1s
+        timeout-duration: 100ms      # rate 초과 시 대기
+```
+
+초당 100개 호출 제한. 초과 시 100ms 대기 후 거부.
+
+## Bulkhead
+
+동시 호출 격리 (스레드 격리).
+
+```java
+@Bulkhead(name = "userService", type = Bulkhead.Type.SEMAPHORE)
+public User getUser(Long id) {
+    return client.findById(id);
+}
+```
+
+```yaml
+resilience4j:
+  bulkhead:
+    instances:
+      userService:
+        max-concurrent-calls: 10
+        max-wait-duration: 0s
+```
+
+동시 10개만 허용. 11번째는 대기 또는 즉시 실패.
+
+`type: THREADPOOL`은 별도 스레드 풀.
+
+## TimeLimiter
+
+```java
+@TimeLimiter(name = "userService", fallbackMethod = "getUserFallback")
+public CompletableFuture<User> getUser(Long id) {
+    return CompletableFuture.supplyAsync(() -> client.findById(id));
+}
+```
+
+```yaml
+resilience4j:
+  timelimiter:
+    instances:
+      userService:
+        timeout-duration: 5s
+        cancel-running-future: true
+```
+
+5초 초과 시 TimeoutException + fallback.
+
+`CompletableFuture` 반환 필수.
+
+## 어노테이션 조합
+
+```java
+@CircuitBreaker(name = "userService", fallbackMethod = "fallback")
+@Retry(name = "userService")
+@Bulkhead(name = "userService")
+@RateLimiter(name = "userService")
+@TimeLimiter(name = "userService")
+public CompletableFuture<User> getUser(Long id) {
+    return CompletableFuture.supplyAsync(() -> client.findById(id));
+}
+```
+
+순서 (외부 → 내부): RateLimiter → CircuitBreaker → Bulkhead → TimeLimiter → Retry → 실제 호출.
+
+## 함수형 API
+
+```java
+CircuitBreaker cb = CircuitBreaker.ofDefaults("userService");
+Retry retry = Retry.ofDefaults("userService");
+
+Supplier<User> decorated = Decorators
+    .ofSupplier(() -> client.findById(id))
+    .withCircuitBreaker(cb)
+    .withRetry(retry)
+    .withFallback(List.of(IOException.class), e -> User.empty())
+    .decorate();
+
+User user = decorated.get();
+```
+
+어노테이션 없이 직접.
+
+## 자주 보는 패턴
+
+### 외부 API 통합
+
+```java
+@Service
+public class PaymentService {
+    private final RestClient stripeClient;
+
+    @CircuitBreaker(name = "stripe", fallbackMethod = "chargeFallback")
+    @Retry(name = "stripe")
+    @TimeLimiter(name = "stripe")
+    public CompletableFuture<Charge> charge(BigDecimal amount, String cardToken) {
+        return CompletableFuture.supplyAsync(() -> stripeClient.post()
+            .uri("/charges")
+            .body(Map.of("amount", amount, "source", cardToken))
+            .retrieve()
+            .body(Charge.class));
+    }
+
+    public CompletableFuture<Charge> chargeFallback(BigDecimal amount, String cardToken, Throwable t) {
+        // 큐에 넣고 나중에 재시도
+        retryQueue.enqueue(new ChargeRequest(amount, cardToken));
+        throw new ChargePendingException();
+    }
+}
+```
+
+### Microservice 호출
+
+```java
+@FeignClient(name = "user-service")
+public interface UserClient {
+    @GetMapping("/users/{id}")
+    User findById(@PathVariable Long id);
+}
+
+@Service
+public class OrderService {
+    @CircuitBreaker(name = "userService", fallbackMethod = "userFallback")
+    public Order create(Long userId, ...) {
+        User user = userClient.findById(userId);
+        ...
+    }
+}
+```
+
+OpenFeign + Resilience4j 자동 통합.
+
+### DB 보호
+
+```java
+@Bulkhead(name = "db", maxConcurrentCalls = 20)
+public List<User> heavyQuery() {
+    return userRepository.complexQuery();
+}
+```
+
+DB 커넥션 풀 초과 방지.
+
+## Event listener
+
+```java
+@Component
+public class CircuitBreakerListener {
+
+    @EventListener
+    public void onStateTransition(CircuitBreakerOnStateTransitionEvent event) {
+        log.warn("CircuitBreaker {} transitioned to {}",
+            event.getCircuitBreakerName(), event.getStateTransition());
+        // 알림
+    }
+}
+```
+
+상태 변화 모니터링.
+
+## Metrics (Micrometer)
+
+자동 통합:
+- `resilience4j_circuitbreaker_state`
+- `resilience4j_circuitbreaker_calls`
+- `resilience4j_retry_calls`
+- `resilience4j_ratelimiter_available_permissions`
+
+Grafana 대시보드로 시각화.
+
+## Actuator
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, circuitbreakers, retries
+  endpoint:
+    health:
+      show-details: always
+```
+
+```
+GET /actuator/circuitbreakers
+{
+  "circuitBreakers": ["userService"]
+}
+
+GET /actuator/circuitbreakers/userService
+{
+  "name": "userService",
+  "state": "CLOSED",
+  "metrics": {...}
+}
+```
+
+## 함정
+
+### 1. 어노테이션 순서
+
+여러 annotation 조합 시 처리 순서가 의도와 다를 수 있음. 명시적 테스트.
+
+### 2. CompletableFuture 인자 미스매치
+
+```java
+@TimeLimiter(name = "x")
+public User get(Long id) { return ... }    // CompletableFuture 아님!
+```
+
+TimeLimiter는 `CompletableFuture` 또는 `Mono`/`Flux` 반환만.
+
+### 3. fallback 메서드 시그니처
+
+```java
+@CircuitBreaker(name = "x", fallbackMethod = "fallback")
+public User get(Long id, String name) { ... }
+
+public User fallback(Long id, String name, Throwable t) { ... }    // 시그니처 일치
+```
+
+원본 인자 + 마지막 Throwable.
+
+### 4. self-invocation
+
+```java
+@Service
+public class MyService {
+    public void caller() {
+        external();    // proxy 거치지 않음 → 자원 적용 안 됨
+    }
+
+    @CircuitBreaker(name = "x")
+    public void external() { ... }
+}
+```
+
+다른 Bean으로 분리.
+
+### 5. test 환경
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        register-health-indicator: false
+```
+
+테스트에서 비활성 또는 mock.
+
+## 대안
+
+- **Spring Cloud Circuit Breaker** (abstraction)
+- **Hystrix** (maintenance, 사용 X)
+- **Sentinel** (Alibaba)
+- **Failsafe** (Java 표준)
+
+Resilience4j가 현재 표준.
