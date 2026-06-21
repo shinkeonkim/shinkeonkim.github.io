@@ -3,6 +3,15 @@ title: "Redis"
 aliases: ["레디스", "redis"]
 tags: [database, in-memory, key-value, nosql, cache]
 updated: 2026-06-15
+references:
+  - title: "Redis 공식 문서"
+    url: "https://redis.io/docs/"
+  - title: "Antirez (Salvatore Sanfilippo) 블로그"
+    url: "http://antirez.com/"
+  - title: "Redis in Action (Josiah Carlson)"
+    url: "https://redislabs.com/ebook/redis-in-action/"
+  - title: "Redis 명령어 레퍼런스"
+    url: "https://redis.io/commands/"
 ---
 
 ## 정의
@@ -90,10 +99,3 @@ TTL (Time-To-Live) + Eviction policy (메모리 부족 시):
 - **Key 단위 Atomicity**: 여러 키 걸친 트랜잭션은 롤백 불가 (MULTI/EXEC는 isolation 약함)
 - **데이터 일관성**: 비동기 복제라 failover 시 일부 쓰기 손실 가능
 - **네트워크 비용**: 클라이언트-서버 왕복, 파이프라이닝으로 완화
-
-## 참고
-
-- [Redis 공식 문서](https://redis.io/docs/)
-- [Antirez (Salvatore Sanfilippo) 블로그](http://antirez.com/)
-- [Redis in Action (Josiah Carlson)](https://redislabs.com/ebook/redis-in-action/)
-- [Redis 명령어 레퍼런스](https://redis.io/commands/)
