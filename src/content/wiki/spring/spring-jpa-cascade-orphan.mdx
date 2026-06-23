@@ -1,0 +1,250 @@
+---
+title: "[JPA] CascadeType과 orphanRemoval"
+aliases: ["JPA Cascade", "CascadeType", "orphanRemoval", "고아 객체 제거", "PERSIST cascade", "REMOVE cascade", "ALL cascade"]
+tags: [jpa, hibernate, cascade, orphan-removal, entity-relationship]
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Cascade"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a8616"
+    note: "CascadeType 명세"
+---
+
+## 정의
+
+JPA 의 entity 연산 (`persist`, `merge`, `remove`, `refresh`, `detach`) 을 **연관 entity 에 자동 전파** 하는 메커니즘. `@OneToMany(cascade = CascadeType.ALL)` 같이 선언.
+
+별개 개념인 **orphanRemoval** 은 부모 컬렉션에서 자식이 빠지면 자식 자체를 삭제. `cascade = REMOVE` 와 비슷해 보이지만 트리거 조건이 다르다.
+
+잘못 쓰면:
+- ALL cascade + 양방향 연관 → 의도치 않은 삭제
+- orphanRemoval + 컬렉션 재할당 → 전체 삭제 후 재삽입
+
+## CascadeType 6가지
+
+| Type | 전파되는 연산 |
+|---|---|
+| `PERSIST` | `em.persist(parent)` 시 child 도 persist |
+| `MERGE` | `em.merge(parent)` 시 child 도 merge |
+| `REMOVE` | `em.remove(parent)` 시 child 도 remove |
+| `REFRESH` | `em.refresh(parent)` 시 child 도 refresh |
+| `DETACH` | `em.detach(parent)` 시 child 도 detach |
+| `ALL` | 위 다섯 + 향후 추가될 모든 cascade |
+
+기본은 cascade 없음. 명시적으로 설정해야 전파.
+
+## PERSIST cascade 예
+
+```java
+@Entity
+class Post {
+    @Id @GeneratedValue Long id;
+    String title;
+
+    @OneToMany(mappedBy = "post", cascade = CascadeType.PERSIST)
+    List<Comment> comments = new ArrayList<>();
+
+    public void addComment(Comment c) {
+        comments.add(c);
+        c.setPost(this);
+    }
+}
+
+@Entity
+class Comment {
+    @Id @GeneratedValue Long id;
+    String body;
+    @ManyToOne Post post;
+}
+```
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`@Transactional
+public void create() {
+    Post p = new Post();
+    p.setTitle("Hello");
+    p.addComment(new Comment("first"));
+    p.addComment(new Comment("second"));
+
+    em.persist(p);   // post + comments 모두 INSERT
+    // cascade 없으면 comments 만 따로 persist 해야 함
+}`}
+  output={`insert into post (title, ...) values (?, ...);
+insert into comment (post_id, body, ...) values (?, ?, ...);
+insert into comment (post_id, body, ...) values (?, ?, ...);`}
+/>
+
+cascade 없으면 `TransientObjectException`: comment 가 transient 상태인데 post 가 참조한다고 에러.
+
+## REMOVE cascade 와 함정
+
+```java
+@OneToMany(mappedBy = "post", cascade = CascadeType.REMOVE)
+List<Comment> comments;
+```
+
+`em.remove(post)` → 모든 comments 도 DELETE.
+
+함정: 양방향 + 다른 entity 와 공유되면 의도치 않은 삭제:
+
+```java
+@ManyToOne(cascade = CascadeType.REMOVE)   // ❌ 위험
+User user;
+```
+
+`em.remove(post)` 호출 시 그 post 의 user 까지 삭제됨. user 가 다른 post 의 부모일 수도 있는데. `@ManyToOne` / `@ManyToMany` 에 `REMOVE` cascade 는 거의 항상 잘못된 설계.
+
+**규칙**:
+- `@OneToMany`, `@OneToOne` 의 **소유자 → 종속물** 관계에만 `REMOVE` 적합
+- `@ManyToOne`, `@ManyToMany` 에 `REMOVE` 금지
+
+## orphanRemoval
+
+부모의 컬렉션에서 자식이 **제거** 되면 자식 자체를 DELETE:
+
+```java
+@OneToMany(mappedBy = "post", orphanRemoval = true)
+List<Comment> comments;
+```
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`@Transactional
+public void deleteFirst(Long postId) {
+    Post p = em.find(Post.class, postId);
+    Comment first = p.getComments().remove(0);   // 컬렉션에서 빼면
+    // orphanRemoval = true 면 DELETE 자동
+}`}
+  output={`select p.* from post p where p.id = ?
+select c.* from comment c where c.post_id = ?
+delete from comment where id = ?`}
+/>
+
+`cascade = REMOVE` 와 다른 점:
+- `cascade = REMOVE`: 부모 자체가 삭제될 때만 트리거
+- `orphanRemoval = true`: 부모-자식 **참조 관계가 끊어질 때마다** 트리거 (부모는 살아 있어도)
+
+`cascade = ALL, orphanRemoval = true` 조합이 가장 흔함: aggregate root 의 종속 entity 처럼 동작.
+
+## orphanRemoval 함정: 컬렉션 재할당
+
+```java
+// ❌ 위험
+post.comments = new ArrayList<>(newComments);
+```
+
+orphanRemoval = true 면 기존 컬렉션의 모든 원소가 orphan 으로 인식 → 전체 DELETE → 새로 INSERT. 변경된 원소만 update 하려는 의도와 다름.
+
+**올바른 패턴**:
+```java
+post.comments.clear();
+post.comments.addAll(newComments);
+// 또는 retainAll / removeAll 로 diff
+```
+
+## 양방향 연관과 cascade
+
+```java
+@Entity
+class Post {
+    @OneToMany(mappedBy = "post", cascade = ALL, orphanRemoval = true)
+    List<Comment> comments = new ArrayList<>();
+
+    public void addComment(Comment c) {
+        comments.add(c);
+        c.setPost(this);   // 양방향 동기화 필수
+    }
+
+    public void removeComment(Comment c) {
+        comments.remove(c);
+        c.setPost(null);   // orphanRemoval 가 인식할 수 있게
+    }
+}
+```
+
+`addComment` / `removeComment` 같은 **편의 메서드** 로 양방향 일관성 유지. 직접 양쪽 setter 호출은 누락 위험.
+
+## CascadeType.MERGE 의 묘한 동작
+
+`merge` 는 새 managed 인스턴스를 반환한다. cascade MERGE 가 있으면 자식도 merge 됨:
+
+```java
+Post detached = ...;
+detached.getComments().add(new Comment("new"));
+
+@Transactional
+public void update(Post detached) {
+    Post managed = em.merge(detached);     // cascade MERGE 면 comments 도 merge
+    // detached.getComments() 의 객체들은 여전히 detached
+    // managed.getComments() 의 객체들이 새 managed
+}
+```
+
+`@Modifying @Query` 로 직접 UPDATE 하면 cascade 도 dirty checking 도 안 일어남. 의도적으로 우회할 때만 사용.
+
+## 종합 비교
+
+| 시나리오 | cascade | orphanRemoval |
+|---|---|---|
+| 부모 persist 시 자식도 INSERT | PERSIST 또는 ALL | - |
+| 부모 remove 시 자식도 DELETE | REMOVE 또는 ALL | - |
+| 컬렉션에서 빠지면 자식 DELETE | - | true |
+| 부모 = aggregate root, 자식은 독립 의미 없음 | ALL | true |
+| 외래키만 공유하는 독립 entity (User, Category) | (없음) | false |
+
+## 자주 보는 패턴
+
+### Aggregate Root
+
+```java
+@Entity
+class Order {
+    @OneToMany(mappedBy = "order", cascade = ALL, orphanRemoval = true)
+    List<OrderItem> items = new ArrayList<>();
+
+    public void addItem(Product p, int qty) {
+        items.add(new OrderItem(this, p, qty));
+    }
+
+    public void removeItem(OrderItem i) {
+        items.remove(i);
+    }
+}
+```
+
+OrderItem 은 Order 외부에서 의미 없음 → 라이프사이클 일체. DDD aggregate root 패턴과 자연스럽게 매핑.
+
+### 독립 entity 참조
+
+```java
+@Entity
+class Post {
+    @ManyToOne                              // cascade 없음
+    @JoinColumn(name = "category_id")
+    Category category;
+}
+```
+
+Category 는 Post 와 독립. Post 삭제해도 Category 살아있어야 함 = cascade 없음.
+
+## 함정과 베스트 프랙티스
+
+- **`cascade = ALL` 은 `@OneToMany`, `@OneToOne` 의 소유자에만**
+- **`@ManyToOne` / `@ManyToMany` 에 REMOVE 절대 금지**
+- **양방향 연관은 편의 메서드로 동기화**
+- **orphanRemoval + 컬렉션 재할당은 전체 삭제 + 재삽입 폭탄**
+- **`@Modifying @Query` 는 cascade 우회**: 의도가 아니면 사용 금지
+- **벌크 삭제 시 cascade 무시됨**: `delete from Order` JPQL 은 자식 cascade 안 일어남. 직접 자식 먼저 삭제
+- **`flush` 와 `clear` 사이 cascade 동작**: 큰 그래프 persist 시 메모리 주의
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-lifecycle-callbacks]]
+- [[spring-transaction]]

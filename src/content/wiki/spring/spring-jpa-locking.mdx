@@ -1,0 +1,215 @@
+---
+title: "[JPA] Optimistic Lock과 Pessimistic Lock"
+aliases: ["JPA Lock", "Optimistic Lock", "Pessimistic Lock", "@Version", "@Lock", "LockModeType", "OptimisticLockException", "낙관적 락", "비관적 락"]
+tags: [jpa, hibernate, locking, concurrency, transaction]
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Locking"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a14045"
+    note: "LockModeType 명세"
+  - title: "Hibernate User Guide: Locking"
+    url: "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#locking"
+    note: "Hibernate locking 가이드"
+---
+
+## 정의
+
+동시 수정으로 데이터가 깨지는 상황을 막는 두 가지 전략:
+
+- **Optimistic (낙관적)**: 충돌이 드물다고 가정, 커밋 직전에 version 비교로 검증. 충돌 시 예외.
+- **Pessimistic (비관적)**: 충돌이 잦다고 가정, 읽는 순간 DB row 에 잠금. 다른 트랜잭션은 대기.
+
+spring-data-jpa 의 `## 자주 보는 패턴` 절에 간단한 예가 있다면, 이 페이지는 LockModeType 옵션과 트레이드오프를 깊이 다룬다.
+
+## Optimistic Lock: @Version
+
+```java
+@Entity
+class Product {
+    @Id Long id;
+    int stock;
+
+    @Version
+    Long version;   // Hibernate 가 자동 관리
+}
+```
+
+매 UPDATE 마다 `WHERE id = ? AND version = ?` 조건 추가, 동시에 `version = version + 1`:
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  outputLabel="DB SQL"
+  code={`-- 트랜잭션 A: stock 차감
+UPDATE product SET stock = 9, version = 2
+WHERE id = 1 AND version = 1;
+
+-- 같은 시점 트랜잭션 B: 다른 stock 차감
+UPDATE product SET stock = 8, version = 2
+WHERE id = 1 AND version = 1;
+-- 매칭되는 row 0개 → 0 rows affected
+-- Hibernate 가 OptimisticLockException 던짐`}
+  output={`A: 1 rows affected, OK
+B: 0 rows affected, throws ObjectOptimisticLockingFailureException`}
+/>
+
+DB 락을 잡지 않음 → throughput 높음. 충돌 시 재시도 로직 필요.
+
+### @Version 필드 타입
+
+```java
+@Version Long version;       // 권장 (음수 안 됨)
+@Version Integer version;    // 권장
+@Version Timestamp updatedAt;  // 가능하지만 정밀도 / 클럭 동기화 문제
+```
+
+권장은 `Long` 또는 `Integer`. timestamp 는 ms 단위 동시 update 에서 깨짐.
+
+### Retry 패턴
+
+```java
+@Retryable(
+    value = ObjectOptimisticLockingFailureException.class,
+    maxAttempts = 3,
+    backoff = @Backoff(delay = 50, multiplier = 2)
+)
+@Transactional
+public void decreaseStock(Long productId, int qty) {
+    Product p = repo.findById(productId).orElseThrow();
+    p.setStock(p.getStock() - qty);
+    // commit 시 version 검증
+}
+```
+
+`spring-retry` 라이브러리로 자동 재시도. 무한 retry 금지 (요청 폭주 시 폭증).
+
+## LockModeType 8가지
+
+| Mode | 의미 |
+|---|---|
+| `NONE` | lock 없음 (기본) |
+| `OPTIMISTIC` | 트랜잭션 종료 시 version 검증 |
+| `OPTIMISTIC_FORCE_INCREMENT` | 변경 없어도 version++ (강제 충돌 감지) |
+| `READ` | = OPTIMISTIC (legacy 이름) |
+| `WRITE` | = OPTIMISTIC_FORCE_INCREMENT (legacy) |
+| `PESSIMISTIC_READ` | `SELECT ... FOR SHARE` (공유 lock) |
+| `PESSIMISTIC_WRITE` | `SELECT ... FOR UPDATE` (배타 lock) |
+| `PESSIMISTIC_FORCE_INCREMENT` | pessimistic + version++ |
+
+대부분 `OPTIMISTIC`, `OPTIMISTIC_FORCE_INCREMENT`, `PESSIMISTIC_WRITE` 만 실무에서 쓰임.
+
+## OPTIMISTIC_FORCE_INCREMENT
+
+연관 entity 의 변경이 부모의 version 도 올려야 할 때:
+
+```java
+@Entity
+class Order {
+    @Version Long version;
+
+    @OneToMany(mappedBy = "order")
+    List<OrderItem> items;
+}
+
+@Transactional
+public void addItem(Long orderId, Product p) {
+    Order o = em.find(Order.class, orderId, LockModeType.OPTIMISTIC_FORCE_INCREMENT);
+    o.getItems().add(new OrderItem(o, p));
+    // OrderItem INSERT 만 일어나도 Order.version 증가
+}
+```
+
+`addItem` 두 트랜잭션이 동시 실행되면 둘 다 version 증가 시도 → 한 쪽이 실패. 이게 없으면 둘 다 통과해 race 가능.
+
+## Pessimistic Lock
+
+DB 에서 직접 row 잠금:
+
+```java
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+@Query("SELECT p FROM Product p WHERE p.id = :id")
+Optional<Product> findByIdForUpdate(@Param("id") Long id);
+```
+
+생성되는 SQL:
+
+```sql
+-- PostgreSQL / MySQL InnoDB
+SELECT * FROM product WHERE id = ? FOR UPDATE;
+
+-- Oracle
+SELECT * FROM product WHERE id = ? FOR UPDATE;
+```
+
+다른 트랜잭션이 같은 row 에 `FOR UPDATE` / UPDATE / DELETE 시도하면 **대기**. lock 보유자가 commit/rollback 하면 해제.
+
+### Timeout
+
+```java
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+@QueryHints({
+    @QueryHint(name = "jakarta.persistence.lock.timeout", value = "5000")   // 5초
+})
+@Query("SELECT p FROM Product p WHERE p.id = :id")
+Optional<Product> findByIdForUpdate(@Param("id") Long id);
+```
+
+대기 시간 초과 시 `LockTimeoutException`. timeout `0` 은 즉시 실패 (`NOWAIT`).
+
+DB 별 지원:
+- PostgreSQL: `FOR UPDATE NOWAIT`, `FOR UPDATE SKIP LOCKED`
+- MySQL 8+: `FOR UPDATE NOWAIT`, `FOR UPDATE SKIP LOCKED`
+- Oracle: `FOR UPDATE NOWAIT`, `FOR UPDATE SKIP LOCKED`
+
+`SKIP LOCKED` 는 큐 패턴에 유용 (lock 잡힌 row 는 건너뛰고 다음 가져옴).
+
+## Optimistic vs Pessimistic 선택
+
+| 항목 | Optimistic | Pessimistic |
+|---|---|---|
+| 충돌 빈도 | 드물 때 | 잦을 때 |
+| DB 락 | 없음 | 있음 |
+| Throughput | 높음 | 낮음 |
+| Deadlock 위험 | 없음 | 있음 |
+| 재시도 로직 | 필요 | 불필요 |
+| 사용자 경험 | 다시 시도 요청 가능 | 대기 |
+| 코드 복잡도 | retry 필요 | 단순 |
+
+규칙:
+- **읽기 중심 + 충돌 드뭄**: Optimistic
+- **재고 차감, 좌석 예약 같은 hot row**: Pessimistic
+- **분산 환경 + 외부 시스템 호출**: 두 가지 다 부족, distributed lock (Redis, Zookeeper) 고려
+
+## 흔한 실수: 같은 트랜잭션 안 재조회
+
+```java
+@Transactional
+public void wrong(Long id) {
+    Product p1 = repo.findById(id).orElseThrow();
+    // ... 시간 걸리는 작업 ...
+    Product p2 = repo.findById(id).orElseThrow();  // 1차 캐시에서 가져옴, p1 == p2
+    p2.setStock(...);
+}
+```
+
+1차 캐시 (`spring-jpa-persistence-context`) 때문에 두 번째 find 는 SQL 안 나감 = stale 데이터. **트랜잭션 시작 시점의 stock** 으로 계산되는 함정. 트랜잭션을 짧게 유지하거나 `em.refresh()` 호출.
+
+## 함정과 베스트 프랙티스
+
+- **재고 차감 / 카운터** 같은 lost update 회피에는 둘 다 가능
+  - read-heavy: optimistic + retry
+  - write-heavy: pessimistic
+- **재시도는 idempotent 작업에만**: 결제 API 호출 후 retry 면 중복 결제
+- **`OptimisticLockException` 은 클라이언트에게 적절히 메시징**: "다른 사람이 먼저 수정했습니다, 새로 고침 후 다시 시도"
+- **pessimistic lock + long transaction = deadlock 폭탄**: 트랜잭션 짧게
+- **`@Lock` 은 query method 에 적용, 메서드 호출은 트랜잭션 안에서**
+- **`FOR UPDATE SKIP LOCKED` + LIMIT 1** 가 큐 패턴 (`spring-batch` 도 비슷)
+- **2차 캐시 + Optimistic**: 2차 캐시는 version 정보도 캐싱 (Hibernate). 분산 환경에선 신중
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-fetch-type]]
+- [[spring-transaction]]
+- [[java-volatile]]

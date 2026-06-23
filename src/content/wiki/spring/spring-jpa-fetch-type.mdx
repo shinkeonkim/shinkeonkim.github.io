@@ -1,0 +1,215 @@
+---
+title: "[JPA] FetchType: LAZY vs EAGER, N+1, fetch join"
+aliases: ["JPA FetchType", "FetchType.LAZY", "FetchType.EAGER", "fetch join", "N+1", "EntityGraph", "@BatchSize", "JPA 페치"]
+tags: [jpa, hibernate, fetch, performance, n-plus-one]
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - FetchType"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#fetchtype"
+    note: "FetchType 명세"
+  - title: "Hibernate User Guide: Fetching"
+    url: "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#fetching"
+    note: "Hibernate 의 fetch 전략"
+---
+
+## 정의
+
+**FetchType** 은 JPA 가 연관 entity 를 **언제** 로드할지 결정하는 hint.
+
+- `EAGER`: entity 로딩 시 즉시 함께 SELECT
+- `LAZY`: 실제 사용 시점 (proxy 메서드 호출) 까지 미룸
+
+기본값:
+- `@OneToOne`, `@ManyToOne`: **EAGER** (위험)
+- `@OneToMany`, `@ManyToMany`: **LAZY**
+
+**규칙: 모든 연관관계는 명시적으로 LAZY**. EAGER 는 N+1 폭탄의 시작. spring-data-jpa 의 `## 관계와 fetch` 가 개요라면, 이 페이지는 N+1 의 메커니즘과 해결 패턴을 깊게 다룬다.
+
+## EAGER 의 함정
+
+```java
+@Entity
+class Post {
+    @Id Long id;
+    String title;
+
+    @ManyToOne                          // ← 기본 EAGER
+    @JoinColumn(name = "author_id")
+    User author;
+}
+
+List<Post> posts = em.createQuery("SELECT p FROM Post p", Post.class).getResultList();
+```
+
+발생 쿼리:
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`-- 위 코드의 의도: posts 1번 조회
+SELECT p.* FROM post p;`}
+  output={`SELECT p.* FROM post p;                  -- 1번
+SELECT u.* FROM user u WHERE u.id = ?;   -- N번 (각 post 마다)
+SELECT u.* FROM user u WHERE u.id = ?;
+SELECT u.* FROM user u WHERE u.id = ?;
+... (post 개수만큼)`}
+/>
+
+posts 100 개면 SQL **101 번**. N+1 (1번 + N번) 문제. 매번 author 가 필요한지 알 수 없어도 무조건 가져옴.
+
+## LAZY 전환
+
+```java
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "author_id")
+User author;
+```
+
+이제 `posts.get(0).getAuthor().getName()` 호출 시점에야 SQL 실행. 사용 안 하면 author SELECT 도 안 일어남.
+
+함정: 트랜잭션 범위를 벗어나면 `LazyInitializationException`. spring-data-jpa 의 `## 함정 / 2. 트랜잭션 없이 lazy` 참고. 해결 도구가 아래 fetch join / EntityGraph.
+
+## fetch join
+
+JPQL 에서 명시적으로 함께 가져옴:
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`List<Post> posts = em.createQuery("""
+    SELECT p
+    FROM Post p
+    JOIN FETCH p.author
+""", Post.class).getResultList();
+
+for (Post p : posts) {
+    System.out.println(p.getAuthor().getName());   // 추가 쿼리 없음
+}`}
+  output={`SELECT p.*, u.*
+FROM post p
+INNER JOIN user u ON p.author_id = u.id;
+-- 단 1번
+-- author 접근은 이미 로딩된 데이터에서`}
+/>
+
+장점: 1번에 다 가져옴. 단점:
+- 컬렉션 fetch join 시 **중복 row** (Post 1 + comments 5 → Post 가 5번 반환). `DISTINCT` 필요
+- **Pageable 과 조합 시 컬렉션 fetch join 불가** (in-memory paging 으로 fallback)
+- **`MultipleBagFetchException`**: 컬렉션 2개 이상 동시 fetch join 시 카르테시안 폭발
+
+## @EntityGraph
+
+쿼리마다 fetch join 작성하지 않고 **선언적**:
+
+```java
+@Entity
+@NamedEntityGraph(
+    name = "Post.author",
+    attributeNodes = @NamedAttributeNode("author")
+)
+class Post { ... }
+
+// Repository
+@EntityGraph(value = "Post.author", type = EntityGraphType.FETCH)
+List<Post> findByCreatedAtAfter(LocalDateTime date);
+```
+
+Spring Data JPA 에서 가장 깔끔. **ad-hoc EntityGraph** 도 가능:
+
+```java
+@EntityGraph(attributePaths = {"author", "comments"})
+List<Post> findAll();
+```
+
+EAGER 와 차이: 그 쿼리에만 적용. 다른 곳에서는 여전히 LAZY.
+
+## @BatchSize (Hibernate 확장)
+
+여러 LAZY proxy 를 한 번에 IN 쿼리로:
+
+```java
+@OneToMany(mappedBy = "post", fetch = FetchType.LAZY)
+@BatchSize(size = 100)
+List<Comment> comments;
+```
+
+N+1 시나리오:
+
+```
+posts 50개 조회
+for (post : posts) post.getComments().size();
+```
+
+`@BatchSize` 없으면:
+- 1 (posts) + 50 (각 comments) = **51 쿼리**
+
+`@BatchSize(size = 100)` 있으면:
+- 1 (posts) + 1 (`WHERE post_id IN (1, 2, ..., 50)`) = **2 쿼리**
+
+전역 설정도 가능: `spring.jpa.properties.hibernate.default_batch_fetch_size=100`.
+
+EntityGraph 보다 덜 침투적. 컬렉션 paging 과도 잘 어울림. 첫 번째 N+1 방어선으로 추천.
+
+## fetch join vs EntityGraph vs @BatchSize 비교
+
+| 방법 | 쿼리 수 | 코드 위치 | Paging | 컬렉션 중복 |
+|---|---|---|---|---|
+| fetch join | 1 | JPQL | 컬렉션 안 됨 | DISTINCT 필요 |
+| @EntityGraph | 1 | Repository method | 컬렉션 안 됨 | DISTINCT 필요 |
+| @BatchSize | 2 (IN 절) | Entity / 전역 | OK | 없음 |
+| LAZY 만 | N+1 | 어디서든 | OK | 없음 |
+
+실무 전략:
+1. **모든 연관 LAZY 로 선언**
+2. **전역 `default_batch_fetch_size=100` 설정** (안전망)
+3. **List 조회 + 즉시 사용 시 `@EntityGraph` 명시**
+4. **단건 + paging 시 LAZY + `@BatchSize` 조합**
+5. **복잡한 join + projection 시 QueryDSL / native SQL**
+
+## EntityGraph 의 두 모드
+
+```java
+@EntityGraph(value = "Post.author", type = EntityGraphType.FETCH)   // 명시한 것만 EAGER, 나머지 LAZY
+@EntityGraph(value = "Post.author", type = EntityGraphType.LOAD)    // 명시한 것 EAGER, 나머지는 entity 기본값
+```
+
+`FETCH` 가 더 예측 가능. `LOAD` 는 entity 의 EAGER 설정과 합쳐져 의도치 않은 추가 fetch 발생 가능.
+
+## 실전 N+1 디버깅
+
+```yaml
+spring:
+  jpa:
+    properties:
+      hibernate:
+        # 모든 SQL 로깅
+        show_sql: true
+        format_sql: true
+        # 핵심: N+1 정적 분석 (warn 로그)
+        session.events.log.LOG_QUERIES_SLOWER_THAN_MS: 100
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+```
+
+`p6spy`, `datasource-proxy` 같은 도구가 더 깔끔. 통합 테스트에서 N+1 검출은 `Hypersistence Utils` 또는 직접 `Statement` count 측정.
+
+## 함정과 베스트 프랙티스
+
+- **EAGER 절대 사용 금지**: 한번 EAGER 하면 그 entity 가 쓰이는 모든 쿼리에 영향
+- **`@OneToOne` 도 LAZY 가능하지만 까다로움**: optional=false + bytecode enhancement 필요
+- **컬렉션 fetch join + Pageable = in-memory paging**: 로그에 `firstResult/maxResults specified with collection fetch; applying in memory!` warning. 대용량 데이터에서 OOM 위험
+- **`DISTINCT` 는 `hibernate.query.passDistinctThrough=false` 와 조합 시 SQL DISTINCT 안 보냄** (메모리 dedup 만)
+- **OSIV (Open Session In View)** 가 운영에서 켜져 있으면 LAZY 함정이 가려짐. 끄는 게 안전: `spring.jpa.open-in-view=false`
+- **`@BatchSize` 가 만능 아님**: 인-메모리 join 처럼 보이게 함, 대용량 IN 절은 DB 별 제한 (Postgres OK, Oracle 1000개 제한)
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-cascade-orphan]]
+- [[spring-jpa-locking]]
+- [[spring-transaction]]
