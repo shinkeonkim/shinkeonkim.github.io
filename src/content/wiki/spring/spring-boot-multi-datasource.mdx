@@ -1,0 +1,295 @@
+---
+title: "[Spring Boot] Multi-DataSource: 복수 DB 연결과 트랜잭션"
+aliases: ["Spring Boot Multi DataSource", "Multiple DataSource", "ChainedTransactionManager", "RoutingDataSource", "Read Replica Spring Boot", "복수 데이터소스", "다중 DB"]
+tags: [spring-boot, datasource, transaction, jpa, read-replica]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Configure Two DataSources - https://docs.spring.io/spring-boot/how-to/data-access.html#howto.data-access.configure-two-datasources"
+---
+
+## 정의
+
+한 Spring Boot 앱이 **여러 DB / 여러 스키마** 에 접근. 패턴 세 가지:
+
+1. **물리적으로 분리된 DB** (orders DB + analytics DB)
+2. **Read replica** (write → primary, read → replica)
+3. **Multi-tenant** (tenant 별 DB)
+
+기본 자동 설정은 단일 DataSource 만 가정. 복수는 명시적 Bean 등록 + `@Qualifier` 또는 routing.
+
+## 두 DB 분리 (가장 흔함)
+
+```yaml
+spring:
+  datasource:
+    primary:
+      url: jdbc:postgresql://primary-db/orders
+      username: orders_user
+      password: ${PRIMARY_DB_PASSWORD}
+      hikari:
+        maximum-pool-size: 20
+    analytics:
+      url: jdbc:postgresql://analytics-db/analytics
+      username: analytics_user
+      password: ${ANALYTICS_DB_PASSWORD}
+      hikari:
+        maximum-pool-size: 10
+```
+
+```java
+@Configuration
+public class DataSourceConfig {
+    @Bean @Primary
+    @ConfigurationProperties("spring.datasource.primary")
+    DataSourceProperties primaryProps() { return new DataSourceProperties(); }
+
+    @Bean @Primary
+    @ConfigurationProperties("spring.datasource.primary.hikari")
+    DataSource primaryDataSource(DataSourceProperties props) {
+        return props.initializeDataSourceBuilder().type(HikariDataSource.class).build();
+    }
+
+    @Bean
+    @ConfigurationProperties("spring.datasource.analytics")
+    DataSourceProperties analyticsProps() { return new DataSourceProperties(); }
+
+    @Bean
+    @ConfigurationProperties("spring.datasource.analytics.hikari")
+    @Qualifier("analytics")
+    DataSource analyticsDataSource(@Qualifier("analyticsProps") DataSourceProperties props) {
+        return props.initializeDataSourceBuilder().type(HikariDataSource.class).build();
+    }
+}
+```
+
+`@Primary` Bean 이 자동 설정 (JPA, JdbcTemplate) 에 사용됨. `@Qualifier` 로 두 번째 선택.
+
+## JPA + 두 DB
+
+```java
+@Configuration
+@EnableJpaRepositories(
+    basePackages = "com.example.orders",
+    entityManagerFactoryRef = "primaryEmf",
+    transactionManagerRef = "primaryTm"
+)
+public class PrimaryJpaConfig {
+    @Bean @Primary
+    LocalContainerEntityManagerFactoryBean primaryEmf(
+            EntityManagerFactoryBuilder builder,
+            @Qualifier("primaryDataSource") DataSource ds) {
+        return builder.dataSource(ds)
+            .packages("com.example.orders")
+            .persistenceUnit("primary")
+            .build();
+    }
+
+    @Bean @Primary
+    PlatformTransactionManager primaryTm(@Qualifier("primaryEmf") EntityManagerFactory emf) {
+        return new JpaTransactionManager(emf);
+    }
+}
+
+@Configuration
+@EnableJpaRepositories(
+    basePackages = "com.example.analytics",
+    entityManagerFactoryRef = "analyticsEmf",
+    transactionManagerRef = "analyticsTm"
+)
+public class AnalyticsJpaConfig {
+    @Bean
+    LocalContainerEntityManagerFactoryBean analyticsEmf(
+            EntityManagerFactoryBuilder builder,
+            @Qualifier("analyticsDataSource") DataSource ds) {
+        return builder.dataSource(ds)
+            .packages("com.example.analytics")
+            .persistenceUnit("analytics")
+            .build();
+    }
+
+    @Bean
+    PlatformTransactionManager analyticsTm(@Qualifier("analyticsEmf") EntityManagerFactory emf) {
+        return new JpaTransactionManager(emf);
+    }
+}
+```
+
+각 entity 가 다른 패키지에 있어야. `@Repository` 도 각 패키지 안에.
+
+```java
+package com.example.orders;
+public interface OrderRepository extends JpaRepository<Order, Long> {}
+
+package com.example.analytics;
+public interface MetricRepository extends JpaRepository<Metric, Long> {}
+```
+
+## 서비스에서 사용
+
+```java
+@Service
+class ReportService {
+    private final OrderRepository orderRepo;
+    private final MetricRepository metricRepo;
+
+    @Transactional("primaryTm")
+    public void recordOrder(Order o) {
+        orderRepo.save(o);
+    }
+
+    @Transactional("analyticsTm")
+    public void recordMetric(Metric m) {
+        metricRepo.save(m);
+    }
+}
+```
+
+`@Transactional("name")` 으로 사용할 TransactionManager 명시. 두 DB 동시 변경은 별도 메서드로 분리 (각자 트랜잭션).
+
+## Read Replica (AbstractRoutingDataSource)
+
+쓰기: primary, 읽기: replica.
+
+```java
+public enum DbRouting { WRITE, READ }
+
+public class ReadWriteRoutingDataSource extends AbstractRoutingDataSource {
+    @Override
+    protected Object determineCurrentLookupKey() {
+        return TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+            ? DbRouting.READ : DbRouting.WRITE;
+    }
+}
+
+@Configuration
+public class RoutingConfig {
+    @Bean
+    DataSource routingDataSource(
+            @Qualifier("primaryDataSource") DataSource primary,
+            @Qualifier("replicaDataSource") DataSource replica) {
+        ReadWriteRoutingDataSource routing = new ReadWriteRoutingDataSource();
+        Map<Object, Object> targets = new HashMap<>();
+        targets.put(DbRouting.WRITE, primary);
+        targets.put(DbRouting.READ, replica);
+        routing.setTargetDataSources(targets);
+        routing.setDefaultTargetDataSource(primary);
+        return routing;
+    }
+
+    @Bean
+    DataSource lazyDataSource(DataSource routingDataSource) {
+        return new LazyConnectionDataSourceProxy(routingDataSource);
+    }
+}
+```
+
+`LazyConnectionDataSourceProxy` 가 중요: connection 획득을 첫 SQL 시점까지 지연. 그래야 `@Transactional(readOnly=true)` 가 readOnly flag 를 먼저 set 한 뒤 connection 가져옴.
+
+```java
+@Service
+class UserService {
+    @Transactional(readOnly = true)
+    public User findById(Long id) {       // replica 사용
+        return repo.findById(id).orElseThrow();
+    }
+
+    @Transactional                         // primary 사용
+    public User create(UserDto dto) {
+        return repo.save(new User(dto));
+    }
+}
+```
+
+## 분산 트랜잭션 (피하기)
+
+두 DB 동시 commit / rollback 보장은 **JTA 분산 트랜잭션** (XA). 복잡 + 성능 저하 + Atomikos 같은 별도 라이브러리. 거의 항상 피해야.
+
+대신:
+- **Outbox 패턴**: 한 DB 에 event 기록 → 별도 worker 가 다른 시스템에 publish
+- **Saga 패턴**: 분리된 트랜잭션 + 보상 트랜잭션
+- 양쪽 DB 가 같은 vendor 면 logical replication 검토
+
+## Multi-tenant 패턴
+
+### 패턴 1: tenant per DB
+
+```java
+public class TenantRoutingDataSource extends AbstractRoutingDataSource {
+    @Override
+    protected Object determineCurrentLookupKey() {
+        return TenantContext.current();   // ThreadLocal
+    }
+}
+```
+
+filter / interceptor 에서 tenant 결정:
+
+```java
+@Component
+public class TenantFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse resp, FilterChain chain) {
+        String tenant = req.getHeader("X-Tenant-Id");
+        TenantContext.set(tenant);
+        try { chain.doFilter(req, resp); }
+        finally { TenantContext.clear(); }
+    }
+}
+```
+
+### 패턴 2: tenant per schema (Hibernate 멀티 테넌시)
+
+```yaml
+spring:
+  jpa:
+    properties:
+      hibernate:
+        multiTenancy: SCHEMA
+        tenant_identifier_resolver: com.example.TenantResolver
+```
+
+같은 DB, 다른 schema. row-level 보다 격리 좋음.
+
+### 패턴 3: row-level (Discriminator)
+
+같은 schema, `tenant_id` 컬럼. 단순하지만 격리 약함.
+
+## HikariCP 튜닝 per DataSource
+
+```yaml
+spring:
+  datasource:
+    primary:
+      hikari:
+        maximum-pool-size: 30
+        minimum-idle: 5
+        connection-timeout: 3000
+        idle-timeout: 600000
+        max-lifetime: 1800000
+        leak-detection-threshold: 60000
+        validation-timeout: 3000
+```
+
+크기 공식: `pool_size = ((core_count × 2) + effective_spindle_count)` (PostgreSQL 권장). 너무 큰 pool 은 thrashing.
+
+## 함정과 베스트 프랙티스
+
+- **`@Primary` 명시 필수**: 자동 설정이 어느 걸 쓸지 알아야 함
+- **`@Transactional("name")` 으로 TM 선택**: default 가 `transactionManager`
+- **두 DB 동시 commit 보장 불가**: outbox / saga 패턴
+- **`LazyConnectionDataSourceProxy`**: read replica 라우팅에 필수
+- **`@Repository` 패키지 분리** (JPA): basePackages 가 충돌하면 안 됨
+- **HikariCP pool size**: per-DataSource 독립적으로 튜닝
+- **connection 누수 감지**: `leak-detection-threshold` 운영 켜기
+- **Flyway/Liquibase 분리**: 각 DB 별 migration 폴더
+- **테스트는 Testcontainers**: 진짜 분리 환경 검증
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-transaction]]
+- [[spring-jdbc-template]]
+- [[spring-boot-database-initialization]]
+- [[spring-jpa-persistence-context]]
+- [[spring-request-context]]

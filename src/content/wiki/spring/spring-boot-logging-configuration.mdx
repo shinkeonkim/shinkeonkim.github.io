@@ -1,0 +1,326 @@
+---
+title: "[Spring Boot] Logging: Logback, Log4j2, Structured Logging"
+aliases: ["Spring Boot Logging", "logback-spring.xml", "log4j2-spring.xml", "structured logging", "MDC Spring Boot", "JSON logging", "spring boot 로그 설정"]
+tags: [spring-boot, logging, logback, log4j2, observability, mdc]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Logging - https://docs.spring.io/spring-boot/reference/features/logging.html"
+---
+
+## 정의
+
+Spring Boot 의 기본 로거는 **Logback** (`spring-boot-starter` 가 자동 포함). SLF4J facade 위에서 동작.
+
+교체 가능:
+- `spring-boot-starter-log4j2`: Log4j2 (높은 처리량, async logger)
+- `java.util.logging`: 비권장
+- SLF4J adapter 로 commons-logging 흡수
+
+대부분 그대로 Logback 사용. 운영 환경에서는 **structured JSON 로깅** + **MDC** + **외부 수집기 (ELK, Loki, CloudWatch)** 와 조합.
+
+## 기본 application.yml 설정
+
+```yaml
+logging:
+  level:
+    root: INFO
+    com.example: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+  file:
+    name: ./logs/app.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 30
+      total-size-cap: 1GB
+      file-name-pattern: "./logs/app-%d{yyyy-MM-dd}.%i.log"
+```
+
+대부분 use case 는 yml 만으로 충분. xml 은 복잡한 패턴 / appender 필요할 때.
+
+## logback-spring.xml (고급)
+
+`src/main/resources/logback-spring.xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <property name="LOG_PATH" value="./logs"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/app.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/app-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>2048</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <appender-ref ref="FILE"/>
+    </appender>
+
+    <springProfile name="dev">
+        <root level="DEBUG">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="prod">
+        <root level="INFO">
+            <appender-ref ref="ASYNC_FILE"/>
+        </root>
+    </springProfile>
+</configuration>
+```
+
+핵심:
+- `<springProfile>` : profile 별 설정
+- `AsyncAppender` : I/O 가 핫 스레드 안 막음 (운영 권장)
+- `SizeAndTimeBasedRollingPolicy` : 크기 + 날짜 동시 rollover
+- `.gz` 확장자: 자동 압축
+
+## Structured JSON Logging (운영 권장)
+
+Plain text 로그는 grep 으로 분석. JSON 은 ELK / Loki / Datadog 같은 수집기가 native 파싱.
+
+### Spring Boot 3.4+ 내장 지원
+
+```yaml
+logging:
+  structured:
+    format:
+      console: ecs        # Elastic Common Schema
+      file: ecs
+```
+
+옵션: `ecs`, `gelf`, `logstash`. 코드 변경 없이 JSON 전환.
+
+### Logstash encoder (수동)
+
+```kotlin
+implementation("net.logstash.logback:logstash-logback-encoder:7.4")
+```
+
+```xml
+<appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+        <fieldNames>
+            <timestamp>@timestamp</timestamp>
+            <message>message</message>
+            <level>level</level>
+        </fieldNames>
+        <customFields>{"app":"my-app","env":"prod"}</customFields>
+        <includeMdc>true</includeMdc>
+    </encoder>
+</appender>
+```
+
+출력 예:
+
+```json
+{"@timestamp":"2026-06-23T10:00:00.123Z","level":"INFO","logger_name":"c.e.OrderService","thread_name":"http-nio-8080-exec-1","message":"order placed","app":"my-app","env":"prod","mdc":{"traceId":"abc123","userId":"42"}}
+```
+
+## MDC (Mapped Diagnostic Context)
+
+스레드별 컨텍스트 (request id, user id 등). 자동으로 모든 로그에 첨부:
+
+```java
+import org.slf4j.MDC;
+
+@Component
+public class MdcFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse resp, FilterChain chain)
+            throws IOException, ServletException {
+        MDC.put("requestId", UUID.randomUUID().toString());
+        MDC.put("clientIp", req.getRemoteAddr());
+        try {
+            chain.doFilter(req, resp);
+        } finally {
+            MDC.clear();   // 반드시 정리 (ThreadLocal 누수 방지)
+        }
+    }
+}
+```
+
+pattern 에서 사용:
+
+```
+pattern: "%d{HH:mm:ss.SSS} [%X{requestId}] %-5level %logger{36} - %msg%n"
+```
+
+`%X{key}` 가 MDC 값. 같은 요청의 모든 로그가 `requestId` 공유 → 추적 용이.
+
+## OpenTelemetry / Micrometer Tracing 통합
+
+Spring Boot 3+ 의 자동 통합:
+
+```yaml
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  endpoints:
+    web:
+      exposure:
+        include: prometheus
+```
+
+`traceId`, `spanId` 가 자동으로 MDC 에 추가. 모든 로그에 분산 추적 ID 첨부. Tempo / Jaeger / Zipkin 으로 수집.
+
+## @Async 와 MDC
+
+`@Async` 메서드는 별도 스레드 → MDC 비어 있음. `TaskDecorator` 로 복사:
+
+```java
+public class MdcCopyDecorator implements TaskDecorator {
+    @Override
+    public Runnable decorate(Runnable runnable) {
+        Map<String, String> context = MDC.getCopyOfContextMap();
+        return () -> {
+            try {
+                if (context != null) MDC.setContextMap(context);
+                runnable.run();
+            } finally {
+                MDC.clear();
+            }
+        };
+    }
+}
+
+@Bean
+TaskExecutor taskExecutor() {
+    ThreadPoolTaskExecutor exec = new ThreadPoolTaskExecutor();
+    exec.setTaskDecorator(new MdcCopyDecorator());
+    exec.initialize();
+    return exec;
+}
+```
+
+[[spring-request-context]] 참고.
+
+## Log4j2 교체
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter") {
+    exclude(module = "spring-boot-starter-logging")
+}
+implementation("org.springframework.boot:spring-boot-starter-log4j2")
+```
+
+`log4j2-spring.xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration>
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="%d{HH:mm:ss.SSS} %-5level [%t] %c{1} - %msg%n"/>
+        </Console>
+    </Appenders>
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+        </Root>
+    </Loggers>
+</Configuration>
+```
+
+Log4j2 장점:
+- async logger 가 logback 보다 빠름 (Disruptor 기반)
+- LMAX queue 로 zero allocation
+- 정형식 message: `logger.info("user {} placed order {}", userId, orderId)` 가 lazy 평가
+
+## 컨테이너 / K8s 환경
+
+```yaml
+logging:
+  pattern:
+    console: "%d{ISO8601} %-5level [%thread] %logger{36} - %msg%n"
+  level:
+    root: INFO
+  file:
+    name:    # 빈 값 = 파일 출력 비활성
+```
+
+K8s 패턴: **stdout 만 출력**. 컨테이너가 자체 수집 (Fluentd, Promtail). 파일 로깅 + sidecar 패턴은 deprecated.
+
+## 비밀번호 / 민감 정보 masking
+
+```java
+logger.info("Login attempt: user={}, password={}", username, password);   // ❌ 평문 노출
+```
+
+해결:
+- 로그 메시지에서 명시적으로 제외
+- `@JsonIgnore` (직렬화 시) + `@ToString.Exclude` (Lombok)
+- Logback 의 filter 로 정규식 마스킹
+
+```xml
+<appender name="MASKED" class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+    <pattern>%replace(%msg){'(password|ssn)=\\S+', '$1=***'}%n</pattern>
+</appender>
+```
+
+## 동적 log level 변경 (Actuator)
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: loggers
+```
+
+```bash
+# 현재 level 조회
+curl http://localhost:8080/actuator/loggers/com.example
+
+# 변경
+curl -X POST http://localhost:8080/actuator/loggers/com.example \
+  -H "Content-Type: application/json" \
+  -d '{"configuredLevel":"DEBUG"}'
+```
+
+재시작 없이 운영 중 디버그 토글. ([[spring-actuator]] 참고)
+
+## 함정과 베스트 프랙티스
+
+- **운영: structured JSON + 수집기**: plain text 분석은 한계
+- **MDC 는 try/finally 로 clear**: ThreadLocal 누수 방지
+- **`@Async` / virtual thread 와 MDC**: TaskDecorator 필수
+- **AsyncAppender 운영 권장**: I/O 가 핫 스레드 막지 않게
+- **password / secret 절대 로그 금지**: 정규식 마스킹 안전망
+- **개발: DEBUG, 운영: INFO/WARN**: profile 별 분리
+- **`<springProfile>` 활용**: logback xml 안에서 환경 분기
+- **컨테이너: stdout only**: 파일 / sidecar 패턴 deprecated
+- **로그 분산 추적 (traceId)** 가 modern 운영 표준
+
+## 관련 위키
+
+- [[spring-actuator]]
+- [[spring-request-context]]
+- [[spring-scheduling-async]]
+- [[java-threadlocal]]
+- [[spring-boot-properties-externalization]]
