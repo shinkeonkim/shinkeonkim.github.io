@@ -1,0 +1,335 @@
+---
+title: "[Rails] 쿼리 최적화: preload, eager_load, includes, references"
+aliases: ["Rails N+1", "preload", "eager_load", "includes", "references rails", "rails eager loading", "Active Record 쿼리 최적화", "Rails 쿼리 최적화"]
+tags: [rails, active-record, n-plus-one, performance, eager-loading]
+updated: 2026-06-23
+references:
+  - id: rails-guides
+    note: "Active Record Query Interface - https://guides.rubyonrails.org/active_record_querying.html#eager-loading-associations"
+  - id: rails-api
+    note: "ActiveRecord::QueryMethods - https://api.rubyonrails.org/classes/ActiveRecord/QueryMethods.html"
+  - title: "가론노미 블로그: Eager loading 으로 N+1 해결"
+    url: "https://garonnome.tistory.com/14"
+    note: "한국어 정리"
+---
+
+## 정의
+
+Active Record 는 연관 (`has_many`, `belongs_to`) 을 lazy 로딩한다. 부모 객체를 받아온 뒤 자식을 순회하면 자식마다 SELECT 가 1번씩 추가로 발생 = **N+1 문제**.
+
+Rails 의 해결 도구는 **세 가지 메서드** + 보조 메서드 1 개:
+
+| 메서드 | 동작 | 조건 사용 시 |
+|---|---|---|
+| `preload(:assoc)` | 항상 **2개의 분리된 쿼리** (parent 한 번 + child IN 한 번) | 연관 테이블 조건 **불가** |
+| `eager_load(:assoc)` | 항상 **1개의 LEFT OUTER JOIN** 쿼리 | 연관 테이블 조건 가능 |
+| `includes(:assoc)` | 상황에 따라 **preload 또는 eager_load 자동 선택** | 조건 추가 시 자동 eager_load |
+| `references(:assoc)` | `includes` 와 조합, 강제 eager_load | 보조 |
+
+## N+1 시나리오
+
+```ruby
+class School < ApplicationRecord
+  has_many :teachers
+end
+
+class Teacher < ApplicationRecord
+  belongs_to :school
+end
+```
+
+```ruby
+School.all.each do |school|
+  school.teachers.each do |teacher|
+    puts "#{school.name} : #{teacher.name}"
+  end
+end
+```
+
+발생 SQL:
+
+```sql
+SELECT * FROM schools;                                          -- 1번
+SELECT * FROM teachers WHERE school_id = 1;                     -- N번
+SELECT * FROM teachers WHERE school_id = 2;
+...
+```
+
+school 5개면 6 쿼리, 100개면 101 쿼리. 트랜잭션 응답시간 폭발.
+
+## preload: 별도 2 쿼리
+
+```ruby
+School.preload(:teachers)
+```
+
+```sql
+SELECT * FROM schools;
+SELECT * FROM teachers WHERE school_id IN (1, 2, 3, 4, 5);
+```
+
+**항상 2 개의 쿼리**. 부모 한 번, 자식 IN 한 번. row 가 부모 수와 동일 (중복 없음).
+
+**제약**: 연관 테이블의 컬럼을 조건절에 사용 불가.
+
+```ruby
+# ❌ Error: column teachers.name does not exist
+School.preload(:teachers).where('teachers.name = ?', '홍길동')
+```
+
+자기 자신 (선행 모델) 조건은 OK:
+
+```ruby
+School.preload(:teachers).where(name: '루비 고등학교')
+```
+
+`preload` 가 적합:
+- 자식 데이터 양이 많을 때 (JOIN 시 부모 row 복제로 메모리 폭발 방지)
+- 자식 컬럼 검색 필요 없을 때
+- 카르테시안 곱 회피
+
+## eager_load: LEFT OUTER JOIN 단일 쿼리
+
+```ruby
+School.eager_load(:teachers).where('teachers.name = ?', '홍길동').to_a
+```
+
+```sql
+SELECT "schools"."id" AS t0_r0, "schools"."name" AS t0_r1,
+       "teachers"."id" AS t1_r0, "teachers"."name" AS t1_r1, "teachers"."school_id" AS t1_r2
+FROM "schools"
+LEFT OUTER JOIN "teachers" ON "teachers"."school_id" = "schools"."id"
+WHERE "teachers"."name" = '홍길동';
+```
+
+**1 개의 LEFT OUTER JOIN 쿼리**. 연관 테이블 조건 가능.
+
+**제약**: 부모 row 가 자식 수만큼 곱해진다. school 5 개에 teacher 평균 20 명이면 100 row 반환 → Active Record 가 메모리에서 dedup. 큰 데이터에선 메모리 부담.
+
+`eager_load` 가 적합:
+- 연관 테이블 조건 필요
+- 자식 수가 적을 때
+- JOIN 으로 한 번에 모든 데이터 가져오는 게 효율적인 경우
+
+## includes: 자동 선택
+
+```ruby
+School.includes(:teachers)
+```
+
+조건절 없으면 **preload 처럼** 동작 (2 쿼리):
+
+```sql
+SELECT * FROM schools;
+SELECT * FROM teachers WHERE school_id IN (1, 2, 3, 4, 5);
+```
+
+조건절 추가하면 자동으로 **eager_load 처럼** 동작 (JOIN):
+
+```ruby
+School.includes(:teachers).where('teachers.name = ?', '홍길동')
+```
+
+```sql
+SELECT "schools"."id" AS t0_r0, ..., "teachers"."name" AS t1_r1
+FROM "schools" LEFT OUTER JOIN "teachers" ON ...
+WHERE "teachers"."name" = '홍길동';
+```
+
+`includes` 가 가장 권장. Rails 가 자동으로 최적 선택.
+
+## references: 강제 eager_load
+
+조건이 string 이 아닌 hash 라 includes 가 detect 못 할 때 강제:
+
+```ruby
+School.includes(:teachers).where(teachers: { name: '홍길동' })
+# → Rails 4+ 자동 detect, JOIN 사용
+```
+
+명시적으로 강제:
+
+```ruby
+School.includes(:teachers).references(:teachers)
+# → 조건 없어도 JOIN 사용
+```
+
+복잡한 동적 query 빌딩에서 안전망.
+
+## 다중 / 중첩 연관
+
+```ruby
+# 다중
+Post.includes(:author, :comments)
+
+# 중첩 (post → comments → user)
+Post.includes(comments: :user)
+
+# 깊은 중첩
+Post.includes(author: { posts: :comments }, comments: :user)
+```
+
+`preload`, `eager_load` 도 동일 문법.
+
+중첩 깊을수록 JOIN 폭발 위험. 깊은 nested 는 `preload` 로 단계 분리가 안전.
+
+## bullet gem 으로 자동 감지
+
+```ruby
+# Gemfile
+group :development do
+  gem 'bullet'
+end
+```
+
+```ruby
+# config/environments/development.rb
+config.after_initialize do
+  Bullet.enable = true
+  Bullet.alert = true
+  Bullet.bullet_logger = true
+  Bullet.console = true
+  Bullet.rails_logger = true
+  Bullet.add_footer = true
+end
+```
+
+N+1 발생 시 자동 로그 + UI footer 표시. CI 에서 `Bullet.raise = true` 로 실패시킬 수도.
+
+## strict_loading (Rails 6.1+)
+
+```ruby
+class School < ApplicationRecord
+  has_many :teachers, strict_loading: true
+end
+
+school = School.find(1)
+school.teachers.to_a   # ❌ ActiveRecord::StrictLoadingViolationError
+```
+
+연관 lazy 접근을 컴파일 타임처럼 차단. preload / includes 없으면 즉시 에러. 의도하지 않은 N+1 방지.
+
+```ruby
+School.strict_loading.find(1)             # 인스턴스별
+config.active_record.strict_loading_by_default = true   # 전역 (개발 / 테스트)
+```
+
+## counter_cache: count 의 N+1
+
+```ruby
+# ❌ 매 school 마다 COUNT 쿼리
+School.all.each { |s| puts s.teachers.count }
+```
+
+`counter_cache` 로 부모에 카운트 컬럼:
+
+```ruby
+class Teacher < ApplicationRecord
+  belongs_to :school, counter_cache: true
+end
+
+# 마이그레이션
+add_column :schools, :teachers_count, :integer, default: 0
+# 기존 데이터 재계산
+School.reset_counters(school.id, :teachers)
+```
+
+`school.teachers.count` → `school.teachers_count` 컬럼 직접 read. 자식 create / destroy 시 자동 갱신.
+
+대규모 동시 INSERT 시 row lock 경합 주의. 절대값 정확성 critical 아니면 `counter_cache: true` 권장.
+
+## 자주 보는 함정
+
+### 1. find vs find_by + includes
+
+```ruby
+# ❌ find_by 가 includes 무시
+School.includes(:teachers).find_by(id: 1)
+
+# ✓
+School.includes(:teachers).where(id: 1).first
+```
+
+(Rails 7+ 에서 일부 개선됐지만 안전한 패턴 권장)
+
+### 2. uniq / distinct 후 includes
+
+```ruby
+# JOIN 결과의 row 중복 제거하면서 preload 가 깨질 수 있음
+School.includes(:teachers).distinct
+```
+
+Rails 가 알아서 처리하지만 가끔 의도와 다른 row count. 명시적으로 분리:
+
+```ruby
+school_ids = School.joins(:teachers).distinct.pluck(:id)
+School.where(id: school_ids).includes(:teachers)
+```
+
+### 3. select 와 함께
+
+`select` 로 부분 컬럼만 가져올 때 연관 FK 누락 주의:
+
+```ruby
+# ❌ school_id 가 select 에 없으면 teachers 매칭 불가
+Teacher.select(:name).includes(:school)   # error
+```
+
+### 4. polymorphic + includes
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :commentable, polymorphic: true
+end
+
+# polymorphic 은 type 마다 다른 테이블 → JOIN 불가
+Comment.includes(:commentable)   # preload 강제됨
+```
+
+자동으로 preload 만 사용 (JOIN 불가). 의도 그대로.
+
+### 5. scope 와 조합
+
+```ruby
+class Post < ApplicationRecord
+  scope :published, -> { where(published: true) }
+end
+
+# scope 가 includes / preload 안에 작동
+User.includes(:posts).merge(Post.published)
+```
+
+`merge` 로 scope 결합.
+
+## 성능 측정
+
+```ruby
+# 쿼리 수 측정
+expect do
+  User.includes(:posts).each { |u| u.posts.size }
+end.to make_database_queries(count: 2)   # rspec-rails-shoulda matchers
+
+# 로그
+ActiveRecord::Base.logger = Logger.new(STDOUT)
+# 또는 .logger.level = Logger::DEBUG
+```
+
+## 베스트 프랙티스
+
+- **기본은 `includes`**: Rails 가 알아서 최적 선택
+- **조건 없으면 의도 명확히 `preload`**: 부모 row 중복 회피
+- **연관 테이블 조건 + 작은 결과면 `eager_load`** 또는 `includes + references`
+- **bullet gem 개발 환경에 필수**
+- **Rails 6.1+ 면 `strict_loading` 적극 활용**: 의도 안 한 lazy 차단
+- **count 가 자주 발생하면 `counter_cache`**
+- **체이닝 길어지면 별도 query 로 분리**: 가독성 + 성능 모두 개선
+- **EXPLAIN ANALYZE** 로 실제 plan 확인 (`.explain`)
+
+## 관련 위키
+
+- [[ruby-on-rails]]
+- [[rails-activerecord-basics]]
+- [[rails-activerecord-associations]]
+- [[spring-jpa-fetch-type]]
+- [[jpa-rails-eager-comparison]]
+- [[spring-data-jpa]]
