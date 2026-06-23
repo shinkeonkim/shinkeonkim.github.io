@@ -2,6 +2,7 @@
 title: "[JPA] CascadeType과 orphanRemoval"
 aliases: ["JPA Cascade", "CascadeType", "orphanRemoval", "고아 객체 제거", "PERSIST cascade", "REMOVE cascade", "ALL cascade"]
 tags: [jpa, hibernate, cascade, orphan-removal, entity-relationship]
+category: spring
 updated: 2026-06-23
 references:
   - title: "Jakarta Persistence 3.1 - Cascade"
@@ -195,6 +196,115 @@ public void update(Post detached) {
 | 컬렉션에서 빠지면 자식 DELETE | - | true |
 | 부모 = aggregate root, 자식은 독립 의미 없음 | ALL | true |
 | 외래키만 공유하는 독립 entity (User, Category) | (없음) | false |
+
+## 시나리오별 선택
+
+### 시나리오 1: Order ↔ OrderItem (소유 관계)
+
+OrderItem 은 Order 없이는 의미 없음. Order 삭제 → OrderItem 삭제 자연스러움. 컬렉션에서 빼면 DB 에서도 삭제.
+
+```java
+@Entity
+class Order {
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    List<OrderItem> items = new ArrayList<>();
+}
+```
+
+`cascade = ALL` + `orphanRemoval = true` 조합. DDD aggregate root 패턴.
+
+### 시나리오 2: Post ↔ Comment (느슨한 소유)
+
+Comment 도 Post 종속이지만 한 번에 삭제하기엔 너무 많을 수 있음 (수십만 댓글). 대용량 환경:
+
+```java
+@Entity
+class Post {
+    @OneToMany(mappedBy = "post", cascade = {PERSIST, MERGE})   // REMOVE 제외
+    List<Comment> comments = new ArrayList<>();
+}
+```
+
+Post 삭제 시 별도 batch / soft delete 패턴 사용. cascade REMOVE 면 트랜잭션이 거대해짐.
+
+### 시나리오 3: Post ↔ Tag (다대다, 독립 entity)
+
+Tag 는 여러 Post 가 공유. Post 삭제해도 Tag 살아야:
+
+```java
+@Entity
+class Post {
+    @ManyToMany   // cascade 없음
+    @JoinTable(name = "post_tag")
+    Set<Tag> tags = new HashSet<>();
+}
+```
+
+조인 테이블 row 만 정리됨. Tag 자체는 보존.
+
+### 시나리오 4: Book ↔ BookCover (1:1 소유)
+
+```java
+@Entity
+class Book {
+    @OneToOne(mappedBy = "book", cascade = ALL, orphanRemoval = true, fetch = LAZY, optional = false)
+    BookCover cover;
+}
+```
+
+`optional = false` + bytecode enhancement 로 LAZY 도 작동.
+
+### 시나리오 5: User ↔ Profile (1:1, 분리 가능)
+
+Profile 이 별도 의미 있으면 cascade 제한적:
+
+```java
+@Entity
+class User {
+    @OneToOne(mappedBy = "user", cascade = PERSIST)   // 자동 저장만, 삭제는 명시적
+    Profile profile;
+}
+```
+
+### 시나리오 6: 양방향 동기화 편의 메서드
+
+cascade 가 작동하려면 컬렉션 조작도 일관성 있게:
+
+```java
+@Entity
+class Order {
+    @OneToMany(mappedBy = "order", cascade = ALL, orphanRemoval = true)
+    List<OrderItem> items = new ArrayList<>();
+
+    public void addItem(Product product, int qty) {
+        OrderItem item = new OrderItem(this, product, qty);
+        items.add(item);    // 양방향 동기화
+    }
+
+    public void removeItem(OrderItem item) {
+        items.remove(item);
+        item.detachFromOrder();   // orphan 으로 만들기
+    }
+
+    public void clearItems() {
+        // ❌ items = new ArrayList<>() → 전체 orphan, 폭탄 INSERT
+        // ✓
+        items.clear();
+    }
+}
+```
+
+### 시나리오 7: 벌크 삭제는 cascade 우회
+
+```java
+// JPQL 벌크 삭제는 cascade 무시
+em.createQuery("DELETE FROM Order WHERE createdAt < :date")
+  .setParameter("date", oneYearAgo)
+  .executeUpdate();
+// → OrderItem 은 그대로 남음! 외래키 위반.
+```
+
+해결: 자식 먼저 삭제하거나 native SQL + ON DELETE CASCADE 사용.
 
 ## 자주 보는 패턴
 
