@@ -1,0 +1,272 @@
+---
+title: "[Spring Boot] YAML Configuration: multi-document, profiles"
+aliases: ["Spring Boot YAML", "application.yml syntax", "YAML profile spring", "YAML anchor", "spring config import", "스프링 YAML 설정"]
+tags: [spring-boot, yaml, configuration, profiles]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "YAML in Spring Boot - https://docs.spring.io/spring-boot/reference/features/external-config.html#features.external-config.yaml"
+---
+
+## 정의
+
+Spring Boot 의 설정 파일 형식. `application.properties` 와 `application.yml` 모두 지원. YAML 이 계층 / list / map / multi-document 표현이 자연스러워 권장.
+
+같은 디렉토리에 둘 다 있으면 properties 가 우선. 보통 하나만 사용.
+
+## 기본 구조
+
+```yaml
+spring:
+  application:
+    name: my-app
+  datasource:
+    url: jdbc:postgresql://localhost/db
+    username: app
+    pool:
+      max-size: 20
+      min-idle: 5
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+logging:
+  level:
+    com.example: DEBUG
+
+app:
+  feature:
+    new-checkout: true
+    max-cart-items: 50
+```
+
+들여쓰기 = 2 space. tab 금지.
+
+## List
+
+```yaml
+spring:
+  profiles:
+    active:
+      - web
+      - dev
+# 또는 inline
+spring.profiles.active: [web, dev]
+```
+
+`@ConfigurationProperties` 의 `List<T>` 자동 매핑.
+
+## Map
+
+```yaml
+app:
+  features:
+    new-checkout: true
+    legacy-cart: false
+    rate-limit: 100
+```
+
+```java
+@ConfigurationProperties(prefix = "app")
+public class AppProps {
+    private Map<String, Object> features;
+}
+```
+
+## Multi-document (한 파일에 profile)
+
+```yaml
+spring:
+  application:
+    name: my-app
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+server:
+  port: 8080
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+server:
+  port: 80
+```
+
+`---` 가 document separator. `spring.config.activate.on-profile` 가 modern 문법 (Spring Boot 2.4+).
+
+## 별도 파일 (profile-specific)
+
+```
+src/main/resources/
+├── application.yml          ← 공통
+├── application-dev.yml      ← dev
+├── application-prod.yml     ← prod
+├── application-test.yml     ← test
+└── application-local.yml    ← 개인 로컬 (gitignore)
+```
+
+활성화: `SPRING_PROFILES_ACTIVE=dev` 또는 `--spring.profiles.active=dev`.
+
+## ${VAR} vs @var@
+
+```yaml
+app:
+  version: @project.version@   # build 타임 (Maven/Gradle resource filtering)
+  user: ${USER:default}        # 런타임 (환경 변수 또는 default)
+  secret: ${random.value}      # Spring Boot built-in
+  nested: ${app.user}-suffix   # 다른 property 참조
+```
+
+`@var@` : build tool 이 치환. `${var}` : Spring Boot 의 PropertyPlaceholder.
+
+## Multiline 문자열
+
+```yaml
+# literal (개행 유지)
+description: |
+  Line 1
+  Line 2
+  Line 3
+
+# folded (개행 → 공백)
+description: >
+  This is a long
+  description that
+  becomes single line.
+```
+
+## YAML 함정
+
+```yaml
+debug: yes               # ❌ deprecated YAML 1.2: string "yes"
+debug: true              # ✓ boolean
+
+unused: ~                # null
+unused: null             # null
+unused:                  # null
+unused: ""               # 빈 문자열
+
+big: 1_000_000           # 가독성 (Spring Boot 3+)
+
+url: "jdbc:postgresql://host:5432/db?ssl=true"   # 특수문자 quote
+```
+
+`yes` / `no` 는 YAML 1.2 부터 boolean 아님. `true` / `false` 명시.
+
+## spring.config.import
+
+다른 파일 / 외부 소스:
+
+```yaml
+spring:
+  config:
+    import:
+      - "classpath:database.yml"
+      - "optional:file:./config/local.yml"
+      - "configtree:/run/secrets/"      # K8s secrets
+      - "vault://"
+      - "configserver:http://config:8888"
+```
+
+- `optional:` : 없어도 OK
+- `configtree:` : 디렉토리 = 각 파일이 property 키 (K8s secret 마운트)
+
+## OS 환경 변수 default
+
+```yaml
+spring:
+  datasource:
+    url: ${DATABASE_URL:jdbc:h2:mem:devdb}
+    username: ${DB_USER:admin}
+    password: ${DB_PASSWORD:}
+```
+
+Docker / K8s 환경에서 일반적.
+
+## 실전 패턴
+
+### 패턴 1: profile + override
+
+```yaml
+spring:
+  profiles:
+    active: ${APP_ENV:dev}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+server.port: 8080
+spring.datasource.url: jdbc:h2:mem:devdb
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+server.port: 80
+spring.datasource.url: ${PROD_DB_URL}
+```
+
+### 패턴 2: 환경 변수만
+
+```yaml
+spring:
+  datasource:
+    url: ${DATABASE_URL:jdbc:h2:mem:devdb}
+    password: ${DB_PASSWORD}
+```
+
+profile 없이 환경 변수로만 분기. 12-factor 권장.
+
+### 패턴 3: 외부 파일 import
+
+```yaml
+spring:
+  config:
+    import: "optional:file:./config/env.yml"
+```
+
+배포 시 `config/env.yml` 만 교체.
+
+## 검증
+
+```bash
+# Actuator
+curl http://localhost:8080/actuator/configprops
+curl http://localhost:8080/actuator/env
+```
+
+또는 시작 로그에 `spring.config.import` 로 어떤 파일이 로드됐는지 확인.
+
+## 함정과 베스트 프랙티스
+
+- **들여쓰기 2 space**, tab 금지
+- **`yes`/`no` boolean 안 됨**: `true`/`false` 명시
+- **secret 은 yml 평문 금지**: 환경 변수 / secret manager
+- **`@ConfigurationProperties` + processor**: IDE 자동완성
+- **`spring.config.import`** 가 modern
+- **multi-document** vs 별도 파일: 가독성에 따라
+- **default profile**: `spring.profiles.default=dev`
+- **profile 그룹**: `spring.profiles.group.staging=cloud,monitoring`
+- **kebab-case 권장**
+
+## 관련 위키
+
+- [[spring-boot-properties-externalization]]
+- [[spring-boot-autoconfig]]
+- [[spring-conditional]]
+- [[spring-cloud]]
