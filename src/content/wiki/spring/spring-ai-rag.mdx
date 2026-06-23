@@ -1,0 +1,309 @@
+---
+title: "[Spring AI] RAG: Embedding, VectorStore, QuestionAnswerAdvisor"
+aliases: ["Spring AI RAG", "Embedding", "EmbeddingModel", "VectorStore", "PgVector", "Chroma", "QuestionAnswerAdvisor", "DocumentReader", "ETL pipeline"]
+tags: [spring, spring-ai, rag, embedding, vector-store, retrieval]
+updated: 2026-06-23
+references:
+  - title: "Spring AI RAG"
+    url: "https://docs.spring.io/spring-ai/reference/api/retrieval-augmented-generation.html"
+    note: "공식 RAG 가이드"
+  - title: "Spring AI Vector Stores"
+    url: "https://docs.spring.io/spring-ai/reference/api/vectordbs.html"
+    note: "VectorStore implementations"
+---
+
+## 정의
+
+**RAG (Retrieval Augmented Generation)** 는 LLM 의 지식 한계 (학습 cutoff, 사내 문서 부재) 를 극복하기 위해, 질문 시점에 **외부 지식 베이스에서 관련 문서 검색** → **prompt 에 첨부** → **LLM 호출** 하는 패턴.
+
+Spring AI 의 핵심 컴포넌트:
+- **`EmbeddingModel`**: 텍스트 → 벡터 (보통 1536 차원). OpenAI text-embedding-3-small / large 등
+- **`VectorStore`**: 벡터 인덱싱 + 유사도 검색 (PgVector, Chroma, Redis, Pinecone, Weaviate, Qdrant, Milvus, MongoDB Atlas)
+- **`Document`**: 텍스트 + 메타데이터 chunk
+- **`DocumentReader` / `DocumentTransformer` / `DocumentWriter`**: ETL 파이프라인
+- **`QuestionAnswerAdvisor`**: ChatClient 에 RAG 통합 (검색 + context 첨부 자동화)
+
+`spring-ai-overview` 가 ChatClient 기본을 다룬다면, 이 페이지는 벡터 검색 기반 RAG 의 ETL + 질의 파이프라인을 다룬다.
+
+## RAG 의 두 단계
+
+```
+[INDEXING (배치)]
+원본 문서 → DocumentReader → 청크 분할 → EmbeddingModel → VectorStore
+       (PDF, MD, HTML)    (DocumentSplitter)  (1536차원 벡터)   (인덱스)
+
+[QUERY (런타임)]
+사용자 질문 → EmbeddingModel → 유사도 top-k 검색 → 관련 청크 → ChatClient → LLM 응답
+        (1벡터)            (cosine sim)        (3-5개)
+```
+
+## 의존성
+
+```kotlin
+implementation("org.springframework.ai:spring-ai-openai-spring-boot-starter:1.0.0")
+implementation("org.springframework.ai:spring-ai-pgvector-store-spring-boot-starter:1.0.0")
+// 또는 -chroma-store-, -redis-store-, -pinecone-store-, -weaviate-store-, -qdrant-store-, -milvus-store-
+```
+
+```yaml
+spring:
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      embedding:
+        options:
+          model: text-embedding-3-small
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1536
+  datasource:
+    url: jdbc:postgresql://localhost/aidb
+```
+
+PgVector 는 PostgreSQL 의 `pgvector` extension. `CREATE EXTENSION vector` 한 번 실행하면 끝.
+
+## Indexing 파이프라인
+
+```java
+@Service
+class IndexingService {
+    private final VectorStore vectorStore;
+    private final EmbeddingModel embeddingModel;   // 자동 주입
+
+    public void ingest(Path file) {
+        // 1. Read
+        DocumentReader reader = new TikaDocumentReader(file.toUri().toString());
+        List<Document> raw = reader.get();
+
+        // 2. Split (chunking)
+        TokenTextSplitter splitter = new TokenTextSplitter(800, 350, 5, 10000, true);
+        List<Document> chunks = splitter.apply(raw);
+
+        // 3. Enrich (선택)
+        KeywordMetadataEnricher enricher = new KeywordMetadataEnricher(chatModel, 5);
+        chunks = enricher.apply(chunks);
+
+        // 4. Write (embedding 자동 + 저장)
+        vectorStore.add(chunks);   // 내부적으로 EmbeddingModel 호출 → INSERT
+    }
+}
+```
+
+Document reader 종류:
+- `TikaDocumentReader`: PDF, DOCX, PPTX, HTML, MD 등 (Apache Tika)
+- `JsonReader`: JSON 배열
+- `TextReader`: plain text
+- `MarkdownDocumentReader`: 마크다운 (heading 별 chunk)
+
+Splitter 옵션:
+- `TokenTextSplitter`: 토큰 단위 (LLM tokenizer 기반)
+- `DocumentByCharacterSplitter`: 문자 단위
+- `DocumentBySentenceSplitter`: 문장 단위
+
+## Query 와 QuestionAnswerAdvisor
+
+가장 간단한 RAG:
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="응답"
+  code={`@RestController
+class DocsAssistant {
+    private final ChatClient chatClient;
+
+    DocsAssistant(ChatClient.Builder b, VectorStore vs) {
+        this.chatClient = b
+            .defaultAdvisors(new QuestionAnswerAdvisor(vs,
+                SearchRequest.builder().topK(5).similarityThreshold(0.75).build()))
+            .build();
+    }
+
+    @GetMapping("/ask")
+    public String ask(@RequestParam String q) {
+        return chatClient.prompt()
+            .user(q)
+            .call()
+            .content();
+    }
+}`}
+  output={`GET /ask?q=spring AI 의 ChatMemory 종류는?
+
+→ "Spring AI 는 InMemoryChatMemory, JdbcChatMemory,
+   CassandraChatMemory, RedisChatMemory, Neo4jChatMemory 를
+   제공합니다 [doc:chat-memory.md]."`}
+/>
+
+`QuestionAnswerAdvisor` 가 자동으로:
+1. 사용자 질문을 임베딩
+2. VectorStore 에서 top-K 유사 문서 검색
+3. 검색 결과를 prompt 에 context 로 첨부
+4. LLM 호출 → 응답
+5. 응답 객체에 출처 (citations) 메타데이터 첨부
+
+## 수동 검색 (advisor 없이)
+
+advisor 가 자동화하는 것을 명시적으로:
+
+```java
+@Service
+class ManualRag {
+    private final VectorStore vectorStore;
+    private final ChatClient chatClient;
+
+    public String ask(String question) {
+        List<Document> docs = vectorStore.similaritySearch(
+            SearchRequest.builder()
+                .query(question)
+                .topK(5)
+                .similarityThreshold(0.7)
+                .filterExpression("category == 'spring-docs'")
+                .build()
+        );
+
+        String context = docs.stream()
+            .map(Document::getText)
+            .collect(Collectors.joining("\n\n---\n\n"));
+
+        return chatClient.prompt()
+            .system("주어진 컨텍스트에 기반해서만 답변하세요. 모르면 모른다고 답하세요.")
+            .user(u -> u.text("컨텍스트:\n{context}\n\n질문: {q}")
+                .param("context", context)
+                .param("q", question))
+            .call()
+            .content();
+    }
+}
+```
+
+수동의 장점: filter 표현식, hybrid 검색 (vector + keyword), 점수 가중치 조정 등 세밀 제어. advisor 는 80% 사용 사례를 한 줄로.
+
+## Metadata Filtering
+
+```java
+List<Document> filtered = vectorStore.similaritySearch(
+    SearchRequest.builder()
+        .query("OAuth2 설정 방법")
+        .filterExpression("source == 'spring-security-docs' && version >= 6")
+        .topK(3)
+        .build()
+);
+```
+
+SQL-like 표현식 (`==`, `!=`, `>`, `IN`, `&&`, `||`, `NOT`). 색인 시 메타데이터를 명시:
+
+```java
+Document d = new Document("Security 설정 가이드 ...",
+    Map.of("source", "spring-security-docs", "version", 6, "category", "auth"));
+vectorStore.add(List.of(d));
+```
+
+## VectorStore 비교
+
+| Store | 운영 환경 | 특징 |
+|---|---|---|
+| `PgVector` | PostgreSQL extension | DBA 친숙, ACID, 기존 PG 인프라 재사용 |
+| `Redis` | Redis Stack | 빠른 검색, in-memory, persistence 가능 |
+| `Chroma` | 단독 Python/Docker | dev 편의, embedded 가능 |
+| `Pinecone` | SaaS 만 | scale, managed, 비용 |
+| `Weaviate` | self-host / cloud | hybrid 검색 (BM25 + vector) |
+| `Qdrant` | Rust 기반 | 빠름, filtering 강력 |
+| `Milvus` | 대규모 | 수십억 벡터, GPU 지원 |
+| `MongoDB Atlas` | Atlas 만 | 기존 MongoDB 와 통합 |
+
+소규모 ~ 중규모: PgVector. 대규모 / 빠른 검색: Qdrant / Milvus. SaaS: Pinecone.
+
+## Advanced: Hybrid Search
+
+vector + keyword 결합:
+
+```java
+List<Document> results = vectorStore.similaritySearch(
+    SearchRequest.builder()
+        .query("Spring AI tool calling")
+        .topK(10)
+        .build()
+);
+
+// Reciprocal Rank Fusion 또는 keyword filter 결합
+List<Document> filtered = results.stream()
+    .filter(d -> d.getText().toLowerCase().contains("tool"))
+    .toList();
+```
+
+Weaviate, Qdrant 는 native hybrid 지원. PgVector 는 `tsvector` 컬럼 + 별도 합산.
+
+## Re-ranking
+
+top-K 검색 결과를 더 정확한 모델 (Cohere Rerank, jina-reranker) 로 재정렬:
+
+```java
+List<Document> initial = vectorStore.similaritySearch(... topK=20 ...);
+List<Document> reranked = rerankerClient.rerank(query, initial).stream()
+    .limit(5)
+    .toList();
+```
+
+Cost / latency 증가하지만 답변 품질 크게 개선.
+
+## Streaming RAG
+
+`ChatClient.stream()` 와 결합:
+
+```java
+Flux<String> answer = chatClient.prompt()
+    .advisors(spec -> spec.advisors(new QuestionAnswerAdvisor(vs)))
+    .user(question)
+    .stream()
+    .content();
+```
+
+검색은 단발, 응답만 토큰 스트림.
+
+## ETL 배치 패턴
+
+대량 문서 인덱싱은 `spring-batch` ([[spring-batch]]) 와 자연스럽게 통합:
+
+```java
+@Configuration
+class IndexingJobConfig {
+    @Bean
+    Job indexingJob(JobRepository repo, Step ingestStep) {
+        return new JobBuilder("indexing", repo).start(ingestStep).build();
+    }
+
+    @Bean
+    Step ingestStep(JobRepository r, PlatformTransactionManager tx,
+                    ItemReader<Path> reader, ItemWriter<Document> writer) {
+        return new StepBuilder("ingest", r)
+            .<Path, Document>chunk(50, tx)
+            .reader(reader)
+            .processor(this::readAndSplit)
+            .writer(writer)
+            .build();
+    }
+
+    Document readAndSplit(Path p) { ... }
+}
+```
+
+## 함정과 베스트 프랙티스
+
+- **chunk size 350~800 토큰 권장**: 너무 작으면 context 부족, 크면 검색 정확도 ↓
+- **chunk overlap 50~100 토큰**: 문맥 단절 방지
+- **embedding model 일관성**: indexing 과 query 가 다른 모델이면 좌표계가 달라 검색 망가짐
+- **similarity threshold 튜닝**: 0.7~0.8 시작, 도메인에 따라 조정. 너무 높으면 결과 없음 위험
+- **citations 표시**: LLM 응답에 출처 (메타데이터) 함께 표시 = hallucination 감지
+- **stale data 처리**: 원본 문서 갱신 시 기존 청크 삭제 + 재인덱싱
+- **embedding cost**: text-embedding-3-small 도 대량 색인 시 비용. 캐싱 또는 self-host (instructor-xl) 검토
+- **PII / 민감 데이터 색인 금지**: vector store 에 들어가면 검색에 노출
+
+## 관련 위키
+
+- [[spring-ai-overview]]
+- [[spring-batch]]
+- [[spring-data-jpa]]
+- [[spring-cache]]
+- [[spring-actuator]]

@@ -1,0 +1,307 @@
+---
+title: "[Spring AI] 개요: ChatClient, ChatModel, Prompt"
+aliases: ["Spring AI", "ChatClient", "ChatModel", "Prompt", "PromptTemplate", "spring ai overview", "스프링 AI"]
+tags: [spring, spring-ai, llm, ai, chatgpt]
+updated: 2026-06-23
+references:
+  - title: "Spring AI Reference"
+    url: "https://docs.spring.io/spring-ai/reference/"
+    note: "공식 레퍼런스"
+  - title: "Spring AI GitHub"
+    url: "https://github.com/spring-projects/spring-ai"
+    note: "소스 / 예제 / 릴리스 노트"
+---
+
+## 정의
+
+**Spring AI** 는 LLM (OpenAI, Anthropic, Vertex AI, Bedrock, Ollama 등) 을 Spring 스타일로 사용하게 해 주는 abstraction. 2024 년 GA (1.0), 2025-2026 년에 1.x 안정 시리즈 진행 중.
+
+핵심 추상화:
+- **`ChatClient`**: 고수준 API, fluent DSL, advisor / tool / structured output 통합
+- **`ChatModel`**: 저수준 API, 단일 호출, provider-specific tuning
+- **`Prompt` / `PromptTemplate`**: 메시지 + system / user / assistant role
+- **`Embedding` / `VectorStore`**: RAG 의 양대 기반 (별도 페이지: [[spring-ai-rag]])
+- **`Advisor`**: ChatClient 호출 chain 에 끼어드는 plugin (RAG, 로깅, safe guard)
+- **`@Tool`**: function calling, 모델이 자바 메서드를 직접 호출
+- **`ChatMemory`**: 대화 이력 관리
+
+LangChain4j 와 경쟁. Spring 사용자라면 통합 (`@SpringBootApplication`, `@Autowired`, 자동 설정) 측면에서 Spring AI 가 자연스러움.
+
+## 의존성
+
+```kotlin
+// build.gradle.kts (Spring Boot 3.3+)
+implementation("org.springframework.ai:spring-ai-openai-spring-boot-starter:1.0.0")
+// 또는: spring-ai-anthropic-spring-boot-starter, -ollama-, -bedrock-, -vertex-ai-, -mistral-, -azure-openai-
+```
+
+```yaml
+spring:
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: gpt-4o-mini
+          temperature: 0.7
+```
+
+자동 설정이 `ChatModel`, `ChatClient.Builder` 같은 Bean 을 등록.
+
+## ChatClient: 가장 흔한 사용
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="응답 본문"
+  code={`@RestController
+public class JokeController {
+    private final ChatClient chatClient;
+
+    public JokeController(ChatClient.Builder builder) {
+        this.chatClient = builder.build();
+    }
+
+    @GetMapping("/joke")
+    public String joke(@RequestParam String topic) {
+        return chatClient.prompt()
+            .user(u -> u.text("Tell me a short joke about {topic}").param("topic", topic))
+            .call()
+            .content();
+    }
+}`}
+  output={`GET /joke?topic=cats
+→ "Why don't cats play poker in the jungle? Too many cheetahs."`}
+/>
+
+`prompt() → user/system → call() → content()` 의 fluent DSL. `.stream()` 으로 SSE 토큰 스트리밍도 가능.
+
+## System 메시지와 PromptTemplate
+
+```java
+String response = chatClient.prompt()
+    .system("당신은 친절한 Spring 강사입니다. 답변은 한국어, 코드 포함.")
+    .user(u -> u.text("@Transactional 의 propagation 7가지를 표로 정리해 주세요"))
+    .call()
+    .content();
+```
+
+`PromptTemplate` 으로 분리하면 재사용:
+
+```java
+@Component
+class ReviewService {
+    private final ChatClient client;
+    private final PromptTemplate REVIEW = new PromptTemplate("""
+        다음 코드를 리뷰해 주세요. 카테고리: 가독성, 성능, 보안.
+        ```{language}
+        {code}
+        ```
+        """);
+
+    public String review(String language, String code) {
+        return client.prompt(REVIEW.create(Map.of("language", language, "code", code)))
+            .call()
+            .content();
+    }
+}
+```
+
+## ChatModel (저수준)
+
+provider-specific 옵션이나 prompt 재사용이 필요 없는 단발성 호출:
+
+```java
+@Service
+class SimpleTextService {
+    private final ChatModel model;   // OpenAiChatModel, AnthropicChatModel 등
+
+    public String summarize(String input) {
+        Prompt prompt = new Prompt(
+            List.of(
+                new SystemMessage("문서 요약 어시스턴트"),
+                new UserMessage(input)
+            ),
+            OpenAiChatOptions.builder().withTemperature(0.0).withMaxTokens(200).build()
+        );
+        return model.call(prompt).getResult().getOutput().getContent();
+    }
+}
+```
+
+ChatClient 는 ChatModel 위에 얹은 편의 layer. 대부분 ChatClient 권장.
+
+## Structured Output
+
+LLM 응답을 자바 객체로 직접 매핑:
+
+```java
+record Recipe(String name, List<String> ingredients, List<String> steps) {}
+
+Recipe recipe = chatClient.prompt()
+    .user("Suggest a simple pasta recipe")
+    .call()
+    .entity(Recipe.class);
+```
+
+내부적으로 schema 를 prompt 에 추가하고 JSON 응답을 파싱. 실패 시 `IllegalStateException` 또는 retry advisor 와 조합.
+
+List, Map 도 지원:
+
+```java
+List<String> topics = chatClient.prompt()
+    .user("List 5 trending Spring topics")
+    .call()
+    .entity(new ParameterizedTypeReference<List<String>>() {});
+```
+
+## Function / Tool Calling
+
+모델이 자바 메서드를 직접 호출:
+
+```java
+@Component
+class WeatherTools {
+    @Tool(description = "Get current weather for a city in Celsius")
+    public String getCurrentWeather(@ToolParam(description = "City name") String city) {
+        return weatherApi.fetch(city);   // 실제 API
+    }
+}
+
+@Service
+class AssistantService {
+    private final ChatClient client;
+    private final WeatherTools weatherTools;
+
+    public String ask(String question) {
+        return client.prompt()
+            .user(question)
+            .tools(weatherTools)
+            .call()
+            .content();
+    }
+}
+```
+
+LLM 이 질문에 따라 `getCurrentWeather("Seoul")` 호출 → 결과를 받아 최종 응답 생성. 여러 함수 호출도 자동 chaining.
+
+`@Tool` 의 `description` 이 모델에게 보내는 메타데이터. 명확하게 작성.
+
+## Streaming
+
+```java
+Flux<String> stream = chatClient.prompt()
+    .user("Write a long essay on JVM")
+    .stream()
+    .content();
+
+stream.subscribe(System.out::print);
+```
+
+SSE 응답을 컨트롤러에서 그대로 클라이언트에 전달 (WebFlux 통합).
+
+## Advisor: chain 에 끼어드는 plugin
+
+`ChatClient` 호출 전후로 동작. 내장 advisor:
+
+| Advisor | 역할 |
+|---|---|
+| `MessageChatMemoryAdvisor` | 대화 이력 자동 첨부 (ChatMemory) |
+| `PromptChatMemoryAdvisor` | 메모리 + system prompt 결합 |
+| `QuestionAnswerAdvisor` | RAG (vector store 검색 + context 첨부, [[spring-ai-rag]] 참고) |
+| `SafeGuardAdvisor` | 입력 / 출력 검열 (금칙어, profanity) |
+| `SimpleLoggerAdvisor` | 요청 / 응답 로깅 |
+
+```java
+ChatClient client = builder
+    .defaultAdvisors(new SimpleLoggerAdvisor(), memoryAdvisor, ragAdvisor)
+    .build();
+```
+
+각 호출마다도 `.advisors(...)` 로 추가 가능.
+
+## ChatMemory: 대화 이력
+
+```java
+@Bean
+ChatMemory chatMemory() {
+    return new InMemoryChatMemory();   // 또는 JdbcChatMemory, RedisChatMemory
+}
+
+@Bean
+ChatClient chatClient(ChatClient.Builder b, ChatMemory mem) {
+    return b.defaultAdvisors(new MessageChatMemoryAdvisor(mem)).build();
+}
+
+// 사용
+String reply1 = client.prompt()
+    .advisors(spec -> spec.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, sessionId))
+    .user("내 이름은 Alice")
+    .call().content();
+
+String reply2 = client.prompt()
+    .advisors(spec -> spec.param(AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY, sessionId))
+    .user("내 이름이 뭐였지?")
+    .call().content();
+// → "Alice 입니다."
+```
+
+`conversationId` 로 세션 분리. 메모리 종류:
+- `InMemoryChatMemory`: 프로세스 내, 휘발성
+- `JdbcChatMemory`: DB 영구
+- `CassandraChatMemory`, `RedisChatMemory`: 외부 저장소
+- `Neo4jChatMemory`: 그래프 기반 (관계 추적 가능)
+
+## Image / Audio
+
+```java
+@Service
+class ImageService {
+    private final ImageModel imageModel;   // OpenAiImageModel (DALL-E 3) 등
+
+    public byte[] generate(String description) {
+        ImageResponse r = imageModel.call(
+            new ImagePrompt(description,
+                OpenAiImageOptions.builder()
+                    .withModel("dall-e-3")
+                    .withWidth(1024).withHeight(1024)
+                    .build())
+        );
+        return Base64.getDecoder().decode(r.getResult().getOutput().getB64Json());
+    }
+}
+```
+
+Audio: `OpenAiAudioTranscriptionModel` (whisper), `OpenAiAudioSpeechModel` (TTS).
+
+## Observability
+
+자동으로 Micrometer metric / trace 발행:
+
+```
+spring_ai_chat_client_request_seconds (히스토그램)
+spring_ai_chat_client_request_tokens_total
+spring_ai_chat_client_response_tokens_total
+spring_ai_chat_client_response_finish_reason (counter)
+```
+
+`management.tracing.sampling.probability=1.0` 으로 trace 활성화 시 prompt / response 도 OTel span 으로 캡처 (민감 데이터 주의).
+
+## 함정과 베스트 프랙티스
+
+- **API key 는 환경 변수**: `application.yml` 에 직접 쓰지 말 것
+- **temperature / maxTokens 명시**: 기본값 의존 시 provider 변경에 취약
+- **structured output 실패 처리**: 잘못된 JSON 응답 시 retry advisor + validation
+- **tool calling 보안**: LLM 이 호출하는 메서드는 부수효과 신중 (DB 쓰기 / 외부 API 등). audit / authorization 필수
+- **streaming 의 응답 본문 길이 제한**: timeout 설정
+- **provider lock-in 회피**: ChatClient 추상화만 사용, provider-specific options 지양
+- **테스트는 `ChatModel` mock**: 실제 LLM 호출은 비용
+
+## 관련 위키
+
+- [[spring-ai-rag]]
+- [[spring-overview]]
+- [[spring-restclient]]
+- [[spring-webflux]]
+- [[spring-validation]]
+- [[spring-actuator]]
