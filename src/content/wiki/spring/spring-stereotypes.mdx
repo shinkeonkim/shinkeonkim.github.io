@@ -1,0 +1,239 @@
+---
+title: "[Spring] Stereotype 어노테이션: @Component, @Service, @Repository, @Controller"
+aliases: ["@Component", "@Service", "@Repository", "@Controller", "@RestController", "spring stereotype", "스프링 스테레오타입", "@ComponentScan"]
+tags: [spring, bean, stereotype, component-scan]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "Stereotype Annotations - https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html#beans-stereotype-annotations"
+  - id: spring-docs
+    note: "@ComponentScan - https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired.html"
+---
+
+## 정의
+
+**Stereotype 어노테이션** 은 클래스가 Spring 컨테이너의 어떤 역할 (role) 인지를 의미적으로 표시한다. 모두 `@Component` 를 **메타 어노테이션** 으로 가진 specialization.
+
+| 어노테이션 | 의미 | 부가 기능 |
+|---|---|---|
+| `@Component` | 일반 Spring 관리 Bean | 컴포넌트 스캔 대상화 |
+| `@Service` | 비즈니스 로직 계층 | 의미적 분류만 (기능 동일) |
+| `@Repository` | DAO / 영속성 계층 | `PersistenceExceptionTranslator` 가 SQLException 을 Spring DataAccessException 으로 변환 |
+| `@Controller` | Web MVC 계층 (view 반환) | DispatcherServlet 이 handler 로 인식 |
+| `@RestController` | REST API (JSON 반환) | `@Controller` + `@ResponseBody` 합성 |
+| `@Configuration` | `@Bean` 메서드를 담는 설정 클래스 | CGLIB proxy 로 `@Bean` 메서드 호출을 가로채 singleton 보장 |
+
+기능적으로 `@Component` 와 동일한 게 대부분이지만 **검색 / advisor 적용 / 자동 처리** 의 단위가 된다.
+
+## 컴포넌트 스캔
+
+```java
+@Configuration
+@ComponentScan(basePackages = "com.example")
+public class AppConfig {}
+```
+
+`com.example` 하위 패키지를 재귀 스캔해 stereotype 이 붙은 클래스를 자동 Bean 등록.
+
+`@SpringBootApplication` 은 내부적으로 `@ComponentScan` 을 포함, 자신이 선언된 패키지를 root 로 스캔. 그래서 main 클래스를 top-level package 에 두는 게 관례.
+
+```java
+@SpringBootApplication   // = @Configuration + @EnableAutoConfiguration + @ComponentScan
+public class App {
+    public static void main(String[] args) {
+        SpringApplication.run(App.class, args);
+    }
+}
+```
+
+## 각 어노테이션 상세
+
+### @Component
+
+가장 기본. 의미적 분류가 명확하지 않을 때 사용.
+
+```java
+@Component
+public class JsonMapperHelper { ... }
+```
+
+### @Service
+
+비즈니스 로직. 트랜잭션이 시작되는 layer 라는 의미. 기술적으로는 `@Component` 와 동일하지만 **읽는 사람에게 의미 전달**.
+
+```java
+@Service
+public class OrderService {
+    @Transactional
+    public Order place(Cart cart) { ... }
+}
+```
+
+### @Repository
+
+DAO. **자동 예외 변환** 이 진짜 기능:
+
+```java
+@Repository
+public class UserDao {
+    @PersistenceContext
+    EntityManager em;
+
+    public User findById(Long id) {
+        return em.find(User.class, id);
+        // 만약 SQLException 이 던져지면 자동으로 DataAccessException 으로 변환
+    }
+}
+```
+
+`PersistenceExceptionTranslationPostProcessor` 가 BeanPostProcessor 로서 `@Repository` 가 붙은 Bean 의 메서드 호출을 가로챈다. 가로채는 예외:
+- `SQLException` → `DataAccessException` 계층
+- JPA `PersistenceException` → 동일
+- Hibernate 예외도 변환
+
+Spring Data JPA 의 `JpaRepository` 인터페이스 구현체도 자동으로 `@Repository` 처리됨.
+
+### @Controller
+
+Spring MVC handler. DispatcherServlet 의 `HandlerMapping` 이 `@Controller` Bean 의 `@RequestMapping` 메서드를 매핑.
+
+```java
+@Controller
+public class HomeController {
+    @GetMapping("/")
+    public String home(Model model) {
+        model.addAttribute("name", "World");
+        return "home";   // view 이름 → ViewResolver 가 .html 또는 .jsp 로 변환
+    }
+}
+```
+
+return type 이 `String` 이면 view 이름. `ModelAndView` 도 가능.
+
+### @RestController
+
+REST API 용. `@Controller` + `@ResponseBody` 의 합성. 모든 메서드 return 값이 자동으로 HTTP body 로 직렬화 (JSON).
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserApiController {
+    @GetMapping("/{id}")
+    public User get(@PathVariable Long id) {
+        return userService.findById(id);   // JSON 으로 직렬화됨
+    }
+}
+```
+
+view 가 아니라 data 를 반환한다. `@Controller` 와 가장 큰 차이.
+
+### @Configuration
+
+```java
+@Configuration
+public class DataConfig {
+    @Bean
+    public DataSource dataSource() {
+        return new HikariDataSource(...);
+    }
+
+    @Bean
+    public JdbcTemplate jdbcTemplate() {
+        return new JdbcTemplate(dataSource());   // ← 직접 호출
+    }
+}
+```
+
+`@Configuration` 클래스는 **CGLIB proxy** 로 감싸진다. 그래서 `dataSource()` 직접 호출이 매번 새 인스턴스를 만들지 않고 **이미 등록된 singleton Bean 을 반환**.
+
+`@Configuration` 없이 `@Component` 로 같은 코드를 쓰면 (또는 `proxyBeanMethods = false`):
+
+```java
+@Configuration(proxyBeanMethods = false)   // proxy 비활성
+public class DataConfig {
+    @Bean
+    public JdbcTemplate jdbcTemplate() {
+        return new JdbcTemplate(dataSource());   // ❌ 새 DataSource 인스턴스 생성됨
+    }
+}
+```
+
+대신 method 의 파라미터로 주입받아야:
+
+```java
+@Configuration(proxyBeanMethods = false)
+public class DataConfig {
+    @Bean
+    public JdbcTemplate jdbcTemplate(DataSource dataSource) {
+        return new JdbcTemplate(dataSource);
+    }
+}
+```
+
+Spring Boot 권장은 `proxyBeanMethods = false` (proxy 오버헤드 제거, native image 친화적). 단, `@Bean` 끼리 직접 호출은 못 하므로 파라미터 주입 패턴 강제됨.
+
+## 메타 어노테이션 (커스텀 stereotype)
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Service
+@Transactional(readOnly = true)
+public @interface ReadOnlyService {}
+
+@ReadOnlyService   // = @Service + @Transactional(readOnly=true)
+public class ProductQueryService { ... }
+```
+
+반복되는 어노테이션 조합을 한 번에. Spring 자체 어노테이션 중에도 메타 어노테이션 합성이 흔함 (`@RestController`, `@SpringBootApplication`, `@RequestScope`).
+
+## 스캔 필터링
+
+```java
+@ComponentScan(
+    basePackages = "com.example",
+    includeFilters = @Filter(type = FilterType.ANNOTATION, classes = MyMarker.class),
+    excludeFilters = @Filter(type = FilterType.REGEX, pattern = ".*Test")
+)
+public class AppConfig {}
+```
+
+테스트 클래스 제외, 특정 어노테이션만 포함 등.
+
+`useDefaultFilters = false` 로 stereotype 자동 매칭 끄고 명시적 필터만 사용도 가능.
+
+## AOP 와의 조합
+
+```java
+// 모든 @Service 메서드에 advice
+@Aspect
+@Component
+public class ServiceAuditAspect {
+    @Around("within(@org.springframework.stereotype.Service *)")
+    public Object audit(ProceedingJoinPoint pjp) throws Throwable {
+        // ...
+        return pjp.proceed();
+    }
+}
+```
+
+`within(@Service *)` 처럼 stereotype 별로 advice 적용 가능. layer 별 횡단 관심사에 유용.
+
+## 함정과 베스트 프랙티스
+
+- **의미에 맞는 stereotype 선택**: `@Service` 와 `@Repository` 를 섞으면 layer 가 불분명
+- **`@Repository` 가 아닌 곳에서 SQLException 받으면 변환 안 됨**: DAO 는 반드시 `@Repository`
+- **`@Configuration` 의 `proxyBeanMethods = false`** 는 native image 환경에서 필수
+- **컴포넌트 스캔 범위 좁히기**: large 프로젝트에서 시작 시간 단축
+- **stereotype 위에 메타 어노테이션 합성** 으로 반복 줄이기
+- **`@Controller` vs `@RestController`**: view 반환은 `@Controller`, JSON 반환은 `@RestController`
+
+## 관련 위키
+
+- [[spring-ioc-di]]
+- [[spring-bean-lifecycle]]
+- [[spring-autowired-resolution]]
+- [[spring-aop]]
+- [[spring-mvc]]
+- [[spring-data-jpa]]
+- [[spring-transaction]]

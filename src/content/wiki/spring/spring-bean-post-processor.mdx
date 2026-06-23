@@ -1,0 +1,202 @@
+---
+title: "[Spring] BeanPostProcessor와 BeanFactoryPostProcessor"
+aliases: ["BeanPostProcessor", "BeanFactoryPostProcessor", "spring extension point", "AutowiredAnnotationBeanPostProcessor", "Spring 확장점", "BPP", "BFPP"]
+tags: [spring, bean, post-processor, extension]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "BeanPostProcessor - https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html#beans-factory-extension-bpp"
+  - id: spring-docs
+    note: "BeanFactoryPostProcessor - https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html#beans-factory-extension-factory-postprocessors"
+---
+
+## 정의
+
+Spring 컨테이너의 **2가지 확장점**:
+
+- **BeanFactoryPostProcessor (BFPP)**: Bean 인스턴스가 만들어지기 **전**, `BeanDefinition` (메타데이터) 을 수정. 클래스명, scope, property 같은 설정 자체를 바꾼다.
+- **BeanPostProcessor (BPP)**: Bean 인스턴스화 **후**, 초기화 콜백 **전/후** 에 인스턴스 자체를 가공. proxy 로 감싸거나 어노테이션 처리.
+
+`@Autowired`, `@PostConstruct`, `@Transactional` 같은 어노테이션 처리는 모두 내장 BPP 들이 한다. 직접 BPP 를 작성하면 컨테이너 동작을 확장할 수 있다.
+
+## BFPP vs BPP 차이
+
+```
+컨테이너 시작
+  ↓
+BeanDefinition 등록 (메타데이터만)
+  ↓
+[ BeanFactoryPostProcessor 실행 ]   ← BeanDefinition 수정 가능
+  ↓
+Bean 인스턴스화 (생성자 호출)
+  ↓
+의존성 주입
+  ↓
+[ BeanPostProcessor.before ]        ← 인스턴스 가공
+  ↓
+초기화 콜백 (@PostConstruct 등)
+  ↓
+[ BeanPostProcessor.after ]         ← 인스턴스 가공 (proxy 생성)
+  ↓
+Bean 사용
+```
+
+BFPP 는 메타데이터 단계. BPP 는 인스턴스 단계.
+
+## BeanFactoryPostProcessor
+
+```java
+@Component
+public class PropertyOverrideBFPP implements BeanFactoryPostProcessor {
+    @Override
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory bf) {
+        BeanDefinition bd = bf.getBeanDefinition("dataSource");
+        bd.getPropertyValues().add("maxPoolSize", 50);
+    }
+}
+```
+
+Spring 내장 예:
+- `PropertySourcesPlaceholderConfigurer`: `${...}` 치환
+- `ConfigurationClassPostProcessor`: `@Configuration` 처리, `@Bean` 메서드를 BeanDefinition 으로 등록
+
+직접 작성하는 경우는 드물다. 대부분 환경 변수 / config 메타프로그래밍.
+
+## BeanPostProcessor
+
+```java
+public interface BeanPostProcessor {
+    default Object postProcessBeforeInitialization(Object bean, String beanName) {
+        return bean;
+    }
+    default Object postProcessAfterInitialization(Object bean, String beanName) {
+        return bean;
+    }
+}
+```
+
+반환값이 새 Bean. **proxy 로 감싸 반환** 하면 컨테이너는 원본 대신 proxy 를 사용. AOP 의 핵심 메커니즘.
+
+### 예: @Loggable 자동 로깅
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+public @interface Loggable {}
+
+@Component
+public class LoggingBPP implements BeanPostProcessor {
+    @Override
+    public Object postProcessAfterInitialization(Object bean, String beanName) {
+        if (bean.getClass().isAnnotationPresent(Loggable.class)) {
+            return Proxy.newProxyInstance(
+                bean.getClass().getClassLoader(),
+                bean.getClass().getInterfaces(),
+                (proxy, method, args) -> {
+                    log.info("→ {}.{}", beanName, method.getName());
+                    try {
+                        return method.invoke(bean, args);
+                    } finally {
+                        log.info("← {}.{}", beanName, method.getName());
+                    }
+                }
+            );
+        }
+        return bean;
+    }
+}
+
+@Loggable
+@Service
+public class OrderService { ... }   // 자동 로깅됨
+```
+
+## Spring 내장 BPP
+
+| BPP | 역할 |
+|---|---|
+| `AutowiredAnnotationBeanPostProcessor` | `@Autowired`, `@Value` 처리 |
+| `CommonAnnotationBeanPostProcessor` | `@PostConstruct`, `@PreDestroy`, `@Resource` (JSR-250) |
+| `RequiredAnnotationBeanPostProcessor` | `@Required` (deprecated) |
+| `AsyncAnnotationBeanPostProcessor` | `@Async` 메서드를 proxy 로 |
+| `ScheduledAnnotationBeanPostProcessor` | `@Scheduled` 메서드 등록 |
+| `AnnotationAwareAspectJAutoProxyCreator` | AOP advisor 적용, `@Aspect` 처리 |
+| `PersistenceAnnotationBeanPostProcessor` | `@PersistenceContext`, `@PersistenceUnit` (JPA) |
+
+**`@Autowired` 가 동작하는 것 자체가 BPP 의 결과**. 컨테이너 자체에 박혀있는 게 아니라 BPP 가 인스턴스를 가공한다.
+
+## 실행 순서 (Ordered)
+
+```java
+@Component
+public class FirstBPP implements BeanPostProcessor, Ordered {
+    @Override public int getOrder() { return 1; }
+}
+
+@Component
+public class SecondBPP implements BeanPostProcessor, Ordered {
+    @Override public int getOrder() { return 2; }
+}
+```
+
+순서 우선순위:
+1. `PriorityOrdered` 구현체 (getOrder() 기준 오름차순)
+2. `Ordered` 구현체 (getOrder() 기준 오름차순)
+3. 나머지 (등록 순서)
+
+`@Order(N)` 어노테이션도 동일하게 동작.
+
+## BPP 의 함정: 자기 자신의 의존성
+
+BPP 는 **다른 모든 Bean 보다 먼저 인스턴스화** 되어야 한다. 그래서 BPP 안에 `@Autowired` 가 있으면:
+
+```java
+@Component
+public class MyBPP implements BeanPostProcessor {
+    @Autowired
+    DataSource dataSource;   // ❌ 너무 늦게 주입 / 다른 BPP 적용 안 됨
+
+    @Override
+    public Object postProcessAfterInitialization(Object bean, String beanName) {
+        // dataSource 가 null 일 수 있음
+    }
+}
+```
+
+`AutowiredAnnotationBeanPostProcessor` 자체가 BPP 이므로, 다른 BPP 의 `@Autowired` 가 처리되지 않을 수 있다. 해결책:
+
+- BPP 안에서 의존성을 lazy 하게 `ApplicationContext` 에서 조회
+- 생성자 주입은 가능 (BeanFactory 가 직접 처리)
+- 명시적으로 `@Lazy` 적용
+
+## proxy 생성 시점
+
+AOP advisor 가 적용되는 시점은 `postProcessAfterInitialization`. 즉:
+
+```
+1. 인스턴스화
+2. 의존성 주입
+3. @PostConstruct
+4. ← 여기서 advisor 가 매치되면 CGLIB/JDK proxy 로 감쌈
+5. 컨테이너가 보관하는 Bean = proxy
+```
+
+그래서 `@PostConstruct` 안에선 `this` 가 원본이고, 외부에서 받는 Bean 은 proxy. self-invocation 함정 (`this.someTransactionalMethod()` 는 proxy 를 거치지 않음) 의 원인.
+
+## BPP 의 활용 사례
+
+- **자동 등록**: 특정 인터페이스 구현체를 발견하면 추가 처리
+- **모니터링**: 메서드 호출 횟수 / 시간 측정 proxy
+- **권한 검사**: `@Secured` 같은 어노테이션 처리
+- **불변 객체 감지**: getter 만 있는 클래스에 캐싱 추가
+
+대부분 직접 작성하기보다 Spring AOP / Spring Boot starter 가 제공.
+
+## 관련 위키
+
+- [[spring-bean-lifecycle]]
+- [[spring-aop]]
+- [[spring-boot-autoconfig]]
+- [[spring-conditional]]
+- [[spring-autowired-resolution]]
+- [[spring-ioc-di]]

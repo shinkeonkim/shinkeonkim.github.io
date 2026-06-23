@@ -1,0 +1,252 @@
+---
+title: "[Spring] @Autowired 해결 전략: @Qualifier, @Primary, byType"
+aliases: ["@Autowired", "@Qualifier", "@Primary", "byType byName", "autowire resolution", "spring 의존성 해결", "ObjectProvider"]
+tags: [spring, di, autowired, qualifier]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "Annotation-based Container Configuration - https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired.html"
+  - id: spring-docs
+    note: "@Qualifier - https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired-qualifiers.html"
+---
+
+## 정의
+
+`spring-ioc-di` 가 `@Autowired` 의 **기초** (생성자/필드/setter 주입) 를 다룬다면, 이 페이지는 **같은 타입의 Bean 이 여러 개일 때 어떻게 하나를 골라내는지** 의 해결 전략을 다룬다.
+
+## 기본 알고리즘
+
+`@Autowired` 가 후보 Bean 을 찾는 순서:
+
+1. **타입 일치 (byType)**: 주입 타입과 호환되는 Bean 들 수집
+2. 후보가 1개면 끝
+3. 후보가 여러 개면:
+   - `@Primary` 가 붙은 Bean 있으면 선택
+   - 없으면 **`@Qualifier` 값** 또는 **변수명 (byName)** 매치
+   - 그래도 못 정하면 `NoUniqueBeanDefinitionException`
+4. 후보가 0개면:
+   - `required = true` (기본) 이면 `NoSuchBeanDefinitionException`
+   - `required = false` 면 null 주입
+
+## 시나리오: 같은 타입 2개
+
+```java
+public interface NotificationSender { void send(String msg); }
+
+@Component class EmailSender implements NotificationSender { ... }
+@Component class SlackSender implements NotificationSender { ... }
+
+@Service
+public class AlertService {
+    @Autowired
+    NotificationSender sender;   // ❌ 어떤 걸 주입?
+    // NoUniqueBeanDefinitionException: expected single matching bean but found 2
+}
+```
+
+## 해결 1: @Qualifier
+
+명시적 이름 매칭:
+
+```java
+@Component("emailSender") class EmailSender implements NotificationSender { ... }
+@Component("slackSender") class SlackSender implements NotificationSender { ... }
+
+@Service
+public class AlertService {
+    @Autowired
+    @Qualifier("slackSender")
+    NotificationSender sender;
+}
+```
+
+`@Component` 의 value 가 Bean 이름. 생략하면 클래스명의 lowerCamelCase (`EmailSender` → `emailSender`).
+
+## 해결 2: @Primary
+
+여러 후보 중 **기본** 표시:
+
+```java
+@Component @Primary class EmailSender implements NotificationSender { ... }
+@Component class SlackSender implements NotificationSender { ... }
+
+@Service
+public class AlertService {
+    @Autowired
+    NotificationSender sender;   // → EmailSender 주입
+}
+```
+
+특정 컨텍스트에서 다른 Bean 이 필요하면 `@Qualifier` 로 override. `@Primary` + `@Qualifier` 조합이 흔한 패턴.
+
+## 해결 3: byName fallback
+
+`@Qualifier` 가 없고 `@Primary` 도 없으면 **변수명** 이 매칭에 사용된다:
+
+```java
+@Service
+public class AlertService {
+    @Autowired
+    NotificationSender slackSender;   // 변수명이 Bean 이름과 일치 → 매칭
+}
+```
+
+가독성이 낮아 권장 안 함. `@Qualifier` 명시가 더 명확.
+
+## 해결 4: 컬렉션 주입
+
+모든 매칭 Bean 을 다 받기:
+
+```java
+@Service
+public class AlertService {
+    @Autowired
+    List<NotificationSender> senders;   // [EmailSender, SlackSender]
+
+    // Map: key = Bean 이름, value = Bean
+    @Autowired
+    Map<String, NotificationSender> senderMap;
+
+    public void broadcast(String msg) {
+        senders.forEach(s -> s.send(msg));
+    }
+}
+```
+
+`@Order` / `Ordered` 인터페이스로 순서 보장:
+
+```java
+@Component @Order(1) class EmailSender ...
+@Component @Order(2) class SlackSender ...
+```
+
+## 해결 5: Optional 주입
+
+Bean 이 **없을 수도 있는** 경우:
+
+```java
+@Service
+public class AlertService {
+    @Autowired(required = false)
+    NotificationSender sender;   // 없으면 null
+
+    @Autowired
+    Optional<NotificationSender> optSender;  // 더 명시적
+}
+```
+
+## ObjectProvider (가장 유연)
+
+Spring 4.3+ 의 추천 패턴. 위 모든 시나리오를 하나로 통합:
+
+```java
+@Service
+public class AlertService {
+    private final ObjectProvider<NotificationSender> senderProvider;
+
+    public AlertService(ObjectProvider<NotificationSender> p) {
+        this.senderProvider = p;
+    }
+
+    public void notify(String msg) {
+        // 1개 정확히
+        senderProvider.getObject().send(msg);
+        // 없으면 null
+        senderProvider.getIfAvailable().send(msg);
+        // 없으면 default 공급자
+        senderProvider.getIfAvailable(() -> new NoOpSender()).send(msg);
+        // 전부
+        senderProvider.orderedStream().forEach(s -> s.send(msg));
+        // 호출마다 새 인스턴스 (prototype 함정 해결)
+        TaskWorker w = workerProvider.getObject();
+    }
+}
+```
+
+특히 prototype Bean 을 singleton 안에서 매번 새로 받을 때 가장 깔끔. [[spring-bean-scope]] 참고.
+
+## @Resource (Jakarta 표준)
+
+```java
+@Service
+public class AlertService {
+    @Resource(name = "slackSender")
+    NotificationSender sender;
+}
+```
+
+`@Autowired` 와 차이:
+- 기본이 **byName** (이름 먼저, 없으면 byType fallback)
+- Jakarta 표준 (`jakarta.annotation.Resource`)
+- Spring framework 비종속
+
+대부분 `@Autowired` + `@Qualifier` 가 일반적.
+
+## @Lazy 의존성
+
+순환 의존성 또는 무거운 Bean 의 lazy 초기화:
+
+```java
+@Component
+public class ServiceA {
+    @Autowired
+    @Lazy
+    ServiceB serviceB;   // 사용 시점에 proxy 가 실제 Bean 조회
+}
+```
+
+`@Lazy` 가 붙으면 컨테이너는 proxy 를 주입하고, 메서드 호출 시점에 실제 Bean 을 lookup. 순환 의존성을 회피할 수 있지만 근본 해결책은 아님 (설계 재검토 권장).
+
+## 생성자 주입 시 @Autowired 생략
+
+Spring 4.3+: 단일 생성자면 `@Autowired` 생략 가능:
+
+```java
+@Service
+public class AlertService {
+    private final NotificationSender sender;
+
+    public AlertService(NotificationSender sender) {   // @Autowired 자동
+        this.sender = sender;
+    }
+}
+```
+
+복수 생성자가 있으면 명시 필요. Lombok `@RequiredArgsConstructor` 가 final 필드 기반으로 생성자를 만들어 주는 게 자주 쓰임.
+
+## 메타 어노테이션 (Custom Qualifier)
+
+```java
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+@Qualifier
+public @interface SlackChannel {}
+
+@Component @SlackChannel class SlackSender implements NotificationSender { ... }
+
+@Service
+public class AlertService {
+    @Autowired @SlackChannel
+    NotificationSender sender;   // 문자열 키 없이 타입 안전
+}
+```
+
+오타 방지, IDE 자동완성. 환경별 (`@DevOnly`, `@ProdOnly`) 또는 의미별 (`@MainDataSource`, `@ReadReplica`) 구분에 유용.
+
+## 함정과 베스트 프랙티스
+
+- **생성자 주입 우선**: final 필드, 불변, 테스트 용이성, 순환 의존성 컴파일 타임 감지
+- **`@Qualifier` 가 `@Primary` 보다 우선**: 둘 다 있으면 `@Qualifier` 가 이김
+- **`@Primary` 는 보수적으로**: "기본" 의도가 코드에서 사라지면 혼란
+- **컬렉션 주입은 빈 리스트도 정상**: 매칭 Bean 없으면 empty list (예외 안 던짐)
+- **`Optional<T>` 가 `required=false` 보다 명시적**
+- **prototype 을 singleton 에 주입하면 ObjectProvider 또는 ScopedProxy** ([[spring-bean-scope]] 참고)
+- **순환 의존성 발견 시 `@Lazy` 보다 설계 재검토**: 일반적으로 한 쪽을 추출하거나 이벤트로 분리
+
+## 관련 위키
+
+- [[spring-ioc-di]]
+- [[spring-stereotypes]]
+- [[spring-bean-scope]]
+- [[spring-bean-lifecycle]]
+- [[spring-conditional]]
