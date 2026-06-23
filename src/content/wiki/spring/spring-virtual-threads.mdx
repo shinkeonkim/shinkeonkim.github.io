@@ -1,0 +1,281 @@
+---
+title: "[Spring] Virtual Threads (Project Loom): Spring 6.1+"
+aliases: ["Virtual Threads", "Project Loom", "spring loom", "Virtual Thread Executor", "spring 가상 스레드", "loom integration"]
+tags: [spring, java, virtual-thread, loom, concurrency, performance]
+updated: 2026-06-23
+references:
+  - title: "JEP 444: Virtual Threads"
+    url: "https://openjdk.org/jeps/444"
+    note: "JDK 21 정식 도입"
+  - id: spring-docs
+    note: "Spring 6.1+ Virtual Threads support - https://docs.spring.io/spring-framework/reference/integration/scheduling.html#scheduling-task-scheduler-implementations"
+---
+
+## 정의
+
+**Virtual Thread** 는 JDK 21+ 에서 GA 된 경량 thread. JVM 이 OS thread (carrier) 위에 가상 thread 를 M:N 매핑. 수백만 개 생성 가능 (OS thread 는 보통 수천 개 한계).
+
+Spring 6.1+ (Spring Boot 3.2+) 가 virtual thread 를 1차 시민으로 지원. `spring.threads.virtual.enabled=true` 한 줄로 활성화.
+
+기존 reactive (`WebFlux`, Reactor) 가 callback / chain 으로 동시성을 얻었다면, virtual thread 는 **기존 명령형 코드 그대로** 두고 thread 비용만 줄여 줌. blocking 호출이 OS thread 를 점유하지 않음.
+
+## 활성화
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true
+```
+
+이 한 줄이 영향:
+- Tomcat / Jetty 의 request thread pool → virtual thread
+- `@Async` 메서드 → virtual thread (별도 Executor 미지정 시)
+- `@Scheduled` → virtual thread
+- `ApplicationTaskExecutor` → virtual thread
+- WebClient blocking 호출도 OS thread 안 잡음
+
+JDK 21+ 필수. Spring Boot 3.2+ 필수.
+
+## 명령형 + 고성능: 가능?
+
+기존 패러다임:
+
+| 동시성 모델 | 코드 스타일 | 동시성 비용 |
+|---|---|---|
+| OS thread + thread pool | 명령형 (try/catch, blocking call) | OS thread 비싸 수천 한계 |
+| Reactive (WebFlux) | 비명령형 (Mono / Flux chain) | thread 적게 쓰지만 코드 복잡 |
+| Virtual thread | 명령형 (기존 코드 그대로) | thread 사실상 무료 (수백만 개) |
+
+virtual thread = "blocking 코드의 부활". 코드 가독성 + reactive 수준 동시성.
+
+## 직접 사용
+
+```java
+// JDK 21 API
+Thread.startVirtualThread(() -> {
+    System.out.println("running on virtual thread");
+});
+
+// Executor
+ExecutorService exec = Executors.newVirtualThreadPerTaskExecutor();
+exec.submit(() -> doWork());
+
+// Builder
+Thread.ofVirtual().name("worker-").start(() -> ...);
+```
+
+## Spring 통합
+
+### Tomcat / Jetty
+
+`spring.threads.virtual.enabled=true` → Tomcat 의 worker pool 이 virtual thread 사용. 요청마다 새 thread 생성 (pool 개념 사실상 불필요).
+
+기존:
+```
+Tomcat thread pool = 200
+요청 201개 동시 도착 → 1개 대기
+```
+
+virtual thread:
+```
+요청마다 새 virtual thread
+수천 동시 요청도 OK (OS thread 는 carrier 몇 개만 공유)
+```
+
+### @Async
+
+```java
+@Configuration
+@EnableAsync
+class AsyncConfig {
+    // spring.threads.virtual.enabled=true 면 자동으로 virtual thread Executor
+}
+
+@Service
+class NotificationService {
+    @Async
+    public void sendEmail(String to) {
+        // virtual thread 에서 실행
+        smtpClient.send(to);   // blocking OK
+    }
+}
+```
+
+별도 `Executor` Bean 등록 안 하면 Spring 이 virtual thread Executor 자동 등록.
+
+### @Scheduled
+
+```java
+@Scheduled(fixedRate = 1000)
+public void cleanup() {
+    // virtual thread 에서 실행
+    // 무거운 작업도 carrier thread 안 잡음
+}
+```
+
+### TaskExecutor / TaskScheduler
+
+```java
+@Bean
+TaskExecutor taskExecutor() {
+    return new VirtualThreadTaskExecutor("my-virtual-");
+}
+
+@Bean
+TaskScheduler taskScheduler() {
+    return new SimpleAsyncTaskScheduler();   // virtual thread 사용
+}
+```
+
+## 함정 1: synchronized 블록 = pinning
+
+virtual thread 가 `synchronized` 블록 안에서 blocking I/O 하면 **carrier thread 에 pin** = 다른 virtual thread 가 그 carrier 못 씀.
+
+```java
+synchronized (lock) {
+    db.query("...");   // ❌ pinning. carrier 점유.
+}
+```
+
+해결:
+- `synchronized` → `ReentrantLock` (LockSupport.park 기반, pinning 안 됨)
+- 또는 critical section 짧게 유지
+
+JDK 24+ 에선 `synchronized` 도 pinning 안 되도록 개선 (JEP 491).
+
+```java
+ReentrantLock lock = new ReentrantLock();
+lock.lock();
+try {
+    db.query("...");   // OK, virtual thread 가 carrier 양보
+} finally {
+    lock.unlock();
+}
+```
+
+## 함정 2: ThreadLocal
+
+virtual thread 마다 별도 `ThreadLocalMap`. 수백만 virtual thread + 큰 ThreadLocal = 메모리 폭탄.
+
+```java
+// ❌
+static final ThreadLocal<byte[]> CACHE = ThreadLocal.withInitial(() -> new byte[1_000_000]);
+// 1M virtual thread = 1TB
+```
+
+해결:
+- **JDK 21+ `ScopedValue` 사용**: 불변, 블록 스코프 한정, virtual thread 친화적
+- 또는 ThreadLocal 남용 줄이기
+
+[[java-threadlocal]] 참고.
+
+## 함정 3: thread pool 의 의미 변화
+
+기존 OS thread 풀의 목적:
+1. **재사용** (thread 생성 비용 절약)
+2. **동시성 제한** (rate limiting)
+
+virtual thread:
+1. ❌ 재사용 불필요 (생성 비용 무시 가능)
+2. ✓ 동시성 제한은 여전히 필요 (DB 연결 풀, 외부 API rate limit)
+
+```java
+// virtual thread + semaphore 로 동시성 제한
+Semaphore dbLimit = new Semaphore(20);
+
+public User findById(Long id) {
+    dbLimit.acquire();
+    try {
+        return jdbcTemplate.queryForObject(...);
+    } finally {
+        dbLimit.release();
+    }
+}
+```
+
+또는 DataSource 의 `maximum-pool-size` 가 자연스러운 한계.
+
+## WebFlux vs Virtual Thread
+
+```
+선택 기준
+├─ 코드 가독성 우선 + JDK 21 가능 → Virtual Thread
+├─ 매우 높은 동시성 (10K+ concurrent) + 메모리 critical → WebFlux
+├─ 외부 reactive API (R2DBC, reactive Kafka) 활용 → WebFlux
+└─ 단순 마이크로서비스 + blocking DB → Virtual Thread 권장
+```
+
+reactive 가 단점은 코드 복잡도 + debugging 어려움. virtual thread 는 단점이 거의 없음 (`synchronized` pinning + ThreadLocal 메모리만 주의).
+
+## 성능 비교 (대략적)
+
+| 시나리오 | OS thread pool (200) | Virtual thread |
+|---|---|---|
+| 동시 요청 100, 응답시간 짧음 | 동일 | 동일 |
+| 동시 요청 1000, 응답시간 1초 | 80% 가 대기 | 모두 즉시 처리 |
+| 동시 요청 10000 | 대부분 timeout | 처리 가능 (다른 자원이 병목 안 되면) |
+| CPU bound 작업 | OS thread 가 빠름 | virtual 도 비슷, but 미세 손해 |
+
+CPU bound 는 virtual thread 가 의미 없음. I/O bound 에서 큰 이득.
+
+## 모니터링
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: threaddump
+```
+
+`/actuator/threaddump` 가 virtual thread 도 포함. JDK 21+ 의 `jcmd <pid> Thread.dump_to_file` 도 활용.
+
+Micrometer 가 metric 발행: `jvm.threads.virtual.thread.count`.
+
+## 사용 사례
+
+### 적합:
+- 동시 다발적 외부 API 호출 (HTTP, gRPC)
+- DB blocking call 많은 서비스
+- 백그라운드 작업 (이메일 발송, 알림)
+- WebSocket / SSE 연결 다수
+
+### 부적합:
+- CPU 집약적 계산 (이미지 처리, 압축)
+- thread 자체가 자원인 경우 (특수 driver)
+
+## 호환성
+
+| 라이브러리 / 도구 | virtual thread 호환 |
+|---|---|
+| JDBC (HikariCP, JDBC driver) | OK (synchronized 부분 있음) |
+| JPA / Hibernate | OK |
+| Spring MVC | OK |
+| Spring Security | OK |
+| Tomcat / Jetty | Spring Boot 3.2+ 에서 자동 |
+| RestClient / WebClient (blocking 모드) | OK |
+| `synchronized` 사용 라이브러리 | 주의 (pinning) |
+| Project Reactor | 호환은 되지만 의미 없음 |
+
+대부분 호환. 일부 native code 또는 `synchronized` 무거운 라이브러리만 주의.
+
+## 함정과 베스트 프랙티스
+
+- **JDK 21+ 필수**: 미만 버전은 virtual thread 자체 없음
+- **`spring.threads.virtual.enabled=true`** 한 줄로 시작
+- **`synchronized` → `ReentrantLock` 마이그레이션 검토**: pinning 회피
+- **ThreadLocal 남용 자제, `ScopedValue` 우선 검토**
+- **CPU bound 작업엔 virtual thread 의미 없음**: 기존 ForkJoinPool 사용
+- **모니터링**: thread count 증가 → carrier 부족 / pinning 의심
+- **테스트**: 동시성 high 시나리오 테스트 필수 (e.g., 1000 동시 요청)
+- **호환성 점검**: 큰 의존 라이브러리는 release note 확인
+
+## 관련 위키
+
+- [[java-threadlocal]]
+- [[spring-scheduling-async]]
+- [[spring-webflux]]
+- [[spring-mvc]]
+- [[spring-request-context]]
+- [[concurrency/non-blocking]]

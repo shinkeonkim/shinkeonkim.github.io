@@ -1,0 +1,313 @@
+---
+title: "[Spring Data] MongoDB: MongoTemplate, MongoRepository"
+aliases: ["Spring Data MongoDB", "MongoTemplate", "MongoRepository", "ReactiveMongoTemplate", "@Document", "spring mongo", "스프링 몽고"]
+tags: [spring, spring-data, mongodb, nosql, document-db]
+updated: 2026-06-23
+references:
+  - title: "Spring Data MongoDB Reference"
+    url: "https://docs.spring.io/spring-data/mongodb/reference/"
+    note: "공식 레퍼런스"
+  - title: "MongoDB Manual"
+    url: "https://www.mongodb.com/docs/manual/"
+    note: "MongoDB 자체 문서"
+---
+
+## 정의
+
+**Spring Data MongoDB** 는 MongoDB 를 Spring 스타일로 사용하는 추상화. JPA 와 비슷한 Repository 패턴 + MongoDB native query (BSON, aggregation) 둘 다 지원.
+
+특징:
+- **Document 기반**: row 가 아닌 nested JSON 문서. flexible schema
+- **JPA 와 호환성 의도적 유사**: `@Document`, `MongoRepository`, `findBy*` query method
+- **Reactive 지원**: `ReactiveMongoTemplate`, `ReactiveMongoRepository` (WebFlux 와 통합)
+
+## 의존성
+
+```kotlin
+implementation("org.springframework.boot:spring-boot-starter-data-mongodb")
+// 또는 reactive
+implementation("org.springframework.boot:spring-boot-starter-data-mongodb-reactive")
+```
+
+```yaml
+spring:
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/myapp
+      # 또는 분리
+      host: localhost
+      port: 27017
+      database: myapp
+      username: admin
+      password: ${MONGO_PASSWORD}
+      auto-index-creation: true   # @Indexed 어노테이션 자동 처리
+```
+
+## Entity 매핑
+
+```java
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.CompoundIndexes;
+
+@Document(collection = "posts")
+@CompoundIndexes({
+    @CompoundIndex(name = "author_created", def = "{'authorId': 1, 'createdAt': -1}")
+})
+public class Post {
+    @Id
+    private String id;       // ObjectId 또는 String
+
+    @Indexed
+    private String authorId;
+
+    private String title;
+    private String body;
+    private List<String> tags;
+    private Address location;   // nested document
+    private Instant createdAt;
+
+    // getter / setter / no-args ctor
+}
+
+public class Address {
+    private String city;
+    private String country;
+}
+```
+
+`@Id` 가 없으면 Mongo 가 ObjectId 자동 생성. `String` 타입 권장 (Java 호환).
+
+JPA 와 다른 점:
+- 별도 join 없음 (nested document 또는 reference)
+- schema 강제 안 함 (Mongo level)
+- `@Embeddable` 불필요 (nested 가 native)
+
+## MongoRepository
+
+```java
+public interface PostRepository extends MongoRepository<Post, String> {
+    List<Post> findByAuthorId(String authorId);
+    List<Post> findByTagsContaining(String tag);
+    Page<Post> findByCreatedAtAfter(Instant date, Pageable pageable);
+
+    @Query("{ 'authorId': ?0, 'tags': { $in: ?1 } }")
+    List<Post> findByAuthorAndTags(String authorId, List<String> tags);
+}
+```
+
+JPA `JpaRepository` 와 거의 동일한 사용법. `@Query` 는 native MongoDB query (BSON).
+
+```java
+@Service
+class PostService {
+    private final PostRepository repo;
+
+    public List<Post> recent(String authorId) {
+        return repo.findByAuthorId(authorId).stream()
+            .sorted(Comparator.comparing(Post::getCreatedAt).reversed())
+            .limit(10)
+            .toList();
+    }
+}
+```
+
+## MongoTemplate (저수준)
+
+복잡한 query, aggregation, 동적 조건은 `MongoTemplate` 직접 사용:
+
+```java
+@Service
+class PostQueryService {
+    private final MongoTemplate mongo;
+
+    public List<Post> findByCriteria(String city, List<String> tags) {
+        Query q = new Query();
+        if (city != null) q.addCriteria(Criteria.where("location.city").is(city));
+        if (tags != null && !tags.isEmpty()) q.addCriteria(Criteria.where("tags").in(tags));
+        q.with(Sort.by(Sort.Direction.DESC, "createdAt")).limit(50);
+        return mongo.find(q, Post.class);
+    }
+}
+```
+
+JPA `Specification` 보다 가독성 좋음.
+
+### Update 부분 (`$set`, `$inc`)
+
+```java
+mongo.updateFirst(
+    Query.query(Criteria.where("id").is(postId)),
+    new Update().inc("viewCount", 1).set("lastViewedAt", Instant.now()),
+    Post.class
+);
+```
+
+JPA 의 dirty checking 과 다른 패턴. 명시적 update operator. 원자적이고 빠름.
+
+## Aggregation Pipeline
+
+MongoDB 의 강력함:
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="결과 row"
+  code={`Aggregation pipeline = Aggregation.newAggregation(
+    Aggregation.match(Criteria.where("createdAt").gt(LocalDate.now().minusDays(30))),
+    Aggregation.group("authorId")
+        .count().as("postCount")
+        .avg("viewCount").as("avgViews"),
+    Aggregation.sort(Sort.Direction.DESC, "postCount"),
+    Aggregation.limit(10)
+);
+AggregationResults<AuthorStats> results = mongo.aggregate(pipeline, "posts", AuthorStats.class);
+results.forEach(System.out::println);`}
+  output={`AuthorStats{authorId='u1', postCount=42, avgViews=151.3}
+AuthorStats{authorId='u2', postCount=38, avgViews=89.5}
+...`}
+/>
+
+GROUP BY + window function 을 declarative 하게. RDB 의 `WITH ... GROUP BY ... ORDER BY ... LIMIT` 에 대응.
+
+## 인덱스
+
+```java
+@Document(collection = "users")
+public class User {
+    @Id String id;
+
+    @Indexed(unique = true)
+    String email;
+
+    @Indexed
+    String username;
+
+    @TextIndexed
+    String bio;   // 텍스트 검색용
+}
+```
+
+`auto-index-creation = true` 면 entity 스캔 후 인덱스 자동 생성. **운영 환경에선 끄고 migration 도구 (mongo-shell, mongock)** 로 관리 권장.
+
+## TTL Index (자동 만료)
+
+```java
+@Document(collection = "sessions")
+public class Session {
+    @Id String id;
+    String userId;
+
+    @Indexed(expireAfterSeconds = 3600)
+    Instant createdAt;   // 1시간 후 자동 삭제
+}
+```
+
+Mongo background job 이 주기적으로 삭제. 자동 cleanup 가능.
+
+## Transaction
+
+MongoDB 4.0+ 부터 multi-document transaction 지원:
+
+```java
+@Service
+class TransferService {
+    @Transactional
+    public void transfer(String from, String to, BigDecimal amount) {
+        accountRepo.decrement(from, amount);
+        accountRepo.increment(to, amount);
+        // 둘 다 성공해야 commit, 실패 시 rollback
+    }
+}
+```
+
+설정:
+
+```java
+@Configuration
+class MongoConfig extends AbstractMongoClientConfiguration {
+    @Bean
+    MongoTransactionManager transactionManager(MongoDatabaseFactory dbFactory) {
+        return new MongoTransactionManager(dbFactory);
+    }
+}
+```
+
+요구사항: **replica set 또는 sharded cluster**. standalone 은 transaction 불가.
+
+## Reactive (WebFlux 통합)
+
+```java
+public interface PostRepository extends ReactiveMongoRepository<Post, String> {
+    Flux<Post> findByAuthorId(String authorId);
+    Mono<Post> findFirstByTitle(String title);
+}
+
+@RestController
+class PostApi {
+    @GetMapping("/posts/by-author/{id}")
+    public Flux<Post> findByAuthor(@PathVariable String id) {
+        return repo.findByAuthorId(id);
+    }
+}
+```
+
+WebFlux + reactive Mongo = 완전 non-blocking. 대량 동시성에 강함.
+
+## change stream (real-time)
+
+MongoDB 의 oplog 기반 실시간 알림:
+
+```java
+@Service
+class PostWatcher {
+    private final ReactiveMongoTemplate mongo;
+
+    @PostConstruct
+    public void watch() {
+        mongo.changeStream(Post.class)
+            .filter(Criteria.where("operationType").is("insert"))
+            .listen()
+            .subscribe(event -> {
+                System.out.println("new post: " + event.getBody());
+            });
+    }
+}
+```
+
+Kafka 없이 in-DB pub-sub. CDC (Change Data Capture) 대안.
+
+## JPA vs Mongo 비교
+
+| 항목 | JPA / SQL DB | Spring Data Mongo |
+|---|---|---|
+| 데이터 모델 | 정규화된 table + FK | 비정규화된 document |
+| Schema | DDL 강제 | flexible (앱 단)에서 강제 |
+| Join | SQL JOIN | nested doc 또는 manual lookup |
+| Index | DB 가 관리 | @Indexed 또는 migration |
+| Transaction | 표준 | 4.0+ replica set 필수 |
+| Query | JPQL / Specifications | BSON / Aggregation |
+| Migration | Flyway / Liquibase | mongock |
+| 대량 동시 read | 인덱스 + 캐싱 | sharding |
+| 복잡 query | SQL window function | Aggregation pipeline |
+
+## 함정과 베스트 프랙티스
+
+- **`@Id` 타입은 `String` (ObjectId) 권장**: serialization / API 매핑 단순
+- **nested document 사용 신중**: 16MB document 제한, 너무 깊으면 query 어려움
+- **reference 는 lazy 아님**: `@DBRef` 는 별도 query 발생, JPA 의 LAZY 와 다름
+- **인덱스 운영 환경 자동 생성 금지**: startup 시간, lock 위험. migration 도구 사용
+- **transaction 은 replica set 필수**: dev 에선 docker-compose 로 replica set 띄우기
+- **Aggregation 의 메모리 한계**: 100MB. `allowDiskUse=true` 또는 단계 분리
+- **schema 검증** (Mongo 3.6+) 적극 활용: 데이터 일관성 보장
+- **N+1 동일하게 발생**: nested 안 쓰고 `findById` 반복하면 비슷한 함정
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-fetch-type]]
+- [[spring-transaction]]
+- [[spring-webflux]]
+- [[spring-cache]]

@@ -1,0 +1,272 @@
+---
+title: "[Spring] Events: @EventListener, @TransactionalEventListener"
+aliases: ["Spring Events", "@EventListener", "@TransactionalEventListener", "ApplicationEventPublisher", "ApplicationEvent", "spring 이벤트", "이벤트 발행 구독"]
+tags: [spring, events, application-event, async, transaction]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Application Events - https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html#context-functionality-events"
+  - id: spring-docs
+    note: "Transactional Event Listener - https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/event/TransactionalEventListener.html"
+---
+
+## 정의
+
+Spring 의 **in-process pub-sub**. 모놀리식 앱 안에서 모듈 간 의존성을 줄이는 도구. 외부 메시지 브로커 (Kafka, RabbitMQ) 와 다른 점: **같은 JVM, 같은 트랜잭션 (옵션)**.
+
+핵심:
+- **`ApplicationEventPublisher`**: 이벤트 발행
+- **`@EventListener`**: 메서드 단위 구독
+- **`@TransactionalEventListener`**: 트랜잭션 commit 후 (이메일 / Kafka publish 같은 외부 부수효과 안전)
+
+스프링 4+ 이전엔 `ApplicationListener<MyEvent>` 인터페이스 구현이 표준이었지만 어노테이션이 더 간결.
+
+## 이벤트 정의
+
+Spring 4+ 에선 **POJO** 면 충분 (이전엔 `ApplicationEvent` 상속 필수):
+
+```java
+public record OrderPlaced(Long orderId, BigDecimal total, Instant placedAt) {}
+```
+
+immutable record 가 가장 깔끔. class 도 OK.
+
+## 발행
+
+```java
+@Service
+class OrderService {
+    private final ApplicationEventPublisher events;
+
+    public OrderService(ApplicationEventPublisher events) {
+        this.events = events;
+    }
+
+    @Transactional
+    public Order place(Cart cart) {
+        Order order = new Order(...);
+        orderRepository.save(order);
+        events.publishEvent(new OrderPlaced(order.getId(), order.getTotal(), Instant.now()));
+        return order;
+    }
+}
+```
+
+`ApplicationEventPublisher` 는 모든 Spring 컨테이너에서 자동 주입 가능.
+
+## @EventListener (동기)
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="stdout"
+  code={`@Component
+class OrderHandler {
+    @EventListener
+    public void onOrderPlaced(OrderPlaced event) {
+        System.out.println("audit: order " + event.orderId() + " placed");
+    }
+
+    @EventListener(condition = "#event.total.compareTo(java.math.BigDecimal.valueOf(1000)) > 0")
+    public void onLargeOrder(OrderPlaced event) {
+        System.out.println("notify VIP: " + event.orderId());
+    }
+}
+
+// 동작
+orderService.place(cart);   // total=1500
+// → 같은 스레드에서 두 listener 실행`}
+  output={`audit: order 1 placed
+notify VIP: 1`}
+/>
+
+기본 **동기**. 발행 스레드에서 즉시 호출. listener 에서 예외 발생 시 발행자도 영향. 같은 트랜잭션 안.
+
+`condition` 으로 SpEL 필터링.
+
+## @Async + @EventListener (비동기)
+
+```java
+@Configuration
+@EnableAsync
+class AppConfig {}
+
+@Component
+class SlowHandler {
+    @Async
+    @EventListener
+    public void onOrderPlaced(OrderPlaced event) {
+        // 별도 스레드 풀에서 실행 = 발행자 블로킹 없음
+        sendEmail(event);
+    }
+}
+```
+
+`@EnableAsync` 필요. 별도 thread pool 에서 실행. 예외도 발행자에 전파 안 됨 (`AsyncUncaughtExceptionHandler` 로 잡기).
+
+함정: **트랜잭션 / ThreadLocal 컨텍스트 전파 안 됨**. 필요하면 `TaskDecorator` ([[spring-request-context]] 참고).
+
+## @TransactionalEventListener (트랜잭션 단계)
+
+**가장 중요**: 트랜잭션이 commit 된 후에야 listener 실행:
+
+```java
+@Component
+class OrderNotifier {
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onOrderPlaced(OrderPlaced event) {
+        // 이 시점엔 DB INSERT 가 영구 반영됨
+        kafkaPublisher.send("orders", event);
+        // 트랜잭션이 rollback 됐다면 이 코드 호출 안 됨
+    }
+}
+```
+
+`@EventListener` 와 다른 점:
+
+```
+[일반 @EventListener]
+publish → listener 실행 → service 메서드 종료 → commit/rollback
+       ↑ rollback 돼도 listener 는 이미 부수효과 발생
+
+[@TransactionalEventListener AFTER_COMMIT]
+publish → 큐에 보관 → service 메서드 종료 → commit → listener 실행
+                                              ↑ rollback 되면 listener 안 호출
+```
+
+외부 시스템 호출 (이메일, SMS, Kafka, webhook) 은 **반드시 `@TransactionalEventListener`**. `@EventListener` 면 rollback 후에도 알림이 가는 일관성 깨짐.
+
+### Phase 4 종류
+
+```java
+@TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)   // 기본
+@TransactionalEventListener(phase = TransactionPhase.AFTER_ROLLBACK)
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMPLETION)   // commit or rollback 둘 다
+```
+
+대부분 `AFTER_COMMIT` 만 사용. `AFTER_ROLLBACK` 은 알림 / cleanup 에 가끔.
+
+### fallbackExecution
+
+발행 시점에 트랜잭션이 없으면 listener 가 호출 안 됨 (기본). 강제하려면:
+
+```java
+@TransactionalEventListener(fallbackExecution = true)
+public void onEvent(MyEvent e) { ... }
+```
+
+테스트 환경 등에서 유용.
+
+## 이벤트 순서 (Ordered)
+
+여러 listener 가 같은 이벤트를 구독할 때 순서:
+
+```java
+@Component
+class Audit {
+    @Order(1)
+    @EventListener
+    public void log(OrderPlaced e) { ... }
+}
+
+@Component
+class Email {
+    @Order(2)
+    @EventListener
+    public void notify(OrderPlaced e) { ... }
+}
+```
+
+`@Order` 가 낮을수록 먼저. 명시 안 하면 비결정적.
+
+## 제네릭 이벤트
+
+```java
+public class CrudEvent<T> {
+    enum Type { CREATED, UPDATED, DELETED }
+    Type type;
+    T entity;
+}
+
+@Component
+class UserListener {
+    @EventListener
+    public void onUserChange(CrudEvent<User> event) {
+        if (event.type == CrudEvent.Type.CREATED) { ... }
+    }
+}
+```
+
+타입 erasure 함정: `CrudEvent<User>` 와 `CrudEvent<Order>` 는 런타임에 같은 타입. `ResolvableType` 으로 재구분:
+
+```java
+events.publishEvent(new CrudEvent<>(CREATED, user)) {
+    @Override
+    public ResolvableType getResolvableType() {
+        return ResolvableType.forClassWithGenerics(CrudEvent.class, User.class);
+    }
+};
+```
+
+또는 별도 클래스 (UserCreatedEvent, OrderCreatedEvent) 가 더 단순.
+
+## 반환값으로 이벤트 chain
+
+listener 가 다른 이벤트 발행:
+
+```java
+@EventListener
+public OrderConfirmedEvent onOrderPlaced(OrderPlaced event) {
+    // 다른 이벤트 자동 발행
+    return new OrderConfirmedEvent(event.orderId());
+}
+```
+
+list, array 도 가능. void 반환은 chain 없음.
+
+## 내장 Spring 이벤트
+
+| 이벤트 | 발행 시점 |
+|---|---|
+| `ContextRefreshedEvent` | ApplicationContext refresh 완료 (시작 / 재시작) |
+| `ContextStartedEvent` | `Lifecycle.start()` 호출 후 |
+| `ContextStoppedEvent` | `Lifecycle.stop()` 호출 후 |
+| `ContextClosedEvent` | ApplicationContext 종료 시작 |
+| `ApplicationStartedEvent` | Spring Boot 모든 runner 호출 전 (`spring-boot` 전용) |
+| `ApplicationReadyEvent` | 모든 runner 완료 후 (트래픽 받을 준비됨) |
+| `ApplicationFailedEvent` | 시작 실패 시 |
+
+`ApplicationReadyEvent` 가 가장 흔히 쓰임: 워밍업 캐시, 시작 metrics 발행 등.
+
+## 외부 메시지 큐와의 비교
+
+| 항목 | Spring Events | Kafka / RabbitMQ |
+|---|---|---|
+| 위치 | 같은 JVM | 별도 broker |
+| 영속성 | 없음 (메모리) | persistent log |
+| 분산 환경 | 단일 인스턴스만 | 여러 인스턴스 |
+| 처리 보장 | 실패 시 재시도 없음 | at-least-once |
+| 성능 | 매우 빠름 (메서드 호출) | 네트워크 비용 |
+| 사용처 | 모놀리스 모듈 분리 | 마이크로서비스, 비동기 작업 |
+
+Spring Events 는 **같은 프로세스 안 결합 줄이는 도구**. 진짜 비동기 / 분산 처리에는 message broker.
+
+## 함정과 베스트 프랙티스
+
+- **외부 시스템 호출은 `@TransactionalEventListener AFTER_COMMIT`**: rollback 시 inconsistency 방지
+- **`@EventListener` 의 예외는 발행자에 전파**: 부수효과 listener 는 try/catch
+- **`@Async` listener 는 ThreadLocal 컨텍스트 안 전파**: TaskDecorator 필요
+- **재시도 / 영속성 필요하면 별도 outbox 패턴 + 메시지 큐**: in-process 이벤트는 안전망 없음
+- **순환 이벤트 주의**: A → B → A 의 무한 루프 가능
+- **`@TransactionalEventListener` + non-transactional publish**: fallbackExecution=true 안 켜면 listener 무시
+- **Test**: `ApplicationEvents` (Spring Boot 3+) 또는 `@RecordApplicationEvents` 로 captured 이벤트 검증
+
+## 관련 위키
+
+- [[spring-ioc-di]]
+- [[spring-scheduling-async]]
+- [[spring-request-context]]
+- [[spring-transaction]]
+- [[spring-kafka]]
+- [[spring-amqp-rabbitmq]]
