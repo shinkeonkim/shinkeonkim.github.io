@@ -1,0 +1,282 @@
+---
+title: "[JPA] 상속 전략: SINGLE_TABLE, JOINED, TABLE_PER_CLASS"
+aliases: ["JPA inheritance", "InheritanceType", "SINGLE_TABLE", "JOINED", "TABLE_PER_CLASS", "@DiscriminatorColumn", "@MappedSuperclass", "JPA 상속"]
+tags: [jpa, hibernate, inheritance, schema-design]
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Inheritance"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a14039"
+    note: "InheritanceType 명세"
+---
+
+## 정의
+
+JPA 는 객체 상속 구조를 관계형 테이블로 매핑하는 3가지 전략 + 1가지 비매핑 옵션:
+
+| 전략 | 테이블 구조 | 사용 시점 |
+|---|---|---|
+| `SINGLE_TABLE` (기본) | 1 테이블에 모든 자식 컬럼 | 자식 클래스가 적고 필드 공유 많음 |
+| `JOINED` | 부모 1 + 자식별 1 테이블, JOIN | 정규화 우선, 자식별 필드 많음 |
+| `TABLE_PER_CLASS` | 자식별 독립 테이블 (부모 없음) | 거의 안 씀 |
+| `@MappedSuperclass` | 부모는 매핑 안 됨 (테이블 없음) | 공통 필드만 상속 |
+
+`@MappedSuperclass` 가 사실 가장 흔하게 쓰임. 다형성 query 가 필요할 때만 InheritanceType 진짜 상속을 쓴다.
+
+## @MappedSuperclass (실무에서 가장 흔함)
+
+부모 클래스는 entity 가 아니고 **공통 필드만 제공**:
+
+```java
+@MappedSuperclass
+public abstract class BaseTimeEntity {
+    @Id @GeneratedValue
+    Long id;
+
+    @CreatedDate
+    @Column(nullable = false, updatable = false)
+    LocalDateTime createdAt;
+
+    @LastModifiedDate
+    @Column(nullable = false)
+    LocalDateTime updatedAt;
+}
+
+@Entity
+class User extends BaseTimeEntity {
+    String email;
+}
+
+@Entity
+class Post extends BaseTimeEntity {
+    String title;
+}
+```
+
+`BaseTimeEntity` 는 테이블 없음. user, post 테이블에 각각 `id, created_at, updated_at` 컬럼이 추가됨. `@EntityListeners(AuditingEntityListener.class)` 와 조합해 자동 timestamp.
+
+다형성 query 불가 (`SELECT b FROM BaseTimeEntity b` 안 됨). 단순 필드 공유 도구.
+
+## SINGLE_TABLE (InheritanceType 기본)
+
+```java
+@Entity
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+@DiscriminatorColumn(name = "type")
+abstract class Vehicle {
+    @Id @GeneratedValue Long id;
+    String name;
+}
+
+@Entity
+@DiscriminatorValue("CAR")
+class Car extends Vehicle {
+    int doors;
+}
+
+@Entity
+@DiscriminatorValue("BIKE")
+class Bike extends Vehicle {
+    boolean hasBasket;
+}
+```
+
+생성 DDL:
+
+```sql
+CREATE TABLE vehicle (
+    id         BIGINT PRIMARY KEY,
+    type       VARCHAR(31),       -- DiscriminatorColumn
+    name       VARCHAR(255),
+    doors      INT,               -- Car
+    has_basket BOOLEAN            -- Bike
+);
+```
+
+**모든 자식 필드가 한 테이블**에 있고 NULL 허용. type 컬럼으로 인스턴스 종류 구분.
+
+장점:
+- JOIN 없음, query 빠름
+- 다형성 query 자연스러움 (`SELECT v FROM Vehicle v`)
+
+단점:
+- 자식 필드는 모두 nullable (자식의 NOT NULL 제약 불가)
+- 자식 종류 늘면 테이블이 sparse 해짐
+- 스키마 변경 잦음
+
+자식 종류가 2-3개고 공통 필드가 대부분인 경우 최적.
+
+## JOINED
+
+```java
+@Entity
+@Inheritance(strategy = InheritanceType.JOINED)
+abstract class Vehicle {
+    @Id @GeneratedValue Long id;
+    String name;
+}
+
+@Entity
+class Car extends Vehicle {
+    int doors;
+}
+
+@Entity
+class Bike extends Vehicle {
+    boolean hasBasket;
+}
+```
+
+생성 DDL:
+
+```sql
+CREATE TABLE vehicle (
+    id      BIGINT PRIMARY KEY,
+    name    VARCHAR(255)
+);
+CREATE TABLE car (
+    id      BIGINT PRIMARY KEY REFERENCES vehicle(id),
+    doors   INT NOT NULL
+);
+CREATE TABLE bike (
+    id          BIGINT PRIMARY KEY REFERENCES vehicle(id),
+    has_basket  BOOLEAN NOT NULL
+);
+```
+
+Query 시 JOIN:
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`// SELECT v FROM Vehicle v WHERE v.id = ?
+em.find(Vehicle.class, 1L);`}
+  output={`SELECT v.id, v.name,
+       c.doors, b.has_basket,
+       CASE
+         WHEN c.id IS NOT NULL THEN 'Car'
+         WHEN b.id IS NOT NULL THEN 'Bike'
+       END as type
+FROM vehicle v
+LEFT JOIN car c ON v.id = c.id
+LEFT JOIN bike b ON v.id = b.id
+WHERE v.id = ?;`}
+/>
+
+장점:
+- 정규화, NOT NULL 제약 가능
+- 스키마가 깔끔
+
+단점:
+- 매번 JOIN, query 느림
+- INSERT 도 2번 (parent + child)
+
+## TABLE_PER_CLASS
+
+```java
+@Entity
+@Inheritance(strategy = InheritanceType.TABLE_PER_CLASS)
+abstract class Vehicle {
+    @Id @GeneratedValue Long id;
+    String name;
+}
+
+@Entity
+class Car extends Vehicle { int doors; }
+
+@Entity
+class Bike extends Vehicle { boolean hasBasket; }
+```
+
+생성 DDL: car, bike 테이블만. vehicle 테이블 없음. 부모 필드 (name) 가 자식 테이블에 복제.
+
+다형성 query 시:
+
+```sql
+SELECT * FROM (
+    SELECT id, name, doors, NULL as has_basket, 'Car' as type FROM car
+    UNION ALL
+    SELECT id, name, NULL as doors, has_basket, 'Bike' as type FROM bike
+) v WHERE v.id = ?;
+```
+
+`UNION ALL`. 자식이 많아질수록 query 폭증. 거의 사용 안 함.
+
+## 전략 비교
+
+| 항목 | SINGLE_TABLE | JOINED | TABLE_PER_CLASS |
+|---|---|---|---|
+| 테이블 수 | 1 | 1 + N | N |
+| JOIN | 없음 | 있음 | 없음 (UNION) |
+| Query 속도 | 빠름 | 보통 | 자식 많을수록 느림 |
+| NOT NULL 자식 컬럼 | 불가 | 가능 | 가능 |
+| Polymorphic query | 자연스러움 | 자연스러움 | UNION |
+| 스키마 변경 | 매번 ALTER | 자식만 추가 | 자식만 추가 |
+| 실무 추천 | 자식 2-3개 + 단순 | 정규화 우선 | 비추천 |
+
+## @DiscriminatorColumn / @DiscriminatorValue
+
+`SINGLE_TABLE` 의 자식 구분:
+
+```java
+@DiscriminatorColumn(
+    name = "vehicle_type",
+    discriminatorType = DiscriminatorType.STRING,   // STRING / CHAR / INTEGER
+    length = 20
+)
+abstract class Vehicle { ... }
+
+@DiscriminatorValue("CAR")
+class Car extends Vehicle { ... }
+```
+
+`JOINED` 에서는 optional. 없어도 동작 (Hibernate 가 child 테이블 join 으로 추론).
+
+## 다형성 query
+
+```java
+// 모든 vehicle (자식 포함)
+em.createQuery("SELECT v FROM Vehicle v", Vehicle.class);
+
+// car 만
+em.createQuery("SELECT c FROM Car c", Car.class);
+
+// TYPE() function 으로 분기
+em.createQuery("""
+    SELECT v FROM Vehicle v WHERE TYPE(v) IN (:types)
+""")
+    .setParameter("types", Set.of(Car.class));
+
+// TREAT (다운캐스트)
+em.createQuery("""
+    SELECT v FROM Vehicle v
+    WHERE TREAT(v AS Car).doors >= 4
+""");
+```
+
+`TYPE()`, `TREAT()` 가 다형성 query 도구. SINGLE_TABLE / JOINED 에서만 의미있고, MAPPED_SUPERCLASS 에서는 불가.
+
+## 실무 권장
+
+1. **공통 필드만 공유**: `@MappedSuperclass` (BaseTimeEntity 같은)
+2. **다형성 query 필요 + 자식 단순**: SINGLE_TABLE
+3. **다형성 query 필요 + 자식 복잡 / 정규화 우선**: JOINED
+4. **TABLE_PER_CLASS 는 피하기**
+
+## 함정과 베스트 프랙티스
+
+- **`@MappedSuperclass` 부모는 `abstract`**: 인스턴스화하면 entity 가 아닌데 entity 처럼 동작 시도
+- **SINGLE_TABLE 의 NULL 컬럼은 검색 성능에 영향**: 인덱스 사용 어려움
+- **JOINED 의 child 만 select 도 join 발생** (id 컬럼이 fk 라서)
+- **자식 entity 의 @DiscriminatorValue 누락**: Hibernate 가 클래스명 사용 (변경 시 깨짐)
+- **`@Inheritance` 는 root entity 에만**: 중간 클래스에 또 붙이면 안 됨
+- **`@JoinColumn(name = "id")` 명시**: JOINED 의 FK 컬럼명 컨트롤
+- **2nd level cache 와 상속**: 캐싱 시 자식 클래스 결정 비용 추가
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpa-lifecycle-callbacks]]
+- [[spring-jpa-embedded-converter]]

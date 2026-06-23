@@ -1,0 +1,276 @@
+---
+title: "[JPA] Entity Lifecycle Callbacks와 Auditing"
+aliases: ["JPA Lifecycle", "@PrePersist", "@PostPersist", "@PreUpdate", "@PostLoad", "EntityListeners", "AuditingEntityListener", "Spring Data Auditing", "JPA 생명주기 콜백"]
+tags: [jpa, hibernate, lifecycle, auditing, callback]
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Entity Listeners"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a3434"
+    note: "Lifecycle Callback 명세"
+  - id: spring-docs
+    note: "Spring Data Auditing - https://docs.spring.io/spring-data/jpa/reference/auditing.html"
+---
+
+## 정의
+
+Entity 의 라이프사이클 (persist / update / load / remove) 특정 시점에 자동 호출되는 메서드. 두 가지 형태:
+
+1. **Entity 내부 메서드**: `@PrePersist`, `@PostPersist`, `@PreUpdate`, `@PostUpdate`, `@PostLoad`, `@PreRemove`, `@PostRemove`
+2. **외부 listener 클래스**: `@EntityListeners(MyListener.class)`
+
+Spring Data 의 **Auditing** (`@CreatedDate`, `@LastModifiedDate`, `@CreatedBy`, `@LastModifiedBy`) 가 이걸 활용한 대표 사례.
+
+## 7가지 콜백
+
+| 어노테이션 | 호출 시점 |
+|---|---|
+| `@PrePersist` | INSERT 직전 (em.persist 호출 직후 ~ INSERT 직전) |
+| `@PostPersist` | INSERT 직후 (id 채워진 뒤) |
+| `@PreUpdate` | UPDATE 직전 (dirty checking flush 시점) |
+| `@PostUpdate` | UPDATE 직후 |
+| `@PreRemove` | DELETE 직전 (em.remove 호출 시점) |
+| `@PostRemove` | DELETE 직후 |
+| `@PostLoad` | SELECT 후 entity 채워진 직후 |
+
+## Entity 내부 콜백
+
+```java
+@Entity
+class User {
+    @Id Long id;
+    String email;
+
+    @Column(nullable = false, updatable = false)
+    LocalDateTime createdAt;
+
+    @Column(nullable = false)
+    LocalDateTime updatedAt;
+
+    @PrePersist
+    void onCreate() {
+        createdAt = updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+}
+```
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="DB row"
+  code={`@Transactional
+public void demo() {
+    User u = new User("alice@example.com");
+    em.persist(u);
+    em.flush();   // @PrePersist 호출 → createdAt, updatedAt 채워짐
+
+    u.setEmail("alice2@example.com");
+    em.flush();   // @PreUpdate 호출 → updatedAt 만 갱신
+}`}
+  output={`-- INSERT
+INSERT INTO user (id, email, created_at, updated_at)
+VALUES (1, 'alice@example.com', '2026-06-23T10:00:00', '2026-06-23T10:00:00');
+
+-- UPDATE
+UPDATE user
+SET email = 'alice2@example.com', updated_at = '2026-06-23T10:00:05'
+WHERE id = 1;
+-- created_at 은 updatable=false 라 변경 안 됨`}
+/>
+
+## EntityListener (외부 클래스)
+
+여러 entity 에 같은 로직 적용:
+
+```java
+public class AuditListener {
+    @PrePersist
+    public void onCreate(Object entity) {
+        if (entity instanceof Auditable a) {
+            a.setCreatedAt(LocalDateTime.now());
+            a.setUpdatedAt(LocalDateTime.now());
+        }
+    }
+
+    @PreUpdate
+    public void onUpdate(Object entity) {
+        if (entity instanceof Auditable a) {
+            a.setUpdatedAt(LocalDateTime.now());
+        }
+    }
+}
+
+@Entity
+@EntityListeners(AuditListener.class)
+class User implements Auditable { ... }
+```
+
+Listener 안에서는 다른 entity 의 EntityManager 호출 금지 (재귀 flush 위험).
+
+## Spring Data Auditing
+
+대부분의 경우 직접 콜백을 안 쓰고 Spring Data 의 `AuditingEntityListener` 사용:
+
+```java
+@Configuration
+@EnableJpaAuditing
+public class JpaConfig {
+    @Bean
+    public AuditorAware<String> auditorAware() {
+        return () -> Optional.ofNullable(SecurityContextHolder.getContext().getAuthentication())
+            .filter(Authentication::isAuthenticated)
+            .map(Authentication::getName);
+    }
+}
+
+@MappedSuperclass
+@EntityListeners(AuditingEntityListener.class)
+public abstract class BaseTimeEntity {
+    @CreatedDate
+    @Column(nullable = false, updatable = false)
+    LocalDateTime createdAt;
+
+    @LastModifiedDate
+    @Column(nullable = false)
+    LocalDateTime updatedAt;
+
+    @CreatedBy
+    @Column(updatable = false)
+    String createdBy;
+
+    @LastModifiedBy
+    String updatedBy;
+}
+
+@Entity
+class User extends BaseTimeEntity {
+    @Id Long id;
+    String email;
+}
+```
+
+`@CreatedDate` / `@LastModifiedDate` 는 시간, `@CreatedBy` / `@LastModifiedBy` 는 `AuditorAware` 가 반환한 값으로 자동 채워짐. 일반적으로 현재 로그인 사용자.
+
+`@MappedSuperclass` 와 조합이 자연스러움 ([[spring-jpa-inheritance]]).
+
+## @PostLoad 활용
+
+SELECT 직후 후처리:
+
+```java
+@Entity
+class User {
+    String firstName;
+    String lastName;
+
+    @Transient
+    String fullName;   // DB 에 없는 derived field
+
+    @PostLoad
+    void compose() {
+        fullName = firstName + " " + lastName;
+    }
+}
+```
+
+매번 SELECT 후 자동. 단, dirty checking 대상 아님 (`@Transient` 라).
+
+암호화 컬럼 복호화에도 사용:
+```java
+@PostLoad
+void decryptSensitive() {
+    this.ssn = Crypto.decrypt(this.encryptedSsn);
+}
+```
+
+`AttributeConverter` ([[spring-jpa-embedded-converter]]) 가 더 깔끔하긴 함.
+
+## 콜백의 함정
+
+### 트랜잭션 안에서만 호출됨
+
+flush 시점에 호출되므로 트랜잭션 필수. 트랜잭션 없이 `em.persist` 호출하면 콜백도 안 일어남.
+
+### 다른 entity 호출 금지
+
+```java
+@PrePersist
+void wrong() {
+    em.persist(new AuditLog(...));   // ❌ 재귀 flush
+}
+```
+
+콜백 안에서 EntityManager 작업 시 무한 루프 또는 ConcurrentModificationException. 대안: `ApplicationEvent` 발행해 트랜잭션 commit 후 처리 (`@TransactionalEventListener`).
+
+### dirty checking 와의 상호작용
+
+`@PreUpdate` 안에서 필드 변경하면 그 변경도 UPDATE 에 포함. 단, **다시 dirty checking 이 일어나진 않음** (한 번의 flush 안에서 두 번 안 돌아감). 의도된 동작이지만 헷갈림.
+
+### 상속 시 콜백 순서
+
+부모 entity / @MappedSuperclass 의 콜백이 자식보다 먼저:
+
+```
+@PrePersist on @MappedSuperclass
+   ↓
+@PrePersist on parent entity (@Inheritance)
+   ↓
+@PrePersist on child entity
+   ↓
+EntityListener @PrePersist (@EntityListeners)
+```
+
+복수 listener 면 등록 순서대로. `@ExcludeSuperclassListeners` 로 부모 listener 비활성화 가능.
+
+## 콜백 vs Hibernate Interceptor / EventListener
+
+JPA 콜백은 entity 별. Hibernate 의 `Interceptor` / `EventListener` 는 전역. SaveOrUpdate 후 모든 entity 에 공통 로직 적용할 때 후자가 적합. 단, Hibernate 종속.
+
+## 콜백 vs @TransactionalEventListener
+
+콜백은 flush 시점 (트랜잭션 commit 이전). `@TransactionalEventListener` 는 commit 후. 외부 시스템 호출 (이메일, Kafka publish) 에는 후자가 안전:
+
+```java
+@PostPersist
+void onCreate() {
+    // ❌ 트랜잭션 rollback 시 이메일은 이미 발송됨
+    emailService.welcome(this);
+}
+
+// 더 안전한 패턴
+@PostPersist
+void onCreate() {
+    events.publishEvent(new UserCreatedEvent(this.id));
+}
+
+@Component
+class UserCreatedHandler {
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    void handle(UserCreatedEvent e) {
+        emailService.welcome(e.getId());
+    }
+}
+```
+
+## 함정과 베스트 프랙티스
+
+- **시간 / Audit 은 Spring Data Auditing 권장**: `AuditingEntityListener` + `@EnableJpaAuditing`
+- **`@PrePersist`/`@PreUpdate` 에서 외부 시스템 호출 금지**: 트랜잭션 rollback 시 일관성 깨짐
+- **콜백 안에서 EntityManager 작업 금지**: `@TransactionalEventListener` 로 분리
+- **`@PostLoad` 는 derived field 계산에 유용** (AttributeConverter 보다 단순할 때)
+- **`@EntityListeners` 의 listener 는 Spring Bean 아님**: DI 안 됨 (생성자도 없는 게 안전)
+  - Spring 5.0+ `BeanFactoryAware` 트릭으로 가능하지만 권장 안 됨
+- **콜백 시그니처 고정**: 인스턴스 메서드는 무인자 (or `Object entity`), listener 는 `Object entity` 1개
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-inheritance]]
+- [[spring-jpa-embedded-converter]]
+- [[spring-transaction]]
+- [[spring-security]]

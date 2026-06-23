@@ -1,0 +1,359 @@
+---
+title: "[JPA] @Embeddable, @Embedded, @Converter"
+aliases: ["JPA Embeddable", "@Embedded", "@AttributeOverride", "JPA Converter", "AttributeConverter", "값 타입", "임베디드 타입"]
+tags: [jpa, hibernate, embeddable, converter, value-object]
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Embeddable"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a290"
+    note: "@Embeddable 명세"
+  - title: "Jakarta Persistence 3.1 - AttributeConverter"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a14029"
+    note: "AttributeConverter 명세"
+---
+
+## 정의
+
+**@Embeddable** 은 별도 테이블 없이 entity 의 일부로 포함되는 **값 객체 (Value Object)**. 같은 의미적 그룹의 필드들을 하나의 클래스로 추출.
+
+**AttributeConverter** 는 entity 필드와 DB 컬럼 사이의 **타입 변환** 을 정의. 직렬화 / enum 매핑 / 암호화 / JSON 컬럼 처리에 사용.
+
+둘 다 entity 의 표현력을 높이는 도구. 라이프사이클은 부모 entity 와 동일.
+
+## @Embeddable 기본
+
+```java
+@Embeddable
+public class Address {
+    private String city;
+    private String street;
+    private String zipCode;
+
+    protected Address() {}   // JPA 요구
+
+    public Address(String city, String street, String zipCode) {
+        this.city = city;
+        this.street = street;
+        this.zipCode = zipCode;
+    }
+
+    // getter / equals / hashCode
+}
+
+@Entity
+class User {
+    @Id Long id;
+    String name;
+
+    @Embedded
+    Address address;
+}
+```
+
+생성되는 DDL:
+
+```sql
+CREATE TABLE user (
+    id        BIGINT PRIMARY KEY,
+    name      VARCHAR(255),
+    city      VARCHAR(255),
+    street    VARCHAR(255),
+    zip_code  VARCHAR(255)
+);
+```
+
+별도 테이블 없음. 모든 컬럼이 user 테이블에 같이 들어감.
+
+## @AttributeOverride
+
+같은 @Embeddable 을 한 entity 에서 여러 번 쓸 때 컬럼명 충돌 방지:
+
+```java
+@Entity
+class Order {
+    @Id Long id;
+
+    @Embedded
+    Address billingAddress;
+
+    @Embedded
+    @AttributeOverrides({
+        @AttributeOverride(name = "city",    column = @Column(name = "shipping_city")),
+        @AttributeOverride(name = "street",  column = @Column(name = "shipping_street")),
+        @AttributeOverride(name = "zipCode", column = @Column(name = "shipping_zip"))
+    })
+    Address shippingAddress;
+}
+```
+
+billing 은 city/street/zip_code, shipping 은 shipping_city 등으로 매핑.
+
+## 값 객체로서의 의미
+
+```java
+// ❌ primitive 의 잔치
+@Entity
+class User {
+    String addressCity;
+    String addressStreet;
+    String addressZipCode;
+    String workCity;
+    String workStreet;
+    // ... 매번 도시 검증 로직 반복
+}
+
+// ✓ 의미 단위로 묶고 동작 부여
+@Embeddable
+class Address {
+    String city, street, zipCode;
+    public boolean isInSameCity(Address other) {
+        return Objects.equals(city, other.city);
+    }
+}
+```
+
+DDD 의 Value Object 개념과 자연스럽게 매핑. 불변으로 만들면 동시성 안전.
+
+### 불변 Address
+
+```java
+@Embeddable
+public class Address {
+    @Column(updatable = false) private String city;
+    @Column(updatable = false) private String street;
+    @Column(updatable = false) private String zipCode;
+    // setter 없음, 생성자만
+}
+```
+
+또는 record (Hibernate 6+ 부분 지원):
+
+```java
+@Embeddable
+public record Address(String city, String street, String zipCode) {}
+```
+
+## AttributeConverter
+
+entity 필드 ↔ DB 컬럼 타입 변환:
+
+```java
+@Converter
+public class BooleanToYNConverter implements AttributeConverter<Boolean, String> {
+    @Override
+    public String convertToDatabaseColumn(Boolean attr) {
+        return Boolean.TRUE.equals(attr) ? "Y" : "N";
+    }
+
+    @Override
+    public Boolean convertToEntityAttribute(String db) {
+        return "Y".equals(db);
+    }
+}
+
+@Entity
+class User {
+    @Convert(converter = BooleanToYNConverter.class)
+    boolean active;
+}
+```
+
+DB 에 `Y`/`N` 저장, 자바에서 boolean 사용. legacy DB 호환에 흔함.
+
+### autoApply
+
+```java
+@Converter(autoApply = true)
+public class BooleanToYNConverter implements AttributeConverter<Boolean, String> { ... }
+```
+
+`autoApply = true` 면 같은 타입 (Boolean) 의 모든 필드에 자동 적용. `@Convert` 명시 불필요. 대신 의도와 다른 곳에도 적용될 위험.
+
+## 흔한 Converter 패턴
+
+### enum 매핑
+
+```java
+public enum Role { ADMIN, USER, GUEST }
+
+@Converter(autoApply = true)
+public class RoleConverter implements AttributeConverter<Role, String> {
+    @Override
+    public String convertToDatabaseColumn(Role r) {
+        return r == null ? null : r.name();
+    }
+
+    @Override
+    public Role convertToEntityAttribute(String db) {
+        return db == null ? null : Role.valueOf(db);
+    }
+}
+```
+
+JPA 의 `@Enumerated(EnumType.STRING)` 으로도 가능하지만, converter 가 더 명시적 (DB 값 변경 시 안전).
+
+### List<String> → CSV
+
+```java
+@Converter
+public class StringListConverter implements AttributeConverter<List<String>, String> {
+    @Override
+    public String convertToDatabaseColumn(List<String> list) {
+        return list == null ? null : String.join(",", list);
+    }
+
+    @Override
+    public List<String> convertToEntityAttribute(String db) {
+        return db == null || db.isEmpty() ? List.of() : List.of(db.split(","));
+    }
+}
+
+@Entity
+class Post {
+    @Convert(converter = StringListConverter.class)
+    List<String> tags;
+}
+```
+
+작은 컬렉션을 한 컬럼으로. 검색 못 하는 게 단점 (별도 테이블이 정석).
+
+### JSON 컬럼 (PostgreSQL JSONB)
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="DB row"
+  code={`@Converter
+public class JsonbConverter implements AttributeConverter<Map<String, Object>, String> {
+    static final ObjectMapper M = new ObjectMapper();
+
+    @Override
+    public String convertToDatabaseColumn(Map<String, Object> attr) {
+        try { return M.writeValueAsString(attr); }
+        catch (Exception e) { throw new IllegalArgumentException(e); }
+    }
+
+    @Override
+    public Map<String, Object> convertToEntityAttribute(String db) {
+        if (db == null) return Map.of();
+        try { return M.readValue(db, new TypeReference<>() {}); }
+        catch (Exception e) { throw new IllegalArgumentException(e); }
+    }
+}
+
+@Entity
+class Event {
+    @Convert(converter = JsonbConverter.class)
+    @Column(columnDefinition = "jsonb")
+    Map<String, Object> payload;
+}`}
+  output={`-- INSERT
+INSERT INTO event (payload) VALUES ('{"userId":42,"action":"login"}');
+-- 컬럼 타입은 jsonb (PostgreSQL native JSON)`}
+/>
+
+Hibernate Types 라이브러리 (`hypersistence-utils`) 가 더 본격적인 JSONB 지원. 위 converter 는 간단한 경우.
+
+### 암호화 컬럼
+
+```java
+@Converter
+public class EncryptedStringConverter implements AttributeConverter<String, String> {
+    @Override
+    public String convertToDatabaseColumn(String plain) {
+        return Crypto.encrypt(plain);
+    }
+
+    @Override
+    public String convertToEntityAttribute(String encrypted) {
+        return Crypto.decrypt(encrypted);
+    }
+}
+
+@Entity
+class User {
+    @Convert(converter = EncryptedStringConverter.class)
+    String ssn;   // DB 에는 암호화돼 저장, 자바에는 평문
+}
+```
+
+Spring 의 `spring-security-rsa` / `Vault` 와 조합. Hibernate 6+ 의 `@ColumnTransformer` 도 비슷.
+
+## @Embeddable 의 함정
+
+### equals / hashCode 필수
+
+값 객체이므로 동등성은 필드 값 기준:
+
+```java
+@Embeddable
+class Address {
+    String city, street, zipCode;
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Address a)) return false;
+        return Objects.equals(city, a.city) && Objects.equals(street, a.street) && Objects.equals(zipCode, a.zipCode);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(city, street, zipCode);
+    }
+}
+```
+
+equals 가 없으면 dirty checking 이 항상 변경됐다고 판단 → 매번 UPDATE.
+
+### null 표현
+
+모든 @Embeddable 필드가 null 이면 Hibernate 는 객체 자체를 null 로 취급. 일부만 null 이면 `Address(city=Seoul, street=null, zipCode=null)` 같은 부분 null 인스턴스.
+
+### @EmbeddedId
+
+복합 키로도 사용 가능:
+
+```java
+@Embeddable
+class OrderItemId implements Serializable {
+    @Column(name = "order_id") Long orderId;
+    @Column(name = "product_id") Long productId;
+
+    // equals + hashCode 필수
+}
+
+@Entity
+class OrderItem {
+    @EmbeddedId
+    OrderItemId id;
+}
+```
+
+복합 키 entity 는 Spring Data JPA 의 `JpaRepository<OrderItem, OrderItemId>` 처럼 ID 타입에 @EmbeddedId 클래스를 지정.
+
+## Converter 의 함정
+
+- **@Convert 와 @Enumerated 동시 사용 금지**: 한쪽만
+- **Converter 안에서 다른 service 호출 금지**: 매 SELECT/INSERT 마다 호출됨
+- **`autoApply = true` 와 framework 어노테이션 충돌**: 의도와 다른 곳에 적용될 수 있음
+- **null 처리 명시적**: convertToDatabaseColumn(null) 호출 가능
+- **`@Lob` / `@JdbcTypeCode`** 가 더 적합한 경우 있음 (CLOB, JSON 등)
+- **검색 안 됨**: List → CSV 같은 변환은 LIKE 검색만 가능, 정확한 매칭 불가능
+
+## 함정과 베스트 프랙티스
+
+- **@Embeddable 는 protected no-args ctor + final fields 권장**
+- **equals/hashCode 잊지 말 것** (dirty checking 영향)
+- **`@AttributeOverride` 로 컬럼 재사용**
+- **AttributeConverter 는 stateless**: 다른 Bean 주입 금지
+- **JSON 컬럼은 hypersistence-utils 가 더 본격적**
+- **legacy DB 호환에 converter 가 가장 깔끔**
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-lifecycle-callbacks]]
+- [[spring-validation]]
+- [[java-javabean]]
