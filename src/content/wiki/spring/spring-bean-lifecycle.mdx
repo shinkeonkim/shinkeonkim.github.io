@@ -1,0 +1,189 @@
+---
+title: "[Spring] Bean Lifecycle: 초기화와 소멸 콜백"
+aliases: ["spring bean lifecycle", "@PostConstruct", "@PreDestroy", "InitializingBean", "DisposableBean", "afterPropertiesSet", "Bean 생명주기", "스프링 빈 라이프사이클"]
+tags: [spring, bean, lifecycle, container]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "Bean lifecycle - https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html#beans-factory-lifecycle"
+  - id: spring-docs
+    note: "Customizing the Nature of a Bean - https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html"
+---
+
+## 정의
+
+`spring-ioc-di` 가 **Bean 등록과 주입** 을 다룬다면, 이 페이지는 등록 이후 **생성 → 사용 → 소멸** 사이에 끼어드는 콜백을 다룬다. Spring 컨테이너가 단순히 객체를 만들고 끝내는 게 아니라, 의존성 주입 → 초기화 → BeanPostProcessor → 사용 → 소멸까지 여러 단계로 처리한다는 점이 핵심.
+
+## 전체 생명주기 단계
+
+```
+1. 컨테이너 시작
+   ↓
+2. Bean 메타데이터 등록 (BeanDefinition)
+   ↓
+3. BeanFactoryPostProcessor 실행 (BeanDefinition 수정)
+   ↓
+4. Bean 인스턴스화 (생성자 호출)
+   ↓
+5. 의존성 주입 (필드, setter)
+   ↓
+6. Aware 콜백
+     ├─ BeanNameAware.setBeanName
+     ├─ BeanFactoryAware.setBeanFactory
+     └─ ApplicationContextAware.setApplicationContext
+   ↓
+7. BeanPostProcessor.postProcessBeforeInitialization
+   ↓
+8. 초기화 콜백 (아래 3가지 모두 실행)
+     ├─ @PostConstruct
+     ├─ InitializingBean.afterPropertiesSet()
+     └─ @Bean(initMethod = "...") 또는 init-method
+   ↓
+9. BeanPostProcessor.postProcessAfterInitialization
+     └─ ← 여기서 AOP proxy 가 생성됨
+   ↓
+10. Bean 사용 (애플리케이션 코드)
+   ↓
+11. 컨테이너 종료
+   ↓
+12. 소멸 콜백 (등록 역순)
+      ├─ @PreDestroy
+      ├─ DisposableBean.destroy()
+      └─ @Bean(destroyMethod = "...") 또는 destroy-method
+```
+
+prototype scope 는 11~12 가 **호출되지 않음** (컨테이너가 추적 안 함, [[spring-bean-scope]] 참고).
+
+## 초기화 콜백 3가지
+
+같은 시점에 호출되는 3가지 방법:
+
+### @PostConstruct (권장)
+
+```java
+@Component
+public class CacheLoader {
+    @Autowired DataSource dataSource;
+    Map<Long, User> cache;
+
+    @PostConstruct
+    public void warmup() {
+        cache = loadAll(dataSource);
+    }
+}
+```
+
+JSR-250 표준 (Jakarta Annotations). framework 종속이 없어 가장 깔끔.
+
+### InitializingBean 인터페이스
+
+```java
+@Component
+public class CacheLoader implements InitializingBean {
+    @Override
+    public void afterPropertiesSet() {
+        cache = loadAll(dataSource);
+    }
+}
+```
+
+Spring 인터페이스에 의존. 추천 안 함.
+
+### @Bean(initMethod) 또는 XML init-method
+
+```java
+@Bean(initMethod = "warmup")
+public CacheLoader cacheLoader() {
+    return new CacheLoader();
+}
+```
+
+라이브러리 코드처럼 **수정 불가능한 클래스** 에 초기화 콜백을 붙일 때 유용.
+
+## 소멸 콜백 3가지
+
+`@PreDestroy`, `DisposableBean.destroy()`, `@Bean(destroyMethod)`. 모두 컨테이너 종료 시 호출. `AutoCloseable` 을 구현한 Bean 은 `close()` 가 자동으로 `destroyMethod` 로 추론됨.
+
+```java
+@Component
+public class ConnectionPool implements AutoCloseable {
+    @Override
+    public void close() {     // destroyMethod 자동 인식
+        // 풀 정리
+    }
+}
+```
+
+비활성화하려면 `@Bean(destroyMethod = "")` 명시.
+
+## Aware 인터페이스
+
+컨테이너 자체에 접근이 필요할 때:
+
+```java
+@Component
+public class BeanNameLogger implements BeanNameAware, ApplicationContextAware {
+    String myName;
+    ApplicationContext ctx;
+
+    @Override
+    public void setBeanName(String name) { this.myName = name; }
+
+    @Override
+    public void setApplicationContext(ApplicationContext ctx) { this.ctx = ctx; }
+}
+```
+
+`ApplicationContextAware` 보다는 **생성자 주입으로 `ApplicationContext` 받기** 가 권장. Aware 는 framework-coupled 코드.
+
+## 종료 순서
+
+소멸은 **등록의 역순**. 의존성이 있는 Bean (A → B) 에서 A 가 먼저 소멸되어야 B 를 안전하게 사용할 수 있으므로:
+
+```
+init order:  B → A   (A 가 B 에 의존)
+destroy order: A → B
+```
+
+`@DependsOn` 으로 명시할 수도 있지만, 일반적으로는 컨테이너가 의존성 그래프를 분석해 자동 처리.
+
+## SmartLifecycle
+
+서버 시작/종료에 시점 제어가 필요한 컴포넌트 (Kafka consumer, scheduler 등):
+
+```java
+@Component
+public class KafkaConsumerWrapper implements SmartLifecycle {
+    boolean running;
+
+    @Override public void start() { /* consumer 시작 */ running = true; }
+    @Override public void stop() { running = false; /* 정리 */ }
+    @Override public boolean isRunning() { return running; }
+    @Override public int getPhase() { return 100; }   // phase 낮을수록 먼저 시작 / 늦게 종료
+    @Override public boolean isAutoStartup() { return true; }
+}
+```
+
+`InitializingBean`/`@PostConstruct` 와 다른 점:
+- 컨테이너의 **모든** Bean 이 초기화된 **후** `start()` 호출 (refresh 완료 시점)
+- phase 로 시작/종료 순서 정밀 제어
+- `stop()` 은 graceful shutdown 호출
+
+## 함정과 베스트 프랙티스
+
+- **@PostConstruct 권장**: 표준, 가독성, framework 독립
+- **초기화 콜백에서 무거운 작업 주의**: 컨테이너 시작 지연 + 실패 시 컨테이너 종료
+- **소멸 콜백은 빠르게**: graceful shutdown timeout 안에 끝나야
+- **`@Lazy` 의 함정**: 첫 사용 시점에 초기화. 초기화 실패가 런타임에 터짐.
+- **순환 의존성**: 생성자 주입에선 컨테이너 시작 시 즉시 에러. setter 주입에선 가능하지만 권장 안 됨.
+- **prototype scope 의 destroy 콜백은 호출 안 됨**: 직접 cleanup 필요
+- **`@PreDestroy` 가 호출되려면 정상 종료**: kill -9 / OOM 등은 불가
+
+## 관련 위키
+
+- [[spring-ioc-di]]
+- [[spring-bean-scope]]
+- [[spring-bean-post-processor]]
+- [[spring-autowired-resolution]]
+- [[spring-stereotypes]]
+- [[spring-conditional]]

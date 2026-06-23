@@ -1,0 +1,247 @@
+---
+title: "[Spring] Bean Scope 심화: Singleton, Prototype, Web Scope"
+aliases: ["spring bean scope", "singleton scope", "prototype scope", "request scope", "session scope", "scoped proxy", "@Scope", "Bean 스코프"]
+tags: [spring, bean, scope, web]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "Bean Scopes - https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html"
+  - id: spring-docs
+    note: "Request, Session, Application, WebSocket Scopes - https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html#beans-factory-scopes-other"
+---
+
+## 정의
+
+`spring-ioc-di` 가 5가지 scope 의 **개요** 를 다룬다면, 이 페이지는 그 중 **함정 (prototype-into-singleton)** 과 **해결 패턴 (ScopedProxy, ObjectProvider)** 을 깊게 다룬다.
+
+## 5 표준 Scope
+
+| Scope | 인스턴스 수 | 생명주기 | 사용 사례 |
+|---|---|---|---|
+| `singleton` (기본) | 컨테이너당 1개 | 컨테이너 시작 ~ 종료 | stateless service, repository |
+| `prototype` | 주입/조회마다 새로 | 생성 후 컨테이너 추적 안 함 | mutable state, throwaway 객체 |
+| `request` | HTTP 요청마다 새로 | 요청 시작 ~ 종료 | 요청별 데이터 (현재 user 등) |
+| `session` | HTTP 세션마다 새로 | 세션 시작 ~ 만료 | 로그인 사용자 정보 |
+| `application` | ServletContext 당 1개 | 앱 시작 ~ 종료 | singleton 과 비슷하지만 모든 DispatcherServlet 공유 |
+| `websocket` | WebSocket session 당 | session 시작 ~ 종료 | STOMP 사용자별 상태 |
+
+`singleton` 은 **컨테이너당 1개** 이지 JVM당 1개가 아니다. 하나의 JVM 에 root + dispatcher 의 두 `ApplicationContext` 가 있다면 singleton Bean 도 2개.
+
+## 선언
+
+```java
+@Component
+@Scope("prototype")
+public class TaskWorker { ... }
+
+// 또는
+@Component
+@Scope(value = "request", proxyMode = ScopedProxyMode.TARGET_CLASS)
+public class CurrentRequestUser { ... }
+```
+
+`@Bean` 방식도 동일:
+
+```java
+@Bean
+@Scope("prototype")
+public TaskWorker worker() { return new TaskWorker(); }
+```
+
+## 함정: Prototype-Into-Singleton
+
+singleton 안에 prototype 을 주입하면:
+
+```java
+@Component  // singleton
+public class Dispatcher {
+    @Autowired
+    TaskWorker worker;   // ← prototype 으로 선언했어도
+
+    public void dispatch() {
+        worker.run();    // 매번 같은 worker 인스턴스!
+    }
+}
+```
+
+`Dispatcher` 가 1번 생성될 때 `worker` 도 1번만 주입된다. 이후 `worker` 필드는 같은 인스턴스를 가리킴. prototype 의 의도 (매번 새 인스턴스) 가 무효화된다.
+
+## 해결 1: ObjectProvider
+
+```java
+@Component
+public class Dispatcher {
+    @Autowired
+    ObjectProvider<TaskWorker> workerProvider;
+
+    public void dispatch() {
+        TaskWorker worker = workerProvider.getObject();  // 호출마다 새 인스턴스
+        worker.run();
+    }
+}
+```
+
+Spring 4.3+ 의 권장 방식. `Optional<T>`, `Iterable<T>`, lazy / unique 같은 부가 기능도 함께.
+
+## 해결 2: jakarta.inject.Provider
+
+JSR-330 표준. ObjectProvider 와 거의 동일하지만 framework 독립:
+
+```java
+@Inject
+Provider<TaskWorker> workerProvider;
+
+TaskWorker worker = workerProvider.get();
+```
+
+## 해결 3: @Lookup
+
+```java
+@Component
+public abstract class Dispatcher {
+    public void dispatch() {
+        TaskWorker w = createWorker();
+        w.run();
+    }
+
+    @Lookup
+    protected abstract TaskWorker createWorker();
+}
+```
+
+Spring 이 CGLIB 으로 abstract 메서드를 구현. 추상 클래스가 필요해 깔끔하진 않음.
+
+## 해결 4: ScopedProxy
+
+scope 자체에 proxy 옵션:
+
+```java
+@Component
+@Scope(value = "prototype", proxyMode = ScopedProxyMode.TARGET_CLASS)
+public class TaskWorker { ... }
+```
+
+주입받는 쪽은 평범하게:
+
+```java
+@Component
+public class Dispatcher {
+    @Autowired
+    TaskWorker worker;       // ← 실제는 proxy
+
+    public void dispatch() {
+        worker.run();        // proxy 가 호출마다 새 인스턴스 lookup
+    }
+}
+```
+
+가장 깔끔하지만 proxy 오버헤드. web scope 에는 거의 필수 (singleton service 가 request-scoped Bean 을 주입받을 때).
+
+## ScopedProxyMode
+
+```java
+@Scope(proxyMode = ScopedProxyMode.TARGET_CLASS)   // CGLIB (클래스 상속)
+@Scope(proxyMode = ScopedProxyMode.INTERFACES)     // JDK dynamic proxy (인터페이스만)
+```
+
+| Mode | 기반 | 장점 | 단점 |
+|---|---|---|---|
+| `TARGET_CLASS` | CGLIB (바이트코드) | 클래스 자체 주입 가능 | final 클래스/메서드 안 됨, 의존성 추가 |
+| `INTERFACES` | JDK Proxy | 표준, 가벼움 | 인터페이스를 통해서만 호출 가능 |
+
+기본은 `NO` (proxy 없음). 함정에 안 빠지려면 거의 항상 `TARGET_CLASS` 명시.
+
+## Web Scope 사용 예
+
+### request scope
+
+```java
+@Component
+@RequestScope         // = @Scope("request", proxyMode = TARGET_CLASS) 단축
+public class RequestMetrics {
+    private final long startTime = System.nanoTime();
+    private int dbQueryCount;
+
+    public void incrementQueries() { dbQueryCount++; }
+    public long elapsedMs() { return (System.nanoTime() - startTime) / 1_000_000; }
+}
+
+@Service
+public class UserService {
+    @Autowired RequestMetrics metrics;   // request 마다 새 인스턴스 (proxy)
+
+    public User find(Long id) {
+        metrics.incrementQueries();
+        return repo.findById(id);
+    }
+}
+```
+
+각 HTTP 요청마다 새 `RequestMetrics` 인스턴스. 요청 종료 시 자동 소멸.
+
+### session scope
+
+```java
+@Component
+@SessionScope
+public class ShoppingCart {
+    private final List<Item> items = new ArrayList<>();
+    public void add(Item i) { items.add(i); }
+}
+```
+
+**메모리 함정**: 세션 만료 (기본 30분) 까지 살아있음. 사용자 수 × 평균 cart 크기 = 메모리 압박. Redis 등 외부 저장소가 유리.
+
+### application scope
+
+singleton 과 비슷하지만 **ServletContext 에 저장**. 멀티 DispatcherServlet 환경에서도 공유. 거의 안 쓰임 (대부분 singleton 으로 충분).
+
+## 커스텀 Scope
+
+`Scope` 인터페이스 구현 후 등록:
+
+```java
+public class TenantScope implements Scope {
+    @Override
+    public Object get(String name, ObjectFactory<?> factory) {
+        String tenant = TenantContext.current();
+        return getStore(tenant).computeIfAbsent(name, k -> factory.getObject());
+    }
+    // ... remove, registerDestructionCallback, etc.
+}
+
+@Configuration
+public class ScopeConfig {
+    @Bean
+    public static CustomScopeConfigurer customScope() {
+        CustomScopeConfigurer cfg = new CustomScopeConfigurer();
+        cfg.addScope("tenant", new TenantScope());
+        return cfg;
+    }
+}
+
+@Component
+@Scope(value = "tenant", proxyMode = ScopedProxyMode.TARGET_CLASS)
+public class TenantDataSource { ... }
+```
+
+`SimpleThreadScope` 는 Spring 내장이지만 thread 풀에서 위험 (이전 요청의 인스턴스 누수).
+
+## 함정과 베스트 프랙티스
+
+- **prototype scope 의 destroy callback 호출 안 됨**: `@PreDestroy` 무용. 직접 정리.
+- **web scope 에는 거의 항상 `proxyMode = TARGET_CLASS`**: singleton 의 함정 회피
+- **session scope 는 메모리 폭탄 후보**: 1000 명 × 1 MB = 1 GB
+- **prototype 을 매번 새로 받으려면 ObjectProvider 우선**: `@Lookup` 보다 깔끔
+- **`@RefreshScope` (Spring Cloud Config) 도 ScopedProxy 패턴**: config 갱신 시 새 인스턴스
+- **WebFlux 환경에서는 web scope 부재**: ThreadLocal 안 쓰는 Reactor Context 기반
+
+## 관련 위키
+
+- [[spring-ioc-di]]
+- [[spring-bean-lifecycle]]
+- [[spring-bean-post-processor]]
+- [[spring-request-context]]
+- [[spring-mvc]]
+- [[spring-webflux]]
+- [[java-threadlocal]]
