@@ -1,0 +1,262 @@
+---
+title: "[Spring] RequestContextHolder, LocaleContextHolder: ThreadLocal 기반 요청 컨텍스트"
+aliases: ["RequestContextHolder", "LocaleContextHolder", "spring request context", "ServletRequestAttributes", "스프링 요청 컨텍스트", "RequestContextFilter"]
+tags: [spring, mvc, threadlocal, context, web]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "RequestContextHolder Javadoc - https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/context/request/RequestContextHolder.html"
+  - id: spring-docs
+    note: "RequestContextFilter - https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/filter/RequestContextFilter.html"
+---
+
+## 정의
+
+Spring 은 **HTTP 요청 / 응답 / locale / 트랜잭션 / 인증** 같은 요청 범위 데이터를 **ThreadLocal 에 저장** 해 전역 노출한다. 메서드 인자로 일일이 넘기지 않아도 호출 스택 어디서든 꺼낼 수 있다.
+
+이 페이지는 Spring 의 ThreadLocal 기반 컨텍스트들을 정리한다. 메커니즘 자체는 [[java-threadlocal]] 참고.
+
+## 4가지 핵심 holder
+
+| Holder | 저장 대상 | 채우는 컴포넌트 |
+|---|---|---|
+| `RequestContextHolder` | `RequestAttributes` (HTTP 요청/응답/세션 접근) | `RequestContextFilter`, `DispatcherServlet` |
+| `LocaleContextHolder` | `LocaleContext` (현재 요청 locale) | `LocaleResolver`, `LocaleContextResolver` |
+| `TransactionSynchronizationManager` | 트랜잭션 자원 (Connection, EntityManager) | `@Transactional` 진입/종료 |
+| `SecurityContextHolder` (Spring Security) | `Authentication` 객체 | `SecurityContextPersistenceFilter` |
+
+모두 동일한 패턴: 진입점 (Filter) 에서 set, 종료점에서 remove.
+
+## RequestContextHolder
+
+가장 흔하게 직접 사용:
+
+```java
+@Service
+public class AuditService {
+    public void log(String action) {
+        ServletRequestAttributes attrs =
+            (ServletRequestAttributes) RequestContextHolder.currentRequestAttributes();
+        HttpServletRequest req = attrs.getRequest();
+
+        String ip = req.getRemoteAddr();
+        String userAgent = req.getHeader("User-Agent");
+        // 로깅 ...
+    }
+}
+```
+
+`currentRequestAttributes()` 는 컨텍스트 없으면 `IllegalStateException`. `getRequestAttributes()` 는 null 반환.
+
+### 사용을 안 해도 되는 대안
+
+서비스 메서드가 `HttpServletRequest` 가 필요하면 그냥 **컨트롤러에서 받아 넘기는 게 깔끔**:
+
+```java
+@PostMapping("/orders")
+public Order create(@RequestBody Order o, HttpServletRequest req) {
+    return orderService.create(o, req.getRemoteAddr());  // 명시적 인자
+}
+```
+
+`RequestContextHolder` 는 **컨트롤러까지 도달하지 못하는 깊은 layer** (interceptor 가 만든 utility, 글로벌 로깅 등) 에서만 사용 권장. 비즈니스 service 가 직접 의존하면 테스트가 어려워진다.
+
+## 어떻게 채워지는가
+
+Spring Boot 의 자동 설정이 `RequestContextFilter` 를 등록 (또는 `DispatcherServlet.threadContextInheritable=true` 설정 시 DispatcherServlet 이 처리).
+
+```java
+// RequestContextFilter 의 핵심 (간략화)
+public void doFilterInternal(HttpServletRequest req, HttpServletResponse resp, FilterChain chain) {
+    ServletRequestAttributes attrs = new ServletRequestAttributes(req, resp);
+    initContextHolders(req, attrs);
+    try {
+        chain.doFilter(req, resp);
+    } finally {
+        resetContextHolders();
+        attrs.requestCompleted();
+    }
+}
+```
+
+매 요청마다 set → 처리 → remove. ThreadLocal 누수 방지의 표준 패턴.
+
+## LocaleContextHolder
+
+```java
+@Service
+public class GreetingService {
+    private final MessageSource messageSource;
+
+    public String greet(String name) {
+        Locale locale = LocaleContextHolder.getLocale();
+        return messageSource.getMessage("greeting", new Object[]{name}, locale);
+    }
+}
+```
+
+`LocaleResolver` 가 요청마다 `Accept-Language` 헤더, 쿠키, 세션, URL 파라미터 등에서 locale 을 추출해 holder 에 set. 서비스는 어디서든 `getLocale()`.
+
+`TimeZone` 도 같은 방식: `LocaleContextHolder.getTimeZone()`.
+
+## TransactionSynchronizationManager
+
+`@Transactional` 의 동작 원리:
+
+```java
+@Service
+public class OrderService {
+    @Transactional
+    public Order place(Cart cart) {
+        // DataSourceTransactionManager 가 진입 시
+        //   Connection 을 thread-local 에 저장
+        repository.save(order);   // 같은 Connection 사용
+        // 정상 종료 시 commit, 예외 시 rollback
+    }
+}
+```
+
+`TransactionSynchronizationManager.getResource(dataSource)` 로 현재 thread 의 Connection 을 꺼낼 수 있다. JPA `EntityManager`, MyBatis `SqlSession` 도 동일 방식.
+
+`@TransactionalEventListener` 가 트랜잭션 commit 후에 실행되는 것도 이 매커니즘 (TransactionSynchronization 콜백 등록).
+
+## SecurityContextHolder (Spring Security)
+
+```java
+@Service
+public class SomeService {
+    public void doIt() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String username = auth.getName();
+        boolean isAdmin = auth.getAuthorities().stream()
+            .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+    }
+}
+```
+
+`SecurityContextPersistenceFilter` 가 세션에서 인증 정보를 꺼내 ThreadLocal 에 set, 응답 후 다시 세션에 저장. JWT 기반이면 `JwtAuthenticationFilter` 가 매 요청 토큰 검증 후 set.
+
+`@PreAuthorize` 같은 메서드 보안 어노테이션도 이 holder 에서 정보를 읽는다.
+
+## 비동기 / @Async 함정
+
+ThreadLocal 은 **현재 thread 에서만 보인다**. `@Async` 메서드는 별도 thread 에서 실행:
+
+```java
+@Service
+public class NotificationService {
+    @Async
+    public void sendAsync(String message) {
+        // ❌ 다른 thread = RequestContextHolder 비어있음
+        var attrs = RequestContextHolder.getRequestAttributes();   // null
+    }
+}
+```
+
+### 해결 1: TaskDecorator
+
+```java
+@Configuration
+@EnableAsync
+public class AsyncConfig implements AsyncConfigurer {
+    @Override
+    public Executor getAsyncExecutor() {
+        ThreadPoolTaskExecutor exec = new ThreadPoolTaskExecutor();
+        exec.setCorePoolSize(10);
+        exec.setTaskDecorator(new ContextCopyingDecorator());
+        exec.initialize();
+        return exec;
+    }
+}
+
+public class ContextCopyingDecorator implements TaskDecorator {
+    @Override
+    public Runnable decorate(Runnable task) {
+        RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+        SecurityContext sc = SecurityContextHolder.getContext();
+        return () -> {
+            try {
+                RequestContextHolder.setRequestAttributes(attrs);
+                SecurityContextHolder.setContext(sc);
+                task.run();
+            } finally {
+                RequestContextHolder.resetRequestAttributes();
+                SecurityContextHolder.clearContext();
+            }
+        };
+    }
+}
+```
+
+매 작업 제출 시점에 호출 스레드의 컨텍스트를 캡처해 worker 스레드에서 복원.
+
+### 해결 2: inheritable=true
+
+```java
+RequestContextHolder.setRequestAttributes(attrs, true);  // 자식 thread 에 상속
+```
+
+`InheritableThreadLocal` 기반. **스레드 풀에서는 무용지물** (생성 시점에만 복사). 일회성 thread 생성에만 의미.
+
+### 해결 3: Spring 6+ Micrometer Context Propagation
+
+```java
+@Bean
+public ThreadPoolTaskExecutor executor() {
+    ContextSnapshotFactory factory = ContextSnapshotFactory.builder().build();
+    ThreadPoolTaskExecutor exec = new ThreadPoolTaskExecutor();
+    exec.setTaskDecorator(runnable -> {
+        ContextSnapshot snapshot = factory.captureAll();
+        return () -> snapshot.wrap(runnable).run();
+    });
+    return exec;
+}
+```
+
+Micrometer Context Propagation 라이브러리가 등록된 모든 ThreadLocal (Spring Security, MDC, Reactor Context, OpenTelemetry trace 등) 을 한 번에 전파.
+
+## WebFlux 에선?
+
+WebFlux 는 reactive (1 thread 가 여러 요청을 처리). ThreadLocal 부적합. Reactor 의 **Context** API 사용:
+
+```java
+@RestController
+public class ApiController {
+    @GetMapping("/me")
+    public Mono<User> me() {
+        return Mono.deferContextual(ctx -> {
+            User u = ctx.get("currentUser");
+            return Mono.just(u);
+        });
+    }
+}
+```
+
+Spring Security 의 WebFlux 모듈은 `ReactiveSecurityContextHolder` 제공:
+
+```java
+return ReactiveSecurityContextHolder.getContext()
+    .map(SecurityContext::getAuthentication)
+    .map(Authentication::getName);
+```
+
+WebFlux 와 MVC 의 가장 큰 패러다임 차이. [[spring-webflux]] 참고.
+
+## 함정과 베스트 프랙티스
+
+- **컨트롤러까지 도달하는 데이터는 명시적 인자로**
+- **`RequestContextHolder` 직접 사용은 최소화**: 테스트가 어려워진다 (MockMvc 도 holder 채워주지만)
+- **`@Async` 메서드에서 ThreadLocal 컨텍스트 안 전파**: TaskDecorator 또는 Micrometer Context Propagation
+- **virtual thread + ThreadLocal**: virtual thread 수백만 개 = ThreadLocal 누수 폭발. 가능하면 ScopedValue 또는 명시적 전달
+- **테스트**: `RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(new MockHttpServletRequest()))` 로 채워줘야 통과
+- **try/finally 강제**: 직접 set 하면 반드시 finally 에서 reset
+
+## 관련 위키
+
+- [[java-threadlocal]]
+- [[spring-mvc]]
+- [[spring-dispatcher-servlet]]
+- [[spring-scheduling-async]]
+- [[spring-webflux]]
+- [[spring-security]]
+- [[spring-transaction]]

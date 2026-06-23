@@ -1,0 +1,228 @@
+---
+title: "[Spring] HandlerInterceptor: preHandle, postHandle, afterCompletion"
+aliases: ["HandlerInterceptor", "spring interceptor", "preHandle postHandle afterCompletion", "WebMvcConfigurer", "스프링 인터셉터", "AsyncHandlerInterceptor"]
+tags: [spring, mvc, interceptor, web]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "Interceptors - https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/handlermapping-interceptor.html"
+  - id: spring-docs
+    note: "HandlerInterceptor Javadoc - https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/HandlerInterceptor.html"
+---
+
+## 정의
+
+**HandlerInterceptor** 는 `DispatcherServlet` 내부에서 handler (Controller 메서드) 실행 **전후** 에 끼어드는 Spring MVC 전용 메커니즘.
+
+Filter 와 비슷하지만 **Spring MVC 컨텍스트 안** 에서 동작. handler 가 어떤 controller 메서드인지 알 수 있고, model 이나 view 도 가공 가능. Filter 는 더 바깥 (Servlet 컨테이너 레벨) 에서 동작해 handler 정보를 모른다.
+
+## 인터페이스
+
+```java
+public interface HandlerInterceptor {
+    default boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object handler)
+            throws Exception {
+        return true;  // false 반환 시 체인 중단
+    }
+
+    default void postHandle(HttpServletRequest req, HttpServletResponse resp, Object handler,
+                            ModelAndView mav) throws Exception {}
+
+    default void afterCompletion(HttpServletRequest req, HttpServletResponse resp, Object handler,
+                                 Exception ex) throws Exception {}
+}
+```
+
+JDK 8+ default 메서드 덕분에 필요한 메서드만 구현하면 된다.
+
+## 실행 순서
+
+여러 Interceptor 등록 시:
+
+```
+요청 도착
+  ↓
+A.preHandle
+  ↓ (true 반환)
+B.preHandle
+  ↓ (true 반환)
+[ Controller 메서드 실행 ]
+  ↓
+B.postHandle     ← 등록 역순
+  ↓
+A.postHandle
+  ↓
+[ View 렌더링 ]
+  ↓
+B.afterCompletion  ← 등록 역순
+  ↓
+A.afterCompletion
+  ↓
+응답 전송
+```
+
+`preHandle` 이 `false` 를 반환하면 그 시점에서 **체인 중단**. 이후 interceptor / handler 모두 호출되지 않음. 이미 호출된 `preHandle` 의 짝인 `afterCompletion` 도 호출되지 않음. 응답은 직접 작성해야 한다 (예: 401 상태 + body).
+
+## 등록
+
+```java
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(new AuthInterceptor())
+            .addPathPatterns("/api/**")
+            .excludePathPatterns("/api/public/**", "/api/login")
+            .order(1);
+
+        registry.addInterceptor(new MetricsInterceptor())
+            .order(2);
+    }
+}
+```
+
+`addPathPatterns` / `excludePathPatterns` 가 Filter 의 URL 매핑보다 유연 (Ant 패턴).
+
+## preHandle: 인증 / 사전 검증
+
+```java
+@Component
+public class AuthInterceptor implements HandlerInterceptor {
+    @Override
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object handler) {
+        // handler 가 HandlerMethod 이면 어노테이션 확인 가능
+        if (handler instanceof HandlerMethod hm) {
+            if (hm.hasMethodAnnotation(SkipAuth.class)) return true;
+        }
+
+        String token = req.getHeader("Authorization");
+        if (token == null || !verify(token)) {
+            resp.setStatus(401);
+            return false;
+        }
+
+        // 통과: 요청 attribute 에 user 저장
+        req.setAttribute("user", getUserFromToken(token));
+        return true;
+    }
+}
+```
+
+`handler` 파라미터가 보통 `HandlerMethod` (`@Controller` 메서드 정보). Filter 는 이게 안 됨.
+
+## postHandle: 응답 가공
+
+```java
+@Override
+public void postHandle(HttpServletRequest req, HttpServletResponse resp, Object handler, ModelAndView mav) {
+    // view 렌더링 전, model 에 공통 데이터 추가
+    if (mav != null) {
+        mav.addObject("currentYear", LocalDate.now().getYear());
+    }
+}
+```
+
+`@RestController` (JSON 반환) 일 때는 `mav` 가 `null`. 응답 body 는 이미 직렬화돼 사용 불가. 응답 body 를 가공하려면 `ResponseBodyAdvice` 가 적합.
+
+## afterCompletion: 정리
+
+```java
+@Override
+public void afterCompletion(HttpServletRequest req, HttpServletResponse resp, Object handler, Exception ex) {
+    MDC.clear();
+    if (ex != null) {
+        log.error("요청 처리 실패: {}", req.getRequestURI(), ex);
+    }
+}
+```
+
+**예외가 발생해도 (preHandle 통과 후) 항상 호출**. ThreadLocal 정리, MDC clean, 시간 측정 종료 등 cleanup 로직이 적합. try/finally 와 유사한 보장.
+
+## Filter vs HandlerInterceptor vs AOP
+
+| 항목 | Filter | HandlerInterceptor | AOP @Around |
+|---|---|---|---|
+| 실행 위치 | Servlet 컨테이너 | DispatcherServlet 내부 | Spring Bean 메서드 호출 |
+| handler 정보 | 모름 | 알 수 있음 (`HandlerMethod`) | 메서드 자체가 대상 |
+| ModelAndView 접근 | 불가 | postHandle 에서 가능 | 반환값으로 접근 |
+| 비-MVC 요청 | 적용 | 미적용 (DispatcherServlet 통과 시만) | 메서드 호출 시 적용 |
+| 예외 잡기 | 직접 try/catch | afterCompletion 의 `ex` 파라미터 | throwing advice |
+| 적용 범위 | URL 패턴 | URL 패턴 + handler 어노테이션 | pointcut (메서드/클래스) |
+| Spring context | 등록 시 주입 가능 | 완전 통합 | Spring Bean 만 |
+
+### 선택 기준
+
+- **인증 / CORS / 압축 / 인코딩** = Filter ([[java-servlet-filter]])
+- **handler 정보 필요한 인증 / 권한 (어노테이션 기반)** = Interceptor
+- **응답 body 변환** = `ResponseBodyAdvice`
+- **모델에 공통 데이터** = Interceptor 의 postHandle 또는 `@ModelAttribute`
+- **요청 처리 시간 측정** = Filter (Interceptor 보다 더 정확)
+- **서비스 메서드 횡단 관심사 (트랜잭션 / 캐싱 / 로깅)** = AOP
+
+## 실용 예: 메서드 단위 권한
+
+```java
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface RequireRole {
+    String value();
+}
+
+@RestController
+public class AdminController {
+    @RequireRole("ADMIN")
+    @PostMapping("/admin/users")
+    public User create(@RequestBody User u) { ... }
+}
+
+@Component
+public class RoleInterceptor implements HandlerInterceptor {
+    @Override
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object handler) {
+        if (!(handler instanceof HandlerMethod hm)) return true;
+
+        RequireRole anno = hm.getMethodAnnotation(RequireRole.class);
+        if (anno == null) return true;
+
+        User user = (User) req.getAttribute("user");
+        if (user == null || !user.hasRole(anno.value())) {
+            resp.setStatus(403);
+            return false;
+        }
+        return true;
+    }
+}
+```
+
+handler 의 어노테이션을 직접 검사 가능 = Interceptor 의 가장 큰 장점.
+
+## AsyncHandlerInterceptor
+
+비동기 요청 (`Callable`, `DeferredResult`):
+
+```java
+public interface AsyncHandlerInterceptor extends HandlerInterceptor {
+    default void afterConcurrentHandlingStarted(HttpServletRequest req, HttpServletResponse resp, Object handler) {}
+}
+```
+
+비동기 dispatch 시작 시 `afterConcurrentHandlingStarted` 호출 (원래 servlet thread 가 반환되기 직전). 비동기 작업 완료 후 다시 들어올 땐 `preHandle` 부터 다시 실행. ThreadLocal 정리 / 복원 처리에 사용.
+
+## 함정과 베스트 프랙티스
+
+- **preHandle false 시 응답을 직접 작성**: 컨테이너가 자동으로 안 한다
+- **postHandle 은 view 렌더링 전, afterCompletion 은 후**
+- **`@RestController` 에서 postHandle 의 mav 는 null**
+- **handler 가 `HandlerMethod` 가 아닐 수도 있음** (정적 리소스 핸들러 등): 타입 체크 필수
+- **ThreadLocal 정리는 afterCompletion 에**: try/finally 보장
+- **여러 interceptor 의 순서 명시**: `.order()` 또는 `@Order`
+- **DispatcherServlet 밖 (Filter) 에서 처리할 수 있는 건 Filter 로**: Interceptor 가 더 깊은 곳
+
+## 관련 위키
+
+- [[spring-mvc]]
+- [[spring-dispatcher-servlet]]
+- [[java-servlet-filter]]
+- [[spring-aop]]
+- [[spring-security]]
+- [[spring-request-context]]

@@ -1,0 +1,242 @@
+---
+title: "[Spring] DispatcherServlet: Front Controller 내부"
+aliases: ["DispatcherServlet", "FrontController", "HandlerMapping", "HandlerAdapter", "ViewResolver", "spring front controller", "디스패처 서블릿"]
+tags: [spring, mvc, servlet, dispatcher]
+updated: 2026-06-21
+references:
+  - id: spring-docs
+    note: "DispatcherServlet - https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet.html"
+  - id: spring-docs
+    note: "Special Bean Types - https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/special-bean-types.html"
+---
+
+## 정의
+
+`spring-mvc` 가 `@RestController` / `@RequestMapping` **사용법** 을 다룬다면, 이 페이지는 그 모든 요청을 받아 처리하는 **`DispatcherServlet` 의 내부 메커니즘** 을 다룬다.
+
+`DispatcherServlet` 은 본질적으로 **하나의 Servlet** ([[java-servlet-api]]). Front Controller 패턴 구현체로, 모든 HTTP 요청을 일단 받은 뒤 적절한 handler (`@Controller` 메서드) 에게 위임한다.
+
+## Front Controller 패턴
+
+전통적 Servlet 방식은 URL 마다 별도 Servlet 등록:
+
+```
+/users    → UserServlet
+/orders   → OrderServlet
+/products → ProductServlet
+```
+
+각 servlet 이 인증, 로깅, 직렬화 같은 공통 로직을 반복. **Front Controller** 는 입구를 하나로:
+
+```
+모든 요청 → DispatcherServlet → 적절한 handler 선택 → 위임
+```
+
+공통 처리 (Interceptor, ExceptionResolver) 가 한 곳에서. handler 는 비즈니스 로직만.
+
+## 등록
+
+Spring Boot 는 자동 등록 (`/` 매핑). 수동 등록은:
+
+```java
+public class MyWebInitializer implements WebApplicationInitializer {
+    @Override
+    public void onStartup(ServletContext ctx) {
+        AnnotationConfigWebApplicationContext appCtx = new AnnotationConfigWebApplicationContext();
+        appCtx.register(WebConfig.class);
+
+        DispatcherServlet servlet = new DispatcherServlet(appCtx);
+        ServletRegistration.Dynamic reg = ctx.addServlet("dispatcher", servlet);
+        reg.setLoadOnStartup(1);
+        reg.addMapping("/");
+    }
+}
+```
+
+`@SpringBootApplication` + `spring-boot-starter-web` 이면 위 코드 불필요.
+
+## 요청 처리 흐름
+
+```
+HTTP 요청
+  ↓
+Servlet Container (Tomcat)
+  ↓
+[ Servlet Filter chain ]   ← Spring Security 도 여기서 동작
+  ↓
+DispatcherServlet.service()
+  ↓
+HandlerMapping → handler (Controller 메서드) 찾기
+  ↓
+HandlerAdapter → handler 실행 준비
+  ↓
+[ HandlerInterceptor.preHandle ]
+  ↓
+HandlerAdapter.handle()
+  ├─ ArgumentResolver → 메서드 파라미터 채우기
+  ├─ Controller 메서드 실행
+  └─ ReturnValueHandler → 반환값 처리
+  ↓
+[ HandlerInterceptor.postHandle ]
+  ↓
+ModelAndView 가 있으면 ViewResolver → View → render
+  ↓
+[ HandlerInterceptor.afterCompletion ]
+  ↓
+응답 전송
+  ↓
+Filter chain 역순
+  ↓
+HTTP 응답
+```
+
+## 9가지 특수 Bean
+
+`DispatcherServlet` 이 컨테이너에서 찾아 사용하는 strategy Bean 들:
+
+| Bean | 역할 | 기본 구현 |
+|---|---|---|
+| `HandlerMapping` | URL → handler 매핑 | `RequestMappingHandlerMapping`, `BeanNameUrlHandlerMapping` |
+| `HandlerAdapter` | handler 호출 어댑터 | `RequestMappingHandlerAdapter` |
+| `HandlerExceptionResolver` | 예외 → 응답 변환 | `ExceptionHandlerExceptionResolver` (`@ExceptionHandler`), `DefaultHandlerExceptionResolver` |
+| `ViewResolver` | view 이름 → View | `InternalResourceViewResolver`, `ThymeleafViewResolver` |
+| `LocaleResolver` | 요청 locale 결정 | `AcceptHeaderLocaleResolver` |
+| `ThemeResolver` | 테마 결정 (legacy) | `FixedThemeResolver` |
+| `MultipartResolver` | multipart/form-data 파싱 | `StandardServletMultipartResolver` |
+| `FlashMapManager` | redirect 시 attribute 전달 | `SessionFlashMapManager` |
+| `RequestToViewNameTranslator` | view 이름 자동 생성 | `DefaultRequestToViewNameTranslator` |
+
+특정 Bean 을 등록하지 않으면 `DispatcherServlet.properties` 에 정의된 기본 구현이 자동 등록.
+
+## HandlerMapping 의 동작
+
+`RequestMappingHandlerMapping` 이 가장 일반적:
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping("/{id}")
+    public User get(@PathVariable Long id) { ... }
+}
+```
+
+컨테이너 시작 시:
+1. 모든 `@Controller` / `@RestController` Bean 스캔
+2. `@RequestMapping` (또는 `@GetMapping` 등) 메서드 추출
+3. URL 패턴 + HTTP 메서드 → `HandlerMethod` 매핑 테이블 생성
+
+요청 도착 시:
+1. URL + 메서드 매칭
+2. `@PathVariable`, `@RequestParam` 등 메타 정보 포함한 `HandlerMethod` 반환
+
+## HandlerAdapter 의 역할
+
+handler 가 다양한 형태 (Controller 인터페이스, `@Controller` 메서드, `HttpRequestHandler`) 라 어댑터가 필요. 가장 일반적인 `RequestMappingHandlerAdapter` 의 책임:
+
+- **ArgumentResolver**: `@PathVariable`, `@RequestBody`, `HttpServletRequest`, `Authentication` 등 파라미터를 채움
+- **메서드 호출**: 채워진 인자로 controller 메서드 실행
+- **ReturnValueHandler**: 반환값을 처리 (`@ResponseBody` 면 JSON 직렬화, view 이름이면 ViewResolver 호출)
+
+ArgumentResolver / ReturnValueHandler 는 확장 포인트. 커스텀 어노테이션 추가 가능:
+
+```java
+public class CurrentUserResolver implements HandlerMethodArgumentResolver {
+    public boolean supportsParameter(MethodParameter p) {
+        return p.hasParameterAnnotation(CurrentUser.class);
+    }
+    public Object resolveArgument(MethodParameter p, ...) {
+        return SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+    }
+}
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+        resolvers.add(new CurrentUserResolver());
+    }
+}
+
+@GetMapping("/me")
+public User me(@CurrentUser User user) { return user; }
+```
+
+## ViewResolver
+
+return type 이 `String` (view 이름) 이면:
+
+```java
+@Controller
+public class HomeController {
+    @GetMapping("/home")
+    public String home(Model model) {
+        model.addAttribute("name", "World");
+        return "home";   // → ViewResolver 가 "home" → 실제 View 객체
+    }
+}
+```
+
+Thymeleaf 사용 시 `templates/home.html` 로 매핑. 여러 ViewResolver 등록 가능 (체인).
+
+`@RestController` 면 `@ResponseBody` 가 강제 적용돼 ViewResolver 미사용.
+
+## WebApplicationContext 계층
+
+```
+Root ApplicationContext (ContextLoaderListener)
+  ├─ Service, Repository, DataSource (재사용 가능 Bean)
+  └─ Dispatcher ApplicationContext (DispatcherServlet)
+       ├─ Controller, ViewResolver, HandlerMapping (web 전용)
+       └─ 부모 root 의 Bean 도 사용 가능
+```
+
+Spring Boot 는 기본적으로 둘을 합쳐 1개 컨텍스트만 만든다. 멀티 DispatcherServlet 일 때만 분리 의미.
+
+```java
+// 멀티 dispatcher 예
+public void onStartup(ServletContext ctx) {
+    // root context
+    AnnotationConfigWebApplicationContext root = new AnnotationConfigWebApplicationContext();
+    root.register(RootConfig.class);
+    ctx.addListener(new ContextLoaderListener(root));
+
+    // dispatcher 1
+    DispatcherServlet api = new DispatcherServlet(apiContext);
+    ctx.addServlet("api", api).addMapping("/api/*");
+
+    // dispatcher 2
+    DispatcherServlet admin = new DispatcherServlet(adminContext);
+    ctx.addServlet("admin", admin).addMapping("/admin/*");
+}
+```
+
+## DispatcherServlet vs Servlet Filter
+
+| | Filter | DispatcherServlet |
+|---|---|---|
+| 위치 | Servlet 컨테이너 (앞단) | Servlet 자체 |
+| Spring context | 사용 가능하지만 통합 약함 | 완전 통합 |
+| handler 정보 | 모름 | 매핑 결과 알 수 있음 |
+| 적용 범위 | URL 패턴 | 매핑된 모든 요청 |
+
+Spring Security 는 **Filter 로 동작** ([[java-servlet-filter]]). 그래서 DispatcherServlet 도달 전에 인증/인가 처리.
+
+## 함정과 베스트 프랙티스
+
+- **404 가 DispatcherServlet 까지 도달하는지 확인**: 정적 리소스 매핑이 가로채면 controller 까지 안 옴
+- **요청 본문 1회 읽기 제약**: filter 가 미리 읽으면 controller 가 못 읽음. `ContentCachingRequestWrapper` 사용
+- **여러 ViewResolver 등록 시 order 중요**: 첫 매칭이 우선
+- **`@ExceptionHandler` 가 가장 우선**: 그 다음 `@ControllerAdvice`, 마지막 default
+- **request scope Bean 은 DispatcherServlet 진입 시 생성**: filter 안에선 사용 불가
+- **async 요청** (`Callable`, `DeferredResult`) 은 servlet 의 startAsync 기반. 컨테이너의 worker thread 풀과 별도 작업 풀 필요.
+
+## 관련 위키
+
+- [[spring-mvc]]
+- [[java-servlet-api]]
+- [[java-servlet-lifecycle]]
+- [[java-servlet-filter]]
+- [[spring-handler-interceptor]]
+- [[spring-boot-autoconfig]]
+- [[spring-webflux]]
