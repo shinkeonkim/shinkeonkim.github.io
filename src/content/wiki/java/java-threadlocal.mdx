@@ -1,0 +1,152 @@
+---
+title: "[Java] ThreadLocal"
+aliases: ["ThreadLocal", "InheritableThreadLocal", "ScopedValue", "스레드 로컬", "java threadlocal"]
+tags: [java, concurrency, threadlocal, memory]
+updated: 2026-06-21
+references:
+  - title: "Oracle Docs: ThreadLocal"
+    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ThreadLocal.html"
+    note: "ThreadLocal Javadoc"
+  - title: "JEP 446: Scoped Values"
+    url: "https://openjdk.org/jeps/446"
+    note: "JDK 21+ 현대적 대안"
+---
+
+## 정의
+
+`ThreadLocal<T>` 는 **각 스레드마다 독립된 변수 사본을 가지게 해 주는 컨테이너**. `set/get/remove` 로 접근하며, 한 스레드의 값은 다른 스레드에서 볼 수 없다.
+
+쓰임은 두 가지: (1) 같은 인스턴스를 여러 스레드가 공유하지만 상태는 격리해야 할 때 (e.g., `SimpleDateFormat` 캐싱), (2) 메서드 인자로 전달하기 번거로운 "요청 컨텍스트" 를 호출 스택 전체에 보이게 하고 싶을 때 (e.g., 트랜잭션, 인증 정보).
+
+## 기본 사용
+
+```java
+public class RequestId {
+    private static final ThreadLocal<String> CURRENT = new ThreadLocal<>();
+
+    public static void set(String id) { CURRENT.set(id); }
+    public static String get() { return CURRENT.get(); }
+    public static void clear() { CURRENT.remove(); }
+}
+
+// 진입점에서 설정
+RequestId.set("req-123");
+try {
+    service.doWork();   // 깊은 호출 스택 어디서든 RequestId.get() 으로 접근
+} finally {
+    RequestId.clear();  // 반드시 정리
+}
+```
+
+`withInitial` 로 lazy 초기값 지정 가능:
+
+```java
+private static final ThreadLocal<SimpleDateFormat> FORMAT =
+    ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyy-MM-dd"));
+
+String today = FORMAT.get().format(new Date());
+```
+
+`SimpleDateFormat` 은 thread-safe 하지 않으므로 흔한 패턴.
+
+## 내부 구조
+
+`ThreadLocal` 값은 `ThreadLocal` 인스턴스 자체에 저장되지 않는다. 각 `Thread` 객체 안의 **`ThreadLocalMap`** 에 저장된다.
+
+```
+Thread A.threadLocals = { ThreadLocal_X: "A 값", ThreadLocal_Y: 1 }
+Thread B.threadLocals = { ThreadLocal_X: "B 값" }
+```
+
+`ThreadLocal` 인스턴스는 map 의 **key** 역할. 그래서 같은 `ThreadLocal` 변수에 대해 스레드별로 다른 값이 보이는 것.
+
+map 의 키는 `WeakReference<ThreadLocal>`. `ThreadLocal` 변수 자체가 GC 되면 entry 의 key 가 null 이 되지만, **value 는 strong reference 라 GC 안 됨**. 이게 누수의 원인.
+
+## 메모리 누수 함정
+
+스레드 풀 환경에서 흔히 발생:
+
+```java
+// 잘못된 패턴
+ExecutorService pool = Executors.newFixedThreadPool(10);
+pool.submit(() -> {
+    BIG_OBJECT.set(new byte[100_000_000]);  // 100 MB 할당
+    doWork();
+    // remove() 안 함
+});
+```
+
+스레드가 풀에 반환돼도 `ThreadLocalMap` 은 그대로. 다음 작업이 와도 그 100 MB 가 계속 살아있다. 10 개 스레드 풀이면 최악의 경우 1 GB 가 유지됨.
+
+**규칙: 진입점에서 `try { set(...); ... } finally { remove(); }` 패턴 강제**. Web 프레임워크들이 servlet filter / interceptor 로 처리해 주는 이유.
+
+## InheritableThreadLocal
+
+자식 스레드가 부모의 값을 상속:
+
+```java
+InheritableThreadLocal<String> trace = new InheritableThreadLocal<>();
+trace.set("trace-1");
+
+new Thread(() -> {
+    System.out.println(trace.get());  // "trace-1"
+}).start();
+```
+
+**중요한 한계**: `Thread` 생성 시점에 값이 복사된다. 스레드 풀처럼 스레드를 재사용하면 풀에 들어갈 때 한 번만 복사되고, 이후 작업에서는 stale 한 부모 값이 그대로. 풀 환경에선 거의 무용지물.
+
+Spring 의 `TaskDecorator` 로 매 작업마다 복사하는 패턴이 일반적.
+
+## ScopedValue (JDK 21+)
+
+ThreadLocal 의 함정을 해결한 **불변, 스코프 한정** 대안:
+
+```java
+private static final ScopedValue<User> CURRENT_USER = ScopedValue.newInstance();
+
+ScopedValue.where(CURRENT_USER, alice)
+    .run(() -> {
+        // 이 블록 안에서만 CURRENT_USER.get() == alice
+        service.process();
+    });
+// 블록 종료 = 자동 해제, 누수 불가능
+```
+
+특징:
+- **불변**: set 으로 덮어쓸 수 없음 (rebinding 만 가능, 새 스코프 안에서)
+- **자동 정리**: try/finally 불필요
+- **virtual thread 친화적**: 가벼움 (ThreadLocal 은 virtual thread 마다 map 생성 비용)
+
+JDK 25 에서도 preview 단계 (2026 기준). 정식 stable 화 진행 중.
+
+## Spring 활용
+
+Spring 은 ThreadLocal 을 광범위하게 사용. 주요 위치:
+
+| 컴포넌트 | 저장 대상 | 설정/해제 시점 |
+|---|---|---|
+| `RequestContextHolder` | HTTP 요청/응답 attributes | `RequestContextFilter`, `DispatcherServlet` |
+| `LocaleContextHolder` | 현재 요청의 locale | `LocaleResolver` 가 갱신 |
+| `TransactionSynchronizationManager` | 현재 트랜잭션 자원 (Connection 등) | `@Transactional` 진입/종료 |
+| `SecurityContextHolder` (Spring Security) | 인증된 `Authentication` 객체 | `SecurityContextPersistenceFilter` |
+
+`@Async` 메서드는 별도 스레드에서 실행되므로 위 ThreadLocal 이 자동 전파되지 않음. 해결책은 `TaskDecorator` 로 컨텍스트를 복사하거나 `setRequestAttributes(attrs, inheritable=true)` 옵션 사용. [[spring-request-context]] 참고.
+
+## 베스트 프랙티스
+
+- `private static final` 로 선언 (인스턴스마다 만들면 누수 가속)
+- 반드시 `try { set; ... } finally { remove; }` 패턴
+- 프레임워크가 관리해 주는 ThreadLocal 은 직접 건드리지 말 것
+- 스레드 풀에서 쓸 때 더 조심
+- JDK 21+ 신규 코드에선 `ScopedValue` 우선 검토
+- virtual thread 사용 시 `ThreadLocal` 남용 피하기 (수백만 개 가능 = 누수 폭발)
+
+## 관련 위키
+
+- [[java-volatile]]
+- [[java-atomic-integer]]
+- [[java-reentrant-lock]]
+- [[spring-request-context]]
+- [[spring-security]]
+- [[spring-transaction]]
+- [[spring-scheduling-async]]
