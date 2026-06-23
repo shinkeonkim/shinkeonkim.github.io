@@ -38,7 +38,10 @@ function renderCard(e: AnimEntry): string {
           )
           .join('')}${e.tags.length > 4 ? `<span class="opacity-60">+${e.tags.length - 4}</span>` : ''}</div>`
       : '';
-  return `<a href="/animations/${encodeURIComponent(e.id)}/" class="anim-card group block rounded-lg border border-border bg-surface-elevated p-4 no-underline transition-colors hover:border-accent">
+  // Encode each path segment individually to preserve `/` as a path separator
+  // in case animation IDs ever gain a directory prefix.
+  const idPath = e.id.split('/').map(encodeURIComponent).join('/');
+  return `<a href="/animations/${idPath}/" class="anim-card group block rounded-lg border border-border bg-surface-elevated p-4 no-underline transition-colors hover:border-accent">
     <div class="mb-1 flex items-start justify-between gap-2">
       <span class="text-base font-semibold text-fg group-hover:text-accent">${title}</span>
       <span class="shrink-0 text-xs text-fg-muted tabular-nums">${(e.duration / 1000).toFixed(1)}s</span>

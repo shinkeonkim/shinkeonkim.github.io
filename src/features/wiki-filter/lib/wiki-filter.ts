@@ -32,7 +32,11 @@ function renderFilteredItem(e: WikiEntry): string {
     e.tags.length > 0
       ? `<div class="mt-0.5 text-xs text-fg-muted">${e.tags.map((t) => `#${escapeHtml(t)}`).join(' ')}</div>`
       : '';
-  return `<li><a href="/wiki/${encodeURIComponent(e.id)}/" class="wiki-list-item group"><div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5"><span class="text-base font-medium group-hover:text-accent">${title}</span>${updated}</div>${tagsRow}</a></li>`;
+  // entry.id may contain `/` for subdirectory entries (e.g. `spring/spring-batch`).
+  // Encode each path segment individually to preserve `/` as a path separator,
+  // matching the static href patterns used elsewhere (WikiList.astro, etc.).
+  const path = e.id.split('/').map(encodeURIComponent).join('/');
+  return `<li><a href="/wiki/${path}/" class="wiki-list-item group"><div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5"><span class="text-base font-medium group-hover:text-accent">${title}</span>${updated}</div>${tagsRow}</a></li>`;
 }
 
 // Build the page-number list with ellipses, mirroring src/shared/ui/Pagination.astro.
