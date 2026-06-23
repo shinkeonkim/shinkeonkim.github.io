@@ -1,0 +1,319 @@
+---
+title: "[Spring Security] Testing: @WithMockUser, MockMvc, jwt(), oauth2Login()"
+aliases: ["Spring Security Test", "@WithMockUser", "@WithUserDetails", "MockMvc security", "csrf().with", "jwt().jwt", "스프링 시큐리티 테스트"]
+tags: [spring, security, testing, mockmvc, junit]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Testing Spring Security - https://docs.spring.io/spring-security/reference/servlet/test/index.html"
+  - id: spring-docs
+    note: "MockMvc Request Builders - https://docs.spring.io/spring-security/reference/servlet/test/mockmvc/setup.html"
+---
+
+## 정의
+
+Spring Security 가 적용된 컨트롤러를 테스트할 때 흔한 어려움:
+- 매번 실제 로그인 절차를 거쳐야 인증된 요청 가능
+- CSRF token 이 없으면 POST 거부
+- OAuth2 / JWT 환경에서 mock token 생성 번거로움
+
+`spring-security-test` 모듈이 이걸 한 줄로 해결: `@WithMockUser`, `@WithUserDetails`, `csrf()`, `jwt()`, `oauth2Login()`, `httpBasic()` 등.
+
+## 의존성
+
+```kotlin
+testImplementation("org.springframework.security:spring-security-test")
+testImplementation("org.springframework.boot:spring-boot-starter-test")
+```
+
+## @WithMockUser (가장 흔함)
+
+테스트 메서드 실행 시 SecurityContext 에 mock user 세팅:
+
+<CodeWithOutput
+  language="java"
+  outputLanguage="text"
+  outputLabel="테스트 결과"
+  code={`@WebMvcTest(UserController.class)
+class UserControllerTest {
+    @Autowired MockMvc mvc;
+    @MockBean UserService userService;
+
+    @Test
+    @WithMockUser(username = "alice", roles = {"USER"})
+    void getMe_returnsCurrentUser() throws Exception {
+        when(userService.findByEmail("alice")).thenReturn(new User("alice"));
+        mvc.perform(get("/me"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.username").value("alice"));
+    }
+
+    @Test
+    void getMe_unauthorized_when_anonymous() throws Exception {
+        mvc.perform(get("/me"))
+            .andExpect(status().isUnauthorized());
+    }
+}`}
+  output={`getMe_returnsCurrentUser: PASSED
+getMe_unauthorized_when_anonymous: PASSED`}
+/>
+
+`@WithMockUser` 의 기본:
+- username = "user"
+- password = "password"
+- authorities = `ROLE_USER`
+
+옵션:
+```java
+@WithMockUser(
+    username = "admin",
+    roles = {"ADMIN", "USER"},                    // ROLE_ 자동 prefix
+    authorities = {"SCOPE_read", "SCOPE_write"}   // raw authority (prefix 없음)
+)
+```
+
+## @WithUserDetails
+
+실제 `UserDetailsService` 를 호출해 로딩:
+
+```java
+@Test
+@WithUserDetails("alice@example.com")
+void purchaseHistory() throws Exception {
+    mvc.perform(get("/purchases"))
+        .andExpect(status().isOk());
+}
+```
+
+`UserDetailsService` 가 DB / mock 에서 사용자를 조회. role / authority / customer-specific 필드까지 실제와 동일. 통합 테스트에 적합.
+
+## @WithSecurityContext (커스텀)
+
+`@WithMockUser` 가 부족할 때:
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@WithSecurityContext(factory = WithCustomUserFactory.class)
+public @interface WithCustomUser {
+    long userId();
+    String tenantId() default "default";
+}
+
+class WithCustomUserFactory implements WithSecurityContextFactory<WithCustomUser> {
+    @Override
+    public SecurityContext createSecurityContext(WithCustomUser anno) {
+        SecurityContext ctx = SecurityContextHolder.createEmptyContext();
+        CustomPrincipal p = new CustomPrincipal(anno.userId(), anno.tenantId());
+        ctx.setAuthentication(new UsernamePasswordAuthenticationToken(p, null, List.of()));
+        return ctx;
+    }
+}
+
+// 사용
+@Test
+@WithCustomUser(userId = 42, tenantId = "acme")
+void multiTenant() throws Exception { ... }
+```
+
+multi-tenant / 복잡한 principal 구조 테스트에 유용.
+
+## CSRF Token Mock
+
+POST / PUT / DELETE 가 CSRF token 없이는 403 거부됨. 테스트에서:
+
+```java
+@Test
+@WithMockUser
+void createPost() throws Exception {
+    mvc.perform(post("/posts")
+            .with(csrf())                      // ← 핵심
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""{"title":"hello"}"""))
+        .andExpect(status().isCreated());
+}
+```
+
+`with(csrf())` 가 valid CSRF token 을 요청에 자동 추가. 의도적으로 실패 테스트하려면 `with(csrf().asHeader().useInvalidToken())`.
+
+## JWT Mock (Resource Server)
+
+```java
+@Test
+void readApi_withJwt() throws Exception {
+    mvc.perform(get("/api/data")
+            .with(jwt().jwt(jwt -> jwt
+                .claim("sub", "alice")
+                .claim("scope", "read write"))
+                .authorities(new SimpleGrantedAuthority("SCOPE_read"))))
+        .andExpect(status().isOk());
+}
+```
+
+`jwt()` 가 OAuth2 Resource Server 가 검증한 것처럼 SecurityContext 세팅. 실제 JWT 서명 검증은 skip.
+
+## OAuth2 Login Mock
+
+```java
+@Test
+void oauth2_login() throws Exception {
+    mvc.perform(get("/me")
+            .with(oauth2Login()
+                .attributes(attrs -> attrs.put("email", "alice@example.com"))
+                .authorities(new SimpleGrantedAuthority("ROLE_USER"))))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.email").value("alice@example.com"));
+}
+```
+
+`OAuth2User` 또는 `OidcUser` 가 컨트롤러 파라미터로 주입되는 시나리오 테스트.
+
+## httpBasic, formLogin
+
+```java
+mvc.perform(get("/api/data")
+    .with(httpBasic("alice", "secret")))   // Basic Auth 헤더 추가
+
+mvc.perform(formLogin()
+    .user("alice").password("secret"))     // POST /login 시뮬레이션
+    .andExpect(authenticated())
+    .andExpect(redirectedUrl("/"))
+```
+
+`authenticated()` matcher 는 SecurityContext 가 정상 세팅됐는지 검증.
+
+## SecurityMockMvcResultMatchers
+
+```java
+import static org.springframework.security.test.web.servlet.response.SecurityMockMvcResultMatchers.*;
+
+mvc.perform(get("/admin"))
+    .andExpect(unauthenticated());           // 401 / anonymous
+
+mvc.perform(formLogin().user("alice").password("secret"))
+    .andExpect(authenticated().withUsername("alice"));
+
+mvc.perform(formLogin().user("wrong").password("wrong"))
+    .andExpect(unauthenticated());
+```
+
+## SecurityContext 직접 조작 (단위 테스트)
+
+`@WebMvcTest` / `MockMvc` 가 아닌 단위 테스트:
+
+```java
+@Test
+void serviceMethod() {
+    Authentication auth = new UsernamePasswordAuthenticationToken("alice", null,
+        List.of(new SimpleGrantedAuthority("ROLE_ADMIN")));
+    SecurityContextHolder.getContext().setAuthentication(auth);
+
+    try {
+        service.adminOnlyAction();   // @PreAuthorize("hasRole('ADMIN')")
+    } finally {
+        SecurityContextHolder.clearContext();
+    }
+}
+```
+
+`@PreAuthorize` 같은 method security 테스트에 필수. 매번 `clearContext` 호출 (또는 JUnit `@AfterEach`).
+
+## Method Security 통합 테스트
+
+`@PreAuthorize` 가 실제 동작하는지:
+
+```java
+@SpringBootTest
+@AutoConfigureMockMvc
+class MethodSecurityTest {
+    @Autowired AdminService service;
+
+    @Test
+    @WithMockUser(roles = "USER")
+    void user_cannot_delete() {
+        assertThrows(AccessDeniedException.class, () -> service.deleteAll());
+    }
+
+    @Test
+    @WithMockUser(roles = "ADMIN")
+    void admin_can_delete() {
+        assertDoesNotThrow(() -> service.deleteAll());
+    }
+}
+```
+
+`@EnableMethodSecurity` 가 활성화돼 있어야 SpEL 평가됨.
+
+## @WebMvcTest 와 Security 자동 설정
+
+```java
+@WebMvcTest(controllers = UserController.class)
+class UserControllerTest {
+    @Autowired MockMvc mvc;
+    @MockBean UserService userService;
+}
+```
+
+`@WebMvcTest` 는 SecurityFilterChain 도 자동 로딩. 그래서 anonymous 요청은 401. `@WithMockUser` 없이 호출하려면:
+
+```java
+@TestConfiguration
+@EnableWebSecurity
+class NoSecurityConfig {
+    @Bean
+    SecurityFilterChain permitAll(HttpSecurity http) throws Exception {
+        return http.csrf(c -> c.disable())
+            .authorizeHttpRequests(a -> a.anyRequest().permitAll())
+            .build();
+    }
+}
+
+@WebMvcTest(controllers = UserController.class)
+@Import(NoSecurityConfig.class)
+class UnsecureControllerTest { ... }
+```
+
+또는 `@AutoConfigureMockMvc(addFilters = false)` 로 filter 비활성화.
+
+## @SpringBootTest 통합 시나리오
+
+```java
+@SpringBootTest(webEnvironment = RANDOM_PORT)
+@AutoConfigureMockMvc
+class FullStackSecurityTest {
+    @Autowired MockMvc mvc;
+
+    @Test
+    void anonymous_to_protected_redirects_to_login() throws Exception {
+        mvc.perform(get("/admin"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(redirectedUrlPattern("**/login"));
+    }
+
+    @Test
+    void login_with_form() throws Exception {
+        mvc.perform(formLogin().user("admin@example.com").password("admin123"))
+            .andExpect(authenticated().withUsername("admin@example.com"));
+    }
+}
+```
+
+실제 SecurityFilterChain, UserDetailsService, PasswordEncoder 동작. CI 가 잡아낼 회귀 가장 많음.
+
+## 함정과 베스트 프랙티스
+
+- **`with(csrf())` 잊지 말 것**: POST / PUT / DELETE 모두 필요
+- **`@WithMockUser` 의 `roles` 는 자동 ROLE_ prefix**: `authorities` 는 prefix 없이 raw
+- **`SecurityContextHolder` 수동 조작 후 cleanup 필수**: 누수 시 다른 테스트 오염
+- **`@WebMvcTest` 는 Security 포함**: 명시적으로 permit 하거나 mock 사용
+- **JWT 테스트는 `jwt()`**: 실제 token decode 시뮬레이션 필요 없음
+- **OAuth2 callback 시나리오**: MockMvc 로는 한계. `WebClient` + WireMock 통합 테스트 고려
+- **password encoder slow**: 테스트에서 `NoOpPasswordEncoder` 또는 BCrypt strength 4 사용
+- **Testcontainers 가 추천**: 실제 PostgreSQL / Redis 로 통합 (UserDetailsService + 세션)
+
+## 관련 위키
+
+- [[spring-security]]
+- [[spring-security-oauth2-flow]]
+- [[spring-security-session-mgmt]]
+- [[spring-testing]]
+- [[spring-mvc]]

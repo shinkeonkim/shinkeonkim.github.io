@@ -1,0 +1,257 @@
+---
+title: "[Spring Security] Session Management와 Remember-Me"
+aliases: ["Spring Security Session", "SessionManagement", "Remember-Me", "concurrent session", "session fixation", "Spring Session", "세션 관리"]
+tags: [spring, security, session, remember-me, csrf]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Session Management - https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html"
+  - id: spring-docs
+    note: "Remember-Me - https://docs.spring.io/spring-security/reference/servlet/authentication/rememberme.html"
+---
+
+## 정의
+
+`spring-security` 가 JWT / stateless 위주를 다룬다면, 이 페이지는 **session-based 인증** 의 세부 동작 (생성 정책, 동시 세션 제한, fixation 방어, remember-me) 을 다룬다.
+
+session-based 가 적합한 경우:
+- 단일 서비스, 모놀리스
+- 사용자 수가 manageable
+- 서버에서 강제 로그아웃 / 세션 무효화 필요
+- CSRF 보호 + httpOnly cookie 가 자연스러움
+
+stateless (JWT) 가 적합한 경우:
+- 여러 마이크로서비스 (token 공유)
+- 모바일 / SPA + BFF 없음
+- 무상태 horizontal scaling 우선
+
+대부분 실무는 **session + Redis backend (Spring Session)** 가 최적 균형.
+
+## SessionCreationPolicy 4가지
+
+```java
+@Bean
+SecurityFilterChain api(HttpSecurity http) throws Exception {
+    return http
+        .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
+        .build();
+}
+```
+
+| Policy | 동작 |
+|---|---|
+| `ALWAYS` | 매 요청마다 세션 생성 (사용자 비-인증도) |
+| `IF_REQUIRED` (기본) | 필요 시 (인증 시) 생성 |
+| `NEVER` | 직접 생성 안 하지만 기존 세션 사용 |
+| `STATELESS` | 세션 절대 안 만듦 (JWT 환경) |
+
+JWT 기반 API 는 반드시 `STATELESS`. 그래야 `JSESSIONID` cookie 가 안 생기고 메모리 누수도 방지.
+
+## Session Fixation 방어
+
+**Session Fixation 공격**: 공격자가 알려진 session id 를 피해자에게 심고, 피해자가 그 session 으로 로그인하면 공격자도 같은 session 으로 접근.
+
+Spring Security 기본 방어: **로그인 성공 시 새 session id 발급**.
+
+```java
+.sessionManagement(s -> s
+    .sessionFixation(f -> f.migrateSession())   // 기본
+    // .sessionFixation(f -> f.newSession())     // attribute 도 폐기
+    // .sessionFixation(f -> f.changeSessionId())// Servlet 3.1+, attribute 유지 + id 변경
+    // .sessionFixation(f -> f.none())           // 비활성 (위험)
+)
+```
+
+`migrateSession` 이 가장 보수적 (attribute 도 새 세션으로 복사). `changeSessionId` 가 가장 효율적 (id 만 교체).
+
+## 동시 세션 제어 (concurrent session)
+
+같은 사용자가 여러 곳에서 로그인 못 하게:
+
+```java
+.sessionManagement(s -> s
+    .maximumSessions(1)
+    .maxSessionsPreventsLogin(false)   // false 면 새 로그인이 기존 세션 무효화
+                                        // true 면 새 로그인 차단
+    .expiredUrl("/login?expired"))
+```
+
+`HttpSessionEventPublisher` Bean 필요 (세션 만료 이벤트 발행):
+
+```java
+@Bean
+HttpSessionEventPublisher httpSessionEventPublisher() {
+    return new HttpSessionEventPublisher();
+}
+```
+
+`maximumSessions = 1` + `maxSessionsPreventsLogin = false` 면:
+- A 컴퓨터 로그인 후 B 컴퓨터 로그인
+- A 의 세션 즉시 만료 → A 에서 다음 요청 시 `/login?expired` 로 redirect
+
+## Remember-Me (자동 로그인)
+
+사용자가 "로그인 유지" 체크하면 cookie 로 장기 유지:
+
+```java
+.rememberMe(r -> r
+    .key("my-secret-remember-key")         // HMAC 키
+    .tokenValiditySeconds(86400 * 14)      // 2주
+    .userDetailsService(userDetailsService))
+```
+
+기본은 **hash-based**: cookie 에 `username + expiry + hash(username + expiry + password + key)` 저장. 사용자가 비밀번호 바꾸면 자동 무효화.
+
+더 안전한 **persistent token** 방식:
+
+```java
+@Bean
+PersistentTokenRepository tokenRepository(DataSource ds) {
+    JdbcTokenRepositoryImpl repo = new JdbcTokenRepositoryImpl();
+    repo.setDataSource(ds);
+    return repo;
+}
+
+.rememberMe(r -> r
+    .tokenRepository(tokenRepository)
+    .tokenValiditySeconds(86400 * 14))
+```
+
+DB 에 (series, token, username, last_used) 저장. **token rotation**: 매번 사용할 때마다 새 token 발급, 도난 시 시리즈 mismatch 감지 가능.
+
+cookie 도난 (XSS) 대비 `secure`, `httpOnly`, `SameSite=Lax` 설정 필수.
+
+## Spring Session (분산 세션)
+
+여러 인스턴스가 세션 공유 (Redis / DB 백엔드):
+
+```kotlin
+implementation("org.springframework.session:spring-session-data-redis")
+implementation("org.springframework.boot:spring-boot-starter-data-redis")
+```
+
+```yaml
+spring:
+  session:
+    store-type: redis
+    timeout: 30m
+  data:
+    redis:
+      host: redis.internal
+```
+
+`HttpSession` API 그대로 사용. Spring Session 이 backend 만 교체. 인스턴스 죽어도 다른 인스턴스에서 같은 session id 로 계속.
+
+장점:
+- horizontal scaling 시 sticky session 불필요
+- 인스턴스 재시작 시 사용자 안 로그아웃됨
+- 강제 로그아웃 (admin 이 특정 사용자 모든 세션 종료) 가능
+
+함정: **세션 직렬화**. session attribute 에 저장하는 객체는 `Serializable`. 클래스 변경 시 `InvalidClassException` 위험. JSON serializer 사용 권장 (`GenericJackson2JsonRedisSerializer`).
+
+## 세션 정보 활용
+
+```java
+@RestController
+class SessionController {
+    @GetMapping("/session")
+    public Map<String, Object> session(HttpSession session, Authentication auth) {
+        return Map.of(
+            "id", session.getId(),
+            "createdAt", new Date(session.getCreationTime()),
+            "lastAccessed", new Date(session.getLastAccessedTime()),
+            "maxInactive", session.getMaxInactiveInterval(),
+            "user", auth.getName()
+        );
+    }
+
+    @PostMapping("/logout-all")
+    public String logoutAll(Authentication auth, FindByIndexNameSessionRepository<?> repo) {
+        Map<String, ? extends Session> sessions = repo.findByPrincipalName(auth.getName());
+        sessions.keySet().forEach(repo::deleteById);
+        return "logged out " + sessions.size() + " sessions";
+    }
+}
+```
+
+`FindByIndexNameSessionRepository` 가 사용자별 세션 조회 / 일괄 삭제 API 제공 (Spring Session).
+
+## SameSite Cookie
+
+```yaml
+server:
+  servlet:
+    session:
+      cookie:
+        same-site: lax    # 또는 strict
+        secure: true      # HTTPS 만
+        http-only: true   # JS 접근 차단
+```
+
+| SameSite | 동작 |
+|---|---|
+| `Strict` | 다른 사이트 어떤 요청에도 cookie 안 보냄. 강력하지만 외부 링크 클릭 시 로그아웃처럼 보임 |
+| `Lax` (현재 브라우저 기본) | top-level navigation (링크) 시만 보냄. 대부분 use case OK |
+| `None` | 모든 cross-site 요청에 보냄. CSRF 위험. iframe / 3rd party 통합 시만. `Secure` 필수 |
+
+대부분 `Lax` 권장.
+
+## CSRF Token 과 Session
+
+CSRF token 은 보통 session 에 저장 (`HttpSessionCsrfTokenRepository`). stateless API 면 cookie 기반:
+
+```java
+.csrf(c -> c.csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
+```
+
+cookie 의 `XSRF-TOKEN` 을 JS 가 읽어 (httpOnly=false) `X-XSRF-TOKEN` 헤더로 보냄. SPA 패턴.
+
+## 세션 timeout
+
+```yaml
+server:
+  servlet:
+    session:
+      timeout: 30m
+      tracking-modes: cookie   # url 추적 비활성화 (XSS / phishing 방어)
+```
+
+idle timeout: 마지막 요청 후 30분 inactive 면 만료. 보안과 UX 트레이드오프.
+
+absolute timeout (session 생성 후 절대 시간) 은 Spring Security 기본 미지원, 직접 filter 작성:
+
+```java
+@Component
+class AbsoluteTimeoutFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse resp, FilterChain chain)
+            throws ServletException, IOException {
+        HttpSession s = req.getSession(false);
+        if (s != null && (System.currentTimeMillis() - s.getCreationTime()) > 8 * 3600 * 1000) {
+            s.invalidate();   // 8시간 절대 만료
+            resp.sendRedirect("/login?expired");
+            return;
+        }
+        chain.doFilter(req, resp);
+    }
+}
+```
+
+## 함정과 베스트 프랙티스
+
+- **API 는 STATELESS, 웹은 IF_REQUIRED**: 혼합 시 명시적 분리
+- **세션 직렬화 호환성**: 클래스 변경 전 deploy 순서 주의 (rolling)
+- **Remember-Me token rotation 권장**: persistent token + 도난 감지
+- **maximumSessions 는 세션 수**: 동시 사용자 수 아님 (같은 사용자 기준)
+- **SameSite=None 은 Secure 필수**: HTTPS 강제
+- **logout 시 session.invalidate + SecurityContextHolder.clearContext** : Spring Security 가 처리하지만 직접 logout handler 면 명시
+- **session attribute 에 큰 객체 금지**: Redis 비용 + 직렬화 시간
+
+## 관련 위키
+
+- [[spring-security]]
+- [[spring-security-oauth2-flow]]
+- [[spring-security-testing]]
+- [[spring-request-context]]
+- [[java-servlet-api]]
+- [[java-servlet-filter]]
