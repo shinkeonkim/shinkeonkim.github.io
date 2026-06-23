@@ -1,0 +1,252 @@
+---
+title: "[Frontend] SPA Architecture: CSR, SSR, SSG, hydration"
+aliases: ["SPA", "Single Page Application", "CSR", "SSR", "SSG", "ISR", "Hydration", "Islands Architecture", "client-side routing", "스파", "단일 페이지 앱"]
+tags: [frontend, javascript, spa, csr, ssr, hydration, react, vue]
+updated: 2026-06-23
+references:
+  - title: "MDN: SPA"
+    url: "https://developer.mozilla.org/en-US/docs/Glossary/SPA"
+    note: "SPA 기초 용어"
+  - title: "Patterns.dev: Rendering Patterns"
+    url: "https://www.patterns.dev/"
+    note: "렌더링 패턴 정리"
+---
+
+## 정의
+
+**SPA (Single Page Application)** 는 첫 로딩 시 받은 HTML / JS 번들 하나로 모든 화면 전환을 클라이언트에서 처리하는 웹 앱 구조. URL 변경, 데이터 fetch, 화면 갱신 모두 JavaScript 가 담당. 전체 페이지 reload 없음.
+
+기존 MPA (Multi Page App, 페이지마다 서버가 HTML 반환) 와 대비. React / Vue / Angular / Svelte 가 대표 framework.
+
+이 페이지는 SPA 의 렌더링 전략 (CSR / SSR / SSG / ISR) 과 hydration 같은 핵심 메커니즘을 다룬다.
+
+## 4가지 렌더링 모드
+
+| 모드 | HTML 생성 시점 | 장점 | 단점 |
+|---|---|---|---|
+| **CSR** (Client-Side Rendering) | 브라우저에서 JS 실행 | 단순 배포, 무거운 인터랙션 자연스러움 | 초기 로딩 느림, SEO 어려움, FCP / LCP 나쁨 |
+| **SSR** (Server-Side Rendering) | 매 요청마다 서버에서 | SEO / FCP 좋음, 동적 콘텐츠 | 서버 부하, TTFB 증가, hydration 비용 |
+| **SSG** (Static Site Generation) | 빌드 시점에 미리 | 가장 빠름 (CDN 캐싱), 안전 | 빌드 시간, 정적 내용만 |
+| **ISR** (Incremental Static Regeneration) | 빌드 + 주기적 재생성 | SSG 장점 + 일부 동적 | 복잡, 캐시 무효화 어려움 |
+
+대표 framework:
+- CSR: Create React App (legacy), Vite + React
+- SSR: Next.js, Nuxt, Remix, SvelteKit
+- SSG: Astro, Eleventy, Hugo, Gatsby (전통적)
+- ISR: Next.js, SvelteKit (revalidate 옵션)
+
+대부분 모던 framework 는 **하이브리드**: 페이지마다 다른 모드 선택 가능.
+
+## CSR 흐름
+
+```
+요청        ← 빈 HTML + JS bundle (~몇 MB)
+JS 실행     ← React/Vue 가 DOM 구축
+API fetch   ← 데이터 로딩
+화면 표시   ← 사용자에게 최종 UI
+```
+
+`index.html` 은 보통:
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>App</title></head>
+<body>
+  <div id="root"></div>
+  <script src="/bundle.js"></script>
+</body>
+</html>
+```
+
+`#root` 는 비어 있다. JS 가 React tree 렌더링.
+
+**문제**: 첫 페인트 = JS 다운로드 + 파싱 + 실행 + API + render. 모바일 네트워크에서 10초+ 가능. SEO 봇은 빈 HTML 만 보고 떠남 (Google 은 부분 지원).
+
+## SSR 흐름
+
+```
+요청        → 서버가 React tree 를 HTML 로 렌더링
+            ← 완성된 HTML + JS bundle
+브라우저    ← HTML 표시 (즉시), JS 다운로드
+hydration   ← JS 가 서버 DOM 에 이벤트 리스너 부착
+완성        ← 인터랙티브
+```
+
+Next.js 예:
+
+```tsx
+// pages/posts/[id].tsx
+export async function getServerSideProps({ params }) {
+    const post = await db.posts.findById(params.id);
+    return { props: { post } };
+}
+
+export default function PostPage({ post }) {
+    return <article><h1>{post.title}</h1><p>{post.body}</p></article>;
+}
+```
+
+서버: SQL 조회 → React 컴포넌트 → HTML. 브라우저: 즉시 표시 + JS 로 인터랙티브.
+
+## Hydration
+
+**서버가 렌더링한 HTML 위에 클라이언트 JS 가 이벤트 / 상태를 "부착" 하는 과정**.
+
+```
+1. 서버: <button>Click</button> HTML 반환
+2. 브라우저: HTML 표시 (정적)
+3. JS 로딩 완료
+4. React: 같은 컴포넌트 트리 다시 생성
+5. 기존 DOM 과 비교, 이벤트 핸들러 부착
+6. 인터랙티브 (이제 클릭 동작)
+```
+
+함정:
+- **hydration mismatch**: 서버와 클라이언트의 렌더링 결과가 다르면 warning + 깜빡임. `Date.now()`, `Math.random()`, 브라우저-only API 사용 시 발생
+- **무거움**: 전체 React tree 재생성. 큰 앱에선 TTI 가 SSR 의 의도와 다르게 오히려 늦어짐 ("hydration cost")
+- **streaming SSR + selective hydration**: React 18 의 해결책. 일부만 priority 로 빠르게 hydration
+
+## Islands Architecture (Astro / Fresh)
+
+전체 페이지를 hydration 하지 말고 **인터랙티브한 부분만** (= island) JS 로:
+
+```astro
+---
+// Astro 컴포넌트, 서버 only
+const posts = await db.posts.list();
+---
+<html>
+<body>
+  <h1>Static heading</h1>
+  <ul>{posts.map(p => <li>{p.title}</li>)}</ul>
+
+  <!-- 이 컴포넌트만 client-side JS 로 hydration -->
+  <Counter client:visible />
+</body>
+</html>
+```
+
+`client:visible` directive 는 viewport 진입 시 hydration. 다른 directive: `client:idle`, `client:load`, `client:media`.
+
+장점: 대부분 정적 HTML = 빠름. 동적인 부분만 JS 비용.
+
+## Client-Side Routing
+
+페이지 전환 시 서버 요청 없이 JS 가 처리:
+
+<CodeWithOutput
+  language="javascript"
+  outputLanguage="text"
+  outputLabel="브라우저 동작"
+  code={`// History API
+window.history.pushState({}, '', '/users/42');
+
+// popstate 이벤트 (뒤로 / 앞으로 버튼)
+window.addEventListener('popstate', (e) => {
+    renderForPath(window.location.pathname);
+});
+
+// 링크 클릭 가로채기
+document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[href]');
+    if (link && link.origin === location.origin) {
+        e.preventDefault();
+        window.history.pushState({}, '', link.href);
+        renderForPath(link.pathname);
+    }
+});`}
+  output={`/users/42 로 이동
+URL 변경, 페이지 reload 없음
+React Router / Vue Router / TanStack Router 가 위 로직을 추상화`}
+/>
+
+`history.pushState` / `popstate` 가 핵심. 모든 SPA router 가 이 위에서 동작.
+
+`Link` 컴포넌트 (React Router 의 `<Link>`, Next 의 `<Link>`) 가 일반 `<a>` 대신 사용되는 이유: 클릭 시 full reload 방지.
+
+## SPA 의 SEO
+
+CSR 만 사용 시 봇이 빈 HTML 만 보고 인덱싱 못 함 (Google 은 JS 실행하지만 시간 / 자원 제한).
+
+해결:
+1. **SSR 또는 SSG**: 봇이 완성된 HTML 받음 (가장 안전)
+2. **Prerender.io 같은 정적 캐시 서비스**: 봇만 정적 HTML 반환
+3. **Dynamic rendering**: User-Agent 따라 봇에게 SSR, 사용자에겐 CSR
+
+`<title>`, `<meta description>`, structured data (JSON-LD) 모두 SSR / SSG 시점에 채워져야.
+
+## State Management 패턴
+
+SPA 의 클라이언트 상태:
+
+| 종류 | 도구 | 사용처 |
+|---|---|---|
+| Local component state | `useState` / `ref` | 폼 입력, UI toggle |
+| Shared app state | Context API / Pinia / Vuex | 사용자 정보, 테마 |
+| Global complex | Redux / Zustand / Jotai / Recoil | 큰 앱의 도메인 상태 |
+| Server state cache | TanStack Query (React Query), SWR | API 응답 캐싱, refetch |
+| URL state | Router params / search params | 페이지 상태 (필터, 페이지 번호) |
+
+현대 권장: **server state 는 TanStack Query / SWR 로 분리**. 글로벌 store 에 server data 두지 말 것 (cache invalidation 지옥).
+
+## SSR + CSR 데이터 fetching
+
+Next.js 패턴:
+
+```tsx
+// Server Component (RSC)
+async function PostList() {
+    const posts = await db.posts.list();   // 서버에서 실행
+    return <ul>{posts.map(p => <li>{p.title}</li>)}</ul>;
+}
+
+// Client Component
+'use client';
+import { useQuery } from '@tanstack/react-query';
+
+function PostList() {
+    const { data } = useQuery({
+        queryKey: ['posts'],
+        queryFn: () => fetch('/api/posts').then(r => r.json())
+    });
+    return <ul>{data?.map(p => <li>{p.title}</li>)}</ul>;
+}
+```
+
+RSC (React Server Components) 는 서버에서만 실행, 브라우저로 JS 안 보냄. 데이터 fetching 의 새로운 패러다임.
+
+## 성능 최적화
+
+- **Code splitting**: 라우트 별 bundle 분리 (`import()` dynamic import)
+- **Tree shaking**: 사용 안 하는 코드 제거 (ESM + production build)
+- **Lazy loading 컴포넌트**: `React.lazy(() => import('./Heavy'))`
+- **Image optimization**: `<img loading="lazy">`, Next.js `<Image>`
+- **Preload critical resources**: `<link rel="preload" as="font">`
+- **Service Worker / PWA**: offline cache, background sync
+- **Compression**: Brotli > gzip
+- **Bundle size budget**: ~200KB JS (gzipped) for fast 3G
+
+`webpack-bundle-analyzer`, `source-map-explorer` 로 bundle 분석.
+
+## 함정과 베스트 프랙티스
+
+- **CSR-only 는 SEO 가 critical 한 사이트에 부적합**: SSR / SSG 선택
+- **hydration mismatch 디버깅 어렵다**: 서버와 클라이언트에서 동일한 deterministic 렌더링 강제
+- **back / forward 버튼 동작 보장**: `popstate` 처리, scroll 위치 복원
+- **상태 영속성**: 페이지 reload 시 사라지면 안 되는 데이터는 localStorage / sessionStorage / URL
+- **API CORS**: SPA 가 다른 도메인 API 호출 시 CORS 설정 필수
+- **Auth token 저장 위치**: localStorage (XSS 위험) vs httpOnly cookie (CSRF 위험) - 보통 후자 + CSRF token
+- **Error boundary**: 컴포넌트 에러가 전체 앱 죽이지 않게
+- **A11y**: focus management, ARIA, 키보드 네비게이션 (router 전환 시 focus / announce)
+- **Bundle size 감시**: CI 에서 size limit 강제
+
+## 관련 위키
+
+- [[js-es-modules]]
+- [[js-event-loop]]
+- [[js-promise]]
+- [[js-fetch]]
+- [[spring-mvc]]
+- [[spring-webflux]]
+- [[spring-restclient]]
