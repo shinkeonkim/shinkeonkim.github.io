@@ -1,0 +1,317 @@
+---
+title: "[Spring Boot] Deployment: 전통 WAR, Cloud, Systemd"
+aliases: ["Spring Boot Deployment", "WAR deployment", "Cloud Foundry Spring Boot", "Heroku Spring Boot", "AWS Beanstalk Spring Boot", "systemd service Spring Boot", "스프링 부트 배포"]
+tags: [spring-boot, deployment, war, cloud, heroku, cloud-foundry, systemd]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Deploying Spring Boot Applications - https://docs.spring.io/spring-boot/how-to/deployment/index.html"
+---
+
+## 정의
+
+컨테이너 / K8s 외의 Spring Boot 배포 옵션:
+- **Traditional WAR**: 외부 Tomcat / Jetty (legacy 환경)
+- **systemd service**: VM / bare-metal
+- **Cloud Foundry**: PaaS, `cf push`
+- **Heroku**: PaaS, git push
+- **AWS Elastic Beanstalk**: AWS managed
+- **AWS Lambda**: serverless (native image 추천)
+- **Azure App Service / Google App Engine**
+
+[[spring-boot-container-deployment]] 가 Docker/K8s 중심이라면 이 페이지는 그 외.
+
+## Traditional WAR (legacy)
+
+기존 외부 Tomcat / WebSphere 인프라:
+
+```kotlin
+plugins {
+    war
+    id("org.springframework.boot") version "3.4.0"
+}
+
+dependencies {
+    providedRuntime("org.springframework.boot:spring-boot-starter-tomcat")
+    // 외부 Tomcat 이 제공
+}
+```
+
+Application 클래스:
+
+```java
+@SpringBootApplication
+public class MyApplication extends SpringBootServletInitializer {
+    @Override
+    protected SpringApplicationBuilder configure(SpringApplicationBuilder b) {
+        return b.sources(MyApplication.class);
+    }
+
+    public static void main(String[] args) {
+        SpringApplication.run(MyApplication.class, args);
+    }
+}
+```
+
+`SpringBootServletInitializer` 가 servlet 3.0+ container 와 통합. 기존 Tomcat 의 `webapps/` 에 war 복사.
+
+대부분 신규 프로젝트는 executable jar + container 권장. WAR 은 legacy 호환 전용.
+
+## systemd Service (VM / bare-metal)
+
+```ini
+# /etc/systemd/system/my-app.service
+[Unit]
+Description=My Spring Boot App
+After=network.target
+
+[Service]
+User=spring
+Group=spring
+WorkingDirectory=/opt/my-app
+ExecStart=/usr/bin/java -jar /opt/my-app/app.jar
+SuccessExitStatus=143
+Restart=always
+RestartSec=10
+Environment="SPRING_PROFILES_ACTIVE=prod"
+EnvironmentFile=/etc/my-app/env
+StandardOutput=append:/var/log/my-app/app.log
+StandardError=append:/var/log/my-app/error.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable my-app
+sudo systemctl start my-app
+sudo journalctl -u my-app -f
+```
+
+기능:
+- 자동 재시작 (`Restart=always`)
+- 로그 통합 (journald)
+- 환경 변수 분리
+- non-root 사용자
+
+executable jar 를 service 로 등록한 가장 흔한 VM 배포 패턴.
+
+### 자동 등록 (`executable = true`)
+
+```kotlin
+tasks.bootJar {
+    archiveFileName.set("app.jar")
+    manifest {
+        attributes["Implementation-Title"] = "my-app"
+    }
+}
+
+// Spring Boot 의 fully executable jar
+springBoot {
+    buildInfo()
+}
+
+// build.gradle.kts
+tasks.bootJar {
+    launchScript()    // jar 가 자체 실행 가능 → ./app.jar
+}
+```
+
+`./app.jar start | stop | status` 가능. systemd 의 `ExecStart=/opt/my-app/app.jar` 만으로 충분.
+
+## Cloud Foundry
+
+```bash
+cf push my-app -p build/libs/app.jar
+```
+
+`manifest.yml`:
+
+```yaml
+applications:
+  - name: my-app
+    memory: 1G
+    instances: 3
+    buildpack: java_buildpack
+    env:
+      SPRING_PROFILES_ACTIVE: prod
+      JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 21.+ } }'
+    services:
+      - postgres-db
+      - redis-cache
+    routes:
+      - route: api.example.com
+```
+
+Buildpack 이 JDK / app server 알아서 구성. Spring Boot 가 Cloud Foundry 환경 자동 감지 (`spring-boot-cloudfoundry` 의존성).
+
+## Heroku
+
+```
+# Procfile
+web: java -Dserver.port=$PORT $JAVA_OPTS -jar build/libs/app.jar
+```
+
+```bash
+git push heroku main
+```
+
+`system.properties`:
+```
+java.runtime.version=21
+```
+
+Heroku 가 빌드 + 실행. `$PORT` 환경 변수 자동 주입. `JAVA_OPTS` 로 메모리 / GC 튜닝.
+
+`application-heroku.yml`:
+```yaml
+server:
+  port: ${PORT}
+spring:
+  datasource:
+    url: ${JDBC_DATABASE_URL}
+```
+
+`heroku addons:create heroku-postgresql` 후 자동 환경 변수.
+
+## AWS Elastic Beanstalk
+
+```bash
+eb init -p java my-app
+eb create my-app-prod
+eb deploy
+```
+
+`.ebextensions/01-options.config`:
+
+```yaml
+option_settings:
+  aws:elasticbeanstalk:application:environment:
+    SPRING_PROFILES_ACTIVE: prod
+    JAVA_TOOL_OPTIONS: "-Xmx768m"
+  aws:elasticbeanstalk:container:tomcat:jvmoptions:
+    JVM Options: "-Xms256m"
+```
+
+WAR (Tomcat) 또는 jar (Procfile) 둘 다 지원. Auto Scaling Group + ELB + RDS 통합.
+
+## AWS Lambda (Native Image 권장)
+
+GraalVM native:
+
+```kotlin
+plugins {
+    id("org.graalvm.buildtools.native") version "0.10.6"
+}
+```
+
+빠른 cold start (수십 ms). 또는 SnapStart (Java 21 Runtime):
+
+```java
+@SpringBootApplication
+public class LambdaHandler implements RequestHandler<APIGatewayProxyRequestEvent, APIGatewayProxyResponseEvent> {
+    private static final SpringApplicationBuilder builder = new SpringApplicationBuilder(LambdaHandler.class);
+    private static ConfigurableApplicationContext ctx;
+
+    @Override
+    public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent event, Context context) {
+        if (ctx == null) ctx = builder.web(WebApplicationType.NONE).run();
+        // route to controller
+        return new APIGatewayProxyResponseEvent().withStatusCode(200).withBody("hello");
+    }
+}
+```
+
+`spring-cloud-function-adapter-aws` 가 자동 통합:
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-function-adapter-aws")
+```
+
+`application.yml`:
+```yaml
+spring:
+  main:
+    web-application-type: none
+  cloud:
+    function:
+      definition: handleRequest
+```
+
+서버리스에서 cold start 가 critical 이면 native image, 안 그러면 SnapStart 로도 충분.
+
+## Reverse Proxy + load balancer
+
+운영 환경 일반 패턴:
+
+```
+Client → CDN / WAF → ALB / nginx → Spring Boot (Tomcat) → DB
+                  ↑ TLS terminate    ↑ plain HTTP
+```
+
+Spring 의 `forward-headers-strategy: native` 가 X-Forwarded-* 처리:
+
+```yaml
+server:
+  forward-headers-strategy: native
+```
+
+또는 framework 가 신뢰하는 reverse proxy 명시:
+```yaml
+server.tomcat:
+  remoteip:
+    remote-ip-header: X-Forwarded-For
+    protocol-header: X-Forwarded-Proto
+    internal-proxies: 10\\.\\d+\\.\\d+\\.\\d+
+```
+
+## CI / CD Pipeline
+
+전형적인 GitHub Actions:
+
+```yaml
+name: deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew test bootJar
+      - run: ./gradlew bootBuildImage --publishImage \
+          -Pjib.to.image=ghcr.io/${{ github.repository }}:${{ github.sha }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - run: aws ecs update-service --cluster prod --service my-app --force-new-deployment
+```
+
+## 함정과 베스트 프랙티스
+
+- **신규 프로젝트는 jar + container**: WAR 는 legacy
+- **systemd 로 VM 배포**: 자동 재시작 + 로그 통합
+- **PaaS (Heroku, CF, App Engine)**: 빠른 시작, 비용 / vendor lock-in
+- **reverse proxy 사용**: TLS / WAF / rate limit / static cache 분리
+- **`forward-headers-strategy: native`**: 클라이언트 IP / scheme 정확 추출
+- **buildpack / OCI image**: Dockerfile 부담 ↓ ([[spring-boot-build-plugins]])
+- **graceful shutdown**: 모든 환경에서 in-flight 요청 보호
+- **native image (Lambda 등 cold start critical)**: 서버리스 적합
+- **logs 는 stdout (12-factor)**: 파일 + rotation 은 OS 책임
+
+## 관련 위키
+
+- [[spring-boot-container-deployment]]
+- [[spring-boot-build-plugins]]
+- [[spring-native]]
+- [[spring-boot-webserver-configuration]]
+- [[spring-boot-properties-externalization]]
+- [[spring-cloud]]

@@ -1,0 +1,280 @@
+---
+title: "[Spring Boot] Build Plugins: Maven, Gradle, Executable JAR, OCI Image"
+aliases: ["Spring Boot Maven Plugin", "Spring Boot Gradle Plugin", "Executable JAR", "Layered JAR", "OCI image", "bootBuildImage", "스프링 부트 빌드"]
+tags: [spring-boot, maven, gradle, build, packaging, oci, buildpacks]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Spring Boot Maven Plugin - https://docs.spring.io/spring-boot/maven-plugin/"
+  - id: spring-docs
+    note: "Spring Boot Gradle Plugin - https://docs.spring.io/spring-boot/gradle-plugin/"
+---
+
+## 정의
+
+Spring Boot 의 빌드 플러그인은 표준 jar 가 아닌 **executable jar** (fat jar / uber jar) 생성. 추가로 OCI 이미지, native image, layered jar 등 production 패키징 지원.
+
+핵심 goal:
+- **Executable JAR**: `java -jar app.jar` 로 실행 가능 (내장 Tomcat 포함)
+- **Layered JAR**: Docker layer 최적화
+- **OCI Image** (`bootBuildImage`): Dockerfile 없이 Cloud Native Buildpacks 로 이미지 생성
+- **Native Image**: GraalVM AOT 컴파일
+
+## Maven Plugin 기본
+
+```xml
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <version>${spring-boot.version}</version>
+            <configuration>
+                <mainClass>com.example.MyApplication</mainClass>
+                <executable>true</executable>
+                <layers>
+                    <enabled>true</enabled>
+                </layers>
+            </configuration>
+        </plugin>
+    </plugins>
+</build>
+```
+
+주요 goal:
+- `mvn spring-boot:run` : 개발 실행
+- `mvn package` : executable jar 빌드 (`target/app-1.0.0.jar`)
+- `mvn spring-boot:build-image` : OCI 이미지 생성
+- `mvn spring-boot:start` / `:stop` : background 실행 (통합 테스트용)
+
+## Gradle Plugin 기본
+
+```kotlin
+plugins {
+    id("org.springframework.boot") version "3.4.0"
+    id("io.spring.dependency-management") version "1.1.7"
+    java
+}
+
+springBoot {
+    mainClass.set("com.example.MyApplication")
+    buildInfo()    // META-INF/build-info.properties 생성
+}
+```
+
+주요 task:
+- `./gradlew bootRun` : 개발 실행
+- `./gradlew bootJar` : executable jar 빌드 (`build/libs/app-1.0.0.jar`)
+- `./gradlew bootBuildImage` : OCI 이미지 생성
+- `./gradlew bootBuildInfo` : build info 생성
+
+## Executable JAR 구조
+
+```
+app.jar (zip)
+├── META-INF/
+│   ├── MANIFEST.MF              ← Main-Class: org.springframework.boot.loader.JarLauncher
+│   └── build-info.properties
+├── BOOT-INF/
+│   ├── classes/                 ← 내 코드 + 리소스
+│   ├── lib/                     ← 모든 의존성 jar
+│   └── classpath.idx
+└── org/springframework/boot/loader/   ← JarLauncher
+```
+
+`JarLauncher` 가 `BOOT-INF/classes` + `BOOT-INF/lib/*.jar` 를 classpath 에 추가 후 `MyApplication.main()` 호출. nested jar 지원.
+
+## Layered JAR (Docker 최적화)
+
+기본 executable jar 는 하나의 큰 layer = 의존성 한 줄 바뀌어도 전체 layer 재빌드.
+
+Layered 활성화:
+
+```kotlin
+tasks.bootJar {
+    layered {
+        enabled.set(true)
+    }
+}
+```
+
+생성된 jar 안에 `BOOT-INF/layers.idx`:
+
+```
+- "dependencies":
+  - "BOOT-INF/lib/spring-core-6.x.jar"
+  - ...
+- "spring-boot-loader":
+  - "org/springframework/boot/loader/"
+- "snapshot-dependencies":
+  - "BOOT-INF/lib/my-snapshot.jar"
+- "application":
+  - "BOOT-INF/classes/"
+  - "META-INF/"
+```
+
+추출:
+
+```bash
+java -Djarmode=layertools -jar app.jar extract --destination extracted
+```
+
+Dockerfile:
+
+```dockerfile
+FROM eclipse-temurin:21-jre AS builder
+WORKDIR /app
+COPY app.jar app.jar
+RUN java -Djarmode=layertools -jar app.jar extract --destination extracted
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder /app/extracted/dependencies/ ./
+COPY --from=builder /app/extracted/spring-boot-loader/ ./
+COPY --from=builder /app/extracted/snapshot-dependencies/ ./
+COPY --from=builder /app/extracted/application/ ./
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```
+
+dependency layer 가 자주 안 바뀌어 cache hit. application layer 만 매 빌드 변경 → push 시간 단축.
+
+## OCI Image (Buildpacks, Dockerfile 없이)
+
+```bash
+mvn spring-boot:build-image
+# 또는
+./gradlew bootBuildImage
+```
+
+자동 생성:
+- JDK 선택 (Paketo Buildpack)
+- 멀티 stage 최적화
+- non-root user
+- CA cert / timezone
+- entrypoint
+
+설정:
+
+```kotlin
+tasks.bootBuildImage {
+    imageName.set("my-app:${version}")
+    builder.set("paketobuildpacks/builder-jammy-base")
+    environment.set(mapOf(
+        "BP_JVM_VERSION" to "21",
+        "BPE_DELIM_JAVA_TOOL_OPTIONS" to " ",
+        "BPE_APPEND_JAVA_TOOL_OPTIONS" to "-XX:+UseG1GC"
+    ))
+    publish.set(false)
+}
+```
+
+`docker build` 보다 훨씬 빠르고 보안 강화. Spring 권장.
+
+## Native Image (GraalVM AOT)
+
+```kotlin
+plugins {
+    id("org.graalvm.buildtools.native") version "0.10.6"
+}
+
+graalvmNative {
+    binaries {
+        named("main") {
+            imageName.set("my-app")
+            mainClass.set("com.example.MyApplication")
+            buildArgs.add("--no-fallback")
+        }
+    }
+}
+```
+
+```bash
+./gradlew nativeCompile      # 실행 binary
+./gradlew nativeBuildImage   # native image OCI
+```
+
+장점: **시작 30ms**, 메모리 절감 (~100MB → ~50MB). 단점:
+- 빌드 오래 (수 분~10분)
+- reflection 메타데이터 명시 (Spring 6.x 가 자동 hint 생성)
+- 일부 라이브러리 호환성
+
+서버리스 (AWS Lambda) / 빠른 스케일 환경에 적합. [[spring-native]] 참고.
+
+## Build Info (Actuator info endpoint 노출)
+
+```kotlin
+springBoot {
+    buildInfo {
+        properties {
+            artifact.set("my-app")
+            version.set(project.version.toString())
+            additional.set(mapOf(
+                "commit" to gitCommit(),
+                "buildTime" to Instant.now().toString()
+            ))
+        }
+    }
+}
+```
+
+```yaml
+management:
+  info:
+    git:
+      mode: full
+    build:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: info
+```
+
+`/actuator/info` 에 build/git 정보 노출. 운영 환경에서 버전 추적.
+
+## 의존성 BOM
+
+```kotlin
+dependencies {
+    implementation(platform("org.springframework.boot:spring-boot-dependencies:3.4.0"))
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    // 버전 명시 안 함, BOM 이 관리
+}
+```
+
+Spring Boot BOM 이 호환되는 라이브러리 버전 결정. 충돌 회피. Maven 은 `dependencyManagement` 로 동일.
+
+## CI / CD 최적화
+
+```yaml
+# .github/workflows/build.yml
+- uses: gradle/actions/setup-gradle@v4
+  with:
+    cache-disabled: false
+- run: ./gradlew bootJar
+- run: ./gradlew bootBuildImage --publishImage \
+    -Pjib.to.image=ghcr.io/${{ github.repository }}:${{ github.sha }}
+```
+
+`bootBuildImage` 가 Docker daemon 또는 docker-less (Kaniko) 환경 모두 지원.
+
+## 함정과 베스트 프랙티스
+
+- **executable jar 권장**: WAR 는 legacy. embedded 서버 활용
+- **layered jar + Dockerfile** 또는 **bootBuildImage**: 둘 중 하나. Buildpacks 가 권장
+- **native image 는 빌드 시간 비용**: 모든 빌드 X, release 만
+- **BOM 의존성 관리**: 직접 버전 명시는 충돌 위험
+- **`spring-boot-configuration-processor`**: IDE 자동완성
+- **build-info + git-commit-id-plugin**: 운영 환경 버전 추적
+- **`bootRun` 의 `--args=...`**: 개발 중 profile 전환
+- **Gradle parallel + build cache**: 빌드 속도 개선
+- **dev tools** : production 에서 제외 (`developmentOnly`)
+
+## 관련 위키
+
+- [[spring-boot-autoconfig]]
+- [[spring-native]]
+- [[spring-actuator]]
+- [[spring-boot-properties-externalization]]
+- [[spring-boot-container-deployment]]
+- [[spring-boot-deployment]]

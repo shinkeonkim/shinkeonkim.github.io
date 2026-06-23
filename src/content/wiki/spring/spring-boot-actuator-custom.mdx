@@ -1,0 +1,393 @@
+---
+title: "[Spring Boot] Actuator 커스텀: Endpoint, HealthIndicator, Metric"
+aliases: ["Actuator custom endpoint", "Custom HealthIndicator", "Custom Metric Micrometer", "@Endpoint", "@ReadOperation", "Actuator 확장", "스프링 액추에이터 커스텀"]
+tags: [spring-boot, actuator, micrometer, observability, custom-endpoint, health]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Implementing Custom Endpoints - https://docs.spring.io/spring-boot/reference/actuator/endpoints.html#actuator.endpoints.implementing-custom"
+  - id: spring-docs
+    note: "Health Indicators - https://docs.spring.io/spring-boot/reference/actuator/endpoints.html#actuator.endpoints.health"
+---
+
+## 정의
+
+Spring Boot Actuator 의 확장 포인트. 기본 endpoint (`/health`, `/metrics`, `/info`) 외에 도메인 정보 노출:
+
+- **`@Endpoint`** : 새로운 endpoint
+- **`HealthIndicator`** : `/health` 의 sub-health
+- **`InfoContributor`** : `/info` 추가 정보
+- **`MeterBinder`** : Micrometer metric
+
+운영 모니터링 (Prometheus / Grafana / Datadog) + alerting 의 토대.
+
+## Custom Endpoint
+
+```java
+import org.springframework.boot.actuate.endpoint.annotation.*;
+import org.springframework.stereotype.Component;
+
+@Component
+@Endpoint(id = "feature-flags")
+public class FeatureFlagsEndpoint {
+    private final FeatureFlagService service;
+
+    public FeatureFlagsEndpoint(FeatureFlagService service) {
+        this.service = service;
+    }
+
+    @ReadOperation
+    public Map<String, Boolean> flags() {
+        return service.getAll();
+    }
+
+    @ReadOperation
+    public Boolean specificFlag(@Selector String name) {
+        return service.isEnabled(name);
+    }
+
+    @WriteOperation
+    public void setFlag(@Selector String name, boolean enabled) {
+        service.set(name, enabled);
+    }
+
+    @DeleteOperation
+    public void clearFlag(@Selector String name) {
+        service.remove(name);
+    }
+}
+```
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: feature-flags
+  endpoint:
+    feature-flags:
+      access: read-write
+```
+
+접근:
+- `GET /actuator/feature-flags` → 전체
+- `GET /actuator/feature-flags/checkout-v2` → 특정 flag
+- `POST /actuator/feature-flags/checkout-v2` body `{"enabled":true}` → 토글
+- `DELETE /actuator/feature-flags/checkout-v2` → 삭제
+
+`@Endpoint` annotation 이 자동으로 `/actuator/{id}` 에 노출. `@Selector` 가 path variable. 인증 / 권한 = Spring Security 로.
+
+### Web-Only / JMX-Only
+
+```java
+@WebEndpoint(id = "deploy-info")        // HTTP only
+@JmxEndpoint(id = "thread-pool")        // JMX only
+```
+
+기본 `@Endpoint` 는 HTTP + JMX 양쪽.
+
+## Custom HealthIndicator
+
+```java
+@Component
+public class RedisHealthIndicator implements HealthIndicator {
+    private final RedisConnectionFactory factory;
+
+    public RedisHealthIndicator(RedisConnectionFactory factory) {
+        this.factory = factory;
+    }
+
+    @Override
+    public Health health() {
+        try (var conn = factory.getConnection()) {
+            String pong = new String(conn.ping());
+            if ("PONG".equals(pong)) {
+                return Health.up()
+                    .withDetail("response", pong)
+                    .withDetail("server", conn.getNativeConnection().toString())
+                    .build();
+            }
+            return Health.down().withDetail("response", pong).build();
+        } catch (Exception e) {
+            return Health.down(e).build();
+        }
+    }
+}
+```
+
+```yaml
+management:
+  endpoint:
+    health:
+      show-details: always   # 또는 when-authorized
+      show-components: always
+```
+
+`/actuator/health`:
+
+```json
+{
+  "status": "UP",
+  "components": {
+    "redis": {
+      "status": "UP",
+      "details": { "response": "PONG", "server": "..." }
+    },
+    "db": { "status": "UP" },
+    "diskSpace": { "status": "UP", "details": { ... } }
+  }
+}
+```
+
+### Reactive HealthIndicator
+
+```java
+@Component
+public class ApiHealthIndicator implements ReactiveHealthIndicator {
+    private final WebClient client;
+
+    @Override
+    public Mono<Health> health() {
+        return client.get().uri("/health")
+            .retrieve()
+            .bodyToMono(String.class)
+            .map(body -> Health.up().withDetail("response", body).build())
+            .onErrorResume(e -> Mono.just(Health.down(e).build()));
+    }
+}
+```
+
+WebFlux 환경에서 non-blocking health check.
+
+### Health 가 K8s probe 와 통합
+
+```yaml
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+        add-additional-paths: true   # /livez, /readyz 같은 단축 path
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+```
+
+- `/actuator/health/liveness` → 컨테이너 재시작
+- `/actuator/health/readiness` → 트래픽 라우팅
+
+[[spring-boot-container-deployment]] 참고.
+
+## InfoContributor
+
+```java
+@Component
+public class GitInfoContributor implements InfoContributor {
+    @Override
+    public void contribute(Info.Builder builder) {
+        builder.withDetail("git", Map.of(
+            "commit", System.getenv("GIT_COMMIT"),
+            "branch", System.getenv("GIT_BRANCH"),
+            "build-time", Instant.now().toString()
+        ));
+    }
+}
+```
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: info
+  info:
+    env:
+      enabled: true
+    git:
+      mode: full
+    build:
+      enabled: true
+```
+
+`/actuator/info`:
+```json
+{
+  "git": { "commit": "abc1234", "branch": "main" },
+  "build": { "artifact": "my-app", "version": "1.0.0" }
+}
+```
+
+## Custom Metric (Micrometer)
+
+```java
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
+
+@Service
+public class OrderService {
+    private final Counter orderCounter;
+    private final Timer placementTimer;
+
+    public OrderService(MeterRegistry registry) {
+        this.orderCounter = Counter.builder("orders.placed.total")
+            .description("Total number of orders placed")
+            .tag("source", "web")
+            .register(registry);
+
+        this.placementTimer = Timer.builder("orders.placement.duration")
+            .description("Time to place an order")
+            .register(registry);
+    }
+
+    public Order place(Cart cart) {
+        return placementTimer.record(() -> {
+            Order order = doPlace(cart);
+            orderCounter.increment();
+            return order;
+        });
+    }
+}
+```
+
+```yaml
+management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        orders.placement.duration: true
+      percentiles:
+        orders.placement.duration: 0.5, 0.95, 0.99
+      slo:
+        orders.placement.duration: 100ms, 200ms, 500ms
+  endpoints:
+    web:
+      exposure:
+        include: metrics, prometheus
+```
+
+`/actuator/metrics/orders.placed.total`:
+
+```json
+{
+  "name": "orders.placed.total",
+  "measurements": [{"statistic": "COUNT", "value": 42}],
+  "availableTags": [{"tag": "source", "values": ["web"]}]
+}
+```
+
+`/actuator/prometheus`: Prometheus scrape 형식.
+
+## MeterBinder (Bean 등록)
+
+```java
+@Component
+public class CacheMetrics implements MeterBinder {
+    private final CacheManager cacheManager;
+
+    @Override
+    public void bindTo(MeterRegistry registry) {
+        for (String name : cacheManager.getCacheNames()) {
+            Cache cache = cacheManager.getCache(name);
+            registry.gauge("cache.size",
+                Tags.of("name", name),
+                cache, c -> c.size());
+        }
+    }
+}
+```
+
+자동으로 모든 등록된 `MeterBinder` 를 `MeterRegistry` 에 bind.
+
+## @Timed / @Counted
+
+```java
+@RestController
+class UserController {
+    @Timed(value = "user.find", percentiles = {0.5, 0.95})
+    @GetMapping("/users/{id}")
+    public User find(@PathVariable Long id) { ... }
+
+    @Counted("user.create")
+    @PostMapping("/users")
+    public User create(@RequestBody User u) { ... }
+}
+```
+
+`@EnableAspectJAutoProxy` + `spring-boot-starter-aop` 필요. 메서드 단위 metric 자동 측정.
+
+## 운영 보안
+
+```yaml
+management:
+  server:
+    port: 9090           # 별도 port (보안 그룹으로 격리)
+  endpoints:
+    web:
+      base-path: /admin   # /actuator 대신
+      exposure:
+        include: health, info, metrics, prometheus
+        exclude: env, beans, mappings   # 민감 정보 제외
+  endpoint:
+    health:
+      show-details: when-authorized
+      show-components: when-authorized
+```
+
+Spring Security 와 조합:
+
+```java
+@Bean
+SecurityFilterChain actuatorSecurity(HttpSecurity http) throws Exception {
+    return http
+        .securityMatcher(EndpointRequest.toAnyEndpoint())
+        .authorizeHttpRequests(a -> a
+            .requestMatchers(EndpointRequest.to("health", "info")).permitAll()
+            .anyRequest().hasRole("ACTUATOR"))
+        .httpBasic(Customizer.withDefaults())
+        .build();
+}
+```
+
+`/health` 만 public, 나머지는 인증 + ACTUATOR role.
+
+## Trace + Span 정보 노출
+
+OpenTelemetry 통합 시 metric 에 traceId 가 자동으로:
+
+```java
+@Bean
+ObservationFilter traceContextFilter() {
+    return ctx -> {
+        TraceContext trace = currentTrace();
+        if (trace != null) {
+            ctx.addHighCardinalityKeyValue(KeyValue.of("trace_id", trace.traceId()));
+        }
+        return ctx;
+    };
+}
+```
+
+Grafana 의 exemplar 로 metric → trace 점프.
+
+## 함정과 베스트 프랙티스
+
+- **`@Endpoint(id)` 는 kebab-case**: `/actuator/{id}`
+- **민감 endpoint 별도 port**: production network 격리
+- **`/health` 만 public**: 나머지는 인증
+- **HealthIndicator 가 외부 시스템 호출 시 timeout 명시**: actuator 가 hang 위험
+- **metric 이름은 dot notation** + tag 활용: 카르테시안 곱 폭발 주의
+- **high-cardinality tag 금지** (`user_id`): Prometheus 폭발
+- **`@Timed` 만 사용**: `@Counted` 는 Timer 의 count 와 중복
+- **`MeterRegistryCustomizer` 로 공통 tag**: `application`, `region` 등
+- **K8s probe 와 분리**: liveness 가 외부 의존성 health 까지 검사하면 cascade 재시작
+
+## 관련 위키
+
+- [[spring-actuator]]
+- [[spring-boot-container-deployment]]
+- [[spring-boot-logging-configuration]]
+- [[spring-security]]
+- [[spring-aop]]

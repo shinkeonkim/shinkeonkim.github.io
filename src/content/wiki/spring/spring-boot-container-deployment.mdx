@@ -1,0 +1,424 @@
+---
+title: "[Spring Boot] Docker / Kubernetes 배포"
+aliases: ["Spring Boot Docker", "Spring Boot Kubernetes", "K8s deployment", "Helm Spring Boot", "Probe health liveness readiness", "Docker Compose Spring Boot", "스프링 부트 컨테이너 배포"]
+tags: [spring-boot, docker, kubernetes, helm, deployment, container]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Docker Compose - https://docs.spring.io/spring-boot/how-to/docker-compose.html"
+  - id: spring-docs
+    note: "Cloud Native - https://docs.spring.io/spring-boot/reference/deployment/cloud.html#deployment.cloud.kubernetes"
+---
+
+## 정의
+
+Spring Boot 앱을 컨테이너로 배포. 두 가지 주류:
+- **Docker / Docker Compose**: 단일 호스트, 개발 + 소규모 운영
+- **Kubernetes**: 멀티 호스트, orchestration, scaling, self-healing
+
+Spring Boot 3+ 의 변경:
+- Cloud Native Buildpacks 가 Dockerfile 작성 거의 불필요
+- Liveness / Readiness probe 가 actuator endpoint 로 표준화
+- Graceful shutdown 이 K8s lifecycle 과 자연스럽게 통합
+
+## Dockerfile (수동)
+
+전통적 multi-stage:
+
+```dockerfile
+FROM eclipse-temurin:21-jdk-alpine AS builder
+WORKDIR /app
+COPY gradle/ gradle/
+COPY gradlew build.gradle.kts settings.gradle.kts ./
+RUN ./gradlew dependencies --no-daemon
+COPY src/ src/
+RUN ./gradlew bootJar --no-daemon
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+RUN addgroup -S spring && adduser -S spring -G spring
+USER spring:spring
+COPY --from=builder /app/build/libs/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+핵심:
+- **multi-stage**: 빌드 환경 분리 → 최종 이미지 작음
+- **alpine / distroless**: 보안 + 크기 축소
+- **non-root user**: 컨테이너 escape 위험 감소
+- **layered jar** 활용 시 더 최적화 (이전 페이지 참고)
+
+## Cloud Native Buildpacks (권장)
+
+Dockerfile 없이:
+
+```bash
+mvn spring-boot:build-image
+# 또는
+./gradlew bootBuildImage
+```
+
+자동으로:
+- 적절한 JDK 선택
+- security patch
+- non-root user
+- entrypoint
+- multi-arch 이미지
+
+훨씬 빠르고 안전. Spring 권장. [[spring-boot-build-plugins]] 참고.
+
+## Docker Compose 통합 (Spring Boot 3.1+)
+
+```yaml
+# compose.yaml
+services:
+  app:
+    image: my-app:latest
+    ports: ["8080:8080"]
+    depends_on:
+      - postgres
+      - redis
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+  redis:
+    image: redis:7-alpine
+```
+
+```kotlin
+dependencies {
+    developmentOnly("org.springframework.boot:spring-boot-docker-compose")
+}
+```
+
+`developmentOnly` 면 production jar 에 제외됨. 개발 환경에서 `bootRun` 시 compose 자동 기동 + connection 자동 주입.
+
+```yaml
+spring:
+  docker:
+    compose:
+      enabled: true
+      file: compose.yaml
+      lifecycle-management: start_and_stop
+```
+
+`profiles` 도 지원: `compose --profile dev up`.
+
+## Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: my-app
+          image: ghcr.io/example/my-app:1.0.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: password
+          envFrom:
+            - configMapRef:
+                name: app-config
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+spec:
+  selector:
+    app: my-app
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+```
+
+## Liveness / Readiness / Startup Probe
+
+Spring Boot 2.3+ 가 actuator 에 K8s probe 표준화:
+
+```yaml
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+```
+
+endpoint:
+- `/actuator/health/liveness` : app 이 응답 가능? 실패 = 컨테이너 재시작
+- `/actuator/health/readiness` : 트래픽 받을 준비? 실패 = LB 에서 제외 (재시작 안 함)
+- `/actuator/health` : 통합 상태
+
+각 상태 의미:
+| State | 의미 | 예시 |
+|---|---|---|
+| `LivenessState.CORRECT` | 정상 | OK |
+| `LivenessState.BROKEN` | 복구 불가 | OOM, deadlock |
+| `ReadinessState.ACCEPTING_TRAFFIC` | 받을 수 있음 | OK |
+| `ReadinessState.REFUSING_TRAFFIC` | 받을 수 없음 | DB 연결 끊김, 시작 중 |
+
+코드로 상태 변경:
+
+```java
+@Service
+class HealthControl {
+    @Autowired ApplicationAvailability availability;
+    @Autowired ApplicationEventPublisher events;
+
+    public void markUnavailable() {
+        AvailabilityChangeEvent.publish(events, this, ReadinessState.REFUSING_TRAFFIC);
+    }
+}
+```
+
+## Graceful Shutdown
+
+```yaml
+server:
+  shutdown: graceful
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+```
+
+K8s 종료 흐름:
+1. `terminationGracePeriodSeconds` (기본 30s) 카운트다운 시작
+2. `SIGTERM` 전송
+3. Spring 이 readiness `REFUSING_TRAFFIC` 으로 변경 → LB 제외
+4. 진행 중 요청 완료 대기 (`timeout-per-shutdown-phase`)
+5. 컨테이너 종료
+
+K8s 의 `preStop` hook 으로 5초 대기 → readiness 가 LB 에서 빠지는 시간 확보:
+
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 5"]
+```
+
+## ConfigMap + Secret
+
+ConfigMap:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  SPRING_PROFILES_ACTIVE: prod
+  SERVER_PORT: "8080"
+  application.yml: |
+    spring:
+      datasource:
+        url: jdbc:postgresql://postgres/myapp
+```
+
+Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-secret
+type: Opaque
+data:
+  password: <base64>
+```
+
+마운트 방식:
+- **env var**: `envFrom: configMapRef` / `secretRef`
+- **파일**: `volumeMounts` + Spring 의 `spring.config.import: configtree:/etc/secrets/`
+
+## Spring Cloud Kubernetes
+
+```kotlin
+implementation("org.springframework.cloud:spring-cloud-starter-kubernetes-client-config")
+```
+
+ConfigMap / Secret 을 PropertySource 로 자동 로딩. reload watch 지원:
+
+```yaml
+spring:
+  cloud:
+    kubernetes:
+      reload:
+        enabled: true
+        mode: polling
+        period: 30s
+```
+
+`@RefreshScope` Bean 이 ConfigMap 변경 시 재생성.
+
+## Helm Chart
+
+`Chart.yaml`:
+
+```yaml
+apiVersion: v2
+name: my-app
+version: 1.0.0
+appVersion: "1.0.0"
+```
+
+`templates/deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  template:
+    spec:
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+```
+
+`values.yaml`:
+
+```yaml
+replicaCount: 3
+image:
+  repository: ghcr.io/example/my-app
+  tag: 1.0.0
+resources:
+  requests: { memory: 512Mi, cpu: 250m }
+  limits: { memory: 1Gi, cpu: 1000m }
+```
+
+```bash
+helm install my-app ./chart -f values-prod.yaml
+helm upgrade my-app ./chart --set image.tag=1.0.1
+```
+
+## HPA (Horizontal Pod Autoscaler)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+CPU / memory / custom metric (Prometheus Adapter) 기반.
+
+## Ingress + TLS
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts: [api.example.com]
+      secretName: api-tls
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port: { number: 80 }
+```
+
+cert-manager 가 자동 cert 갱신. Spring 은 plain HTTP 만 받음 ([[spring-boot-ssl-https]] 참고).
+
+## 함정과 베스트 프랙티스
+
+- **non-root user**: 보안 + K8s security context 호환
+- **graceful shutdown 필수**: in-flight 요청 손실 방지
+- **readiness 와 liveness 분리**: 일시적 문제로 재시작 폭주 회피
+- **resource limits 명시**: OOM kill 보다 명시적 한계
+- **resource requests = QoS**: Burstable / Guaranteed 차이
+- **secret 은 ConfigMap 에 X**: 별도 Secret 또는 ExternalSecrets / Vault
+- **로그는 stdout only**: sidecar / DaemonSet 가 수집
+- **JVM 힙 vs 컨테이너 메모리**: `-XX:MaxRAMPercentage=75` (전체 메모리의 75% 만 힙)
+- **Spring Cloud Kubernetes 의 reload**: 운영 환경 검증 필요
+- **Spring Boot 의 OCI image (Buildpacks)** 사용: Dockerfile 관리 부담 ↓
+
+## 관련 위키
+
+- [[spring-boot-deployment]]
+- [[spring-boot-build-plugins]]
+- [[spring-boot-ssl-https]]
+- [[spring-boot-webserver-configuration]]
+- [[spring-actuator]]
+- [[spring-boot-logging-configuration]]
