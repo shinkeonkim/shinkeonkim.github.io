@@ -1,0 +1,260 @@
+---
+title: "[Spring Boot] SSL/HTTPS 설정"
+aliases: ["Spring Boot SSL", "Spring Boot HTTPS", "TLS", "keystore", "PEM Spring Boot", "SSL Bundle", "mutual TLS", "mTLS spring"]
+tags: [spring-boot, ssl, tls, https, security]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "SSL - https://docs.spring.io/spring-boot/reference/features/ssl.html"
+  - id: spring-docs
+    note: "Configure SSL - https://docs.spring.io/spring-boot/how-to/webserver.html#howto.webserver.configure-ssl"
+---
+
+## 정의
+
+Spring Boot 에서 HTTPS / TLS 설정 방법. JKS (legacy), PKCS12, **PEM (modern)**, **SSL Bundles** (Spring Boot 3.1+) 네 가지 형식.
+
+운영에선 보통 reverse proxy (nginx, ALB, Cloud LB) 가 TLS terminate 하지만, 직접 처리 시나리오:
+- localhost 개발 (HTTPS 강제 정책)
+- 내부 서비스 간 mTLS
+- 임베디드 배포 (proxy 없음)
+
+## 가장 단순한 형식 (JKS / PKCS12)
+
+```yaml
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    key-store: classpath:keystore.p12
+    key-store-password: ${KEYSTORE_PASSWORD}
+    key-store-type: PKCS12          # 또는 JKS
+    key-alias: tomcat
+    key-password: ${KEY_PASSWORD}   # private key 별도 비번 (보통 keystore 와 동일)
+```
+
+keystore 생성 (개발용 self-signed):
+
+```bash
+keytool -genkeypair \
+  -alias tomcat \
+  -keyalg RSA \
+  -keysize 2048 \
+  -storetype PKCS12 \
+  -keystore keystore.p12 \
+  -validity 365 \
+  -dname "CN=localhost, OU=Dev, O=MyCo, L=Seoul, S=KR, C=KR" \
+  -storepass changeit
+```
+
+## PEM 형식 (Spring Boot 3.1+)
+
+OpenSSL / Let's Encrypt 친화적:
+
+```yaml
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    certificate: classpath:cert.pem
+    certificate-private-key: classpath:key.pem
+    trust-certificate: classpath:ca.pem       # mTLS 시
+```
+
+PEM 파일이 가장 modern. 운영 환경에서 자동 갱신 (cert-manager 등) 과 자연스럽게.
+
+## SSL Bundles (Spring Boot 3.1+, 권장)
+
+여러 SSL 설정을 묶어 재사용:
+
+```yaml
+spring:
+  ssl:
+    bundle:
+      pem:
+        web-server:
+          keystore:
+            certificate: classpath:cert.pem
+            private-key: classpath:key.pem
+          truststore:
+            certificate: classpath:ca.pem
+      jks:
+        legacy-client:
+          keystore:
+            location: classpath:legacy.jks
+            password: ${LEGACY_PASSWORD}
+            type: JKS
+
+server:
+  ssl:
+    bundle: web-server          # 위 bundle 참조
+```
+
+장점:
+- 같은 cert 를 여러 컴포넌트가 공유 (server + WebClient + Kafka client)
+- hot reload 지원 (cert 만료 / 교체 자동 감지)
+- 환경별 bundle 분리
+
+### WebClient / RestClient 에서 사용
+
+```java
+@Bean
+RestClient.Builder restClientBuilder(SslBundles bundles) {
+    SslBundle bundle = bundles.getBundle("backend-mtls");
+    return RestClient.builder()
+        .requestFactory(new SslBundleClientHttpRequestFactory(bundle));
+}
+```
+
+mTLS 환경에서 클라이언트 cert 자동 첨부.
+
+## HTTPS 강제 (HTTP → HTTPS redirect)
+
+Spring Boot 는 기본 단일 connector. 두 connector 동시 (8080 + 8443):
+
+```java
+@Bean
+public ServletWebServerFactory servletContainer() {
+    TomcatServletWebServerFactory tomcat = new TomcatServletWebServerFactory() {
+        @Override
+        protected void postProcessContext(Context context) {
+            SecurityConstraint securityConstraint = new SecurityConstraint();
+            securityConstraint.setUserConstraint("CONFIDENTIAL");
+            SecurityCollection collection = new SecurityCollection();
+            collection.addPattern("/*");
+            securityConstraint.addCollection(collection);
+            context.addConstraint(securityConstraint);
+        }
+    };
+    tomcat.addAdditionalTomcatConnectors(redirectConnector());
+    return tomcat;
+}
+
+private Connector redirectConnector() {
+    Connector connector = new Connector("org.apache.coyote.http11.Http11NioProtocol");
+    connector.setScheme("http");
+    connector.setPort(8080);
+    connector.setSecure(false);
+    connector.setRedirectPort(8443);
+    return connector;
+}
+```
+
+Spring Security 로 더 깔끔:
+
+```java
+@Bean
+SecurityFilterChain http(HttpSecurity http) throws Exception {
+    return http
+        .requiresChannel(c -> c.anyRequest().requiresSecure())
+        .build();
+}
+```
+
+## HSTS (Strict-Transport-Security)
+
+```java
+@Bean
+SecurityFilterChain http(HttpSecurity http) throws Exception {
+    return http
+        .headers(h -> h
+            .httpStrictTransportSecurity(hsts -> hsts
+                .includeSubDomains(true)
+                .maxAgeInSeconds(31536000)))
+        .build();
+}
+```
+
+브라우저가 HTTPS 만 사용하도록 강제. 한 번 받으면 1년 (`max-age`) 동안 캐싱.
+
+⚠️ HSTS 가 설정되면 사용자가 cert 문제로 HTTP 로 강제 전환 못 함. cert 만료 / DNS 변경 시 위험.
+
+## mutual TLS (mTLS)
+
+서버 + 클라이언트 양쪽 cert 검증:
+
+```yaml
+server:
+  ssl:
+    enabled: true
+    bundle: server-mtls
+    client-auth: need        # need (필수), want (요청은 함), none (비활성)
+```
+
+`need` 면 클라이언트 cert 없으면 connection 거부. 내부 서비스 간 인증에 사용.
+
+내부 통신 = JWT 보다 mTLS 가 더 강력 (네트워크 레벨 인증).
+
+## SNI (Server Name Indication)
+
+하나의 IP / port 에 여러 cert (도메인별):
+
+```yaml
+server:
+  ssl:
+    server-name-bundles:
+      - server-name: "api.example.com"
+        bundle: api-cert
+      - server-name: "admin.example.com"
+        bundle: admin-cert
+```
+
+Spring Boot 3.2+ 지원. multi-tenant 또는 multi-domain.
+
+## Let's Encrypt 자동화
+
+운영에선 cert-manager (K8s), Caddy, certbot 같은 도구가 cert 발급 + 갱신.
+
+K8s 패턴:
+```yaml
+# Ingress 에 cert-manager annotation
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts: [api.example.com]
+      secretName: api-tls-secret
+  rules: [...]
+```
+
+Spring 은 plain HTTP 만 받고 Ingress 가 TLS terminate. 가장 흔한 운영 패턴.
+
+## 디버깅
+
+```bash
+# cert 유효성
+openssl x509 -in cert.pem -text -noout
+
+# keystore 내용
+keytool -list -keystore keystore.p12 -storetype PKCS12
+
+# 서버 cert 검증
+openssl s_client -connect api.example.com:443 -showcerts
+
+# Spring 로그
+logging:
+  level:
+    org.springframework.boot.web.embedded: DEBUG
+    org.apache.tomcat.util.net.SSLUtilBase: DEBUG
+```
+
+## 함정과 베스트 프랙티스
+
+- **production: reverse proxy 가 TLS terminate**: Spring 은 plain HTTP. cert 관리 분리.
+- **개발: self-signed + `localhost` CN**: 브라우저 경고 무시 (chrome `--ignore-certificate-errors`)
+- **PKCS12 > JKS**: PKCS12 가 표준, JKS 는 Java legacy
+- **PEM + SSL Bundles (Spring Boot 3.1+)**: 가장 modern
+- **HSTS 는 신중하게**: 한 번 활성화 후 cert 문제 시 사용자 lock-out
+- **mTLS 는 내부 서비스 간**: 외부 노출 API 에는 OAuth2 가 적합
+- **cert 갱신 자동화 필수**: 수동 = 잊음 → outage
+- **Spring Boot 의 SSL 변경 hot reload**: SSL Bundles 사용 시 가능 (재시작 불필요)
+
+## 관련 위키
+
+- [[spring-boot-webserver-configuration]]
+- [[spring-security]]
+- [[spring-security-oauth2-flow]]
+- [[spring-restclient]]

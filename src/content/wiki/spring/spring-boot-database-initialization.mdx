@@ -1,0 +1,354 @@
+---
+title: "[Spring Boot] Database Initialization: schema.sql, Flyway, Liquibase"
+aliases: ["Spring Boot DB initialization", "schema.sql", "data.sql", "Flyway", "Liquibase", "DB migration", "DDL auto", "스프링 부트 DB 초기화"]
+tags: [spring-boot, database, flyway, liquibase, migration, ddl]
+updated: 2026-06-23
+references:
+  - id: spring-docs
+    note: "Database Initialization - https://docs.spring.io/spring-boot/how-to/data-initialization.html"
+  - title: "Flyway"
+    url: "https://flywaydb.org/"
+    note: "Flyway 공식"
+  - title: "Liquibase"
+    url: "https://www.liquibase.org/"
+    note: "Liquibase 공식"
+---
+
+## 정의
+
+DB 스키마 / 데이터를 application 시작 시점에 자동 설정하는 메커니즘. 세 가지 접근:
+
+1. **`schema.sql` / `data.sql`** (Spring Boot 내장, 단순)
+2. **Hibernate `ddl-auto`** (JPA 기반, 자동)
+3. **Flyway / Liquibase** (migration 도구, 운영 권장)
+
+운영 환경 표준: **Flyway** 또는 **Liquibase**. `schema.sql` / `ddl-auto` 는 dev/test 만.
+
+## schema.sql / data.sql (단순)
+
+```
+src/main/resources/
+├── schema.sql           ← DDL (CREATE TABLE 등)
+├── data.sql             ← DML (INSERT 등)
+├── schema-h2.sql        ← DB 별 (h2)
+└── schema-postgresql.sql ← DB 별 (postgresql)
+```
+
+Spring Boot 가 시작 시점에 자동 실행:
+
+```sql
+-- schema.sql
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255)
+);
+
+-- data.sql
+INSERT INTO users (email, name) VALUES
+    ('alice@example.com', 'Alice'),
+    ('bob@example.com', 'Bob');
+```
+
+```yaml
+spring:
+  sql:
+    init:
+      mode: always           # always | embedded | never
+      platform: postgresql   # schema-{platform}.sql 활성화
+      continue-on-error: false
+```
+
+`mode`:
+- `embedded` (기본): H2 / HSQLDB / Derby 만
+- `always`: 모든 DB
+- `never`: 비활성
+
+JPA 와 함께 쓰면 순서 주의:
+```yaml
+spring:
+  jpa:
+    defer-datasource-initialization: true   # JPA 가 ddl 만든 뒤 data.sql 실행
+```
+
+## ddl-auto (JPA / Hibernate)
+
+```yaml
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+```
+
+| 값 | 동작 |
+|---|---|
+| `none` | 아무것도 안 함 (운영 권장) |
+| `validate` | entity 매핑이 DB 와 일치하는지 검증, 불일치 시 시작 실패 |
+| `update` | 차이를 ALTER 로 적용 (위험, 데이터 보존) |
+| `create` | drop + create (데이터 손실!) |
+| `create-drop` | 시작 시 create + 종료 시 drop (테스트만) |
+
+**운영: `validate` 또는 `none` 만**. `update` 는 의도치 않은 schema 변경 위험.
+
+ddl-auto 와 schema.sql 동시 사용 금지 (충돌). migration 도구를 쓰면 둘 다 끔.
+
+## Flyway (권장)
+
+```kotlin
+implementation("org.flywaydb:flyway-core")
+implementation("org.flywaydb:flyway-database-postgresql")   // Postgres 17+ 필요
+```
+
+```yaml
+spring:
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true   # 기존 DB 에서 처음 적용 시
+    validate-on-migrate: true
+    schemas: public
+  jpa:
+    hibernate:
+      ddl-auto: validate         # Flyway 가 schema, JPA 는 검증만
+```
+
+migration 파일 명명 규칙:
+
+```
+src/main/resources/db/migration/
+├── V1__init.sql                        ← versioned (한 번만)
+├── V2__add_users_email_unique.sql
+├── V3__seed_default_admin.sql
+└── R__refresh_views.sql                ← repeatable (변경 시 재실행)
+```
+
+- `V{version}__{description}.sql`: 버전 (한 번만)
+- `R__{description}.sql`: repeatable (체크섬 변경 시 다시 실행)
+- `U{version}__{description}.sql`: undo (Flyway Teams 만)
+
+### 예: V1__init.sql
+
+```sql
+CREATE TABLE users (
+    id          BIGSERIAL PRIMARY KEY,
+    email       VARCHAR(255) UNIQUE NOT NULL,
+    name        VARCHAR(255),
+    created_at  TIMESTAMP NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_users_created_at ON users(created_at);
+```
+
+### 예: V2__add_posts.sql
+
+```sql
+CREATE TABLE posts (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title       VARCHAR(255) NOT NULL,
+    body        TEXT,
+    created_at  TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_posts_user_id ON posts(user_id);
+```
+
+### Flyway metadata 테이블
+
+Flyway 가 자동 생성:
+
+```
+flyway_schema_history
+├── installed_rank
+├── version
+├── description
+├── type
+├── script
+├── checksum
+├── installed_by
+├── installed_on
+├── execution_time
+└── success
+```
+
+같은 V{version} 이 다시 실행되면 checksum 비교. 변경 감지 시 시작 실패 (run 후 .sql 수정 = 안 됨).
+
+### 자주 보는 명령
+
+```bash
+# 상태 확인
+./gradlew flywayInfo
+
+# 강제 baseline (기존 DB 에서 처음 도입)
+./gradlew flywayBaseline
+
+# 마이그레이션 실행
+./gradlew flywayMigrate
+
+# checksum repair (checksum 깨졌을 때)
+./gradlew flywayRepair
+```
+
+운영 환경에선 application 시작 시 자동 migrate. CI / CD 단계에서 `flyway info` 로 확인 후 deploy.
+
+## Liquibase
+
+```kotlin
+implementation("org.liquibase:liquibase-core")
+```
+
+```yaml
+spring:
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+```
+
+```yaml
+# db/changelog/db.changelog-master.yaml
+databaseChangeLog:
+  - include:
+      file: db/changelog/changes/001-init.yaml
+  - include:
+      file: db/changelog/changes/002-add-users.yaml
+```
+
+```yaml
+# 001-init.yaml
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-users
+      author: alice
+      changes:
+        - createTable:
+            tableName: users
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: email
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+      rollback:
+        - dropTable:
+            tableName: users
+```
+
+또는 native SQL:
+
+```yaml
+- changeSet:
+    id: 001-create-users
+    author: alice
+    changes:
+      - sqlFile:
+          path: db/changelog/sql/001-init.sql
+```
+
+### Flyway vs Liquibase
+
+| 항목 | Flyway | Liquibase |
+|---|---|---|
+| 형식 | SQL native | YAML/XML/JSON (또는 SQL) |
+| 학습 곡선 | 낮음 (DBA 친숙) | 중간 |
+| rollback | Teams (paid) | OSS |
+| DB 추상화 | 약함 | 강함 (multi-DB) |
+| 커뮤니티 | 큼 | 큼 |
+| Spring Boot 통합 | 자동 | 자동 |
+
+**Flyway**: SQL 익숙, 단일 DB, 빠른 시작.
+**Liquibase**: rollback 필요, multi-DB 추상화, enterprise.
+
+## 자주 보는 패턴
+
+### Testcontainers + Flyway
+
+```java
+@SpringBootTest
+@Testcontainers
+class PostRepositoryTest {
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+
+    @DynamicPropertySource
+    static void registerPgProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Test
+    void test() {
+        // Flyway 가 컨테이너 DB 에 자동 migration → 진짜 schema 로 테스트
+    }
+}
+```
+
+각 테스트 클래스마다 fresh DB + 모든 migration 적용. 실 환경과 동일한 schema 검증.
+
+### 운영 환경 zero-downtime migration
+
+위험한 변경 (column drop, NOT NULL 추가) 은 단계 분리:
+
+```
+V10__add_new_email_column.sql       (NULL 허용)
+V11__backfill_email.sql              (데이터 채우기)
+[배포: 새 코드가 new_email 쓰기 시작]
+V12__make_new_email_not_null.sql    (제약 추가)
+V13__drop_old_email_column.sql      (삭제)
+```
+
+application 코드 배포와 migration 순서 신중. expand-contract 패턴.
+
+### 환경별 migration 제외
+
+dev 만 seed 데이터:
+
+```
+db/migration/
+├── V1__schema.sql                ← 모든 환경
+├── V2__seed_test_users.sql       ← dev / test 만
+```
+
+```yaml
+# application-prod.yml
+spring:
+  flyway:
+    locations: classpath:db/migration/prod
+
+# application-dev.yml
+spring:
+  flyway:
+    locations:
+      - classpath:db/migration
+      - classpath:db/seed
+```
+
+## 함정과 베스트 프랙티스
+
+- **운영: ddl-auto=validate + Flyway/Liquibase**: 자동 DDL 금지
+- **schema.sql 은 dev/test 만**: 운영은 migration 도구
+- **V{version} 파일 수정 금지**: checksum 깨짐, 새 V{n+1} 파일로 수정
+- **data.sql 의 INSERT 는 IDEMPOTENT 하게**: `INSERT ... ON CONFLICT` (Postgres) / `ON DUPLICATE KEY UPDATE` (MySQL)
+- **baseline-on-migrate**: 기존 DB 에서 Flyway 도입 시 한 번만 true
+- **zero-downtime 위해 단계 분리**: expand-contract 패턴
+- **migration 도구 + Testcontainers**: 실 DB 로 테스트
+- **DB 별 SQL 차이** (PostgreSQL vs MySQL): Liquibase 의 추상화 또는 Flyway 의 `${flyway:database}` placeholder 활용
+- **JPA entity 변경 시 항상 migration 동반**: validate 가 startup 실패로 알려줌
+
+## 관련 위키
+
+- [[spring-data-jpa]]
+- [[spring-hibernate-naming-strategy]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jdbc-template]]
+- [[spring-testing]]
