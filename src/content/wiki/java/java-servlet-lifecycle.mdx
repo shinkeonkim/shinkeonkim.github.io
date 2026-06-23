@@ -1,0 +1,182 @@
+---
+title: "[Java] Servlet 생명주기"
+aliases: ["Servlet lifecycle", "init service destroy", "Servlet 컨테이너", "servlet container", "서블릿 생명주기"]
+tags: [java, servlet, lifecycle, container]
+updated: 2026-06-21
+references:
+  - title: "Jakarta Servlet 6.0 - Servlet Lifecycle"
+    url: "https://jakarta.ee/specifications/servlet/6.0/jakarta-servlet-spec-6.0#servlet-interface"
+    note: "공식 lifecycle 명세"
+---
+
+## 정의
+
+Servlet 은 **컨테이너 (Tomcat / Jetty / Undertow) 가 생성, 호출, 소멸시키는 객체**. 개발자는 인터페이스 메서드만 구현하고 인스턴스 관리는 일체 안 한다.
+
+핵심 메서드 3 가지:
+
+| 메서드 | 호출 시점 | 호출 횟수 |
+|---|---|---|
+| `init(ServletConfig)` | 첫 요청 도착 시 (lazy) 또는 컨테이너 시작 시 (eager) | 인스턴스당 1회 |
+| `service(req, resp)` | 매 HTTP 요청 | 요청마다 1회, 멀티스레드로 동시 호출 |
+| `destroy()` | 컨테이너 종료 또는 hot reload 시 | 인스턴스당 1회 |
+
+`HttpServlet` 은 `service()` 를 오버라이드해 HTTP 메서드별로 `doGet` / `doPost` / `doPut` 등에 분기.
+
+## 인스턴스 수: 1
+
+**기본적으로 servlet 클래스당 인스턴스 1개**. 모든 요청이 같은 인스턴스의 `service()` 를 동시 호출. 그래서:
+
+```java
+public class BrokenServlet extends HttpServlet {
+    private String currentUser;  // ❌ 멀티스레드 공유 = race condition
+
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) {
+        currentUser = req.getRemoteUser();
+        respondWithGreeting(currentUser);  // 다른 요청이 덮어쓸 수 있음
+    }
+}
+```
+
+**규칙**: 인스턴스 필드 = 불변 의존성만 (logger, config). 요청별 데이터는 메서드 로컬 변수에.
+
+`SingleThreadModel` 마커 인터페이스는 Servlet 2.4 부터 deprecated. 대신 thread-safe 하게 작성하거나 ThreadLocal 사용 ([[java-threadlocal]]).
+
+## init: lazy vs eager
+
+기본은 **lazy**: 첫 요청이 와야 인스턴스 생성 + `init()` 호출. 첫 요청이 느려진다.
+
+`load-on-startup` 으로 eager:
+
+```java
+@WebServlet(urlPatterns = "/api/*", loadOnStartup = 1)
+public class ApiServlet extends HttpServlet { ... }
+```
+
+```xml
+<!-- web.xml -->
+<servlet>
+    <servlet-name>api</servlet-name>
+    <servlet-class>com.example.ApiServlet</servlet-class>
+    <load-on-startup>1</load-on-startup>   <!-- 숫자 작을수록 먼저 -->
+</servlet>
+```
+
+DB 풀 초기화, 캐시 워밍업 등 무거운 작업을 `init()` 에서 한다. `init()` 실패 시 `ServletException` 던지면 컨테이너는 servlet 을 사용 불가 처리.
+
+```java
+@Override
+public void init() throws ServletException {
+    try {
+        this.dataSource = createDataSource();
+    } catch (SQLException e) {
+        throw new ServletException("DB 초기화 실패", e);
+    }
+}
+```
+
+## service 의 dispatch
+
+`HttpServlet.service()` 의 기본 구현:
+
+```java
+// HttpServlet (간략화)
+protected void service(HttpServletRequest req, HttpServletResponse resp) {
+    String method = req.getMethod();
+    switch (method) {
+        case "GET":    doGet(req, resp); break;
+        case "POST":   doPost(req, resp); break;
+        case "PUT":    doPut(req, resp); break;
+        case "DELETE": doDelete(req, resp); break;
+        case "HEAD":   doHead(req, resp); break;
+        case "OPTIONS": doOptions(req, resp); break;
+        case "TRACE":  doTrace(req, resp); break;
+        default: resp.sendError(SC_NOT_IMPLEMENTED);
+    }
+}
+```
+
+직접 `service()` 를 오버라이드하면 메서드 분기를 직접 해야 함. 일반적으로는 `doX()` 만 오버라이드.
+
+## destroy
+
+컨테이너가 servlet 을 제거하기 직전 호출. 진행 중인 요청이 끝날 때까지 기다림 (graceful shutdown).
+
+```java
+@Override
+public void destroy() {
+    if (dataSource != null) dataSource.close();
+    executor.shutdown();
+}
+```
+
+**중요한 한계**: JVM 이 비정상 종료 (kill -9, OOM crash) 되면 `destroy()` 호출 안 됨. 영속적 cleanup 은 외부 메커니즘 (DB transaction commit, file flush) 에 의존하지 말 것.
+
+## 컨테이너의 인스턴스 관리
+
+```
+컨테이너 시작
+  └─ load-on-startup servlet 인스턴스화
+       └─ init() 호출
+
+요청 도착
+  ├─ 첫 요청이면 lazy servlet 인스턴스화 + init()
+  └─ thread pool 에서 worker thread 가져옴
+       └─ servlet.service(req, resp)
+            └─ doGet/doPost/...
+
+요청 처리 중
+  └─ 같은 servlet 인스턴스에 동시 호출 가능 (다른 worker thread 에서)
+
+컨테이너 종료 / 재배포
+  ├─ 신규 요청 거부
+  ├─ 진행 중 요청 완료 대기 (timeout)
+  └─ servlet.destroy() → GC
+```
+
+Tomcat 의 `Connector` + `Executor` 가 worker thread pool 을 관리. 기본 200 개. `server.tomcat.threads.max` 로 조정.
+
+## hot deploy 와 ClassLoader
+
+Spring Boot DevTools 가 코드 변경 감지 시:
+1. 기존 WebApplicationContext + servlet `destroy()`
+2. 새 ClassLoader 로 클래스 재로딩
+3. 새 인스턴스 + `init()`
+
+이때 `init()` / `destroy()` 가 빠르고 idempotent 여야 함. 외부 리소스 (DB connection) 누수 주의.
+
+## 비동기 lifecycle
+
+`startAsync()` 호출 시 `service()` 반환과 응답 commit 이 분리:
+
+```java
+@Override
+protected void doGet(HttpServletRequest req, HttpServletResponse resp) {
+    AsyncContext ac = req.startAsync();
+    ac.start(() -> {
+        // 별도 thread 에서 응답 작성
+        respondLater(ac);
+    });
+}
+// service() 는 즉시 반환, but 응답은 아직 미완료
+```
+
+worker thread 는 풀로 복귀. 응답 완료는 `ac.complete()` 호출 시. timeout 도 컨테이너가 관리.
+
+## 함정과 베스트 프랙티스
+
+- **인스턴스 필드 = 불변 의존성만**
+- **`init()` 에서 OOM 위험 작업 (큰 캐시 로드) 주의**: 컨테이너 시작이 멈춤
+- **`destroy()` 는 빠르게**: 응답 안 하면 컨테이너가 강제 종료
+- **graceful shutdown** 은 `Tomcat.setAwaitTimeout()` 또는 Spring Boot `server.shutdown=graceful` 설정
+- **load-on-startup** 은 정수만 의미 있음. 음수면 lazy 와 동일.
+- **컨테이너 별 차이**: Tomcat 은 worker thread pool, Jetty 도 유사, Undertow 는 XNIO 기반 다름.
+
+## 관련 위키
+
+- [[java-servlet-api]]
+- [[java-servlet-filter]]
+- [[java-threadlocal]]
+- [[spring-dispatcher-servlet]]
+- [[spring-mvc]]

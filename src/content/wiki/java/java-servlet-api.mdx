@@ -1,0 +1,207 @@
+---
+title: "[Java] Servlet API: HttpServletRequest, HttpServletResponse"
+aliases: ["Servlet", "HttpServletRequest", "HttpServletResponse", "ServletContext", "ServletConfig", "Jakarta Servlet", "서블릿"]
+tags: [java, servlet, http, web, jakarta-ee]
+updated: 2026-06-21
+references:
+  - title: "Jakarta Servlet 6.0 Spec"
+    url: "https://jakarta.ee/specifications/servlet/6.0/"
+    note: "현행 Jakarta Servlet 명세"
+  - title: "Jakarta Servlet API Javadoc"
+    url: "https://jakarta.ee/specifications/platform/10/apidocs/jakarta/servlet/http/package-summary"
+    note: "패키지 Javadoc"
+---
+
+## 정의
+
+**Servlet** 은 Java 진영의 표준 HTTP 처리 API. 컨테이너 (Tomcat / Jetty / Undertow) 가 HTTP 요청을 객체 (`HttpServletRequest`) 로 만들어 servlet 의 `service()` 에 넘기고, 응답 (`HttpServletResponse`) 을 받아 클라이언트에 송신한다.
+
+Spring MVC, JSF, Struts 같은 web framework 가 모두 이 위에서 동작. **Spring Boot 의 `DispatcherServlet` 도 본질적으로 하나의 Servlet** 이다.
+
+## javax → jakarta 네임스페이스
+
+| 시기 | 네임스페이스 | 컨테이너 |
+|---|---|---|
+| Java EE 8 이하 | `javax.servlet.*` | Tomcat 9 이하, Jetty 9 이하 |
+| Jakarta EE 9+ | `jakarta.servlet.*` | Tomcat 10+, Jetty 11+ |
+
+2019 년 Oracle 이 Java EE 를 Eclipse Foundation 에 이관하면서 `javax` 상표를 못 쓰게 됨. 모든 import 가 강제 변경됐다. Spring Boot 3.x / Spring Framework 6 부터 `jakarta.*` 만 지원.
+
+오래된 라이브러리가 `javax.servlet` 을 import 하면 Spring Boot 3 에서 동작 안 함. 마이그레이션 도구 `org.eclipse.transformer` 가 바이트코드 레벨에서 패키지 치환을 해 준다.
+
+## 가장 간단한 Servlet
+
+```java
+import jakarta.servlet.annotation.WebServlet;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+
+@WebServlet("/hello")
+public class HelloServlet extends HttpServlet {
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+        resp.setContentType("text/plain;charset=UTF-8");
+        resp.getWriter().write("Hello, " + req.getParameter("name"));
+    }
+}
+```
+
+`@WebServlet("/hello")` 가 URL 매핑. `web.xml` 으로도 가능하지만 annotation 방식이 일반적.
+
+## HttpServletRequest 핵심 API
+
+```java
+// URL 구성요소
+String method = req.getMethod();                 // "GET"
+String uri = req.getRequestURI();                // "/api/users/42"
+String url = req.getRequestURL().toString();     // "http://host/api/users/42"
+String query = req.getQueryString();             // "page=1&size=10"
+String contextPath = req.getContextPath();       // "/myapp" or ""
+String servletPath = req.getServletPath();       // "/api/users/42"
+
+// 파라미터 (query string + form body)
+String name = req.getParameter("name");
+String[] tags = req.getParameterValues("tag");
+Map<String, String[]> all = req.getParameterMap();
+
+// 헤더
+String ua = req.getHeader("User-Agent");
+Enumeration<String> names = req.getHeaderNames();
+long contentLength = req.getContentLengthLong();
+String contentType = req.getContentType();
+
+// 본문 (한 번만 읽을 수 있음!)
+InputStream body = req.getInputStream();          // 바이너리
+BufferedReader reader = req.getReader();          // 텍스트
+// getReader() 또는 getInputStream() 중 하나만 호출 가능
+
+// 쿠키, 세션
+Cookie[] cookies = req.getCookies();
+HttpSession session = req.getSession();           // 없으면 생성
+HttpSession existing = req.getSession(false);     // 없으면 null
+
+// 클라이언트 정보
+String ip = req.getRemoteAddr();
+String userAgent = req.getRemoteUser();
+
+// attribute (request scope 임시 데이터)
+req.setAttribute("user", currentUser);
+User u = (User) req.getAttribute("user");
+```
+
+**본문 한 번만 읽기** 가 함정. logging filter 가 본문을 미리 읽으면 controller 가 못 읽는다. Spring 의 `ContentCachingRequestWrapper` 가 이 문제를 해결.
+
+## HttpServletResponse 핵심 API
+
+```java
+// 상태 코드
+resp.setStatus(200);
+resp.sendError(404, "Not Found");
+
+// 헤더
+resp.setHeader("X-Custom", "value");
+resp.addHeader("Set-Cookie", "session=abc");
+resp.setContentType("application/json;charset=UTF-8");
+resp.setCharacterEncoding("UTF-8");
+
+// 본문 쓰기
+PrintWriter writer = resp.getWriter();
+writer.write("{\"ok\":true}");
+// 또는 바이너리
+OutputStream out = resp.getOutputStream();
+out.write(bytes);
+
+// 리다이렉트 (302)
+resp.sendRedirect("/login");
+
+// 쿠키
+Cookie c = new Cookie("session", "abc");
+c.setHttpOnly(true);
+c.setSecure(true);
+c.setPath("/");
+c.setMaxAge(3600);
+resp.addCookie(c);
+
+// flush / commit
+resp.flushBuffer();    // 헤더 + 버퍼 즉시 전송
+// 이후엔 헤더 변경 불가
+```
+
+`getWriter()` 와 `getOutputStream()` 도 둘 중 하나만. 함께 쓰면 `IllegalStateException`.
+
+## ServletContext
+
+애플리케이션 전체에 1 개. **모든 servlet 이 공유**:
+
+```java
+ServletContext ctx = req.getServletContext();
+ctx.setAttribute("startupTime", Instant.now());
+
+// 초기화 파라미터 (web.xml 의 <context-param>)
+String env = ctx.getInitParameter("env");
+
+// 실제 파일 시스템 경로
+String realPath = ctx.getRealPath("/WEB-INF/data.json");
+
+// 동적 servlet 등록 (Servlet 3.0+)
+ctx.addServlet("myServlet", MyServlet.class).addMapping("/api/*");
+```
+
+Spring 의 `application` scope Bean 이 이 ServletContext attribute 에 저장된다 (`@Scope("application")`).
+
+## ServletConfig
+
+개별 servlet 의 초기화 정보:
+
+```java
+@Override
+public void init() {
+    ServletConfig cfg = getServletConfig();
+    String mode = cfg.getInitParameter("mode");   // web.xml 의 <init-param>
+}
+```
+
+`@WebServlet(initParams = @WebInitParam(name = "mode", value = "prod"))` 로도 설정 가능.
+
+## Servlet 3.0+ Async 처리
+
+```java
+@WebServlet(urlPatterns = "/slow", asyncSupported = true)
+public class SlowServlet extends HttpServlet {
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) {
+        AsyncContext async = req.startAsync();
+        async.setTimeout(10_000);
+
+        // 워커 풀에 작업 위임, servlet thread 즉시 반환
+        executor.submit(() -> {
+            try {
+                String result = computeSlowly();
+                async.getResponse().getWriter().write(result);
+            } finally {
+                async.complete();
+            }
+        });
+    }
+}
+```
+
+`asyncSupported = true` 설정 + `startAsync()` 호출. 응답 완료까지 servlet thread 를 잡고 있지 않아 컨테이너 throughput 향상. Spring MVC 의 `Callable` / `DeferredResult` 가 내부적으로 이걸 사용.
+
+## 함정과 베스트 프랙티스
+
+- **본문, writer, stream 모두 1회용**: filter 가 미리 읽으면 컨트롤러에서 못 읽음. wrapper 패턴 사용.
+- **servlet 은 멀티스레드**: 컨테이너는 같은 인스턴스에 동시 요청을 보낸다. 인스턴스 필드 (mutable state) 두지 말 것. [[java-servlet-lifecycle]] 참고.
+- **`HttpSession.setAttribute`** 는 분산 환경에서 문제. session 객체에 직접 저장하지 말고 Redis 등 외부 store 사용 (Spring Session).
+- **`getParameter()`** 는 query string + form body 둘 다 본다. POST 본문이 `application/x-www-form-urlencoded` 가 아니면 body 파라미터 못 읽음 (JSON body 는 직접 stream 파싱).
+- **응답 commit 후 헤더 변경 불가**: `flushBuffer()` 또는 본문이 buffer 크기를 넘기면 자동 commit.
+
+## 관련 위키
+
+- [[java-servlet-lifecycle]]
+- [[java-servlet-filter]]
+- [[java-threadlocal]]
+- [[spring-mvc]]
+- [[spring-dispatcher-servlet]]
+- [[spring-webflux]]

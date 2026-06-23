@@ -1,0 +1,236 @@
+---
+title: "[Java] Servlet Filter"
+aliases: ["Servlet Filter", "Filter", "FilterChain", "@WebFilter", "OncePerRequestFilter", "FilterRegistrationBean", "서블릿 필터"]
+tags: [java, servlet, filter, http]
+updated: 2026-06-21
+references:
+  - title: "Jakarta Servlet 6.0 - Filtering"
+    url: "https://jakarta.ee/specifications/servlet/6.0/jakarta-servlet-spec-6.0#filtering"
+    note: "Filter 명세"
+  - id: spring-docs
+    note: "OncePerRequestFilter - https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/filter/OncePerRequestFilter.html"
+---
+
+## 정의
+
+**Filter** 는 servlet 호출 **전/후** 에 끼어들어 요청과 응답을 가로채는 컴포넌트. 인증, 로깅, 압축, CORS, 인코딩 변환 같은 **횡단 관심사 (cross-cutting concern)** 를 servlet 코드 밖에서 처리할 때 쓴다.
+
+여러 filter 가 **체인 (chain)** 으로 연결돼 순차 실행된다. 마지막 filter 가 `chain.doFilter(req, resp)` 를 호출하면 비로소 매핑된 servlet 의 `service()` 가 실행된다.
+
+`HandlerInterceptor` 와 다른 점: **컨테이너 레벨** (servlet 보다 바깥) 에서 동작. Spring 의 `DispatcherServlet` 진입 전후 모두를 감쌀 수 있다.
+
+## Filter 인터페이스
+
+```java
+import jakarta.servlet.*;
+import jakarta.servlet.annotation.WebFilter;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+
+@WebFilter("/api/*")
+public class RequestLoggingFilter implements Filter {
+
+    @Override
+    public void init(FilterConfig config) {
+        // 컨테이너 시작 시 1회
+    }
+
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain)
+            throws IOException, ServletException {
+        long start = System.nanoTime();
+        HttpServletRequest http = (HttpServletRequest) req;
+
+        try {
+            chain.doFilter(req, resp);   // ← 다음 filter / servlet 으로 진행
+        } finally {
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            log.info("{} {} {}ms", http.getMethod(), http.getRequestURI(), ms);
+        }
+    }
+
+    @Override
+    public void destroy() { /* 정리 */ }
+}
+```
+
+JDK 8+ 에서 `init` / `destroy` 는 default 구현이 있어 생략 가능. 핵심은 `doFilter` 하나.
+
+## chain.doFilter 의 의미
+
+```
+Request 흐름:
+  ↓
+[Filter1.doFilter pre]
+  ↓ chain.doFilter
+  [Filter2.doFilter pre]
+    ↓ chain.doFilter
+    [Servlet.service]
+    ↑
+  [Filter2.doFilter post]
+  ↑
+[Filter1.doFilter post]
+  ↓
+Response
+```
+
+`chain.doFilter` 호출 전 = 요청 전처리, 호출 후 = 응답 후처리. 호출 안 하면 **체인 중단** = servlet 까지 도달하지 않음. 인증 실패 처리에 사용:
+
+```java
+if (!isAuthenticated(http)) {
+    ((HttpServletResponse) resp).sendError(401);
+    return;   // chain.doFilter 호출 안 함
+}
+chain.doFilter(req, resp);
+```
+
+## 등록 방법
+
+### 1. @WebFilter annotation
+
+```java
+@WebFilter(urlPatterns = "/api/*", initParams = @WebInitParam(name = "level", value = "DEBUG"))
+public class LogFilter implements Filter { ... }
+```
+
+### 2. web.xml
+
+```xml
+<filter>
+    <filter-name>logFilter</filter-name>
+    <filter-class>com.example.LogFilter</filter-class>
+</filter>
+<filter-mapping>
+    <filter-name>logFilter</filter-name>
+    <url-pattern>/api/*</url-pattern>
+</filter-mapping>
+```
+
+### 3. Spring Boot FilterRegistrationBean
+
+```java
+@Configuration
+public class FilterConfig {
+    @Bean
+    public FilterRegistrationBean<LogFilter> logFilter() {
+        FilterRegistrationBean<LogFilter> reg = new FilterRegistrationBean<>();
+        reg.setFilter(new LogFilter());
+        reg.addUrlPatterns("/api/*");
+        reg.setOrder(1);    // 낮을수록 먼저
+        return reg;
+    }
+}
+```
+
+순서 제어가 필요하면 `FilterRegistrationBean` 권장. `@Component` 로 등록하면 Spring Boot 가 자동 매핑하지만 순서를 제어하기 어렵다.
+
+## 흔한 패턴
+
+### 인증
+
+```java
+public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) {
+    HttpServletRequest http = (HttpServletRequest) req;
+    String token = http.getHeader("Authorization");
+    if (token == null || !jwtVerifier.verify(token)) {
+        ((HttpServletResponse) resp).sendError(401);
+        return;
+    }
+    chain.doFilter(req, resp);
+}
+```
+
+### CORS
+
+```java
+public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) {
+    HttpServletResponse http = (HttpServletResponse) resp;
+    http.setHeader("Access-Control-Allow-Origin", "https://app.example.com");
+    http.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+    http.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+    if ("OPTIONS".equalsIgnoreCase(((HttpServletRequest) req).getMethod())) {
+        http.setStatus(204);
+        return;
+    }
+    chain.doFilter(req, resp);
+}
+```
+
+### 문자 인코딩
+
+```java
+public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) {
+    req.setCharacterEncoding("UTF-8");
+    chain.doFilter(req, resp);
+}
+```
+
+Spring Boot 는 `CharacterEncodingFilter` 가 기본 등록돼 있음.
+
+### 응답 압축 / 캐싱 (wrapper)
+
+응답을 가로채려면 `HttpServletResponseWrapper` 로 감싸기:
+
+```java
+public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) {
+    ContentCachingResponseWrapper wrapper = new ContentCachingResponseWrapper((HttpServletResponse) resp);
+    chain.doFilter(req, wrapper);
+    byte[] body = wrapper.getContentAsByteArray();
+    // 로깅, 압축, 변환 ...
+    wrapper.copyBodyToResponse();    // 실제 응답으로 복사
+}
+```
+
+요청도 마찬가지: `ContentCachingRequestWrapper` 로 본문을 캐싱해야 logging filter + controller 가 모두 읽을 수 있다.
+
+## OncePerRequestFilter (Spring)
+
+Servlet spec 에선 `forward` / `include` / `async dispatch` 시 filter chain 이 **다시 실행** 될 수 있다. 인증 filter 가 2 번 돌면 안 되는데.
+
+Spring 의 `OncePerRequestFilter` 가 이 문제를 해결:
+
+```java
+public class JwtFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse resp, FilterChain chain)
+            throws ServletException, IOException {
+        // 요청당 정확히 1회만 실행 보장
+        ...
+        chain.doFilter(req, resp);
+    }
+}
+```
+
+내부적으로 request attribute 에 `alreadyFilteredAttributeName` 플래그를 두고 중복 실행을 차단. **Spring 환경에선 거의 항상 이걸 상속하는 게 안전**.
+
+## Filter vs HandlerInterceptor vs AOP
+
+| 항목 | Filter | HandlerInterceptor | AOP @Around |
+|---|---|---|---|
+| 실행 위치 | servlet 컨테이너 | DispatcherServlet 내부 | Bean 메서드 호출 |
+| Spring context 접근 | 등록 시 의존성 주입 가능 | Spring Bean 으로 자연 통합 | Spring Bean 만 적용 |
+| handler 정보 접근 | 불가 | 가능 (`Object handler`) | proxy target 메서드 |
+| 응답 변환 가능 | 가능 (wrapper 로) | postHandle 에서 ModelAndView | 메서드 반환값 변형 |
+| 예외 처리 | 직접 try/catch | afterCompletion 의 `ex` | throwing advice |
+| 적용 범위 | URL 패턴 | URL 패턴 + handler | pointcut (메서드/클래스) |
+
+규칙: HTTP 레이어 (인증, CORS, 압축, 로깅) = Filter, MVC handler 정보 필요 = Interceptor, 서비스 메서드 횡단 관심사 = AOP.
+
+## 함정과 베스트 프랙티스
+
+- **항상 `OncePerRequestFilter` (Spring 환경)**: forward/include 중복 방지
+- **순서 제어 명시적으로**: `FilterRegistrationBean.setOrder()` 또는 `@Order`
+- **chain.doFilter 누락 방지**: 중단 의도가 아니면 반드시 호출
+- **try/finally 패턴**: ThreadLocal set/remove, 시간 측정 등은 finally 에서
+- **응답 commit 후 헤더 변경 불가**: filter 후처리에서 헤더 추가하려면 응답이 아직 commit 전이어야
+- **본문 wrapper 는 메모리 비용**: 큰 body 전체 캐싱은 OOM 위험
+
+## 관련 위키
+
+- [[java-servlet-api]]
+- [[java-servlet-lifecycle]]
+- [[spring-handler-interceptor]]
+- [[spring-aop]]
+- [[spring-security]]
+- [[spring-dispatcher-servlet]]
