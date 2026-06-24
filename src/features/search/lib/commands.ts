@@ -8,11 +8,29 @@ export interface CommandEntry {
   shortcut?: string;
 }
 
+const WIKI_CATEGORY_JUMPS: CommandEntry[] = [
+  { id: 'go-wiki-categories', label: '위키 카테고리 목록', href: '/wiki/categories/', keywords: ['wiki', 'categories', '카테고리'] },
+  { id: 'go-wiki-algorithm', label: '위키, algorithm', href: '/wiki/category/algorithm/', keywords: ['wiki', 'algorithm', '알고리즘'] },
+  { id: 'go-wiki-concurrency', label: '위키, concurrency', href: '/wiki/category/concurrency/', keywords: ['wiki', 'concurrency', '동시성', 'async'] },
+  { id: 'go-wiki-django', label: '위키, django', href: '/wiki/category/django/', keywords: ['wiki', 'django'] },
+  { id: 'go-wiki-frameworks', label: '위키, frameworks', href: '/wiki/category/frameworks/', keywords: ['wiki', 'frameworks'] },
+  { id: 'go-wiki-java', label: '위키, java', href: '/wiki/category/java/', keywords: ['wiki', 'java'] },
+  { id: 'go-wiki-javascript', label: '위키, javascript', href: '/wiki/category/javascript/', keywords: ['wiki', 'javascript', 'js', 'ts', 'typescript'] },
+  { id: 'go-wiki-ml', label: '위키, ml', href: '/wiki/category/ml/', keywords: ['wiki', 'ml', 'machine-learning'] },
+  { id: 'go-wiki-network', label: '위키, network', href: '/wiki/category/network/', keywords: ['wiki', 'network', '네트워크'] },
+  { id: 'go-wiki-pandas', label: '위키, pandas', href: '/wiki/category/pandas/', keywords: ['wiki', 'pandas'] },
+  { id: 'go-wiki-python', label: '위키, python', href: '/wiki/category/python/', keywords: ['wiki', 'python', 'py'] },
+  { id: 'go-wiki-rails', label: '위키, rails', href: '/wiki/category/rails/', keywords: ['wiki', 'rails', 'ruby'] },
+  { id: 'go-wiki-spring', label: '위키, spring', href: '/wiki/category/spring/', keywords: ['wiki', 'spring', 'java'] },
+  { id: 'go-wiki-sql', label: '위키, sql', href: '/wiki/category/sql/', keywords: ['wiki', 'sql', 'database', 'db'] },
+];
+
 export const COMMAND_LIST: CommandEntry[] = [
   { id: 'go-home', label: '홈', href: '/', keywords: ['home', 'index', '메인'] },
   { id: 'go-posts', label: '글 (목록)', href: '/posts/', keywords: ['blog', 'posts'] },
   { id: 'go-notes', label: '노트', href: '/notes/', keywords: ['notes', '메모', '한줄'] },
   { id: 'go-wiki', label: '위키', href: '/wiki/', keywords: ['wiki'] },
+  ...WIKI_CATEGORY_JUMPS,
   { id: 'go-tags', label: '태그', href: '/tags/', keywords: ['tags'] },
   { id: 'go-graph', label: '그래프', href: '/graph/', keywords: ['graph', 'network'] },
   { id: 'go-sources', label: '출처 / 인용', href: '/sources/', keywords: ['sources', 'bibliography', 'citation'] },
