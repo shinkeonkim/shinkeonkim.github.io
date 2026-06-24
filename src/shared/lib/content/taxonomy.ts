@@ -172,6 +172,31 @@ export async function buildWikiTreeForCategory(categorySlug: string): Promise<Wi
   return { slug: categorySlug, count: entries.length, entries: leaves };
 }
 
+export interface WikiSubGroup {
+  slug: string | null;
+  entries: CollectionEntry<'wiki'>[];
+}
+
+export async function groupCategoryBySubcategory(categorySlug: string): Promise<WikiSubGroup[]> {
+  const taxonomy = await getWikiTaxonomy();
+  const entries = taxonomy.categories.get(categorySlug) ?? [];
+  const groups = new Map<string | null, CollectionEntry<'wiki'>[]>();
+  for (const e of entries) {
+    const sub = (e.data as { subcategory?: string }).subcategory ?? null;
+    if (!groups.has(sub)) groups.set(sub, []);
+    groups.get(sub)!.push(e);
+  }
+  const out: WikiSubGroup[] = [];
+  for (const [slug, items] of groups) out.push({ slug, entries: items });
+  out.sort((a, b) => {
+    if (a.slug === null && b.slug !== null) return 1;
+    if (a.slug !== null && b.slug === null) return -1;
+    if (a.slug === null && b.slug === null) return 0;
+    return b.entries.length - a.entries.length || (a.slug ?? '').localeCompare(b.slug ?? '');
+  });
+  return out;
+}
+
 export async function listSeriesInfos(): Promise<SeriesInfo[]> {
   const taxonomy = await getPostTaxonomy();
   return Array.from(taxonomy.series.values()).sort(

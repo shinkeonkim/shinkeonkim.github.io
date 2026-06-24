@@ -54,6 +54,7 @@ const wiki = defineCollection({
     aliases: z.array(z.string()).default([]),
     tags: z.array(z.string()).default([]),
     category: z.string().optional(),
+    subcategory: z.string().optional(),
     updated: z.coerce.date().optional(),
     cover: z.string().optional(),
     coverAlt: z.string().optional(),

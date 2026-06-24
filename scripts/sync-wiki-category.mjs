@@ -53,6 +53,12 @@ function extractCategory(relPath) {
   return parts[0];
 }
 
+function extractSubcategory(relPath) {
+  const parts = relPath.split('/');
+  if (parts.length < 3) return null;
+  return parts[1];
+}
+
 /**
  * Insert `category: {value}` as a single new line in the YAML block,
  * preserving every other byte. We target the line immediately after the
@@ -92,6 +98,29 @@ function insertCategoryLine(raw, category) {
   return openDelim + lines.join(eol) + closeDelim + body;
 }
 
+function insertSubcategoryLine(raw, subcategory) {
+  const fmMatch = raw.match(/^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/);
+  if (!fmMatch) return null;
+  const [, openDelim, yamlBody, closeDelim, body] = fmMatch;
+
+  const lines = yamlBody.split(/\r?\n/);
+  const eol = yamlBody.includes('\r\n') ? '\r\n' : '\n';
+
+  const catIdx = lines.findIndex((l) => /^category:/.test(l));
+  if (catIdx === -1) return null;
+
+  let i = catIdx + 1;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line === '' || /^[ \t]/.test(line)) i++;
+    else break;
+  }
+
+  const newLine = 'subcategory: ' + subcategory;
+  lines.splice(i, 0, newLine);
+  return openDelim + lines.join(eol) + closeDelim + body;
+}
+
 async function main() {
   const files = await walk(WIKI_DIR);
   const results = {
@@ -101,11 +130,15 @@ async function main() {
     topLevel: [],
     errors: [],
     skippedNoAnchor: [],
+    subFilled: [],
+    subMismatch: [],
+    subSkippedNoAnchor: [],
   };
 
   for (const file of files) {
     const rel = path.relative(WIKI_DIR, file).replace(/\\/g, '/');
     const dirCategory = extractCategory(rel);
+    const dirSubcategory = extractSubcategory(rel);
 
     let raw;
     try {
@@ -125,6 +158,7 @@ async function main() {
 
     const fm = parsed.frontmatter ?? {};
     const currentCategory = fm.category;
+    const currentSubcategory = fm.subcategory;
 
     if (!dirCategory) {
       results.topLevel.push({ file: rel, current: currentCategory ?? null });
@@ -140,6 +174,7 @@ async function main() {
           continue;
         }
         await fs.writeFile(file, next, 'utf-8');
+        raw = next;
       }
     } else if (currentCategory === dirCategory) {
       results.matched.push({ file: rel, category: currentCategory });
@@ -150,6 +185,26 @@ async function main() {
         directory: dirCategory,
       });
     }
+
+    if (dirSubcategory) {
+      if (!currentSubcategory) {
+        results.subFilled.push({ file: rel, subcategory: dirSubcategory });
+        if (WRITE) {
+          const next = insertSubcategoryLine(raw, dirSubcategory);
+          if (next === null) {
+            results.subSkippedNoAnchor.push({ file: rel });
+            continue;
+          }
+          await fs.writeFile(file, next, 'utf-8');
+        }
+      } else if (currentSubcategory !== dirSubcategory) {
+        results.subMismatch.push({
+          file: rel,
+          current: currentSubcategory,
+          directory: dirSubcategory,
+        });
+      }
+    }
   }
 
   if (JSON_OUT) {
@@ -157,12 +212,15 @@ async function main() {
   } else {
     const mode = WRITE ? 'WRITE' : 'DRY-RUN';
     console.log('[sync-wiki-category] mode=' + mode);
-    console.log('  filled    : ' + results.filled.length);
-    console.log('  matched   : ' + results.matched.length);
-    console.log('  mismatch  : ' + results.mismatch.length);
-    console.log('  top-level : ' + results.topLevel.length);
-    console.log('  skipped (no anchor) : ' + results.skippedNoAnchor.length);
-    console.log('  errors    : ' + results.errors.length);
+    console.log('  filled       : ' + results.filled.length);
+    console.log('  matched      : ' + results.matched.length);
+    console.log('  mismatch     : ' + results.mismatch.length);
+    console.log('  sub-filled   : ' + results.subFilled.length);
+    console.log('  sub-mismatch : ' + results.subMismatch.length);
+    console.log('  top-level    : ' + results.topLevel.length);
+    console.log('  skipped (no anchor)     : ' + results.skippedNoAnchor.length);
+    console.log('  sub-skipped (no anchor) : ' + results.subSkippedNoAnchor.length);
+    console.log('  errors       : ' + results.errors.length);
 
     if (results.filled.length > 0 && !WRITE) {
       const preview = results.filled.slice(0, 10);
