@@ -222,6 +222,41 @@ export function setupSearchModal(): void {
     updateSelection();
   }
 
+  function renderRecentlyViewed(stats: HTMLElement, container: HTMLElement): void {
+    let items: { url: string; title: string; kind: string }[] = [];
+    try {
+      const raw = localStorage.getItem('recent-viewed');
+      const arr = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(arr)) items = arr.slice(0, 10);
+    } catch {
+      /* ignore */
+    }
+    if (items.length === 0) {
+      stats.textContent = '검색어를 입력하세요';
+      container.innerHTML = '';
+      currentItems = [];
+      selectedIndex = -1;
+      return;
+    }
+    stats.textContent = `최근 본 페이지 ${items.length}개`;
+    currentItems = items.map((it) => ({ kind: 'search', href: it.url }));
+    container.innerHTML = items
+      .map((it, i) => {
+        const label = SECTION_LABELS[it.kind] || it.kind;
+        return `
+          <a href="${escapeHtml(it.url)}" class="search-modal-hit" data-index="${i}">
+            <span class="search-modal-hit-badge">${escapeHtml(label)}</span>
+            <span class="search-modal-hit-body">
+              <span class="search-modal-hit-title">${escapeHtml(it.title)}</span>
+            </span>
+          </a>
+        `;
+      })
+      .join('');
+    selectedIndex = 0;
+    updateSelection();
+  }
+
   async function doSearch(query: string): Promise<void> {
     const trimmed = (query || '').trim();
     const token = ++searchToken;
@@ -229,10 +264,7 @@ export function setupSearchModal(): void {
     const container = document.getElementById('search-modal-results');
     if (!stats || !container) return;
     if (!trimmed) {
-      stats.textContent = '';
-      container.innerHTML = '';
-      currentItems = [];
-      selectedIndex = -1;
+      renderRecentlyViewed(stats, container);
       return;
     }
     stats.textContent = '검색 중…';
