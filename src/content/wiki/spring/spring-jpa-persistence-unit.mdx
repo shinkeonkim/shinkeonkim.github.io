@@ -1,0 +1,339 @@
+---
+title: "[JPA] PersistenceUnit: EntityManagerFactory의 정의 단위"
+aliases: ["PersistenceUnit", "@PersistenceUnit", "EntityManagerFactory", "persistence.xml", "LocalContainerEntityManagerFactoryBean", "JPA 영속성 유닛", "persistence unit"]
+tags: [jpa, hibernate, persistence-unit, entity-manager-factory, configuration]
+category: spring
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Persistence Unit"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a14026"
+    note: "persistence.xml 명세"
+  - id: spring-docs
+    note: "LocalContainerEntityManagerFactoryBean - https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/orm/jpa/LocalContainerEntityManagerFactoryBean.html"
+---
+
+## 정의
+
+**PersistenceUnit** 은 **하나의 논리적 DB 연결 + entity 매핑 집합** 을 정의한 단위. 결과물은 **`EntityManagerFactory`** 1개.
+
+JPA 아키텍처의 계층:
+
+```
+PersistenceUnit  ← 설정 단위 (persistence.xml 또는 Spring config)
+   ↓ 생성
+EntityManagerFactory  ← 무거운 thread-safe 객체, 앱 1개
+   ↓ createEntityManager()
+EntityManager  ← 가벼운 단일 thread 객체, 트랜잭션마다 새로
+   ↓ 보유
+PersistenceContext  ← 1차 캐시 + dirty checking
+```
+
+`spring-jpa-persistence-context` 가 트랜잭션 범위의 메모리 저장소를 다룬다면, 이 페이지는 **앱 시작 시점의 설정 / factory 단위** 를 다룬다.
+
+비교 페이지: [[spring-jpa-context-vs-unit]].
+
+## persistence.xml (표준 Jakarta Persistence)
+
+순수 JPA 환경의 정석:
+
+```xml
+<!-- src/main/resources/META-INF/persistence.xml -->
+<persistence xmlns="https://jakarta.ee/xml/ns/persistence" version="3.1">
+    <persistence-unit name="primaryPU" transaction-type="RESOURCE_LOCAL">
+        <provider>org.hibernate.jpa.HibernatePersistenceProvider</provider>
+        <class>com.example.User</class>
+        <class>com.example.Order</class>
+        <exclude-unlisted-classes>false</exclude-unlisted-classes>
+        <properties>
+            <property name="jakarta.persistence.jdbc.url" value="jdbc:postgresql://localhost/db"/>
+            <property name="jakarta.persistence.jdbc.user" value="app"/>
+            <property name="jakarta.persistence.jdbc.password" value="secret"/>
+            <property name="hibernate.dialect" value="org.hibernate.dialect.PostgreSQLDialect"/>
+            <property name="hibernate.hbm2ddl.auto" value="validate"/>
+            <property name="hibernate.show_sql" value="false"/>
+        </properties>
+    </persistence-unit>
+</persistence>
+```
+
+```java
+EntityManagerFactory emf = Persistence.createEntityManagerFactory("primaryPU");
+EntityManager em = emf.createEntityManager();
+```
+
+Spring Boot 환경에선 직접 작성 거의 안 함. Spring 이 `LocalContainerEntityManagerFactoryBean` 으로 동등한 기능 제공.
+
+## Spring Boot 의 PersistenceUnit (자동)
+
+Spring Boot 의 `JpaAutoConfiguration` 이 자동 생성:
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost/db
+    username: app
+    password: ${DB_PASSWORD}
+  jpa:
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+```
+
+내부적으로 `LocalContainerEntityManagerFactoryBean` Bean 자동 등록. `persistence.xml` 없이도 entity 자동 스캔 (`@SpringBootApplication` 패키지 기준).
+
+명시적 등록:
+
+```java
+@Configuration
+public class JpaConfig {
+    @Bean
+    LocalContainerEntityManagerFactoryBean entityManagerFactory(
+            DataSource dataSource,
+            EntityManagerFactoryBuilder builder) {
+        return builder
+            .dataSource(dataSource)
+            .packages("com.example.domain")
+            .persistenceUnit("primary")
+            .properties(Map.of(
+                "hibernate.dialect", "org.hibernate.dialect.PostgreSQLDialect",
+                "hibernate.hbm2ddl.auto", "validate"
+            ))
+            .build();
+    }
+
+    @Bean
+    PlatformTransactionManager transactionManager(EntityManagerFactory emf) {
+        return new JpaTransactionManager(emf);
+    }
+}
+```
+
+## transaction-type: RESOURCE_LOCAL vs JTA
+
+```xml
+<persistence-unit name="..." transaction-type="RESOURCE_LOCAL">
+<persistence-unit name="..." transaction-type="JTA">
+```
+
+| 타입 | 트랜잭션 관리 | 사용처 |
+|---|---|---|
+| `RESOURCE_LOCAL` | JPA 가 직접 (`em.getTransaction().begin/commit`) | 일반 Spring Boot, 단일 DB |
+| `JTA` | 외부 Transaction Manager (Java EE container, Atomikos, Narayana) | XA 분산 트랜잭션, EJB |
+
+Spring Boot 의 기본은 `RESOURCE_LOCAL` + `JpaTransactionManager` (Spring 의 transaction abstraction). JTA 는 별도 설정 필요 + 거의 안 씀.
+
+## @PersistenceUnit 어노테이션
+
+EntityManagerFactory 자체를 주입받을 때:
+
+```java
+@Service
+public class MyService {
+    @PersistenceUnit(unitName = "primary")
+    private EntityManagerFactory emf;
+
+    public void doWork() {
+        EntityManager em = emf.createEntityManager();
+        try {
+            em.getTransaction().begin();
+            // ...
+            em.getTransaction().commit();
+        } finally {
+            em.close();
+        }
+    }
+}
+```
+
+거의 안 씀. Spring Boot 에선 `@PersistenceContext` 또는 Repository 패턴 권장.
+
+`@PersistenceUnit` vs `@PersistenceContext`:
+- `@PersistenceUnit` → `EntityManagerFactory` 주입 (factory)
+- `@PersistenceContext` → `EntityManager` 주입 (PC handle, 트랜잭션 scope)
+
+## 복수 PersistenceUnit
+
+서로 다른 DB / entity set 사용 시:
+
+```java
+@Configuration
+@EnableJpaRepositories(
+    basePackages = "com.example.orders",
+    entityManagerFactoryRef = "ordersEmf",
+    transactionManagerRef = "ordersTm"
+)
+public class OrdersJpaConfig {
+    @Bean
+    LocalContainerEntityManagerFactoryBean ordersEmf(
+            EntityManagerFactoryBuilder builder,
+            @Qualifier("ordersDataSource") DataSource ds) {
+        return builder.dataSource(ds)
+            .packages("com.example.orders")
+            .persistenceUnit("orders")
+            .build();
+    }
+
+    @Bean
+    PlatformTransactionManager ordersTm(@Qualifier("ordersEmf") EntityManagerFactory emf) {
+        return new JpaTransactionManager(emf);
+    }
+}
+
+@Configuration
+@EnableJpaRepositories(
+    basePackages = "com.example.analytics",
+    entityManagerFactoryRef = "analyticsEmf",
+    transactionManagerRef = "analyticsTm"
+)
+public class AnalyticsJpaConfig {
+    @Bean
+    LocalContainerEntityManagerFactoryBean analyticsEmf(
+            EntityManagerFactoryBuilder builder,
+            @Qualifier("analyticsDataSource") DataSource ds) {
+        return builder.dataSource(ds)
+            .packages("com.example.analytics")
+            .persistenceUnit("analytics")
+            .build();
+    }
+
+    @Bean
+    PlatformTransactionManager analyticsTm(@Qualifier("analyticsEmf") EntityManagerFactory emf) {
+        return new JpaTransactionManager(emf);
+    }
+}
+```
+
+각 entity 패키지는 분리. `@Repository` 도 각 패키지 안. [[spring-boot-multi-datasource]] 참고.
+
+## EntityManagerFactory 의 무게
+
+```java
+EntityManagerFactory emf = Persistence.createEntityManagerFactory("primaryPU");
+```
+
+내부에서 일어나는 일:
+- 모든 `@Entity` 클래스 스캔 + 메타데이터 분석
+- mapping XML 파싱 (있다면)
+- second-level cache 초기화
+- query 사전 컴파일 (named queries)
+- connection pool 초기화
+
+**비싸다**. 앱 시작 시 1번만 생성. close 안 하면 JVM 종료까지 살아 있음. 절대 `createEntityManagerFactory` 를 반복 호출하지 말 것.
+
+`EntityManager` 는 가벼움 (PC 1개 + Connection 1개 reference). 트랜잭션마다 새로 생성하고 즉시 close.
+
+## Bootstrap Mode
+
+```yaml
+spring:
+  jpa:
+    bootstrap-mode: deferred   # default / lazy / deferred
+```
+
+| Mode | 동작 | 사용처 |
+|---|---|---|
+| `default` | 시작 시 동기적으로 EMF 생성 | 보장된 startup, 작은 앱 |
+| `lazy` | 첫 사용 시점에 생성 | 시작 시간 단축, 첫 요청 느림 |
+| `deferred` | 백그라운드 thread 로 비동기 생성, 사용 시점에 대기 | Spring Boot 권장 default |
+
+`deferred` 가 보통 최선. 대형 앱 (entity 수백개) 의 시작 시간 단축 + 첫 요청 안 막힘.
+
+## Properties (Hibernate 튜닝)
+
+```yaml
+spring:
+  jpa:
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        use_sql_comments: true
+        jdbc:
+          batch_size: 50            # batch INSERT/UPDATE
+          batch_versioned_data: true
+          time_zone: UTC
+          fetch_size: 100
+        order_inserts: true
+        order_updates: true
+        connection:
+          provider_disables_autocommit: true
+        cache:
+          use_second_level_cache: true
+          region.factory_class: org.hibernate.cache.jcache.JCacheRegionFactory
+        query:
+          plan_cache_max_size: 2048
+          plan_parameter_metadata_max_size: 128
+        statistics: false              # 운영 환경에선 보통 false
+```
+
+자주 쓰는 옵션:
+- **`batch_size: 50`** : INSERT/UPDATE batch 처리 (성능 큰 영향)
+- **`order_inserts: true`** : batch hit 률 ↑
+- **`provider_disables_autocommit: true`** : HikariCP 와 조합 시 connection 획득 최적화
+- **`format_sql`, `use_sql_comments`** : dev 만, 운영은 비활성
+
+## Entity 스캔 범위
+
+```java
+@Bean
+LocalContainerEntityManagerFactoryBean emf(EntityManagerFactoryBuilder builder, DataSource ds) {
+    return builder.dataSource(ds)
+        .packages("com.example.domain", "com.example.shared")   // 명시
+        .persistenceUnit("primary")
+        .build();
+}
+```
+
+`@EntityScan` 어노테이션도 가능:
+
+```java
+@SpringBootApplication
+@EntityScan(basePackages = "com.example.domain")
+class App {}
+```
+
+명시 안 하면 `@SpringBootApplication` 패키지 + 하위만.
+
+## Persistence Provider
+
+JPA 는 spec, 실제 구현은 provider:
+
+```yaml
+spring:
+  jpa:
+    properties:
+      hibernate.dialect: org.hibernate.dialect.PostgreSQLDialect
+```
+
+| Provider | 특징 |
+|---|---|
+| **Hibernate** (기본) | 가장 일반, Spring Boot 의 기본 |
+| **EclipseLink** | Jakarta EE reference impl |
+| **OpenJPA** | Apache, deprecated 흐름 |
+
+대부분 Hibernate. 다른 provider 교체는 거의 안 일어남.
+
+## 함정과 베스트 프랙티스
+
+- **`EntityManagerFactory` 는 앱 1개**: 반복 생성 = 메모리 누수
+- **Spring Boot 에선 persistence.xml 거의 불필요**: `LocalContainerEntityManagerFactoryBean` 이 동등
+- **bootstrap-mode: deferred** 권장: 시작 시간 단축
+- **`hibernate.jdbc.batch_size`** 설정: 대량 INSERT 시 큰 효과
+- **여러 PersistenceUnit 사용 시 패키지 분리 필수**: entity 가 어느 PU 에 속하는지 명확히
+- **`@PersistenceUnit` vs `@PersistenceContext`** 혼동 주의: 후자가 보통 정답
+- **transaction-type 은 RESOURCE_LOCAL**: JTA 는 특수 상황만
+- **2차 캐시 신중**: 멀티 인스턴스에서 stale 위험, 정말 read-heavy 한 항목만
+
+## 관련 위키
+
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-context-vs-unit]]
+- [[spring-data-jpa]]
+- [[spring-boot-multi-datasource]]
+- [[spring-boot-database-initialization]]
+- [[spring-hibernate-naming-strategy]]
+- [[spring-transaction]]

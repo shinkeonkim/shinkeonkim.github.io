@@ -1,0 +1,223 @@
+---
+title: "[JPA] PersistenceContext vs PersistenceUnit 비교"
+aliases: ["PersistenceContext vs PersistenceUnit", "@PersistenceContext vs @PersistenceUnit", "JPA 계층 구조", "EntityManager vs EntityManagerFactory", "context unit 차이"]
+tags: [jpa, hibernate, persistence-context, persistence-unit, comparison]
+category: spring
+updated: 2026-06-23
+references:
+  - title: "Jakarta Persistence 3.1 - Architecture"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a30"
+    note: "JPA 아키텍처 명세"
+---
+
+## 정의
+
+JPA 의 두 개념은 **레벨이 다르다**. 이름이 비슷해서 자주 혼동하지만:
+
+- **PersistenceUnit** = **설정 단위** (정적, 앱 1번)
+- **PersistenceContext** = **실행 단위** (동적, 트랜잭션마다)
+
+비유:
+- PersistenceUnit = **공장 설계도** (어떤 DB, 어떤 entity, 어떤 옵션)
+- EntityManagerFactory = **공장** (설계도로 만들어진 thread-safe 객체, 앱 1개)
+- EntityManager = **공장의 작업자** (한 번에 한 트랜잭션 처리, 수많은 인스턴스)
+- PersistenceContext = **작업자의 작업대** (managed entity 보관, 1차 캐시)
+
+## 한 줄 비교
+
+| 항목 | PersistenceUnit | PersistenceContext |
+|---|---|---|
+| 정의 위치 | 앱 시작 시 1회 (config / persistence.xml) | 트랜잭션 진입 시 자동 |
+| 결과 객체 | `EntityManagerFactory` | (EntityManager 내부 상태) |
+| 수 | 앱당 1~N개 (보통 1) | 트랜잭션마다 1개, 동시 수많음 |
+| 수명 | JVM 라이프타임 | 트랜잭션 시작 ~ commit/rollback |
+| Thread-safe | 예 (EMF) | 아니오 (단일 트랜잭션 = 단일 스레드) |
+| 무게 | 무거움 (entity 스캔, cache 초기화) | 가벼움 (메모리 Map + entry) |
+| 어노테이션 | `@PersistenceUnit` | `@PersistenceContext` |
+| 주입 타입 | `EntityManagerFactory` | `EntityManager` |
+| 다루는 책임 | DB 연결, dialect, entity 매핑, properties | 1차 캐시, dirty checking, flush |
+
+## 시각화
+
+```
+[애플리케이션 시작]
+   ↓
+[PersistenceUnit 정의 로드]              ← 정적 (persistence.xml / Spring config)
+   ↓ Persistence.createEntityManagerFactory("name")
+[EntityManagerFactory 1개 생성]          ← 무거움, 앱 종료까지 유지
+   │
+   │ (트랜잭션마다)
+   ↓ emf.createEntityManager()
+[EntityManager + PersistenceContext]    ← 가벼움, 트랜잭션 끝나면 소멸
+   │
+   ├─ entity 매니지 (managed map)
+   ├─ dirty checking
+   ├─ action queue
+   └─ flush
+   │
+   ↓ em.close() / 트랜잭션 commit
+[소멸 - PC 비워짐]
+```
+
+## 코드로 비교
+
+```java
+// PersistenceUnit 정의 (Spring Boot 자동)
+@Configuration
+public class JpaConfig {
+    @Bean
+    LocalContainerEntityManagerFactoryBean entityManagerFactory(DataSource ds) {
+        return new LocalContainerEntityManagerFactoryBean();   // 한 번 생성
+    }
+}
+
+// PersistenceContext 사용 (트랜잭션마다)
+@Service
+public class UserService {
+    @PersistenceContext
+    EntityManager em;   // ← Spring 이 proxy 주입, 매 트랜잭션마다 진짜 EM 매핑
+
+    @Transactional
+    public User find(Long id) {
+        return em.find(User.class, id);   // 이 메서드 호출 = 새 PC 시작
+        // 메서드 종료 = 트랜잭션 commit = PC 소멸
+    }
+}
+```
+
+`@PersistenceContext` 가 주입하는 `EntityManager` 는 **shared proxy**. 호출 시점에 현재 트랜잭션의 진짜 EM 으로 위임.
+
+## @PersistenceUnit vs @PersistenceContext
+
+```java
+@Service
+class FactoryService {
+    @PersistenceUnit
+    EntityManagerFactory emf;   // factory 자체 (앱 1개)
+
+    @PersistenceContext
+    EntityManager em;            // 트랜잭션 scope (매번 다름)
+
+    public void doManual() {
+        EntityManager fresh = emf.createEntityManager();
+        try {
+            fresh.getTransaction().begin();
+            // 직접 트랜잭션 관리
+            fresh.getTransaction().commit();
+        } finally {
+            fresh.close();
+        }
+    }
+
+    @Transactional
+    public void doSpring() {
+        em.persist(new User("X"));   // 컨테이너가 트랜잭션 관리
+    }
+}
+```
+
+`@PersistenceUnit` 사용은 드물다. **거의 항상 `@PersistenceContext` + `@Transactional`** 패턴.
+
+## 다중성
+
+### PersistenceUnit 가 여러 개일 때
+
+서로 다른 DB / entity set:
+
+```java
+// orders PU
+@Bean
+LocalContainerEntityManagerFactoryBean ordersEmf(EntityManagerFactoryBuilder b, @Qualifier("ordersDs") DataSource ds) {
+    return b.dataSource(ds).packages("com.example.orders").persistenceUnit("orders").build();
+}
+
+// analytics PU
+@Bean
+LocalContainerEntityManagerFactoryBean analyticsEmf(EntityManagerFactoryBuilder b, @Qualifier("analyticsDs") DataSource ds) {
+    return b.dataSource(ds).packages("com.example.analytics").persistenceUnit("analytics").build();
+}
+```
+
+각 PU 가 **별도 EntityManagerFactory** → **별도 EntityManager pool** → **별도 PersistenceContext** 생성. [[spring-boot-multi-datasource]] 참고.
+
+`@PersistenceContext(unitName = "orders")` 로 어느 PU 의 EM 인지 선택:
+
+```java
+@PersistenceContext(unitName = "orders")
+EntityManager ordersEm;
+
+@PersistenceContext(unitName = "analytics")
+EntityManager analyticsEm;
+```
+
+### PersistenceContext 가 여러 개일 때
+
+같은 PU 안에서도 동시 트랜잭션 수만큼 PC 존재. 예: HTTP 100 동시 요청 → 100 트랜잭션 → 100 PC. 각자 독립 1차 캐시.
+
+같은 entity (id=1) 가 동시에 100 PC 에 있을 수 있음. 각 PC 가 자기 snapshot 보유. 동시 update 충돌은 **optimistic locking (`@Version`)** 또는 **pessimistic locking** 으로 해결. [[spring-jpa-locking]].
+
+## 책임 분리 요약
+
+```
+PersistenceUnit:
+  └─ DB url, dialect, entity 스캔, hibernate.* properties,
+      cache region factory, batch size, bootstrap mode
+
+EntityManagerFactory:
+  └─ EM 생성, 2nd-level cache, named queries 사전 컴파일,
+      schema validation, connection pool 통합
+
+EntityManager:
+  └─ persist / find / merge / remove / detach API,
+      JPQL query 실행, transaction 핸들
+
+PersistenceContext:
+  └─ Identity guarantee (1차 캐시),
+      Dirty checking (snapshot 비교),
+      Write-behind (action queue),
+      Ordered flush (FK 의존성 분석)
+```
+
+각자 다른 추상화 레벨. 같은 layer 라고 묶으면 디버깅 시 혼란.
+
+## 자주 보는 질문
+
+### Q: 왜 EntityManagerFactory 는 무겁고 EntityManager 는 가벼운가?
+
+A: EMF 는 entity 메타데이터 + cache + named query 컴파일을 보유. EM 은 PC (HashMap) + Connection 1개 reference 만. EMF 는 모든 EM 이 공유하는 **불변** 데이터, EM 은 트랜잭션마다 변하는 **가변** 상태.
+
+### Q: @PersistenceContext 가 주입하는 EM 은 어떻게 트랜잭션마다 다른 인스턴스인가?
+
+A: Spring 이 **shared proxy** 를 주입. 메서드 호출 시점에 `TransactionSynchronizationManager` 에서 현재 트랜잭션의 진짜 EM 을 조회 후 위임. 트랜잭션 없으면 새 EM 즉시 close.
+
+### Q: 트랜잭션 종료 후 entity 가 detached 되는 이유는?
+
+A: PC 소멸. managed entity 의 reference 는 살아 있지만 어느 PC 에도 등록 안 됨 → setter 호출해도 변경 추적 안 됨 → 다음 트랜잭션에서 `merge` 로 다시 attach.
+
+### Q: 같은 PU 의 EM 두 개를 동시에 열면?
+
+A: 두 개의 독립 PC. 같은 id (1) 의 User 도 두 PC 에 별도 인스턴스. 한 쪽 변경이 다른 쪽에 안 보임. flush 후 DB → refresh 해야 보임. 대부분 권장 안 함 (트랜잭션 = EM 1:1 패턴 유지).
+
+### Q: persistence.xml 없이 PU 정의는?
+
+A: Spring Boot 의 `LocalContainerEntityManagerFactoryBean` + `EntityManagerFactoryBuilder` + `application.yml` 의 `spring.jpa.*` 옵션 조합. 실질적으로 persistence.xml 의 모든 항목 표현 가능.
+
+## 함정과 베스트 프랙티스
+
+- **`@PersistenceContext` 가 거의 항상 정답**: `@PersistenceUnit` + 수동 EM 관리 안 함
+- **`@Transactional` 과 함께**: PC 의 수명 = 트랜잭션 수명
+- **EntityManagerFactory 는 1개**: 반복 생성 시 OOM + connection leak
+- **PU 와 패키지 분리**: 다중 PU 환경에서 entity 가 어느 PU 에 속하는지 명확히
+- **`@PersistenceContext(unitName=...)` 명시**: 멀티 PU 환경 필수
+- **2개 PU 에 같은 entity 클래스 등록 금지**: ambiguous 매핑
+- **이름 헷갈리지 말 것**: Unit = factory, Context = transaction scope
+
+## 관련 위키
+
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-persistence-unit]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpa-locking]]
+- [[spring-data-jpa]]
+- [[spring-boot-multi-datasource]]
+- [[spring-transaction]]
