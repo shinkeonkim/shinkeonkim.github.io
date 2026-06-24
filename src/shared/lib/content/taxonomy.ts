@@ -155,6 +155,7 @@ export async function listWikiCategoryInfos(): Promise<CategoryInfo[]> {
 export interface WikiTreeLeaf {
   id: string;
   title: string;
+  subcategory: string | null;
 }
 
 export interface WikiTreeCategory {
@@ -167,7 +168,11 @@ export async function buildWikiTreeForCategory(categorySlug: string): Promise<Wi
   const taxonomy = await getWikiTaxonomy();
   const entries = taxonomy.categories.get(categorySlug);
   if (!entries) return null;
-  const leaves: WikiTreeLeaf[] = entries.map((e) => ({ id: e.id, title: e.data.title }));
+  const leaves: WikiTreeLeaf[] = entries.map((e) => ({
+    id: e.id,
+    title: e.data.title,
+    subcategory: (e.data as { subcategory?: string }).subcategory ?? null,
+  }));
   leaves.sort((a, b) => a.title.localeCompare(b.title));
   return { slug: categorySlug, count: entries.length, entries: leaves };
 }
