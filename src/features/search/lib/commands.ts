@@ -31,6 +31,7 @@ export const COMMAND_LIST: CommandEntry[] = [
   { id: 'go-notes', label: '노트', href: '/notes/', keywords: ['notes', '메모', '한줄'] },
   { id: 'go-wiki', label: '위키', href: '/wiki/', keywords: ['wiki'] },
   ...WIKI_CATEGORY_JUMPS,
+  { id: 'go-search', label: '검색 결과 페이지 (URL 공유 가능)', href: '/search/', keywords: ['search', '검색', 'query'] },
   { id: 'go-tags', label: '태그', href: '/tags/', keywords: ['tags'] },
   { id: 'go-graph', label: '그래프', href: '/graph/', keywords: ['graph', 'network'] },
   { id: 'go-sources', label: '출처 / 인용', href: '/sources/', keywords: ['sources', 'bibliography', 'citation'] },

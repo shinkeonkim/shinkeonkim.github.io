@@ -1,0 +1,303 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="검색"
+  description="블로그 전체 검색. Pagefind 인덱스 기반 fuzzy 검색."
+  noIndex
+>
+  <section class="mx-auto max-w-3xl px-5">
+    <h1 class="mb-2 text-3xl font-bold tracking-tight">🔎 검색</h1>
+    <p class="mb-4 text-sm text-fg-muted">
+      URL의 <code>?q=...</code>로 영구 링크 가능. 빠른 검색은 <kbd>⌘+K</kbd>.
+    </p>
+
+    <form
+      id="search-page-form"
+      class="mb-4 flex gap-2"
+      action="/search"
+      method="get"
+      role="search"
+    >
+      <input
+        id="search-page-input"
+        type="search"
+        name="q"
+        placeholder="검색어 입력..."
+        autocomplete="off"
+        autofocus
+        class="flex-1 rounded-md border border-border bg-surface px-3 py-2 text-base placeholder:text-fg-muted focus:border-accent focus:outline-none"
+      />
+      <button
+        type="submit"
+        class="rounded-md bg-accent px-4 py-2 text-sm text-white hover:bg-accent-hover"
+      >
+        검색
+      </button>
+    </form>
+
+    <div
+      id="search-page-chips"
+      class="mb-3 flex flex-wrap gap-1.5"
+      role="toolbar"
+      aria-label="카테고리 필터"
+      hidden
+    ></div>
+
+    <p id="search-page-stats" class="mb-3 text-xs text-fg-muted" aria-live="polite"></p>
+
+    <ul id="search-page-results" class="space-y-3" role="region" aria-label="검색 결과"></ul>
+
+    <p
+      id="search-page-empty"
+      class="hidden rounded-md border border-border bg-surface-elevated p-4 text-sm text-fg-muted"
+    >
+      검색어를 입력하거나 URL에 <code>?q=...</code>를 추가하세요.
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  .search-page-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid var(--color-border);
+    border-radius: 9999px;
+    background: transparent;
+    color: var(--color-fg-muted);
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .search-page-chip:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+  .search-page-chip[aria-pressed='true'] {
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    color: var(--color-accent);
+    font-weight: 500;
+  }
+  .search-page-hit {
+    display: block;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.45rem;
+    background: var(--color-surface-elevated);
+    text-decoration: none;
+    color: inherit;
+  }
+  .search-page-hit:hover {
+    border-color: var(--color-accent);
+  }
+  .search-page-hit-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: var(--color-fg-muted);
+    margin-bottom: 0.2rem;
+  }
+  .search-page-hit-badge {
+    display: inline-block;
+    padding: 0 0.4rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.25rem;
+    font-size: 0.65rem;
+  }
+  .search-page-hit-title {
+    font-size: 1rem;
+    font-weight: 500;
+  }
+  .search-page-hit-excerpt {
+    margin-top: 0.3rem;
+    font-size: 0.85rem;
+    color: var(--color-fg-muted);
+    line-height: 1.5;
+  }
+  .search-page-hit-excerpt mark {
+    background-color: color-mix(in srgb, var(--color-accent) 30%, transparent);
+    color: var(--color-fg);
+    padding: 0 0.1rem;
+    border-radius: 0.15rem;
+  }
+</style>
+
+<script>
+  const SECTION_LABELS: Record<string, string> = { posts: '글', notes: '노트', wiki: '위키' };
+
+  function escapeHtml(s: string): string {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  type PagefindResult = { results: { data: () => Promise<unknown> }[] };
+  type Hit = {
+    url: string;
+    meta?: { title?: string };
+    excerpt?: string;
+    filters?: { section?: string | string[]; category?: string | string[] };
+  };
+
+  type PagefindMod = {
+    search: (q: string, opts?: { filters?: { category?: string } }) => Promise<PagefindResult>;
+    options: (o: object) => Promise<void>;
+    init: () => Promise<void>;
+  };
+  let pagefindModule: PagefindMod | null = null;
+  let activeCategory: string | null = null;
+
+  async function loadPagefind(): Promise<PagefindMod | null> {
+    if (pagefindModule) return pagefindModule;
+    try {
+      const pagefindUrl = '/pagefind/pagefind.js';
+      const mod = (await import(/* @vite-ignore */ pagefindUrl)) as PagefindMod;
+      await mod.options({});
+      await mod.init();
+      pagefindModule = mod;
+      return mod;
+    } catch {
+      return null;
+    }
+  }
+
+  function pickFirst(v: string | string[] | undefined): string {
+    return Array.isArray(v) ? v[0] : (v ?? '');
+  }
+
+  function syncUrl(q: string): void {
+    const url = new URL(window.location.href);
+    if (q) url.searchParams.set('q', q);
+    else url.searchParams.delete('q');
+    if (activeCategory) url.searchParams.set('category', activeCategory);
+    else url.searchParams.delete('category');
+    window.history.replaceState({}, '', url.toString());
+  }
+
+  function renderChips(hits: Hit[], chipsEl: HTMLElement): void {
+    const counts = new Map<string, number>();
+    for (const h of hits) {
+      const c = pickFirst(h.filters?.category);
+      if (c) counts.set(c, (counts.get(c) ?? 0) + 1);
+    }
+    if (counts.size === 0 && !activeCategory) {
+      chipsEl.hidden = true;
+      chipsEl.innerHTML = '';
+      return;
+    }
+    const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const parts: string[] = [];
+    if (activeCategory) {
+      parts.push(`<button type="button" class="search-page-chip" data-chip-clear>✕ 전체</button>`);
+    }
+    for (const [cat, count] of entries) {
+      parts.push(
+        `<button type="button" class="search-page-chip" data-chip-category="${escapeHtml(cat)}" aria-pressed="${cat === activeCategory}">${escapeHtml(cat)} <span>${count}</span></button>`,
+      );
+    }
+    chipsEl.innerHTML = parts.join('');
+    chipsEl.hidden = false;
+  }
+
+  async function runSearch(query: string): Promise<void> {
+    const stats = document.getElementById('search-page-stats');
+    const results = document.getElementById('search-page-results') as HTMLUListElement | null;
+    const empty = document.getElementById('search-page-empty');
+    const chipsEl = document.getElementById('search-page-chips');
+    if (!stats || !results || !empty || !chipsEl) return;
+    const trimmed = query.trim();
+    if (!trimmed) {
+      stats.textContent = '';
+      results.innerHTML = '';
+      chipsEl.hidden = true;
+      chipsEl.innerHTML = '';
+      empty.classList.remove('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    stats.textContent = '검색 중...';
+    const pf = await loadPagefind();
+    if (!pf) {
+      stats.textContent = '검색 인덱스를 로드할 수 없습니다 (개발 모드에서는 빌드 후 preview 사용)';
+      return;
+    }
+    const start = performance.now();
+    const opts = activeCategory ? { filters: { category: activeCategory } } : undefined;
+    const result = await pf.search(trimmed, opts);
+    const elapsed = (performance.now() - start).toFixed(0);
+    if (!result || result.results.length === 0) {
+      stats.textContent = `"${trimmed}" 결과 없음 (${elapsed}ms)`;
+      results.innerHTML = '';
+      chipsEl.hidden = true;
+      chipsEl.innerHTML = '';
+      return;
+    }
+    const hits = (await Promise.all(result.results.slice(0, 30).map((r) => r.data()))) as Hit[];
+    stats.textContent = `"${trimmed}" 결과 ${result.results.length}개 (${elapsed}ms)${activeCategory ? ` · 필터: ${activeCategory}` : ''}`;
+    renderChips(hits, chipsEl);
+    results.innerHTML = hits
+      .map((h) => {
+        const section = pickFirst(h.filters?.section);
+        const category = pickFirst(h.filters?.category);
+        const label = SECTION_LABELS[section] ?? section;
+        const title = h.meta?.title ?? h.url;
+        const excerpt = h.excerpt ?? '';
+        return `<li><a href="${escapeHtml(h.url)}" class="search-page-hit">
+          <div class="search-page-hit-meta">
+            ${label ? `<span class="search-page-hit-badge">${escapeHtml(label)}</span>` : ''}
+            ${category ? `<span>${escapeHtml(section)} / ${escapeHtml(category)}</span>` : ''}
+          </div>
+          <div class="search-page-hit-title">${escapeHtml(title)}</div>
+          ${excerpt ? `<div class="search-page-hit-excerpt">${excerpt}</div>` : ''}
+        </a></li>`;
+      })
+      .join('');
+  }
+
+  function setup() {
+    const form = document.getElementById('search-page-form') as HTMLFormElement | null;
+    const input = document.getElementById('search-page-input') as HTMLInputElement | null;
+    const chipsEl = document.getElementById('search-page-chips');
+    if (!form || !input || !chipsEl) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const initialQ = params.get('q') ?? '';
+    activeCategory = params.get('category');
+    if (initialQ) {
+      input.value = initialQ;
+      void runSearch(initialQ);
+    } else {
+      document.getElementById('search-page-empty')?.classList.remove('hidden');
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const q = input.value;
+      syncUrl(q);
+      void runSearch(q);
+    });
+
+    chipsEl.addEventListener('click', (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+      const chip = t.closest<HTMLElement>('[data-chip-category], [data-chip-clear]');
+      if (!chip) return;
+      e.preventDefault();
+      const cat = chip.getAttribute('data-chip-category');
+      activeCategory = cat === activeCategory ? null : cat;
+      syncUrl(input.value);
+      void runSearch(input.value);
+    });
+  }
+
+  if (document.readyState !== 'loading') setup();
+  else document.addEventListener('DOMContentLoaded', setup);
+  document.addEventListener('astro:page-load', setup);
+</script>
