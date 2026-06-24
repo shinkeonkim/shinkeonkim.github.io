@@ -1,0 +1,346 @@
+---
+title: "[JPA] JPQL DTO Projection: constructor expression, interface, record"
+aliases: ["JPQL projection", "JPQL DTO", "constructor expression", "interface projection", "Tuple", "JPQL NEW 키워드", "JPA projection"]
+tags: [jpa, hibernate, jpql, projection, dto, performance]
+category: spring
+updated: 2026-06-24
+references:
+  - title: "Jakarta Persistence 3.1 - Constructor Expression"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a4759"
+    note: "constructor expression 명세"
+  - id: spring-docs
+    note: "Projections (Spring Data) - https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html"
+---
+
+## 정의
+
+**DTO Projection** 은 entity 전체가 아닌 **필요한 컬럼만 query** 해서 DTO 로 받기. 장점:
+- N+1 회피 (lazy 컬렉션 자동 무시)
+- entity 전체 hydration 비용 절감
+- API 응답에 맞춘 형태 (entity 그대로 반환은 anti-pattern)
+- read-only 의도 명확
+
+JPQL 의 4가지 projection 방식 + Spring Data JPA 의 추가 옵션 2가지.
+
+## 1. Constructor Expression (NEW)
+
+JPQL 표준. DTO 클래스의 생성자 시그니처와 매칭:
+
+```java
+public record UserSummary(Long id, String name, String email) {}
+
+List<UserSummary> result = em.createQuery(
+    "SELECT NEW com.example.UserSummary(u.id, u.name, u.email) FROM User u",
+    UserSummary.class
+).getResultList();
+```
+
+핵심:
+- **FQCN (full class name) 필수**: `NEW com.example.UserSummary(...)`
+- **생성자 시그니처 정확히 일치**: 순서 / 타입
+- record 권장 (Java 14+, immutable)
+- class 도 OK: ctor + getter 만 있으면
+
+```java
+public class UserSummary {
+    private final Long id;
+    private final String name;
+    private final String email;
+
+    public UserSummary(Long id, String name, String email) { ... }
+    // getter
+}
+```
+
+장점:
+- 표준 JPQL → 모든 provider 호환
+- 타입 안전
+- 가장 깔끔
+
+단점:
+- FQCN 길어서 가독성 낮음
+- DTO 변경 시 query 수정 필요
+
+### NamedConstructorResult (native query)
+
+```java
+@SqlResultSetMapping(
+    name = "UserSummaryMapping",
+    classes = @ConstructorResult(
+        targetClass = UserSummary.class,
+        columns = {
+            @ColumnResult(name = "id", type = Long.class),
+            @ColumnResult(name = "name"),
+            @ColumnResult(name = "email")
+        }
+    )
+)
+@NamedNativeQuery(
+    name = "User.summary",
+    query = "SELECT id, name, email FROM users",
+    resultSetMapping = "UserSummaryMapping"
+)
+```
+
+native query 에서 DTO 매핑. 보일러플레이트 많음.
+
+## 2. Interface-Based Projection (Spring Data JPA)
+
+```java
+public interface UserSummary {
+    Long getId();
+    String getName();
+    String getEmail();
+}
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    List<UserSummary> findAllProjectedBy();
+    UserSummary findByEmail(String email);
+}
+```
+
+Spring Data 가 자동으로 proxy 만들어 매핑. **getter 이름이 entity field 와 일치** 필요 (snake_case 가 아니라 camelCase).
+
+### Closed projection (필드만)
+
+```java
+public interface UserSummary {
+    Long getId();
+    String getName();
+}
+```
+
+Spring Data 가 SELECT 절을 최적화 → 필요한 컬럼만 쿼리.
+
+### Open projection (SpEL)
+
+```java
+public interface UserSummary {
+    Long getId();
+
+    @Value("#{target.firstName + ' ' + target.lastName}")
+    String getFullName();
+}
+```
+
+SpEL 사용. 단점: 전체 entity 가 로드된 후 메서드 호출 (최적화 안 됨).
+
+## 3. Class-Based Projection (DTO via Spring Data)
+
+```java
+public record UserSummary(Long id, String name, String email) {}
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    List<UserSummary> findAllProjectedBy();
+}
+```
+
+Spring Data 가 매개변수 이름 → entity field 매칭 (record 의 component 이름 활용).
+
+Spring Data JPA 3.x+ 가 가장 자연스러움.
+
+## 4. Tuple
+
+```java
+List<Tuple> results = em.createQuery(
+    "SELECT u.id AS id, u.name AS name, u.email AS email FROM User u",
+    Tuple.class
+).getResultList();
+
+for (Tuple t : results) {
+    Long id = t.get("id", Long.class);
+    String name = t.get("name", String.class);
+}
+```
+
+DTO 클래스 불필요. 동적 쿼리 결과에 적합. 단점: 타입 안전성 낮음 (string key + cast).
+
+## 5. Dynamic Projection (Spring Data JPA)
+
+같은 메서드를 여러 projection 으로:
+
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+    <T> List<T> findByActiveTrue(Class<T> type);
+}
+
+// 사용
+List<UserSummary> summary = repo.findByActiveTrue(UserSummary.class);
+List<UserDetail> detail = repo.findByActiveTrue(UserDetail.class);
+List<User> entities = repo.findByActiveTrue(User.class);   // entity 전체도
+```
+
+가장 유연. API 응답 형태에 따라 projection 동적 선택.
+
+## 5가지 방식 비교
+
+| 방식 | 표준 | Spring Data 의존 | 타입 안전 | 보일러 | 추천도 |
+|---|---|---|---|---|---|
+| Constructor expression (NEW) | JPQL 표준 | X | ✓ | 중간 (FQCN) | ★★★ |
+| Interface projection | Spring Data | ✓ | ✓ | 낮음 | ★★★★ |
+| Class projection (record) | Spring Data | ✓ | ✓ | 낮음 | ★★★★★ |
+| Tuple | JPA 표준 | X | ✗ | 낮음 | ★★ |
+| Dynamic (`Class<T>`) | Spring Data | ✓ | ✓ | 가장 낮음 | ★★★★★ |
+
+Spring Data JPA 환경: **dynamic projection + record** 가 모던 best.
+
+## 자주 보는 패턴
+
+### 패턴 1: 화면별 DTO
+
+```java
+// 리스트 화면
+public record UserListItem(Long id, String name, String email) {}
+
+// 상세 화면
+public record UserDetail(Long id, String name, String email, String bio, Instant createdAt, int postCount) {}
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    Page<UserListItem> findByActive(boolean active, Pageable pageable);
+
+    @Query("""
+        SELECT new com.example.UserDetail(
+            u.id, u.name, u.email, u.bio, u.createdAt, SIZE(u.posts))
+        FROM User u WHERE u.id = :id
+    """)
+    UserDetail findDetailById(@Param("id") Long id);
+}
+```
+
+각 API 요구에 맞춘 projection. entity 그대로 반환은 over-fetch.
+
+### 패턴 2: 통계 / 집계
+
+```java
+public record UserPostStat(Long userId, String name, Long postCount, Long commentCount) {}
+
+@Query("""
+    SELECT new com.example.UserPostStat(
+        u.id, u.name, COUNT(DISTINCT p), COUNT(DISTINCT c))
+    FROM User u
+    LEFT JOIN u.posts p
+    LEFT JOIN u.comments c
+    GROUP BY u.id, u.name
+""")
+List<UserPostStat> findUserStats();
+```
+
+집계 결과를 record 로 직접 받음.
+
+### 패턴 3: nested DTO
+
+```java
+public record OrderSummary(Long id, OrderUser user, BigDecimal total) {
+    public record OrderUser(Long id, String name) {}
+}
+
+@Query("""
+    SELECT new com.example.OrderSummary(
+        o.id,
+        new com.example.OrderSummary$OrderUser(u.id, u.name),
+        o.total)
+    FROM Order o JOIN o.user u
+""")
+List<OrderSummary> findAllSummary();
+```
+
+JPQL 의 NEW 안에 NEW 가능 (Hibernate). 가독성 낮으니 interface projection 이 더 깔끔할 수도.
+
+## 함정
+
+### 함정 1: Open projection 의 SELECT 최적화 안 됨
+
+```java
+public interface UserSummary {
+    Long getId();
+    @Value("#{target.firstName + ' ' + target.lastName}")
+    String getFullName();
+}
+```
+
+`SELECT u.id, u.first_name, u.last_name, u.email, ...` (전체) → 메모리에서 SpEL 평가. closed projection 이 성능 우위.
+
+### 함정 2: nested entity 의 lazy 함정
+
+```java
+public interface PostSummary {
+    Long getId();
+    String getTitle();
+    UserSummary getAuthor();   // nested projection
+
+    interface UserSummary {
+        Long getId();
+        String getName();
+    }
+}
+```
+
+Spring Data 가 JOIN 자동 추가 (closed projection). 다만 `getAuthor()` 가 entity 면 lazy 함정 발생 가능.
+
+### 함정 3: constructor expression 의 entity 인자
+
+```jpql
+SELECT new com.example.PostSummary(p.id, p.title, p.author) FROM Post p
+```
+
+`p.author` 가 entity → 전체 hydration. 의도 안 맞으면:
+
+```jpql
+SELECT new com.example.PostSummary(p.id, p.title, p.author.id, p.author.name) FROM Post p
+```
+
+scalar 만 사용.
+
+### 함정 4: COUNT(DISTINCT) + JOIN FETCH
+
+```jpql
+SELECT new ... (... COUNT(DISTINCT p) ...) FROM User u LEFT JOIN u.posts p
+GROUP BY u.id
+```
+
+`u.posts` 가 LAZY 면 그냥 JOIN 으로 처리됨 (FETCH 아님). 의도와 다를 수 있음. EXPLAIN 으로 확인.
+
+### 함정 5: Pageable + projection
+
+```java
+Page<UserSummary> findByActive(boolean active, Pageable pageable);
+```
+
+count query 가 자동 생성. complex projection 이면 count 가 비효율적. `@Query` 의 `countQuery` 옵션:
+
+```java
+@Query(value = "SELECT new ... FROM User u JOIN u.posts p ...",
+       countQuery = "SELECT COUNT(DISTINCT u) FROM User u")
+Page<UserStat> findStat(Pageable pageable);
+```
+
+## Performance: projection 의 효과
+
+| 시나리오 | entity 로드 | projection 로드 | 차이 |
+|---|---|---|---|
+| 단일 필드만 사용 | 100% 컬럼 SELECT + lazy 필드 | 필요 컬럼만 SELECT | DB I/O 절감 |
+| collection 사용 안 함 | LAZY proxy 생성 | 무관 | proxy 비용 절감 |
+| dirty checking 미사용 | snapshot 저장 | 안 함 | 메모리 절감 |
+| 트랜잭션 종료 후 사용 | `LazyInitializationException` 위험 | 안전 (값만) | 안정성 |
+
+read-heavy API 에서 큰 차이. 권장: **모든 read API 가 projection 으로 응답**, entity 그대로 반환 금지.
+
+## 함정과 베스트 프랙티스
+
+- **entity 그대로 API 반환 금지**: projection 으로 분리
+- **record 우선**: immutable + 간결
+- **closed projection** (필드만) 이 SELECT 최적화 가능
+- **dynamic projection** (`Class<T>`) 이 가장 유연
+- **constructor expression 의 FQCN** 보일러: static import 또는 named query 활용
+- **nested entity 인자 피하기**: scalar 만 사용
+- **Pageable + projection 의 count query 명시**: 자동 count 비효율 시
+- **DTO 가 API 계약**: schema 변경 시 versioning 신중
+- **`@Transactional(readOnly = true)`** 가 projection 메서드의 기본
+
+## 관련 위키
+
+- [[spring-jpql]]
+- [[spring-jpql-dynamic-queries]]
+- [[spring-data-jpa]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpa-persistence-context]]

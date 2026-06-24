@@ -1,0 +1,352 @@
+---
+title: "[JPA] 동적 쿼리: Criteria API, QueryDSL, Specification"
+aliases: ["JPA Criteria API", "QueryDSL", "Specification", "동적 쿼리", "type-safe query", "dynamic JPQL", "JPA dynamic query"]
+tags: [jpa, hibernate, jpql, criteria, querydsl, specification]
+category: spring
+updated: 2026-06-24
+references:
+  - title: "Jakarta Persistence 3.1 - Criteria API"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a6925"
+    note: "Criteria API 명세"
+  - title: "QueryDSL Reference"
+    url: "https://querydsl.com/static/querydsl/latest/reference/html_single/"
+    note: "QueryDSL 공식"
+  - id: spring-docs
+    note: "Spring Data Specifications - https://docs.spring.io/spring-data/jpa/reference/jpa/specifications.html"
+---
+
+## 정의
+
+동적 쿼리 = **런타임 조건에 따라 WHERE / JOIN 이 달라지는 쿼리**. 검색 필터, admin 도구, 리포팅 등에서 흔함.
+
+```java
+// 정적: 모든 조건이 query 에 박혀 있음
+List<User> findActiveByEmail(String email);
+
+// 동적: 사용자 입력에 따라 조건 추가 / 제거
+List<User> search(@Nullable String email, @Nullable String city, @Nullable Integer minAge, ...);
+```
+
+JPQL string concatenation 으로 만들 수도 있지만:
+- SQL injection 위험
+- 가독성 ↓ (분기마다 + " AND ...")
+- 컴파일 타임 검증 X
+
+해결책 3가지:
+1. **Criteria API** (JPA 표준)
+2. **QueryDSL** (가장 인기)
+3. **Spring Data Specification** (Criteria API 의 래퍼)
+
+각자 트레이드오프.
+
+## 비교 한눈에
+
+| 항목 | Criteria API | QueryDSL | Specification |
+|---|---|---|---|
+| 표준 | JPA 표준 | Third-party | Spring Data |
+| 가독성 | 낮음 (verbose) | 높음 (SQL-like) | 중간 |
+| 타입 안전 | 부분 (metamodel 필요) | 완전 (Q 클래스 생성) | 부분 |
+| 빌드 의존 | 없음 (또는 annotation processor) | annotation processor | 없음 |
+| 동적 조립 | 가능 (장황) | 매우 쉬움 (`BooleanBuilder`) | 가능 (`Specification.where`) |
+| Spring 통합 | 직접 | 별도 설정 | native |
+| 학습 곡선 | 가파름 | 완만 | 완만 |
+
+**현실**: 새 프로젝트라면 QueryDSL 또는 Specification, legacy 코드면 Criteria API.
+
+## Criteria API 기본
+
+```java
+@PersistenceContext
+EntityManager em;
+
+public List<User> search(String name, Integer minAge) {
+    CriteriaBuilder cb = em.getCriteriaBuilder();
+    CriteriaQuery<User> cq = cb.createQuery(User.class);
+    Root<User> u = cq.from(User.class);
+
+    List<Predicate> predicates = new ArrayList<>();
+    if (name != null) {
+        predicates.add(cb.like(u.get("name"), "%" + name + "%"));
+    }
+    if (minAge != null) {
+        predicates.add(cb.greaterThanOrEqualTo(u.get("age"), minAge));
+    }
+    cq.where(predicates.toArray(new Predicate[0]));
+    cq.orderBy(cb.desc(u.get("createdAt")));
+
+    return em.createQuery(cq).getResultList();
+}
+```
+
+문제:
+- `u.get("name")` : string 기반 (타입 안전 X, 오타 위험)
+- 길고 verbose
+
+### 해결: JPA Metamodel
+
+`hibernate-jpamodelgen` 같은 annotation processor 가 `User_` 같은 metamodel 생성:
+
+```kotlin
+annotationProcessor("org.hibernate.orm:hibernate-jpamodelgen")
+```
+
+```java
+// 자동 생성: User_.java
+predicates.add(cb.like(u.get(User_.name), "%" + name + "%"));      // 타입 안전
+predicates.add(cb.greaterThanOrEqualTo(u.get(User_.age), minAge));
+```
+
+여전히 boilerplate 많지만 타입 안전 ✓.
+
+### JOIN with Criteria
+
+```java
+Join<User, Post> post = u.join("posts");
+cq.select(u).where(cb.gt(cb.count(post), 10L));
+cq.groupBy(u.get("id"));
+```
+
+JPQL 의 `JOIN u.posts p` 대응. fluent 하지만 가독성 ↓.
+
+## QueryDSL (가장 인기)
+
+annotation processor 가 `Q` 클래스 자동 생성:
+
+```kotlin
+annotationProcessor("com.querydsl:querydsl-apt:5.0.0:jakarta")
+annotationProcessor("jakarta.persistence:jakarta.persistence-api")
+implementation("com.querydsl:querydsl-jpa:5.0.0:jakarta")
+```
+
+`./gradlew compileJava` → `QUser`, `QPost` 자동 생성.
+
+```java
+@Repository
+public class UserRepository {
+    @PersistenceContext EntityManager em;
+
+    public List<User> search(String name, Integer minAge, String city) {
+        JPAQueryFactory query = new JPAQueryFactory(em);
+        QUser u = QUser.user;
+
+        return query.selectFrom(u)
+            .where(
+                nameContains(name),
+                ageGoe(minAge),
+                cityEq(city)
+            )
+            .orderBy(u.createdAt.desc())
+            .fetch();
+    }
+
+    private BooleanExpression nameContains(String name) {
+        return name == null ? null : QUser.user.name.contains(name);
+    }
+    private BooleanExpression ageGoe(Integer age) {
+        return age == null ? null : QUser.user.age.goe(age);
+    }
+    private BooleanExpression cityEq(String city) {
+        return city == null ? null : QUser.user.city.eq(city);
+    }
+}
+```
+
+**핵심**: `where()` 에 `null` 전달하면 자동 무시 → 동적 쿼리 자연스러움. 메서드 분리로 재사용성 ↑.
+
+### QueryDSL + projection
+
+```java
+public record UserSummary(Long id, String name, String email) {}
+
+List<UserSummary> result = query
+    .select(Projections.constructor(UserSummary.class, u.id, u.name, u.email))
+    .from(u)
+    .fetch();
+
+// 또는 Projections.fields, Projections.bean
+```
+
+또는 직접 record constructor:
+
+```java
+.select(new QUserSummary(u.id, u.name, u.email))   // Q-class for DTO
+```
+
+### QueryDSL + Pageable
+
+```java
+public Page<User> search(Pageable pageable) {
+    JPAQueryFactory query = new JPAQueryFactory(em);
+    QUser u = QUser.user;
+
+    JPAQuery<User> base = query.selectFrom(u).where(predicates);
+
+    List<User> content = base
+        .offset(pageable.getOffset())
+        .limit(pageable.getPageSize())
+        .fetch();
+
+    Long total = query.select(u.count()).from(u).where(predicates).fetchOne();
+
+    return new PageImpl<>(content, pageable, total != null ? total : 0L);
+}
+```
+
+count query 직접. Spring Data + QuerydslPredicateExecutor 통합도 가능.
+
+## Spring Data Specification
+
+Spring Data 가 Criteria API 를 functional 하게 래핑:
+
+```java
+public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificationExecutor<User> {}
+
+public class UserSpecs {
+    public static Specification<User> nameContains(String name) {
+        return (root, query, cb) -> name == null ? null : cb.like(root.get("name"), "%" + name + "%");
+    }
+    public static Specification<User> ageGoe(Integer minAge) {
+        return (root, query, cb) -> minAge == null ? null : cb.greaterThanOrEqualTo(root.get("age"), minAge);
+    }
+    public static Specification<User> cityEq(String city) {
+        return (root, query, cb) -> city == null ? null : cb.equal(root.get("city"), city);
+    }
+}
+
+// 사용
+List<User> users = userRepo.findAll(
+    Specification.where(UserSpecs.nameContains(name))
+        .and(UserSpecs.ageGoe(minAge))
+        .and(UserSpecs.cityEq(city))
+);
+```
+
+장점:
+- Spring Data 통합 (`findAll`, `findOne`, `count`, page)
+- 별도 의존성 없음
+- composition (`.and`, `.or`, `.not`)
+
+단점:
+- 여전히 Criteria API 의 verbose 한 syntax
+
+## Specification 의 함수형 활용
+
+```java
+public static Specification<User> matching(UserSearchCriteria c) {
+    return Specification
+        .where(nameContains(c.name()))
+        .and(ageGoe(c.minAge()))
+        .and(cityEq(c.city()))
+        .and(activeIsTrue());
+}
+
+userRepo.findAll(matching(criteria), pageable);
+```
+
+검색 조건 객체 + Specification factory → 깔끔한 사용처.
+
+## QueryDSL 의 동적 조립 패턴
+
+`BooleanBuilder` 사용:
+
+```java
+BooleanBuilder builder = new BooleanBuilder();
+if (name != null) builder.and(u.name.contains(name));
+if (minAge != null) builder.and(u.age.goe(minAge));
+if (city != null) builder.and(u.city.eq(city));
+
+List<User> result = query.selectFrom(u).where(builder).fetch();
+```
+
+또는 `where()` 의 multi-arg + null 자동 무시 (앞 예시).
+
+## QueryDSL Subquery
+
+```java
+JPAQuery<?> sub = JPAExpressions
+    .select(post.author.id)
+    .from(post)
+    .where(post.createdAt.after(oneMonthAgo));
+
+List<User> activeAuthors = query
+    .selectFrom(u)
+    .where(u.id.in(sub))
+    .fetch();
+```
+
+## QueryDSL CASE
+
+```java
+NumberExpression<Integer> rank = new CaseBuilder()
+    .when(u.score.gt(100)).then(1)
+    .when(u.score.gt(50)).then(2)
+    .otherwise(3);
+
+query.select(u.name, rank).from(u).orderBy(rank.asc()).fetch();
+```
+
+CASE 표현식. JPQL 보다 자연스러움.
+
+## QueryDSL 의 native 함정 회피
+
+```java
+// JPQL: 컬렉션 fetch join + Pageable = 메모리 paging
+query.selectFrom(u).leftJoin(u.posts).fetchJoin()
+    .offset(0).limit(10).fetch();   // ⚠️ 같은 함정
+```
+
+해결: 두 단계 query
+
+```java
+// 1. id 만 페이징
+List<Long> ids = query.select(u.id)
+    .from(u)
+    .where(...)
+    .orderBy(u.createdAt.desc())
+    .offset(pageable.getOffset())
+    .limit(pageable.getPageSize())
+    .fetch();
+
+// 2. id 로 fetch join
+List<User> users = query.selectFrom(u)
+    .leftJoin(u.posts).fetchJoin()
+    .where(u.id.in(ids))
+    .orderBy(u.createdAt.desc())
+    .fetch();
+```
+
+## 어떤 걸 골라야?
+
+```
+새 프로젝트?
+├─ Spring Data 사용 + 간단한 동적 쿼리 → Specification
+├─ 복잡한 동적 쿼리 + 가독성 우선 → QueryDSL
+└─ 표준 우선 + verbosity 감수 → Criteria API
+
+레거시 / 기존 코드?
+├─ 이미 QueryDSL → 그대로 유지
+├─ Criteria API → metamodel + 부분 리팩토링
+└─ string JPQL concatenation → QueryDSL 마이그레이션 강력 권장
+```
+
+실무에서 가장 흔한 조합: **Spring Data JPA + Specification (간단한 검색)** + **QueryDSL (복잡한 동적 / 통계 쿼리)**.
+
+## 함정과 베스트 프랙티스
+
+- **string concatenation 절대 금지**: SQL injection + 컴파일 검증 X
+- **QueryDSL 의 Q 클래스 빌드 캐싱 주의**: gradle clean 후 재생성
+- **Specification 의 `(root, query, cb) -> null`** 패턴: 조건 없음 표현
+- **`Specification.where(null)`** 도 안전 (null 이면 모두 매칭)
+- **Pageable + JOIN FETCH**: 둘 다에서 메모리 paging 함정 동일
+- **QueryDSL Projection.fields vs constructor**: bean 기반은 setter 필요, record 면 constructor
+- **subquery 는 IN 절 한정**: WHERE EXISTS / NOT EXISTS 가 인덱스 활용 더 좋음
+- **count query 명시**: 큰 결과셋 + complex projection 시 자동 count 비효율
+- **읽기 전용 쿼리는 `@Transactional(readOnly = true)`**: dirty checking 비용 절감
+
+## 관련 위키
+
+- [[spring-jpql]]
+- [[spring-jpql-projection]]
+- [[spring-data-jpa]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpa-persistence-context]]

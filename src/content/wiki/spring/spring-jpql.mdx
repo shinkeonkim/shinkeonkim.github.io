@@ -1,0 +1,417 @@
+---
+title: "[JPA] JPQL: Jakarta Persistence Query Language"
+aliases: ["JPQL", "Jakarta Persistence Query Language", "HQL", "@Query JPQL", "TypedQuery", "JPQL 문법", "엔티티 쿼리"]
+tags: [jpa, hibernate, jpql, query, hql]
+category: spring
+updated: 2026-06-24
+references:
+  - title: "Jakarta Persistence 3.1 - Query Language"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a4665"
+    note: "JPQL 명세"
+  - title: "Hibernate User Guide: HQL/JPQL"
+    url: "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#hql"
+    note: "Hibernate HQL/JPQL 가이드"
+  - id: spring-docs
+    note: "Spring Data JPA @Query - https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"
+---
+
+## 정의
+
+**JPQL** 은 Jakarta Persistence 표준의 객체 지향 쿼리 언어. 문법은 SQL 과 유사하지만 **entity 와 그 필드를 대상으로** 작동 (table / column 아님).
+
+```jpql
+SELECT u FROM User u WHERE u.email = :email
+```
+
+- `User` : entity 클래스명 (JPA 가 매핑된 table 로 변환)
+- `u` : entity alias (필수)
+- `u.email` : entity 의 field (JPA 가 column 으로 변환)
+
+**Hibernate HQL** 은 JPQL 의 superset (Hibernate 전용 확장 포함). 대부분 호환.
+
+이 페이지는 JPQL 의 핵심 문법 + 함정. DTO projection 은 [[spring-jpql-projection]], 동적 쿼리는 [[spring-jpql-dynamic-queries]] 참고.
+
+## 기본 SELECT
+
+```java
+// Entity 통째로
+em.createQuery("SELECT u FROM User u", User.class).getResultList();
+
+// Scalar
+em.createQuery("SELECT u.name FROM User u", String.class).getResultList();
+
+// Multi-value (Object[])
+em.createQuery("SELECT u.id, u.name FROM User u", Object[].class).getResultList();
+```
+
+DISTINCT:
+
+```java
+em.createQuery("SELECT DISTINCT u FROM User u JOIN u.orders o", User.class);
+```
+
+## FROM (entity, alias)
+
+```jpql
+SELECT u FROM User u                    -- ✓
+SELECT u FROM users u                   -- ❌ table 명 아님
+SELECT FROM User u                      -- ❌ alias 필수
+```
+
+**entity 명 == 클래스 simple name** (default). `@Entity(name = "...")` 로 변경 가능.
+
+## WHERE
+
+```jpql
+SELECT u FROM User u WHERE u.age >= 18
+SELECT u FROM User u WHERE u.name LIKE 'A%'
+SELECT u FROM User u WHERE u.role IN ('ADMIN', 'STAFF')
+SELECT u FROM User u WHERE u.deletedAt IS NULL
+SELECT u FROM User u WHERE u.createdAt BETWEEN :from AND :to
+SELECT u FROM User u WHERE u.email LIKE CONCAT('%', :domain)
+```
+
+연산자:
+- 비교: `=`, `<>`, `<`, `<=`, `>`, `>=`
+- 논리: `AND`, `OR`, `NOT`
+- 집합: `IN`, `NOT IN`, `EXISTS`, `NOT EXISTS`, `ANY`, `ALL`, `SOME`
+- 패턴: `LIKE`, `NOT LIKE` (와일드카드 `%`, `_`)
+- NULL: `IS NULL`, `IS NOT NULL`
+- 범위: `BETWEEN`
+
+## Parameter Binding
+
+```java
+// Named (권장)
+em.createQuery("SELECT u FROM User u WHERE u.name = :name", User.class)
+    .setParameter("name", "Alice")
+    .getResultList();
+
+// Positional
+em.createQuery("SELECT u FROM User u WHERE u.name = ?1", User.class)
+    .setParameter(1, "Alice")
+    .getResultList();
+```
+
+**Named 권장** (`:name`): 가독성 + 같은 파라미터 재사용 가능 + 순서 변경에 안전.
+
+❌ **String concatenation 금지** (SQL injection):
+```java
+// ❌ 절대 금지
+String jpql = "SELECT u FROM User u WHERE u.name = '" + name + "'";
+```
+
+## JOIN
+
+```jpql
+SELECT p FROM Post p JOIN p.author a WHERE a.email = :email
+```
+
+`p.author` = `Post.author` 필드 (FK relationship). JOIN condition 은 매핑이 결정 (별도 ON 불필요).
+
+### JOIN 종류
+
+| Type | 의미 |
+|---|---|
+| `JOIN` (or `INNER JOIN`) | 양쪽 다 존재 |
+| `LEFT JOIN` | 왼쪽 모두 + 오른쪽 match (없으면 NULL) |
+| `JOIN FETCH` | JOIN + 연관 entity 함께 로드 (N+1 해결) |
+| `LEFT JOIN FETCH` | LEFT JOIN + fetch |
+
+### ON 절 (JPA 2.1+)
+
+기본 JOIN 외 추가 조건:
+
+```jpql
+SELECT p FROM Post p LEFT JOIN p.comments c ON c.deletedAt IS NULL
+```
+
+### JOIN FETCH (N+1 해결)
+
+```jpql
+SELECT p FROM Post p JOIN FETCH p.author
+```
+
+```sql
+SELECT p.*, a.* FROM post p
+INNER JOIN user a ON p.author_id = a.id;
+-- 1쿼리에 author 까지 로드, lazy 무시
+```
+
+자세한 N+1 패턴: [[spring-jpa-fetch-type]] 참고.
+
+### Implicit Join (path traversal)
+
+```jpql
+SELECT p FROM Post p WHERE p.author.email = :email
+-- 자동으로 INNER JOIN user 추가
+```
+
+편하지만 의도 흐릿. 명시적 JOIN 이 가독성 좋음.
+
+## GROUP BY / HAVING
+
+```jpql
+SELECT a.email, COUNT(p) FROM Post p JOIN p.author a
+GROUP BY a.email
+HAVING COUNT(p) > 10
+```
+
+집계 함수: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
+
+## ORDER BY
+
+```jpql
+SELECT u FROM User u ORDER BY u.createdAt DESC, u.id ASC
+SELECT u FROM User u ORDER BY u.name NULLS FIRST       -- Hibernate 확장
+```
+
+`NULLS FIRST` / `NULLS LAST` 는 표준 (Jakarta Persistence 3.1+).
+
+## 페이징
+
+```java
+em.createQuery("SELECT u FROM User u ORDER BY u.id", User.class)
+    .setFirstResult(20)
+    .setMaxResults(10)
+    .getResultList();
+```
+
+⚠️ **컬렉션 fetch join + setMaxResults** 조합 = Hibernate 가 in-memory paging 경고:
+
+```
+HHH000104: firstResult/maxResults specified with collection fetch; applying in memory!
+```
+
+전체 row 를 메모리에 로드 후 잘라냄. 큰 데이터에서 OOM. 해결:
+- `@EntityGraph` + `Slice` (스칼라 JOIN 만)
+- 두 단계 query (id 만 paging → 두 번째 query 로 fetch)
+
+## Built-in Functions
+
+### String
+- `CONCAT(a, b)` 또는 `a || b` (Hibernate)
+- `SUBSTRING(s, start, length)`
+- `LENGTH(s)`
+- `LOWER(s)`, `UPPER(s)`
+- `TRIM(s)`, `TRIM(BOTH 'x' FROM s)`
+- `LOCATE(substr, s [, from])` (1-based)
+
+### Numeric
+- `ABS(x)`, `MOD(x, y)`, `SQRT(x)`
+- `SIZE(collection)`: `WHERE SIZE(p.comments) > 5`
+
+### Date / Time
+- `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`
+- `EXTRACT(YEAR FROM date)`, `EXTRACT(MONTH FROM date)`
+- `LOCAL DATE`, `LOCAL TIME`, `LOCAL DATETIME` (Hibernate)
+
+### CASE
+
+```jpql
+SELECT u.id,
+       CASE WHEN u.age < 20 THEN 'teen'
+            WHEN u.age < 30 THEN 'twenties'
+            ELSE 'older'
+       END
+FROM User u
+```
+
+simple case:
+
+```jpql
+CASE u.country WHEN 'KR' THEN 1 WHEN 'US' THEN 2 ELSE 0 END
+```
+
+### COALESCE / NULLIF
+
+```jpql
+SELECT COALESCE(u.nickname, u.name) FROM User u
+SELECT NULLIF(u.score, 0) FROM User u   -- score 가 0 이면 NULL
+```
+
+## Subquery
+
+```jpql
+-- WHERE 절
+SELECT u FROM User u
+WHERE u.id IN (SELECT p.author.id FROM Post p WHERE p.createdAt > :date)
+
+-- correlated
+SELECT u FROM User u
+WHERE EXISTS (SELECT 1 FROM Post p WHERE p.author = u AND p.featured = true)
+
+-- ALL / ANY
+SELECT u FROM User u WHERE u.score > ALL (SELECT s.threshold FROM Setting s)
+```
+
+JPA 2.1+ 부터는 FROM 절 subquery 도 일부 지원 (Hibernate 6+ 가 가장 잘).
+
+## Polymorphism (TYPE, TREAT)
+
+```java
+@Entity @Inheritance(strategy = SINGLE_TABLE)
+abstract class Animal {}
+
+@Entity @DiscriminatorValue("CAT") class Cat extends Animal { int catSpecific; }
+@Entity @DiscriminatorValue("DOG") class Dog extends Animal { int dogSpecific; }
+```
+
+```jpql
+SELECT a FROM Animal a                              -- 모두
+SELECT a FROM Animal a WHERE TYPE(a) = Cat          -- Cat 만
+SELECT a FROM Animal a WHERE TYPE(a) IN (Cat, Dog)
+
+-- TREAT (다운캐스트)
+SELECT a FROM Animal a WHERE TREAT(a AS Cat).catSpecific > 5
+```
+
+상속 매핑: [[spring-jpa-inheritance]] 참고.
+
+## TypedQuery vs Query
+
+```java
+// TypedQuery: 타입 안전
+TypedQuery<User> q1 = em.createQuery("SELECT u FROM User u", User.class);
+List<User> users = q1.getResultList();   // 컴파일 시 타입 확인
+
+// Query: untyped (legacy)
+Query q2 = em.createQuery("SELECT u FROM User u");
+List<?> raw = q2.getResultList();   // 캐스팅 필요
+```
+
+**항상 `TypedQuery`** 사용. 다중 컬럼은 `Object[].class` 또는 DTO projection.
+
+## NamedQuery (사전 정의)
+
+```java
+@Entity
+@NamedQuery(
+    name = "User.findActiveSince",
+    query = "SELECT u FROM User u WHERE u.active = true AND u.createdAt > :since"
+)
+class User { ... }
+
+// 사용
+TypedQuery<User> q = em.createNamedQuery("User.findActiveSince", User.class);
+q.setParameter("since", oneMonthAgo);
+List<User> result = q.getResultList();
+```
+
+장점:
+- 시작 시점 JPQL 검증 (오류 = 시작 실패)
+- 재사용
+- query 가 entity 와 함께 위치 (가독성)
+
+Spring Data JPA 의 `findBy*` 도 내부적으로 동등한 query 컴파일.
+
+## Bulk UPDATE / DELETE
+
+```jpql
+UPDATE User u SET u.active = false WHERE u.lastLogin < :cutoff
+DELETE FROM User u WHERE u.deletedAt < :purgeBefore
+```
+
+```java
+em.createQuery("UPDATE User u SET u.active = false WHERE u.lastLogin < :cutoff")
+    .setParameter("cutoff", oneYearAgo)
+    .executeUpdate();
+```
+
+⚠️ **함정**:
+- **PersistenceContext 우회**: 이미 managed 인 entity 와 동기화 안 됨. `em.clear()` 필요
+- **cascade 무시**: `DELETE FROM Order` 가 OrderItem 까지 안 지움. 자식 먼저 삭제 또는 native + ON DELETE CASCADE
+- **dirty checking 우회**: Hibernate 의 @Version 도 무시 (직접 set 필요)
+- **`@Modifying` 어노테이션**: Spring Data JPA 에서 필수
+
+```java
+@Modifying
+@Query("UPDATE User u SET u.active = false WHERE u.lastLogin < :cutoff")
+int deactivateInactive(@Param("cutoff") LocalDate cutoff);
+```
+
+## Native Query
+
+JPQL 로 표현 안 되는 DB 특수 기능:
+
+```java
+List<User> users = em.createNativeQuery(
+    "SELECT * FROM users WHERE created_at > NOW() - INTERVAL '7 days'",
+    User.class
+).getResultList();
+```
+
+- Postgres 의 `INTERVAL`, `JSONB ->`
+- Window function (`ROW_NUMBER() OVER`)
+- CTE (`WITH x AS (...)`)
+- DB-specific dialect
+
+단점: DB 종속, JPA 추상화 깨짐. 가능하면 JPQL 우선.
+
+`@SqlResultSetMapping` 으로 결과 매핑:
+
+```java
+@SqlResultSetMapping(
+    name = "UserStats",
+    classes = @ConstructorResult(
+        targetClass = UserStat.class,
+        columns = { @ColumnResult(name = "id", type = Long.class),
+                    @ColumnResult(name = "post_count", type = Long.class) }
+    )
+)
+@NamedNativeQuery(
+    name = "User.stats",
+    query = "SELECT u.id, COUNT(p.id) AS post_count FROM users u LEFT JOIN posts p ON p.author_id = u.id GROUP BY u.id",
+    resultSetMapping = "UserStats"
+)
+```
+
+## Spring Data JPA 통합
+
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+    // 1. Query method (자동 생성)
+    List<User> findByActiveTrue();
+
+    // 2. @Query (JPQL)
+    @Query("SELECT u FROM User u WHERE u.email LIKE %:domain")
+    List<User> findByEmailDomain(@Param("domain") String domain);
+
+    // 3. @Query nativeQuery
+    @Query(value = "SELECT * FROM users WHERE age > :min", nativeQuery = true)
+    List<User> findOlderThan(@Param("min") int min);
+
+    // 4. Modifying (bulk)
+    @Modifying
+    @Query("UPDATE User u SET u.active = false WHERE u.lastLogin < :cutoff")
+    int deactivate(@Param("cutoff") LocalDate cutoff);
+
+    // 5. Pageable
+    @Query("SELECT u FROM User u WHERE u.active = :active")
+    Page<User> findByActive(@Param("active") boolean active, Pageable pageable);
+}
+```
+
+## 함정과 베스트 프랙티스
+
+- **entity 명 == 클래스명 (default)**: table 명 쓰면 에러
+- **alias 필수**: `FROM User u`
+- **Named parameter (`:name`) 우선**: positional 보다 가독성
+- **String concatenation 절대 금지**: SQL injection
+- **컬렉션 fetch join + Pageable = 메모리 paging**: warning 무시 위험
+- **bulk update / delete 는 PC 우회**: `em.clear()` + cascade 직접 처리
+- **`@Modifying` 빠뜨리지 말 것** (Spring Data JPA)
+- **NamedQuery 로 startup 검증**: 운영 안전망
+- **TypedQuery 만 사용**: 컴파일 타입 안전
+- **Implicit join (`p.author.email`) 보다 명시적 JOIN**: 가독성
+- **TYPE() / TREAT()** 가 polymorphic query 의 표준
+
+## 관련 위키
+
+- [[spring-jpql-projection]]
+- [[spring-jpql-dynamic-queries]]
+- [[spring-data-jpa]]
+- [[spring-jpa-persistence-context]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpa-inheritance]]
+- [[spring-jdbc-template]]
