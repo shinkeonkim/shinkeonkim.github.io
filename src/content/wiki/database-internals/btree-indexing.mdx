@@ -1,0 +1,302 @@
+---
+title: "[DB Internals] B-Tree와 B+Tree 인덱싱"
+aliases: ["B-tree", "B+ tree", "B+tree", "database index", "index scan", "covering index", "B-트리", "데이터베이스 인덱스"]
+tags: [database, index, btree, btree-plus, query-optimization]
+category: database-internals
+updated: 2026-06-24
+references:
+  - title: "PostgreSQL B-Tree Internals"
+    url: "https://www.postgresql.org/docs/current/btree-implementation.html"
+    note: "PostgreSQL B-tree 구현"
+  - title: "Database Internals (Alex Petrov)"
+    url: "https://www.databass.dev/"
+    note: "DB 엔진 책"
+---
+
+## 정의
+
+**B-Tree** (B+ Tree) 는 거의 모든 RDB 의 인덱스 자료구조. balanced tree, 디스크 I/O 최소화 설계.
+
+특징:
+- **균형 (balanced)**: 모든 leaf 깊이 같음 → O(log N) 보장
+- **fan-out 큼**: 노드당 수백 개 key (1 page = 8KB ~ 16KB)
+- **재귀적 정렬**: 각 노드 안에서도 정렬
+- **순차 접근 최적화**: B+Tree 의 leaf 가 linked list
+
+대부분 RDB (PostgreSQL, MySQL InnoDB, Oracle) 가 **B+Tree** 사용. 차이:
+- **B-Tree**: internal + leaf 모두 데이터 저장
+- **B+Tree**: leaf 만 데이터, internal 은 navigation 만 (더 효율)
+
+## 왜 B+Tree 인가?
+
+대안:
+- **Binary search tree**: 균형 안 됨, 디스크 I/O 폭증
+- **Red-black tree**: 균형이지만 깊이 깊음, 메모리 자료구조
+- **Hash index**: O(1) point lookup 만 가능, range query 불가
+- **LSM tree**: write-heavy 최적화 (Cassandra, RocksDB)
+- **B+Tree**: read + range query 균형 잘 잡힘 ← OLTP 표준
+
+## 구조
+
+```
+                  [50]                       ← root
+                 /    \
+              [20]    [70 80]                ← internal
+             /  |  \   /  |  \
+           ... leaves (data + linked) ...     ← leaf
+           
+Leaf:
+  [10, 15, 20, ...] → [21, 25, 30, ...] → [31, ...]
+    ↑ linked list 로 순차 스캔 가능
+```
+
+각 internal node: `[key1, ptr1, key2, ptr2, ..., keyN, ptrN+1]`. key 가 정렬, ptr 이 자식 노드.
+
+각 leaf: `[(key, row_id), (key, row_id), ...]` + next leaf pointer.
+
+## 디스크 I/O 효율
+
+```
+1 page (8KB) ≈ 수백 ~ 수천 key
+B+Tree 깊이 = log_fanout(N)
+
+10 억 row, fanout=400 이면:
+log_400(1,000,000,000) ≈ 4
+
+→ disk read 4번 + leaf scan = 모든 query
+```
+
+깊이 4-5 가 일반적. SSD 환경에선 거의 instant.
+
+## Operations
+
+### Lookup (=)
+
+```sql
+SELECT * FROM users WHERE id = 12345;
+```
+
+root 부터 leaf 까지 4번의 디스크 read (캐시 hit 면 더 적음). O(log N).
+
+### Range scan
+
+```sql
+SELECT * FROM users WHERE id BETWEEN 100 AND 200;
+```
+
+1. id=100 의 leaf 찾기 (O(log N))
+2. linked list 로 next leaf 순회하며 id=200 까지
+
+B+Tree 의 linked leaf 가 range query 의 핵심.
+
+### Insert
+
+1. leaf 찾기 (O(log N))
+2. 정렬된 위치에 삽입
+3. leaf 가 가득 차면 split → 부모에 새 key 추가
+4. 부모도 가득 차면 split → root 까지 propagate
+
+worst case O(log N).
+
+### Delete
+
+1. leaf 에서 제거
+2. leaf 가 너무 비면 (under-fill) → 인접 leaf 와 merge 또는 redistribute
+3. internal 도 cascading 가능
+
+대부분 modern DB 는 **lazy delete**: 표시만 + VACUUM (PostgreSQL) 으로 정리.
+
+## Single column vs Composite Index
+
+```sql
+CREATE INDEX idx_user_email ON users(email);                    -- single
+CREATE INDEX idx_user_status_created ON users(status, created_at);   -- composite
+```
+
+composite 의 key 순서가 중요:
+
+```sql
+-- 인덱스: (status, created_at)
+
+SELECT * FROM users WHERE status = 'active';                  ✓ 사용
+SELECT * FROM users WHERE status = 'active' AND created_at > '...'; ✓ 사용
+SELECT * FROM users WHERE created_at > '...';                 ✗ 사용 안 함
+```
+
+**left-most prefix** 규칙: 인덱스의 왼쪽부터 일치해야 사용.
+
+## Covering Index (Index-only scan)
+
+쿼리에 필요한 모든 컬럼이 인덱스에 있으면 **테이블 안 읽고** 인덱스만으로 응답:
+
+```sql
+CREATE INDEX idx_user ON users(email, name);
+
+SELECT email, name FROM users WHERE email = 'x@y.com';
+-- index 에서 email, name 둘 다 얻음 → 테이블 lookup 불필요
+```
+
+PostgreSQL 의 `INCLUDE`:
+
+```sql
+CREATE INDEX idx_user ON users(email) INCLUDE (name);
+-- email 은 검색 key, name 은 인덱스에 같이 저장만
+```
+
+순수 검색 key 보다 가벼움. 매우 효율적.
+
+## Selectivity 와 인덱스 선택
+
+```
+selectivity = distinct values / total rows
+
+높음 (예: email, id) → 인덱스 효율 ↑
+낮음 (예: gender, status enum) → full scan 이 더 빠를 수 있음
+```
+
+DB 의 query planner 가 통계로 결정. 매우 selectivity 낮은 (5% 미만) 컬럼은 인덱스 불필요.
+
+### partial index
+
+```sql
+CREATE INDEX idx_active ON users(email) WHERE status = 'active';
+```
+
+특정 조건의 row 만 인덱스 → 크기 ↓, 효율 ↑. status='active' 비율이 작을 때 유용.
+
+## Index 종류
+
+### B+Tree (default)
+
+range query + equality 균형. 대부분 컬럼에 적합.
+
+### Hash
+
+```sql
+CREATE INDEX idx_x ON t USING HASH (col);    -- PostgreSQL
+```
+
+O(1) equality only. range query 불가. 사용 드물다.
+
+### GIN (Generalized Inverted Index)
+
+```sql
+CREATE INDEX idx_tags ON posts USING GIN (tags);
+CREATE INDEX idx_search ON posts USING GIN (to_tsvector('english', body));
+```
+
+PostgreSQL: 배열, JSONB, 전문 검색. inverted index 구조.
+
+### GiST (Generalized Search Tree)
+
+geometric, range type, full text 등. PostgreSQL.
+
+### BRIN (Block Range Index)
+
+대용량 + 자연스럽게 정렬된 데이터 (timestamp 등). 매우 작음.
+
+```sql
+CREATE INDEX idx_created ON logs USING BRIN (created_at);
+```
+
+10억 row 도 작은 인덱스로.
+
+### Bitmap index
+
+데이터 웨어하우스 (OLAP). 매우 낮은 cardinality 컬럼. PostgreSQL 은 자동 bitmap scan (인덱스 결합).
+
+## Query Planner 의 인덱스 사용 결정
+
+```
+SELECT u.* FROM users u WHERE u.email = 'x@y.com';
+```
+
+EXPLAIN:
+
+```
+Index Scan using idx_user_email on users
+  Index Cond: (email = 'x@y.com')
+```
+
+vs full scan:
+
+```
+Seq Scan on users
+  Filter: (email = 'x@y.com')
+```
+
+planner 가 비용 비교. 통계 (`ANALYZE`) 가 정확해야 좋은 결정.
+
+함정: 통계 stale (`ANALYZE` 안 함) 시 잘못된 plan.
+
+## Bitmap Index Scan
+
+여러 인덱스 결합 시 PostgreSQL 이 자동 사용:
+
+```sql
+WHERE category = 'electronics' AND price BETWEEN 100 AND 200;
+```
+
+```
+Bitmap And
+  ├─ Bitmap Index Scan on idx_category   (category 일치 row 의 bitmap)
+  └─ Bitmap Index Scan on idx_price       (price 범위 row 의 bitmap)
+→ Bitmap Heap Scan on products             (AND 결과로 실제 row 읽기)
+```
+
+여러 인덱스의 결합. 단일 composite 보다 유연.
+
+## 함정
+
+### 함정 1: 인덱스 너무 많이
+
+각 인덱스 = INSERT/UPDATE/DELETE 비용 ↑. 보통 테이블당 3-5개 이하.
+
+### 함정 2: 함수 / 형변환으로 인덱스 무효
+
+```sql
+WHERE LOWER(email) = 'x@y.com';   -- ❌ idx_user_email 사용 안 함
+
+-- 해결: functional index
+CREATE INDEX idx_user_email_lower ON users(LOWER(email));
+```
+
+### 함정 3: LIKE 'X%' vs '%X'
+
+```sql
+WHERE email LIKE 'alice%';    ✓ 인덱스 사용
+WHERE email LIKE '%@gmail';   ✗ 사용 안 함 (suffix 매칭은 인덱스 불가)
+```
+
+suffix 검색은 GIN trigram 또는 reverse 인덱스.
+
+### 함정 4: NULL 처리
+
+PostgreSQL: `WHERE col IS NULL` 인덱스 사용 가능. MySQL: 일부 버전 어려움.
+
+### 함정 5: 통계 stale
+
+`ANALYZE` (PostgreSQL), `OPTIMIZE TABLE` / `ANALYZE TABLE` (MySQL) 으로 통계 갱신. autovacuum 이 자동 (Postgres).
+
+### 함정 6: bloat
+
+UPDATE / DELETE 가 많은 테이블의 인덱스는 dead tuple 로 비대. `REINDEX` 또는 `VACUUM FULL`.
+
+## 함정과 베스트 프랙티스
+
+- **selectivity 낮으면 인덱스 무용**: 통계 확인
+- **composite index 의 컬럼 순서**: 가장 selective + WHERE 자주 쓰는 컬럼 먼저
+- **EXPLAIN ANALYZE 항상 확인**: 추측 금지
+- **partial / functional / covering index 적극 활용**
+- **인덱스 너무 많지 않게**: write 비용 trade-off
+- **`ANALYZE` 주기적**: 통계 정확성
+- **REINDEX CONCURRENTLY** (PostgreSQL): lock 없이 재구축
+
+## 관련 위키
+
+- [[database-internals-mvcc]]
+- [[sql/postgresql]]
+- [[sql/mysql]]
+- [[spring-data-jpa]]
+- [[spring-jpa-fetch-type]]
+- [[spring-jpql]]

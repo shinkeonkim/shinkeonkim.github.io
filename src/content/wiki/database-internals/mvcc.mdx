@@ -1,0 +1,262 @@
+---
+title: "[DB Internals] MVCC: Multi-Version Concurrency Control"
+aliases: ["MVCC", "Multi-Version Concurrency Control", "snapshot isolation", "transaction id", "VACUUM", "tuple version", "동시성 제어"]
+tags: [database, mvcc, transaction, isolation, postgresql, mysql]
+category: database-internals
+updated: 2026-06-24
+references:
+  - title: "PostgreSQL MVCC"
+    url: "https://www.postgresql.org/docs/current/mvcc.html"
+    note: "PostgreSQL MVCC 공식"
+  - title: "InnoDB Multi-Versioning"
+    url: "https://dev.mysql.com/doc/refman/8.0/en/innodb-multi-versioning.html"
+    note: "MySQL InnoDB MVCC"
+---
+
+## 정의
+
+**MVCC (Multi-Versioning Concurrency Control)** 는 트랜잭션 간 격리를 **여러 버전의 row** 로 구현. 동시 read / write 가 락 없이 진행.
+
+핵심 아이디어:
+- 한 row 의 여러 버전 (tuple) 이 동시에 존재
+- 각 트랜잭션은 자신이 시작한 시점의 "snapshot" 만 봄
+- read 가 write 를 막지 않음 (그 반대도)
+
+대부분 modern RDB 가 MVCC: PostgreSQL, MySQL (InnoDB), Oracle, SQL Server (RCSI), CockroachDB.
+
+대안:
+- **Lock-based** (legacy): 모든 row 에 락. 동시성 ↓
+- **MVCC**: 락 최소화. 표준이 됨
+
+## 왜 MVCC?
+
+```
+[Lock-based 시나리오]
+T1: SELECT * FROM users WHERE id=1
+   → shared lock on row 1
+T2: UPDATE users SET name='B' WHERE id=1
+   → exclusive lock 요청, T1 끝날 때까지 대기
+
+[MVCC 시나리오]
+T1: SELECT (스냅샷 시점의 row 읽기, 락 없음)
+T2: UPDATE (새 버전 생성, 락 최소)
+→ 동시 진행
+```
+
+**read 와 write 가 서로 안 막음**. MVCC 의 가장 큰 장점.
+
+## PostgreSQL MVCC
+
+각 row (tuple) 에 hidden column:
+- `xmin`: 이 tuple 을 만든 트랜잭션 ID
+- `xmax`: 이 tuple 을 삭제 / update 한 트랜잭션 ID (없으면 0)
+
+```
+row 1: (id=1, name='Alice', xmin=100, xmax=0)
+   ↓ T200 이 UPDATE
+row 1: (id=1, name='Alice', xmin=100, xmax=200)  ← 옛 버전 (dead 곧)
+row 1: (id=1, name='Bob',   xmin=200, xmax=0)    ← 새 버전
+```
+
+같은 row 의 두 버전이 disk 에 공존. T200 미만의 트랜잭션은 옛 버전, T200 이상은 새 버전.
+
+### snapshot isolation
+
+```
+T150 시작 → snapshot 잡음 (active xid: 100-149)
+   ↓
+T150 의 SELECT:
+   - xmin <= 150 인 tuple 만 보임
+   - xmax > 150 또는 xmax=0 인 tuple 만 보임
+   ↓
+다른 트랜잭션의 commit 영향 없이 일관된 view
+```
+
+`xmin <= snapshot` AND `(xmax = 0 OR xmax > snapshot OR xmax 가 active)`.
+
+### Update 의 mechanics
+
+PostgreSQL 은 in-place update 안 함. 새 row 작성 + 옛 row 의 xmax 설정:
+
+```
+BEFORE:
+  Tuple A: xmin=100, xmax=0
+
+UPDATE:
+  Tuple A: xmin=100, xmax=200  (이제 dead 곧)
+  Tuple B: xmin=200, xmax=0    (live)
+```
+
+장점: rollback 이 단순 (xmax 만 reset). 단점: dead tuple 누적 → VACUUM 필요.
+
+### VACUUM
+
+dead tuple 정리:
+
+```sql
+VACUUM users;          -- 가벼움, 백그라운드, lock 적음
+VACUUM FULL users;     -- 무거움, exclusive lock, 테이블 재구성
+```
+
+autovacuum 이 자동 (default). 비활성화 시 **bloat** 폭증 → 성능 저하.
+
+### transaction wraparound
+
+PostgreSQL 의 xid 는 32-bit. 약 40억 트랜잭션 후 wrap. 적절히 VACUUM 안 하면 wraparound 시 데이터 손실 위험 → autovacuum 강제 발동 (`emergency vacuum`).
+
+## MySQL InnoDB MVCC
+
+다른 방식: **rollback segment + undo log**.
+
+```
+row 1: (id=1, name='Bob', trx_id=200)   ← 현재 버전 (in-place updated)
+undo log: 옛 버전 'Alice' 보관
+```
+
+옛 트랜잭션이 read 하면 undo log 로 옛 버전 복원.
+
+장점: dead tuple 없음. 단점: undo log 길이 (long-running tx 시 폭증).
+
+## Snapshot Isolation 의 함정
+
+### Write Skew
+
+```
+계좌 A 잔액=100, B=100. 둘 다 양수 유지 조건.
+
+T1: SELECT A.balance, B.balance → both 100
+    IF A+B >= 50 THEN UPDATE A SET balance=A-50
+
+T2: SELECT A.balance, B.balance → both 100 (같은 snapshot 가정)
+    IF A+B >= 50 THEN UPDATE B SET balance=B-50
+
+둘 다 commit → A=50, B=50. 합=100 OK.
+
+하지만 만약 조건이 "A+B >= 100 유지" 였다면:
+T1, T2 둘 다 자기 snapshot 기준 조건 만족 → 둘 다 진행 → 결과 A=50, B=50 → 합=100 → OK
+조건이 strict 였다면 의도 위반.
+```
+
+snapshot isolation 은 write 가 같은 row 면 충돌 감지 (first-writer-wins). 다른 row 면 둘 다 commit → **write skew**.
+
+해결: **Serializable Snapshot Isolation (SSI)** - PostgreSQL 9.1+. 충돌 감지 + 한쪽 rollback.
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+```
+
+성능 약간 손해, 정확성 보장.
+
+## Transaction Isolation Levels
+
+| Level | Dirty Read | Non-Repeatable Read | Phantom Read | Write Skew |
+|---|---|---|---|---|
+| READ UNCOMMITTED | 가능 | 가능 | 가능 | 가능 |
+| READ COMMITTED | 차단 | 가능 | 가능 | 가능 |
+| REPEATABLE READ | 차단 | 차단 | 가능* | 가능 |
+| SNAPSHOT (PostgreSQL REPEATABLE READ) | 차단 | 차단 | 차단 | 가능 |
+| SERIALIZABLE | 차단 | 차단 | 차단 | 차단 |
+
+PostgreSQL default = READ COMMITTED. SERIALIZABLE 은 SSI 로 구현.
+
+MySQL InnoDB default = REPEATABLE READ (with phantom-read 차단 by 갭 락).
+
+## VACUUM 의 정밀 동작
+
+```
+1. dead tuple 식별 (xmin/xmax 보고 어느 active tx 도 안 보는 row)
+2. heap 정리 (dead tuple 의 공간 회수)
+3. 인덱스 entry 정리
+4. visibility map 갱신
+5. FSM (free space map) 갱신
+6. 통계 갱신
+```
+
+`VACUUM FULL` 은 전체 테이블 재작성 (lock 필요). 평소엔 `VACUUM` 으로 충분.
+
+## Bloat 모니터링
+
+```sql
+SELECT
+  schemaname, tablename,
+  pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as total,
+  n_dead_tup, n_live_tup,
+  round(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) as dead_pct
+FROM pg_stat_user_tables
+ORDER BY dead_pct DESC NULLS LAST
+LIMIT 10;
+```
+
+`dead_pct > 20%` 면 bloat 의심. 더 강력한 vacuum 또는 `pg_repack` (online 재구성).
+
+## MVCC + 인덱스
+
+[[btree-indexing]] 의 인덱스도 MVCC tuple 가리킴. 옛 tuple 도 인덱스에 entry 가 있음 → 인덱스 bloat. VACUUM 이 정리.
+
+**HOT (Heap-Only Tuple) update** (PostgreSQL): update 가 인덱스 컬럼을 안 건드리면 인덱스 entry 재사용. write 비용 절감.
+
+```sql
+-- HOT: name 만 변경, 인덱스는 email 만 → 인덱스 entry 재사용
+UPDATE users SET name='X' WHERE id=1;
+
+-- NOT HOT: email 변경 = 인덱스도 새 entry
+UPDATE users SET email='y@y.com' WHERE id=1;
+```
+
+## 자주 보는 함정
+
+### 함정 1: long-running transaction
+
+큰 트랜잭션이 오래 살아 있으면 VACUUM 이 자기보다 새로운 xid 의 dead tuple 정리 못 함 → bloat 축적.
+
+```sql
+SELECT * FROM pg_stat_activity WHERE state != 'idle' ORDER BY xact_start;
+```
+
+5분 넘은 transaction 의심.
+
+### 함정 2: autovacuum 비활성화
+
+`autovacuum=off` 는 재앙. wraparound 위험 + bloat.
+
+### 함정 3: snapshot isolation 의 lost update
+
+```
+T1: SELECT balance → 100
+T2: SELECT balance → 100
+T1: UPDATE balance = 100 - 50 → 50
+T2: UPDATE balance = 100 - 30 → 70
+```
+
+마지막 write 만 살아남음. SELECT FOR UPDATE 또는 optimistic lock (@Version) 필요. [[spring-jpa-locking]] 참고.
+
+### 함정 4: read after write 의 깜빡임
+
+```
+INSERT user (id=1, name='X');
+COMMIT;
+SELECT * FROM user WHERE id=1;   -- 다른 connection 이면 transactional snapshot 이슈
+```
+
+같은 connection 이면 항상 봄. 다른 connection 은 자기 snapshot 기준.
+
+## 함정과 베스트 프랙티스
+
+- **autovacuum 활성화 유지**
+- **long-running transaction 모니터링**: bloat 의 주범
+- **`@Transactional(readOnly=true)`** 활용: dirty checking 비용 절감 ([[spring-jpa-persistence-context]])
+- **REPEATABLE READ** 가 PostgreSQL 의 snapshot isolation
+- **write skew 위험 시 SERIALIZABLE 또는 SELECT FOR UPDATE**
+- **HOT update** 가능하도록 인덱스 컬럼 변경 최소화
+- **`pg_stat_user_tables` 정기 확인**: dead_pct 모니터링
+- **VACUUM FULL 은 비상시만**: exclusive lock
+
+## 관련 위키
+
+- [[btree-indexing]]
+- [[sql/postgresql]]
+- [[sql/mysql]]
+- [[spring-jpa-locking]]
+- [[spring-jpa-persistence-context]]
+- [[spring-transaction]]
+- [[cap-theorem]]
