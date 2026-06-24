@@ -1,0 +1,253 @@
+---
+title: "[Network] CIDR와 Subnetting"
+aliases: ["CIDR", "Subnetting", "subnet mask", "VLSM", "prefix length", "서브넷", "서브넷팅"]
+tags: [network, ip, cidr, subnetting, l3]
+category: network
+updated: 2026-06-24
+references:
+  - title: "RFC 4632: CIDR"
+    url: "https://datatracker.ietf.org/doc/html/rfc4632"
+    note: "CIDR 명세"
+---
+
+## 정의
+
+**CIDR (Classless Inter-Domain Routing)** 은 IPv4 / IPv6 주소를 **prefix length** 로 표기하는 표준. 1993년 등장 (RFC 1519, 현재 RFC 4632).
+
+```
+192.168.1.0/24
+        ↑
+        prefix length = 상위 24 bit 가 network, 하위 8 bit 가 host
+```
+
+CIDR 이전의 class-based (A/B/C) 는 비효율적 → 클래스 폐지, prefix 자유 지정.
+
+## CIDR 표기
+
+```
+주소 / prefix
+192.168.1.0/24       → 256 개 IP (호스트 254 개 + network + broadcast)
+192.168.0.0/16       → 65536 개 IP
+10.0.0.0/8           → 16,777,216 개 IP
+
+2001:db8::/32        → IPv6 prefix
+fe80::/64            → 일반 IPv6 subnet (호스트 64 bit)
+```
+
+prefix = network bit 수. host bit = 32 - prefix (IPv4) 또는 128 - prefix (IPv6).
+
+## subnet mask 변환
+
+```
+prefix    binary subnet mask                 dotted decimal
+/8        11111111.00000000.00000000.00000000   255.0.0.0
+/16       11111111.11111111.00000000.00000000   255.255.0.0
+/24       11111111.11111111.11111111.00000000   255.255.255.0
+/25       11111111.11111111.11111111.10000000   255.255.255.128
+/30       11111111.11111111.11111111.11111100   255.255.255.252
+/32       11111111.11111111.11111111.11111111   255.255.255.255  (단일 host)
+```
+
+CIDR notation 이 dotted mask 보다 간결 + 라우터 설정에 일관됨.
+
+## host 수 계산
+
+`/N` 의 host 수 = `2^(32-N) - 2`:
+
+| Prefix | IP 총 개수 | 사용 가능 host |
+|---|---|---|
+| /24 | 256 | 254 (network + broadcast 제외) |
+| /25 | 128 | 126 |
+| /26 | 64 | 62 |
+| /27 | 32 | 30 |
+| /28 | 16 | 14 |
+| /29 | 8 | 6 |
+| /30 | 4 | 2 (point-to-point link) |
+
+`-2` 는 network address (모두 0) + broadcast (모두 1) 제외.
+
+예외:
+- `/31` : 2 host (P2P, RFC 3021)
+- `/32` : 1 host (single)
+
+## subnet 계산 예
+
+`192.168.1.130/25` 의 subnet:
+
+```
+binary: 192.168.1.10000010
+mask  : 11111111.11111111.11111111.10000000
+
+network: 192.168.1.10000000 = 192.168.1.128
+broadcast: 192.168.1.11111111 = 192.168.1.255
+host range: 192.168.1.129 ~ 192.168.1.254
+```
+
+`/24` 를 2 개 `/25` 로 분할:
+- `192.168.1.0/25`: 0 ~ 127 (network 0, broadcast 127, host 1-126)
+- `192.168.1.128/25`: 128 ~ 255 (network 128, broadcast 255, host 129-254)
+
+## VLSM (Variable Length Subnet Masking)
+
+같은 organization 안에서 subnet 마다 prefix 다르게:
+
+```
+회사 네트워크: 10.0.0.0/16
+
+  ├── 본사 (host 1000개):     10.0.0.0/22   (1022 host)
+  ├── 지사 A (host 100개):    10.0.4.0/25   (126 host)
+  ├── 지사 B (host 50개):     10.0.4.128/26  (62 host)
+  ├── DMZ (host 6개):         10.0.4.192/29  (6 host)
+  └── 관리 vlan:              10.0.4.200/29  (6 host)
+```
+
+VLSM 이 없으면 모든 subnet 이 같은 크기 = 낭비.
+
+## 라우팅 (longest prefix match)
+
+라우터는 가장 긴 prefix 가 매칭되는 경로 선택:
+
+```
+라우팅 테이블:
+0.0.0.0/0           → default (interface eth0)
+10.0.0.0/8          → eth1
+10.1.0.0/16         → eth2
+10.1.5.0/24         → eth3
+
+목적지: 10.1.5.20
+→ 매칭: /0 (default), /8, /16, /24 4개
+→ 가장 긴 /24 선택 → eth3
+```
+
+## supernetting (route summarization)
+
+작은 subnet 여러 개를 큰 prefix 로 묶기:
+
+```
+10.1.0.0/24
+10.1.1.0/24
+10.1.2.0/24
+10.1.3.0/24
+   ↓ 묶으면
+10.1.0.0/22
+```
+
+라우팅 테이블 크기 줄여 라우터 부하 감소. BGP 의 핵심.
+
+## private vs public
+
+RFC 1918 private (인터넷 라우팅 불가):
+- 10.0.0.0/8
+- 172.16.0.0/12
+- 192.168.0.0/16
+
+NAT 로 public IP 공유 ([[network-nat]]). 사내 / docker / k8s 모두 위 범위 사용.
+
+```
+조직 1: 10.0.0.0/8
+조직 2: 10.0.0.0/8
+└─ 충돌 없음 (각자 사설)
+└─ VPN 연결 시 충돌 (overlap)
+```
+
+큰 조직은 VPN / merger 대비 충돌 회피 가능한 범위 선택.
+
+## IPv6 subnetting
+
+IPv6 은 보통 `/64` subnet (host 64 bit). ISP 가 organization 에 `/48` 또는 `/56` 부여:
+
+```
+/48 organization → 65536 개 /64 subnet
+/56 organization → 256 개 /64 subnet
+
+예: 2001:db8:1234::/48
+  ├── 2001:db8:1234:0001::/64  (sub-1)
+  ├── 2001:db8:1234:0002::/64  (sub-2)
+  └── 2001:db8:1234:0003::/64
+```
+
+IPv6 의 `/64` 가 표준인 이유: SLAAC (Stateless Address Autoconfiguration) 가 MAC → host 64 bit 자동 생성.
+
+## 자주 보는 시나리오
+
+### 시나리오 1: AWS VPC
+
+```
+VPC: 10.0.0.0/16
+
+  ├── subnet-public-a:   10.0.1.0/24 (AZ-a, public)
+  ├── subnet-public-b:   10.0.2.0/24 (AZ-b, public)
+  ├── subnet-private-a:  10.0.10.0/24 (AZ-a, private)
+  └── subnet-private-b:  10.0.20.0/24 (AZ-b, private)
+```
+
+VPC 의 `/16` 안에서 `/24` 들로 subdivide. AZ 별 + public/private 별.
+
+### 시나리오 2: Kubernetes
+
+```
+Pod CIDR:     10.244.0.0/16   (Pod IP pool)
+Service CIDR: 10.96.0.0/12    (ClusterIP pool)
+
+  Node 1: 10.244.0.0/24   (256 pod 한계)
+  Node 2: 10.244.1.0/24
+  Node 3: 10.244.2.0/24
+```
+
+CNI plugin (Calico, Flannel) 이 위 할당. 노드 수 × subnet 크기가 Pod CIDR 보다 작아야.
+
+### 시나리오 3: P2P link
+
+라우터 간 직접 연결은 host 2 개면 충분:
+
+```
+RouterA --- 10.255.1.0/30 --- RouterB
+  .1                            .2
+```
+
+`/30`: network=.0, host=.1+.2, broadcast=.3. 또는 `/31` (RFC 3021).
+
+## 빠른 계산 트릭
+
+```
+"몇 host?"
+
+/24 → 2^8 - 2 = 254
+/25 → 2^7 - 2 = 126
+/26 → 2^6 - 2 = 62
+/27 → 2^5 - 2 = 30
+/28 → 2^4 - 2 = 14
+/29 → 2^3 - 2 = 6
+/30 → 2^2 - 2 = 2
+```
+
+`/N` 의 host = `2^(32-N) - 2`.
+
+```
+"몇 subnet?"
+
+/24 를 /26 으로 → 4 개 (host bit 2 → 2^2)
+/24 를 /27 으로 → 8 개
+/16 을 /24 로 → 256 개
+```
+
+prefix 가 길어진 bit 수 = 2 의 지수.
+
+## 함정과 베스트 프랙티스
+
+- **VPC / overlay 의 CIDR 미리 큰 범위로**: 작게 잡으면 나중에 확장 불가
+- **subnet 충돌 회피**: VPN / multi-cloud 환경에서 organization 별 다른 prefix
+- **AWS VPC: `/16` 권장**: subnet 분할 여지
+- **Docker 의 기본 `172.17.0.0/16`** 충돌 시: `daemon.json` 으로 변경
+- **K8s 의 Pod CIDR + Service CIDR + Node IP 가 충돌 금지**
+- **IPv6 의 `/64` 는 거의 절대 분할 X**: SLAAC 망가짐
+- **longest prefix match** 가 라우터 결정 규칙
+- **summarization 으로 라우팅 테이블 축소**: BGP 환경에서 critical
+
+## 관련 위키
+
+- [[network-ip]]
+- [[network-nat]]
+- [[network-dns]]
+- [[tcp]]
+- [[udp]]

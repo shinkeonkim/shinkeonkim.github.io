@@ -1,0 +1,277 @@
+---
+title: "[Network] DNS: 도메인 이름 해석"
+aliases: ["DNS", "Domain Name System", "DNS record", "A record", "AAAA", "CNAME", "MX", "DoH", "DoT", "DNSSEC", "도메인 이름 시스템"]
+tags: [network, dns, l7]
+category: network
+updated: 2026-06-24
+references:
+  - title: "RFC 1034: Domain Names Concepts"
+    url: "https://datatracker.ietf.org/doc/html/rfc1034"
+    note: "DNS 기본"
+  - title: "RFC 1035: Domain Names Implementation"
+    url: "https://datatracker.ietf.org/doc/html/rfc1035"
+    note: "DNS message format"
+---
+
+## 정의
+
+**DNS (Domain Name System)** 는 도메인 이름 (`example.com`) 을 IP 주소 (`93.184.216.34`) 로 변환하는 분산 데이터베이스. 인터넷의 가장 중요한 인프라.
+
+기본 동작:
+1. 클라이언트 → resolver 에게 "example.com 의 IP" 요청
+2. resolver → root → TLD → authoritative 서버를 순회 (recursive)
+3. resolver → 결과를 캐시 + 클라이언트에 반환
+
+L7 protocol, 보통 UDP 53 port (큰 응답은 TCP 53, modern 은 DoT/DoH).
+
+## 도메인 계층
+
+```
+.                              ← root (.)
+├── com.                       ← TLD
+│   ├── google.com.            ← second-level
+│   │   ├── www.google.com.    ← subdomain
+│   │   └── mail.google.com.
+│   └── example.com.
+├── kr.                        ← ccTLD
+│   └── naver.kr.
+└── org.
+```
+
+오른쪽에서 왼쪽으로 읽기. `.` 가 root.
+
+FQDN (Fully Qualified Domain Name): `www.example.com.` (마지막 `.` 까지).
+
+## DNS Record 종류
+
+| Type | 용도 | 예시 |
+|---|---|---|
+| **A** | IPv4 주소 | `example.com → 93.184.216.34` |
+| **AAAA** | IPv6 주소 | `example.com → 2606:2800:220:1::6:34` |
+| **CNAME** | 별칭 (canonical name) | `www.example.com → example.com` |
+| **MX** | 메일 서버 + 우선순위 | `example.com → 10 mail.example.com` |
+| **NS** | nameserver | `example.com → ns1.example.com` |
+| **TXT** | 임의 텍스트 (SPF, DKIM, 인증) | `v=spf1 ...` |
+| **SRV** | service location (port + host) | `_sip._tcp.example.com → 10 60 5060 sip.example.com` |
+| **PTR** | reverse lookup (IP → 도메인) | `34.216.184.93.in-addr.arpa → example.com` |
+| **CAA** | cert authority 제한 | `example.com → issue "letsencrypt.org"` |
+| **SOA** | zone authority | `nameserver, email, serial, refresh, ...` |
+| **DNSKEY / DS / RRSIG** | DNSSEC 서명 | - |
+
+## Resolution 흐름
+
+```
+client → recursive resolver → root → TLD → authoritative
+         ("8.8.8.8" 등)
+```
+
+상세:
+
+```
+1. 클라이언트: "www.example.com 의 A 레코드?"
+       ↓
+2. recursive resolver (ISP, 8.8.8.8, 1.1.1.1)
+   - 캐시 hit 시 즉시 반환
+   - 캐시 miss:
+       ↓
+3. root (.) 에 질문: ".com 의 nameserver?"
+   - 응답: "a.gtld-servers.net 등"
+       ↓
+4. .com TLD 에 질문: "example.com 의 nameserver?"
+   - 응답: "ns1.example.com 등"
+       ↓
+5. example.com 의 authoritative 에 질문: "www.example.com 의 A?"
+   - 응답: "93.184.216.34"
+       ↓
+6. resolver 캐시 + 클라이언트에 반환
+```
+
+각 단계는 TTL 만큼 캐시. 일반적으로 5분 ~ 24시간.
+
+## recursive vs iterative
+
+- **recursive query**: "최종 답을 줘"
+  - 클라이언트 → resolver
+- **iterative query**: "당신이 아는 것만 줘"
+  - resolver → root / TLD / authoritative
+
+대부분 OS / 브라우저는 recursive 만 사용. resolver 가 iterative 로 순회.
+
+## 캐싱과 TTL
+
+DNS 응답에 TTL (초). 짧으면 변경 빠르게 반영, 길면 부하 감소.
+
+```
+www.example.com.    300    IN    A    93.184.216.34
+                    ↑
+                    300 초 (5분) 캐시
+```
+
+다층 캐싱:
+1. 브라우저 cache (~수분)
+2. OS resolver cache (`systemd-resolved`, `dnsmasq`)
+3. ISP / public resolver cache
+4. authoritative cache 없음 (source of truth)
+
+서비스 마이그레이션 / DNS 변경 시 **TTL 미리 줄이기** (1시간 → 60초) 가 일반 패턴.
+
+## CNAME 함정
+
+```
+www.example.com.    300    IN    CNAME    example.com.
+example.com.        300    IN    A        93.184.216.34
+```
+
+`www.example.com` 조회 → CNAME → `example.com` 다시 조회 → A.
+
+함정:
+- **apex / root 에는 CNAME 불가** (RFC). `example.com` 에는 CNAME 안 됨.
+  - 회피: AWS Route 53 의 **ALIAS** (CNAME 처럼 보이지만 A 레코드 반환)
+- **CNAME 체인 길어지면 latency**: 가능하면 직접 A
+
+## DNS over HTTPS (DoH) / DNS over TLS (DoT)
+
+기존 DNS = 평문 UDP 53. 도청 / 변조 가능.
+
+- **DoT (RFC 7858)**: TLS 위에서 DNS. Port 853.
+- **DoH (RFC 8484)**: HTTPS 위에서 DNS. Port 443. 일반 HTTPS 트래픽처럼 보임.
+
+브라우저 (Firefox, Chrome) 가 기본 DoH 활성화 중. 단점: ISP / 기업의 DNS 기반 필터링 우회 가능 → 정책 충돌.
+
+DoQ (DNS over QUIC) 도 표준화 (RFC 9250).
+
+## DNSSEC
+
+응답의 서명 검증:
+
+```
+.            DNSKEY  → ZSK / KSK (root signing key)
+com.         DS      → .com 의 KSK 해시 (root 가 서명)
+example.com. DS      → example.com 의 KSK 해시 (.com 이 서명)
+example.com. RRSIG   → A 레코드의 서명
+```
+
+resolver 가 root → TLD → authoritative 전 chain 검증.
+
+복잡 + 운영 어려움 → 채택률 낮음 (Top 1M 사이트의 약 4%). 큰 ISP / 정부 사이트는 적용.
+
+## EDNS (Extension)
+
+- DNS 메시지 크기 확장 (기본 512 byte → 4096 등)
+- EDNS Client Subnet (ECS): resolver 가 클라이언트 subnet 을 authoritative 에 전달 → geo-IP 정확도 향상 (CDN 핵심)
+
+## 실용 예: 서비스 운영
+
+### A 레코드 + CDN
+
+```
+www.example.com    300    A    104.21.x.x   (Cloudflare edge)
+www.example.com    300    A    172.67.x.x   (다른 edge)
+```
+
+여러 A 레코드 = round-robin 또는 anycast 라우팅.
+
+### MX 우선순위
+
+```
+example.com    3600    MX    10    primary-mail.example.com
+example.com    3600    MX    20    backup-mail.example.com
+```
+
+낮은 숫자 = 높은 우선순위. primary 실패 시 backup.
+
+### TXT (SPF / DKIM / DMARC)
+
+이메일 인증:
+
+```
+example.com    300    TXT    "v=spf1 include:_spf.google.com ~all"
+default._domainkey.example.com  300  TXT  "v=DKIM1; k=rsa; p=MIGfMA0..."
+_dmarc.example.com  300  TXT  "v=DMARC1; p=reject; rua=mailto:..."
+```
+
+스팸 / 위장 방지의 필수.
+
+### Health check + failover
+
+Route 53 / Cloudflare 같은 managed DNS 가 health check 수행:
+
+```
+primary 가 200 OK → primary A 반환
+primary 가 5xx → backup A 반환
+```
+
+TTL 짧게 (30~60초) 두면 빠른 failover.
+
+## DNS 측정 도구
+
+```bash
+# 기본 lookup
+dig example.com
+dig example.com AAAA
+dig example.com MX
+
+# 특정 resolver
+dig @8.8.8.8 example.com
+
+# 전체 trace
+dig +trace example.com
+
+# 짧게
+dig +short example.com
+
+# nslookup (legacy)
+nslookup example.com
+```
+
+```bash
+# host (간결)
+host example.com
+
+# DoH
+curl -H 'Accept: application/dns-json' \
+  'https://1.1.1.1/dns-query?name=example.com&type=A'
+```
+
+## 자주 보는 함정
+
+### 함정 1: 캐시 stale
+
+DNS 변경 후 일부 사용자 / ISP 가 옛 IP 캐시 → 일관성 문제. TTL 미리 줄이기.
+
+### 함정 2: round-robin 의 불균등
+
+A 레코드 여러 개를 resolver 가 순서대로 반환하지만 클라이언트가 첫 IP 만 시도하면 불균등. anycast / load balancer 가 더 정확.
+
+### 함정 3: SOA refresh / retry
+
+secondary nameserver 가 primary 의 변경을 늦게 감지. SOA 의 refresh / retry / expire 값 적절히.
+
+### 함정 4: PTR 이 없으면 이메일 거부
+
+송신 메일 서버의 PTR (reverse DNS) 가 매칭 안 되면 스팸 처리. 자체 SMTP 운영 시 필수.
+
+### 함정 5: split-horizon DNS
+
+내부에서 `api.example.com` → 사내 IP, 외부에서 → public IP. VPN 전환 시 캐시 혼선 가능.
+
+## 함정과 베스트 프랙티스
+
+- **TTL 운영 변경 전 미리 줄이기**: 마이그레이션 24시간 전부터
+- **DNSSEC 은 큰 조직만**: 운영 복잡, 채택률 낮음
+- **DoH / DoT 활용**: 도청 방지
+- **SPF + DKIM + DMARC 필수**: 이메일 운영 시
+- **multiple authoritative nameserver**: 단일 장애점 회피 (보통 2~4개)
+- **EDNS Client Subnet**: CDN 의 geo-IP 정확도 의존성
+- **PTR 도 관리**: 메일 / SSH 인증 영향
+- **monitoring**: TTL, 응답 시간, error rate (NXDOMAIN 등)
+- **dig +trace** 가 디버깅의 가장 강력한 도구
+
+## 관련 위키
+
+- [[network-ip]]
+- [[network-cidr-subnetting]]
+- [[tcp]]
+- [[udp]]
+- [[tls]]
+- [[quic]]

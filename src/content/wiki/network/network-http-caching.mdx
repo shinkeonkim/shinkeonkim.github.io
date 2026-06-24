@@ -1,0 +1,308 @@
+---
+title: "[Network] HTTP Caching: Cache-Control, ETag, Last-Modified"
+aliases: ["HTTP Caching", "Cache-Control", "ETag", "Last-Modified", "If-None-Match", "304 Not Modified", "Vary header", "HTTP 캐싱"]
+tags: [network, http, caching, performance, l7]
+category: network
+updated: 2026-06-24
+references:
+  - title: "RFC 9111: HTTP Caching"
+    url: "https://datatracker.ietf.org/doc/html/rfc9111"
+    note: "HTTP/1.1 caching 명세"
+  - title: "MDN: HTTP Caching"
+    url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching"
+    note: "실용 가이드"
+---
+
+## 정의
+
+**HTTP Caching** 은 HTTP 응답을 클라이언트 / 중간 proxy / CDN 이 보관해 같은 요청을 다시 처리하지 않게 하는 메커니즘. 성능 + 비용 절감의 핵심.
+
+3가지 levels:
+1. **Private cache**: 브라우저 (사용자 1명만)
+2. **Shared cache**: CDN, reverse proxy (여러 사용자)
+3. **Origin cache**: 서버 자체 (e.g., Redis)
+
+이 페이지는 HTTP layer 의 1, 2번 (Cache-Control, ETag 등).
+
+## 캐시 전략의 두 축
+
+```
+"신선함 (freshness)": TTL 기반 - 만료 전까진 캐시 사용 (서버 안 가)
+"검증 (validation)": ETag / Last-Modified - 서버에 "변경됐어?" 물어봄
+```
+
+조합:
+- **fresh**: 캐시 즉시 사용 (네트워크 X)
+- **stale + valid (304)**: 캐시 사용 + 짧은 검증 요청
+- **stale + invalid (200)**: 새 응답 받기
+
+## Cache-Control
+
+핵심 directive:
+
+| Directive | 의미 |
+|---|---|
+| `max-age=N` | N 초 동안 fresh |
+| `s-maxage=N` | shared cache (CDN) 만 적용 |
+| `public` | 모든 cache 에 저장 가능 |
+| `private` | 브라우저만 (CDN 금지) |
+| `no-cache` | 캐시 OK 하지만 사용 전 반드시 검증 |
+| `no-store` | 절대 캐시 금지 (민감 정보) |
+| `must-revalidate` | 만료 후 stale 사용 금지, 검증 필수 |
+| `immutable` | 절대 안 바뀜 (검증도 안 함) |
+| `stale-while-revalidate=N` | 만료 후 N 초 동안 stale 반환 + 백그라운드 갱신 |
+| `stale-if-error=N` | 서버 에러 시 N 초 동안 stale 사용 |
+
+### 응답 예
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/css
+Cache-Control: public, max-age=31536000, immutable
+ETag: "abc123"
+
+body { ... }
+```
+
+`immutable` + 긴 max-age = "이 자원은 절대 안 바뀐다" → CDN / 브라우저 완전 신뢰. Vite / webpack 의 hashed filename (`app.abc123.css`) 패턴에 최적.
+
+### 요청 측 Cache-Control
+
+```http
+GET /api/data HTTP/1.1
+Cache-Control: no-cache    # 강제 검증
+Cache-Control: max-age=0   # 동일
+Cache-Control: no-store    # 캐시 비활성
+```
+
+## ETag (Entity Tag)
+
+응답의 unique identifier (보통 hash):
+
+```http
+HTTP/1.1 200 OK
+ETag: "v2.1-abc123"
+```
+
+다음 요청에서 클라이언트가 `If-None-Match` 로 보냄:
+
+```http
+GET /api/data HTTP/1.1
+If-None-Match: "v2.1-abc123"
+```
+
+서버 응답:
+- 변경 없음 → **`304 Not Modified`** (body 없음, 짧음)
+- 변경 있음 → `200 OK` + 새 body + 새 ETag
+
+### Strong vs Weak ETag
+
+```
+ETag: "abc123"        # strong (byte-for-byte 동일)
+ETag: W/"abc123"      # weak (의미적으로 동일, gzip 후도 OK)
+```
+
+대부분 weak 가 적합 (compression, encoding 차이 무시).
+
+## Last-Modified
+
+ETag 의 timestamp 버전:
+
+```http
+HTTP/1.1 200 OK
+Last-Modified: Wed, 24 Jun 2026 10:00:00 GMT
+```
+
+요청:
+
+```http
+GET /api/data HTTP/1.1
+If-Modified-Since: Wed, 24 Jun 2026 10:00:00 GMT
+```
+
+응답: 304 또는 200.
+
+ETag 와 Last-Modified 둘 다 있으면 ETag 우선. ETag 만으로 충분한 경우 많음.
+
+## Vary
+
+같은 URL 인데 응답이 다를 수 있을 때 (Accept-Encoding 별 gzip/br, Accept-Language 별 i18n):
+
+```http
+HTTP/1.1 200 OK
+Vary: Accept-Encoding, Accept-Language
+```
+
+캐시가 Vary 헤더에 명시된 헤더 값별로 별도 저장:
+- `Accept-Encoding: gzip` → gzip 버전 캐시
+- `Accept-Encoding: br` → brotli 버전 캐시
+
+⚠️ **Vary 가 너무 많으면 캐시 hit 률 ↓**. 가능하면 적게 사용.
+
+`Vary: User-Agent` 는 일반적으로 비추천 (UA 종류가 많음 → 거의 캐시 miss).
+
+## Age & Expires
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: max-age=3600
+Age: 1200         # 캐시에서 1200 초 머묾 (남은 신선도 2400초)
+Expires: Wed, 24 Jun 2026 11:00:00 GMT  # legacy
+```
+
+`Age` 가 CDN 디버깅에 유용. `Expires` 는 HTTP/1.0 legacy, `Cache-Control` 우선.
+
+## Pragma (deprecated)
+
+```http
+Pragma: no-cache
+```
+
+HTTP/1.0 호환용. `Cache-Control: no-cache` 가 표준.
+
+## 패턴 별 권장 설정
+
+### Static asset (hash 파일명, immutable)
+
+```
+GET /assets/app.abc123.js
+
+Cache-Control: public, max-age=31536000, immutable
+```
+
+1년 + immutable. CDN edge 에서 영구 사용.
+
+### HTML (변경 가능, 항상 신선)
+
+```
+GET /index.html
+
+Cache-Control: no-cache, must-revalidate
+ETag: "v1"
+```
+
+ETag 로 검증, 변경 시 새 HTML 받기. SPA 의 index.html 패턴.
+
+### API (변경 빈도 보통)
+
+```
+GET /api/products
+
+Cache-Control: private, max-age=60, stale-while-revalidate=300
+ETag: "x"
+```
+
+60초 fresh, 그 후 5분간 stale 반환 + 백그라운드 갱신. 사용자 경험과 부하의 균형.
+
+### Private user data
+
+```
+GET /api/me
+
+Cache-Control: private, no-cache, no-store
+```
+
+CDN 캐시 금지, 브라우저도 캐시 안 함.
+
+### Public API with no Cookie
+
+```
+GET /api/public/articles
+
+Cache-Control: public, max-age=300, s-maxage=3600
+```
+
+브라우저는 5분, CDN 은 1시간. `s-maxage` 가 `max-age` override (shared cache 만).
+
+## CDN 통합
+
+대부분 CDN (Cloudflare, Fastly, CloudFront) 가 위 헤더 자동 처리. 추가 제어:
+
+```
+Cache-Control: public, max-age=300
+CDN-Cache-Control: max-age=3600      # CDN 전용
+Cloudflare-CDN-Cache-Control: max-age=86400   # Cloudflare 만
+```
+
+origin 부담 줄이려면 CDN 에 길게 캐시 + 클라이언트엔 짧게.
+
+### 캐시 invalidation
+
+수동:
+```bash
+# Cloudflare API
+curl -X POST "https://api.cloudflare.com/.../purge_cache" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"files":["https://example.com/path"]}'
+```
+
+또는 URL 에 hash / version 포함:
+- `/assets/app.abc123.js` → 새 빌드는 `/assets/app.def456.js` (URL 자체가 바뀌므로 invalidation 불필요)
+
+## 자주 보는 함정
+
+### 함정 1: no-cache vs no-store 혼동
+
+- `no-cache` : 캐시 OK, 사용 전 검증
+- `no-store` : 캐시 자체 금지
+
+민감 정보는 `no-store`. "항상 최신" 만 원하면 `no-cache` + ETag.
+
+### 함정 2: Cookie 와 캐시
+
+`Set-Cookie` 가 있는 응답을 CDN 이 캐시하면 모든 사용자가 같은 cookie 받음 (재앙). 보통 CDN 이 자동 회피하지만 명시:
+
+```
+Cache-Control: private    # 또는 no-store
+```
+
+### 함정 3: Vary: * 또는 너무 많은 Vary
+
+캐시 hit 률 0%. 불필요한 Vary 제거.
+
+### 함정 4: 짧은 max-age + 큰 트래픽 = origin 부하
+
+CDN 에 `s-maxage` 길게 + 클라이언트엔 `max-age` 짧게 분리.
+
+### 함정 5: Authorization 헤더와 캐시
+
+`Authorization` 헤더 있는 요청은 기본적으로 캐시 안 됨 (RFC 9111). `Cache-Control: public` 명시 시만.
+
+### 함정 6: 응답 status
+
+비-2xx 도 캐시 가능:
+- `301 Moved Permanently` : 영구 캐시 (브라우저가 매우 길게)
+- `404 Not Found` : 짧게 캐시 가능 (다음 요청도 404 위험)
+
+## 디버깅
+
+브라우저 DevTools Network 탭:
+- `(memory cache)` / `(disk cache)` : 히트
+- `200` : origin / CDN 응답
+- `304` : 검증 hit
+- `Cache-Control`, `ETag`, `Age` 헤더 확인
+
+CDN debug header:
+- `cf-cache-status: HIT/MISS/REVALIDATED` (Cloudflare)
+- `x-cache: HIT/MISS` (CloudFront, Fastly)
+
+## 함정과 베스트 프랙티스
+
+- **Static asset 은 immutable + 1년 + URL hash**: 가장 효율적
+- **HTML 은 ETag + no-cache**: SPA 와 자연스러움
+- **API 는 stale-while-revalidate 적극 활용**: UX 향상
+- **`Vary` 는 최소화**: hit 률 보호
+- **`no-store`** 와 **`private`** 차이 명확히 인지
+- **CDN debug header 모니터링**: hit 률 추적
+- **invalidation 보다 versioned URL**: 더 안전
+- **민감 데이터는 `no-store`**
+- **`stale-if-error` 로 자동 fallback**: origin 다운 시 UX 보호
+
+## 관련 위키
+
+- [[network-dns]]
+- [[network-ip]]
+- [[hpack]]
+- [[head-of-line-blocking]]
+- [[quic]]
+- [[spring-cache]]
