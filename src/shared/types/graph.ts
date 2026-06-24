@@ -7,6 +7,7 @@ export interface GraphNode {
   group?: string;
   kind?: GraphNodeKind;
   degree?: number;
+  category?: string;
 }
 
 export type GraphLinkKind = 'wikilink' | 'tag';

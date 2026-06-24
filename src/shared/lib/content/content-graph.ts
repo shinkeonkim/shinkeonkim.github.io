@@ -14,6 +14,7 @@ export interface ContentNode {
   title: string;
   url: string;
   degree?: number;
+  category?: string;
 }
 
 export interface ContentLink {
@@ -133,8 +134,13 @@ async function build(): Promise<ContentGraph> {
 
   function addEntry(collection: Collection, entry: { id: string; data: Record<string, unknown> }) {
     const slug = entry.id;
-    const data = entry.data as { title?: string; aliases?: string[] };
+    const data = entry.data as { title?: string; aliases?: string[]; category?: string };
     const title = data.title ?? slug;
+    let category: string | undefined = data.category;
+    if (!category && collection === 'wiki') {
+      const parts = slug.split('/');
+      if (parts.length >= 2) category = parts[0];
+    }
     const node: ContentNode = {
       id: canonicalId(collection, slug),
       kind: 'doc',
@@ -142,6 +148,7 @@ async function build(): Promise<ContentGraph> {
       slug,
       title,
       url: urlFor(collection, slug),
+      category,
     };
     nodes.push(node);
 

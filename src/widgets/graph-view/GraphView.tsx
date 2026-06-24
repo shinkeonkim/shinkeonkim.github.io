@@ -1,4 +1,4 @@
-import { lazy, Suspense, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import Graph2D from './Graph';
 import type { GraphLink, GraphNode } from '@/shared/types/graph';
 
@@ -33,6 +33,22 @@ export default function GraphView({ nodes, links }: Props) {
   const [enabledCollections, setEnabledCollections] = useState<Set<CollectionFilter>>(
     new Set(ALL_COLLECTIONS),
   );
+  const [wikiCategory, setWikiCategory] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    const cat = url.searchParams.get('category');
+    if (cat) setWikiCategory(cat);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (wikiCategory) url.searchParams.set('category', wikiCategory);
+    else url.searchParams.delete('category');
+    window.history.replaceState({}, '', url.toString());
+  }, [wikiCategory]);
 
   const collectionCounts = useMemo(() => {
     const out: Record<CollectionFilter, number> = { posts: 0, notes: 0, wiki: 0 };
@@ -44,15 +60,30 @@ export default function GraphView({ nodes, links }: Props) {
     return out;
   }, [nodes]);
 
+  const wikiCategoryCounts = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const n of nodes) {
+      if (n.kind === 'tag' || n.group !== 'wiki' || !n.category) continue;
+      out.set(n.category, (out.get(n.category) ?? 0) + 1);
+    }
+    return Array.from(out.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [nodes]);
+
   const { visibleNodes, visibleLinks } = useMemo(() => {
     const tagOk = (n: GraphNode) => showTags || n.kind !== 'tag';
     const colOk = (n: GraphNode) =>
       n.kind === 'tag' || (n.group && enabledCollections.has(n.group as CollectionFilter));
-    const filteredNodes = nodes.filter((n) => tagOk(n) && colOk(n));
+    const catOk = (n: GraphNode) => {
+      if (!wikiCategory) return true;
+      if (n.kind === 'tag') return true;
+      if (n.group !== 'wiki') return false;
+      return n.category === wikiCategory;
+    };
+    const filteredNodes = nodes.filter((n) => tagOk(n) && colOk(n) && catOk(n));
     const ids = new Set(filteredNodes.map((n) => n.id));
     const filteredLinks = links.filter((l) => ids.has(l.source) && ids.has(l.target));
     return { visibleNodes: filteredNodes, visibleLinks: filteredLinks };
-  }, [nodes, links, showTags, enabledCollections]);
+  }, [nodes, links, showTags, enabledCollections, wikiCategory]);
 
   const filteredCounts = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -162,6 +193,42 @@ export default function GraphView({ nodes, links }: Props) {
             </button>
           );
         })}
+        <span className="ml-auto inline-flex gap-1">
+        </span>
+      </div>
+      {wikiCategoryCounts.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-fg-muted">위키 카테고리:</span>
+          <button
+            type="button"
+            aria-pressed={wikiCategory === null}
+            onClick={() => setWikiCategory(null)}
+            className={
+              wikiCategory === null
+                ? 'rounded-full border border-accent bg-surface-elevated px-2.5 py-0.5 text-accent'
+                : 'rounded-full border border-border px-2.5 py-0.5 text-fg-muted hover:border-accent'
+            }
+          >
+            전체
+          </button>
+          {wikiCategoryCounts.map(([cat, count]) => (
+            <button
+              key={cat}
+              type="button"
+              aria-pressed={wikiCategory === cat}
+              onClick={() => setWikiCategory(wikiCategory === cat ? null : cat)}
+              className={
+                wikiCategory === cat
+                  ? 'rounded-full border border-accent bg-surface-elevated px-2.5 py-0.5 text-accent'
+                  : 'rounded-full border border-border px-2.5 py-0.5 text-fg-muted hover:border-accent'
+              }
+            >
+              {cat} ({count})
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="ml-auto inline-flex gap-1">
           <button
             type="button"
