@@ -15,43 +15,63 @@ references:
 
 ## 정의
 
-**PersistenceContext** 는 `EntityManager` 가 관리하는 entity 의 **메모리 저장소**. JPA 의 1차 캐시, dirty checking, write-behind 모두 여기서 일어남. 트랜잭션이 시작되면 만들어지고, commit/rollback 시 닫힌다.
+**PersistenceContext** 는 `EntityManager` 가 관리하는 entity 의 **메모리 저장소 + 변경 추적기**. 트랜잭션 안에서만 살아 있다 (`@Transactional` 진입 시 생성, commit/rollback 시 소멸).
 
-DB 와의 차이:
-- DB: 영속 상태
-- PersistenceContext: 메모리 상태 (transient → managed → detached → removed)
+DB 와 분리해 이해:
+- **DB**: 영속 상태 (모든 트랜잭션에 공유, persistent)
+- **PersistenceContext**: 메모리 상태 (트랜잭션 1개 안에서만, transactional)
 
-이 페이지는 entity 상태 전이와 flush 타이밍을 깊이 다룬다.
+**관련 비교 페이지**: [[spring-jpa-context-vs-unit]] (PersistenceContext vs PersistenceUnit 명확히 구분).
+
+## 시각화
+
+```anim:jpa-persistence-context-states
+{}
+```
+
+4개 상태 전이가 PC 와 DB 양쪽에서 어떻게 진행되는지 시간순으로 표시.
+
+## 핵심 책임 4가지
+
+| 책임 | 메커니즘 | 효과 |
+|---|---|---|
+| **Identity guarantee** | 같은 id → 같은 인스턴스 보장 | `em.find(...)` 두 번 호출해도 `==` 비교 통과 |
+| **Dirty checking** | EntityEntry 가 snapshot 보관, flush 시 비교 | setter 호출만으로 자동 UPDATE |
+| **Write-behind** | persist/remove/dirty 변경 → action queue | INSERT/UPDATE 모아서 한 번에 flush |
+| **Ordered flush** | FK 의존성 분석 | INSERT → UPDATE → Collection 변경 → DELETE 순 |
+
+이 4가지가 JPA 의 핵심. 모든 함정과 패턴은 이 네 가지에서 파생.
 
 ## Entity 4가지 상태
 
 ```
-[new/transient]   new User()                     ← JPA 모름
+[new/transient]   new User()                ← JPA 모름, PC 밖
        ↓ persist()
-[managed]         em 안에 보관, 변경 추적됨
+[managed]         PC 안에 보관, 변경 추적
        ↓ flush() / commit()
-[DB 반영]
+       └─→ DB 반영 (INSERT/UPDATE)
        ↓ remove()
-[removed]         삭제 예약, flush 시 DELETE
-       ↓ detach() / close() / em 종료
-[detached]        em 밖, 변경 추적 안 됨
-       ↑ merge()
+[removed]         DELETE 대기, flush 시 DB 반영
+       ↓ detach() / clear() / em 종료
+[detached]        PC 밖, 변경 추적 안 됨, ID 는 유지
+       ↑ merge()                            ← 새 managed 인스턴스 반환
 ```
 
-각 상태 확인:
+코드 흐름:
 
 ```java
 EntityManager em = ...;
 User u = new User("Alice");          // transient
-em.persist(u);                       // managed (1차 캐시에 등록)
-u.setName("Bob");                    // 자동 추적 (dirty checking)
+em.persist(u);                       // managed (PC 등록)
+u.setName("Bob");                    // 자동 추적
 em.flush();                          // DB 반영 (UPDATE)
 em.detach(u);                        // detached
-u.setName("Carol");                  // 추적 안 됨, DB 안 바뀜
+u.setName("Carol");                  // 추적 안 됨
 User merged = em.merge(u);           // 새 managed 인스턴스 반환
+em.remove(merged);                   // removed
 ```
 
-## 1차 캐시 동작
+## 책임 1: Identity Guarantee (1차 캐시)
 
 같은 트랜잭션 안에서 같은 id 의 entity 는 **항상 같은 인스턴스**:
 
@@ -65,22 +85,32 @@ public void demo() {
     User u2 = em.find(User.class, 1L);   // 캐시에서 (SQL 없음)
 
     System.out.println("same instance: " + (u1 == u2));
-    System.out.println("u1.name: " + u1.getName());
 
-    u1.setName("Alice2");                // dirty checking
-    System.out.println("u2.name: " + u2.getName());   // 같은 인스턴스라 같이 바뀜
+    u1.setName("Alice2");
+    System.out.println("u2.name: " + u2.getName());   // 같이 바뀜
 }`}
   output={`Hibernate: select u.* from user u where u.id = ?
 same instance: true
-u1.name: Alice
 u2.name: Alice2`}
 />
 
-두 번째 `find` 는 SQL 안 보냄. 객체 동일성 보장 = **identity guarantee**. 트랜잭션 안에서 `==` 비교 가능.
+두 번째 `find` 는 SQL 안 보냄. **identity guarantee**: 같은 PC 안에서 `equals` 가 아닌 `==` 비교 가능.
 
-## Dirty Checking
+`em.find` vs `em.getReference`:
+- **`find`**: 즉시 SELECT, entity 또는 null
+- **`getReference`**: proxy 반환, 첫 메서드 호출 시 SELECT (lazy)
 
-managed entity 의 필드 변경은 **자동 감지**. setter 호출 후 별도 update() 호출 불필요:
+```java
+Post p = new Post();
+p.setAuthor(em.getReference(User.class, authorId));   // User SELECT 안 함
+em.persist(p);   // INSERT post 만
+```
+
+`getReference` 가 반환한 proxy 의 메서드를 호출하면 그때서야 SELECT. 존재하지 않는 id 면 `EntityNotFoundException`. 트랜잭션 밖에서 proxy 메서드 호출 = `LazyInitializationException`.
+
+## 책임 2: Dirty Checking
+
+managed entity 의 필드 변경은 **자동 감지**. setter 호출 후 별도 update 호출 불필요:
 
 <CodeWithOutput
   language="java"
@@ -92,19 +122,22 @@ public void changeName(Long id, String newName) {
     u.setName(newName);
     // em.update() 같은 거 호출 안 함
 }
-// 메서드 종료 = transaction commit = flush
-// Hibernate 가 snapshot (find 시점) vs 현재 상태 비교, 차이가 있으면 UPDATE`}
+// 메서드 종료 = commit = flush
+// Hibernate 가 snapshot vs 현재 비교, 차이가 있으면 UPDATE`}
   output={`select u.* from user u where u.id = ?      -- find
 update user set name = ?, version = ? where id = ?   -- commit 시점`}
 />
 
-내부적으로 `EntityEntry` 가 처음 로딩 시 **snapshot** 을 저장. flush 시점에 현재 필드 값과 비교해 변경된 컬럼만 UPDATE.
+내부 동작:
+1. `find` 시점에 `EntityEntry` 가 **snapshot** 저장 (필드 값 복사본)
+2. 트랜잭션 진행 중 setter 호출
+3. flush 시점에 snapshot vs 현재 비교, 변경된 컬럼만 UPDATE
 
-**Cost**: 모든 managed entity 의 모든 필드를 매번 비교. entity 가 수천 개면 성능 영향. 대용량 배치에선 `StatelessSession` (Hibernate) 사용 권장.
+**Cost**: 모든 managed entity 의 모든 필드를 매번 비교. entity 수천 개면 성능 영향. 대용량 배치엔 `StatelessSession` (Hibernate, PC 자체를 끔).
 
-## Write-Behind와 flush 타이밍
+## 책임 3: Write-Behind (action queue)
 
-`persist()`, `remove()`, dirty 변경은 즉시 SQL 을 보내지 않고 **action queue** 에 쌓인다. flush 시점에 모아서 실행:
+`persist`, `remove`, dirty 변경은 즉시 SQL 안 보내고 **action queue** 에 쌓임. flush 시점에 모아서 실행:
 
 ```java
 @Transactional
@@ -113,13 +146,14 @@ public void demo() {
     em.persist(new User("B"));      // INSERT 대기열
     em.persist(new User("C"));      // INSERT 대기열
     // 아직 SQL 안 감
-    // 트랜잭션 commit 시 한꺼번에 flush → 3 INSERT
+    // commit 시 한꺼번에 flush → 3 INSERT
 }
 ```
 
-flush 시점:
-1. **commit() 직전** (가장 흔함)
-2. **JPQL/Native query 실행 직전** (`FlushModeType.AUTO`, 기본): 영속성 컨텍스트 변경이 query 결과에 반영되어야 하므로
+### Flush 시점 3가지
+
+1. **commit() 직전** (가장 흔함, default)
+2. **JPQL / Native query 실행 직전** (`FlushModeType.AUTO`, 기본)
 3. **em.flush() 명시 호출**
 
 ```java
@@ -127,41 +161,25 @@ em.persist(user);
 em.createQuery("SELECT u FROM User u WHERE u.name = ?1", User.class)
   .setParameter(1, "Alice")
   .getSingleResult();
-// 위 query 실행 직전에 user 가 INSERT 됨 (안 그러면 query 결과 불일치)
+// 위 query 실행 직전에 user INSERT 됨
+// (안 그러면 새로 persist 한 user 가 query 에 안 잡혀 결과 불일치)
 ```
 
-`FlushModeType.COMMIT` 으로 자동 flush 끄면 명시 호출 전까지 안 나감. 단, query 결과가 미반영 상태에 기반할 수 있어 위험.
+`FlushModeType.COMMIT` 으로 자동 flush 끄면 명시 호출까지 SQL 안 나감. query 결과가 미반영 상태에 기반할 수 있어 위험.
 
-### flush 순서 (Hibernate)
+## 책임 4: Ordered Flush
 
-Hibernate 는 외래키 의존성을 분석해 INSERT/UPDATE/DELETE 순서를 자동 조정:
+Hibernate 가 FK 의존성 분석 후 SQL 순서 자동 조정:
 
 ```
-1. INSERT (parent → child 순)
+1. INSERT (parent → child 순서)
 2. UPDATE
 3. Collection element 삭제
 4. Collection element INSERT
-5. DELETE
+5. DELETE (child → parent)
 ```
 
-`UNIQUE` 제약 + DELETE 후 INSERT 같은 경우 `Constraint violation` 만날 수 있음. `em.flush()` 명시 호출로 분리하거나 deferred constraint 사용.
-
-## em.find vs em.getReference
-
-```java
-User u1 = em.find(User.class, 1L);          // 즉시 SELECT, entity 또는 null
-User u2 = em.getReference(User.class, 1L);  // proxy 반환, 첫 메서드 호출 시 SELECT
-```
-
-`getReference` 는 **존재 확인 없이 외래키 설정에만 쓸 때** 유용 (불필요한 SELECT 회피):
-
-```java
-Post p = new Post();
-p.setAuthor(em.getReference(User.class, authorId));   // User SELECT 안 함
-em.persist(p);   // INSERT post (author_id = authorId)
-```
-
-`em.getReference()` 가 반환한 proxy 의 메서드를 호출하면 그때서야 SELECT. 존재하지 않는 id 면 `EntityNotFoundException`.
+`UNIQUE` 제약 + DELETE 후 INSERT 같은 경우 `Constraint violation` 가능 (둘 다 flush 시점에 같이 실행). `em.flush()` 명시 호출로 분리하거나 deferred constraint 사용.
 
 ## merge: detached → managed
 
@@ -171,32 +189,33 @@ User detached = ...;       // 트랜잭션 밖에서 가져온 객체
 public void update(User detached) {
     User managed = em.merge(detached);   // 새 managed 인스턴스 반환
     // detached 는 여전히 detached, managed 가 새로 만들어짐
-    // managed 의 필드 = detached 의 필드 복사본
-    // managed 의 변경은 dirty checking 됨
 }
 ```
 
-**함정**: `merge` 는 새 인스턴스를 반환한다. 원본 reference 를 그대로 사용하면 안 바뀜:
+**함정**: `merge` 는 새 인스턴스를 반환. 원본 reference 를 그대로 사용하면 변경 추적 안 됨:
 
 ```java
 em.merge(detached);
-detached.setName("X");   // 추적 안 됨 (detached 그대로)
+detached.setName("X");   // ❌ 추적 안 됨 (detached 그대로)
 
-// 옳은 패턴
 User m = em.merge(detached);
-m.setName("X");          // dirty checking 됨
+m.setName("X");          // ✓ dirty checking 됨
 ```
 
-Spring Data JPA 의 `save()` 는 id 가 있으면 `merge`, 없으면 `persist`. 새 entity 에 미리 id 를 설정하면 의도와 달리 merge 가 호출돼 불필요한 SELECT 발생.
+Spring Data JPA `save()`:
+- id 없음 → `persist` 호출
+- id 있음 → `merge` 호출 (불필요한 SELECT 발생)
 
-## clear, detach
+새 entity 에 미리 id 를 set 하면 의도와 달리 merge → 성능 손해. 직접 `em.persist` 호출하거나 `Persistable` 인터페이스 활용.
+
+## clear, detach: 메모리 관리
 
 ```java
-em.clear();      // 1차 캐시 전체 비움 = 모든 entity detach
+em.clear();      // PC 전체 비움 = 모든 entity detach
 em.detach(u);    // 특정 entity 만
 ```
 
-대용량 배치에서 메모리 절약:
+대용량 배치:
 
 ```java
 @Transactional
@@ -206,41 +225,63 @@ public void importMany(Stream<UserDto> input) {
         em.persist(new User(dto));
         if (++i % 1000 == 0) {
             em.flush();      // INSERT 보내고
-            em.clear();      // 메모리 비우기
+            em.clear();      // PC 비우기
         }
     }
 }
 ```
 
-`em.clear()` 없으면 1차 캐시에 entity 누적 → OOM.
+`em.clear()` 없으면 PC 에 entity 누적 → OOM. 1000 row 마다 flush + clear 패턴이 일반적.
+
+## 트랜잭션 경계 = PC 경계
+
+```
+[트랜잭션 진입]
+  ↓
+[PersistenceContext 생성]
+  ↓
+[비즈니스 로직 (find, persist, merge, remove, dirty 변경)]
+  ↓
+[트랜잭션 commit]
+  ├─→ PC 의 모든 dirty entity → flush → DB
+  └─→ PC 소멸
+```
+
+규칙:
+- `@Transactional` 없이 `EntityManager` 사용 금지
+- 트랜잭션 종료 = 모든 managed entity 자동 detached
+- 새 트랜잭션 = 새 PC (다른 인스턴스)
 
 ## OSIV (Open Session In View)
 
 ```yaml
-spring.jpa.open-in-view: true   # 기본
+spring.jpa.open-in-view: true   # Spring Boot 기본
 ```
 
-DispatcherServlet 진입 시 EntityManager 열고, view 렌더링까지 유지. lazy 가 view layer 까지 도달해도 작동.
+DispatcherServlet 진입 시 EntityManager 열고, view 렌더링까지 유지. lazy 로딩이 view layer 까지 가능.
 
 **운영 권장: `false`**:
-- 컨트롤러 / view 에서 DB 커넥션 점유 → 풀 고갈
-- lazy 로딩이 service 밖에서 일어남 (예측 어려움)
+- 컨트롤러 / view 가 DB 커넥션 점유 → 풀 고갈
+- lazy 가 service 밖에서 일어남 (예측 어려움)
 - 트랜잭션 경계가 흐려짐
 
-`false` 시 lazy 접근 위치를 service 메서드 안 (`@Transactional`) 으로 강제. spring-data-jpa 의 함정 절 참고.
+`false` 로 두면 lazy 접근을 service 안 (`@Transactional`) 으로 강제. controller 는 `Optional<DTO>` 받아 매핑.
 
 ## 함정과 베스트 프랙티스
 
-- **`@Transactional` 없이 EntityManager 사용 금지**: 트랜잭션 = persistence context 수명
+- **`@Transactional` 없이 EntityManager 사용 금지**: 트랜잭션 = PC 수명
 - **detached 객체 setter 변경은 무시**: `merge` 후 반환된 새 인스턴스에 변경
-- **`StatelessSession` (Hibernate)**: 대용량 배치, dirty checking 끔, 1차 캐시 없음
-- **`em.flush()` 명시 호출은 신중하게**: 예외 발생 위치를 옮기는 효과
-- **1차 캐시는 트랜잭션 범위**: 2차 캐시 (`@Cacheable` JPA) 는 다른 개념. 멀티 인스턴스 환경에서 stale 위험
-- **`getReference` 의 lazy 가 `LazyInitializationException` 원인**: 트랜잭션 밖에서 proxy 메서드 호출 금지
+- **`StatelessSession` (Hibernate)** 대용량 배치 시: dirty checking 끔, PC 없음
+- **`em.flush()` 명시 호출 신중**: 예외 발생 위치를 옮기는 효과
+- **1차 캐시는 트랜잭션 범위**: 2차 캐시 (`@Cacheable` JPA L2) 는 다른 개념, 멀티 인스턴스 stale 위험
+- **`getReference` 의 lazy + 트랜잭션 밖 호출** = `LazyInitializationException`
 - **save 의 merge/persist 자동 판별 함정**: id 가 있는 새 entity 는 `persist` 직접 호출
+- **OSIV false + DTO projection**: 가장 안전한 운영 패턴
 
 ## 관련 위키
 
+- [[spring-jpa-persistence-unit]]
+- [[spring-jpa-context-vs-unit]]
 - [[spring-data-jpa]]
 - [[spring-jpa-fetch-type]]
 - [[spring-jpa-cascade-orphan]]
