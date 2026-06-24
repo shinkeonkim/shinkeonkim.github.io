@@ -56,12 +56,20 @@ export function setupSearchModal(): void {
   if (window.__searchModalBound) return;
   window.__searchModalBound = true;
 
-  let pagefindModule: { search: (q: string) => Promise<{ results: { data: () => Promise<unknown> }[] }>; options: (o: object) => Promise<void>; init: () => Promise<void> } | null = null;
+  type PagefindResult = { results: { data: () => Promise<unknown> }[] };
+  type PagefindFilters = { category?: string };
+  let pagefindModule: {
+    search: (q: string, opts?: { filters?: PagefindFilters }) => Promise<PagefindResult>;
+    options: (o: object) => Promise<void>;
+    init: () => Promise<void>;
+  } | null = null;
   let pagefindReady = false;
   let pagefindLoadFailed = false;
   let searchToken = 0;
   let selectedIndex = -1;
   let currentItems: CurrentItem[] = [];
+  let activeCategoryFilter: string | null = null;
+  let lastQuery = '';
 
   async function loadPagefind() {
     if (pagefindReady) return pagefindModule;
@@ -222,6 +230,41 @@ export function setupSearchModal(): void {
     updateSelection();
   }
 
+  function renderCategoryChips(
+    hits: {
+      filters?: { category?: string | string[] };
+    }[],
+  ): void {
+    const chipsEl = document.getElementById('search-modal-chips');
+    if (!chipsEl) return;
+    const counts = new Map<string, number>();
+    for (const h of hits) {
+      const c = h.filters?.category;
+      const v = Array.isArray(c) ? c[0] : c;
+      if (v) counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    if (counts.size === 0 && !activeCategoryFilter) {
+      chipsEl.hidden = true;
+      chipsEl.innerHTML = '';
+      return;
+    }
+    const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const chips: string[] = [];
+    if (activeCategoryFilter) {
+      chips.push(
+        `<button type="button" class="search-modal-chip" data-chip-clear aria-label="필터 해제">✕ 전체</button>`,
+      );
+    }
+    for (const [cat, count] of entries) {
+      const pressed = cat === activeCategoryFilter;
+      chips.push(
+        `<button type="button" class="search-modal-chip" data-chip-category="${escapeHtml(cat)}" aria-pressed="${pressed}">${escapeHtml(cat)} <span class="search-modal-chip-count">${count}</span></button>`,
+      );
+    }
+    chipsEl.innerHTML = chips.join('');
+    chipsEl.hidden = false;
+  }
+
   function renderRecentlyViewed(stats: HTMLElement, container: HTMLElement): void {
     let items: { url: string; title: string; kind: string }[] = [];
     try {
@@ -268,6 +311,7 @@ export function setupSearchModal(): void {
       return;
     }
     stats.textContent = '검색 중…';
+    lastQuery = trimmed;
     const pf = await loadPagefind();
     if (token !== searchToken) return;
     if (!pf) {
@@ -275,7 +319,8 @@ export function setupSearchModal(): void {
       return;
     }
     const start = performance.now();
-    const result = await pf.search(trimmed);
+    const searchOpts = activeCategoryFilter ? { filters: { category: activeCategoryFilter } } : undefined;
+    const result = await pf.search(trimmed, searchOpts);
     if (token !== searchToken) return;
     const elapsed = (performance.now() - start).toFixed(0);
     if (!result || result.results.length === 0) {
@@ -295,6 +340,7 @@ export function setupSearchModal(): void {
       filters?: { section?: string | string[]; category?: string | string[] };
     }[];
     if (token !== searchToken) return;
+    renderCategoryChips(hits);
     currentItems = hits.map((h) => ({ kind: 'search', href: h.url }));
     container.innerHTML = hits
       .map((h, i) => {
@@ -331,6 +377,14 @@ export function setupSearchModal(): void {
   function dispatch(rawValue: string): void {
     const { mode, query } = detectMode(rawValue);
     setModeBadge(mode);
+    if (mode !== 'search') {
+      activeCategoryFilter = null;
+      const chipsEl = document.getElementById('search-modal-chips');
+      if (chipsEl) {
+        chipsEl.hidden = true;
+        chipsEl.innerHTML = '';
+      }
+    }
     if (mode === 'command') return renderCommands(query);
     if (mode === 'tag') return renderTags(query);
     if (mode === 'help') return renderHelp(query);
@@ -404,6 +458,14 @@ export function setupSearchModal(): void {
   document.addEventListener('click', (e) => {
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
+    const chipBtn = target.closest<HTMLElement>('[data-chip-category], [data-chip-clear]');
+    if (chipBtn) {
+      e.preventDefault();
+      const cat = chipBtn.getAttribute('data-chip-category');
+      activeCategoryFilter = cat === activeCategoryFilter ? null : cat;
+      void doSearch(lastQuery);
+      return;
+    }
     if (target.closest('[data-search-modal-open]')) {
       e.preventDefault();
       openModal();
