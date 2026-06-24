@@ -2,6 +2,7 @@
 title: "Head-of-Line Blocking"
 aliases: ["HOL Blocking", "HOLB", "헤드 오브 라인 블로킹", "Head of Line Blocking"]
 tags: [network, http, protocol, performance]
+category: network
 updated: 2026-06-13
 references:
   - title: "RFC 9000, QUIC: Stream Multiplexing"

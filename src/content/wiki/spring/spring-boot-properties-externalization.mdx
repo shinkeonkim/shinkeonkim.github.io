@@ -1,128 +1,103 @@
 ---
-title: "[Spring Boot] Externalized Configuration: Property Sources, Profiles"
-aliases: ["Spring Boot externalized config", "PropertySource", "spring profiles", "@ConfigurationProperties Spring Boot", "@Value Spring Boot", "spring environment", "property 우선순위", "외부화된 설정"]
-tags: [spring-boot, configuration, profiles, property-source, environment]
+title: "[Spring Boot] Properties 외부화: PropertySource, Profile, @ConfigurationProperties"
+aliases: ["Spring Boot Properties", "Externalized Configuration", "application.yml", "application.properties", "PropertySource", "@ConfigurationProperties Spring Boot", "Spring Boot 환경 설정"]
+tags: [spring, spring-boot, configuration, properties, profiles, yaml]
 updated: 2026-06-23
 references:
   - id: spring-docs
     note: "Externalized Configuration - https://docs.spring.io/spring-boot/reference/features/external-config.html"
-  - id: spring-docs
-    note: "Profiles - https://docs.spring.io/spring-boot/reference/features/profiles.html"
 ---
 
 ## 정의
 
-Spring Boot 가 **여러 소스에서 설정값을 수집** 해 `Environment` 로 통합. 코드는 같은 인터페이스로 접근하고 환경별 값만 바꾼다.
+Spring Boot 는 설정값을 **15가지 소스에서 우선순위로 병합**. 같은 키가 여러 곳에 있으면 우선순위 높은 게 이김. 코드 변경 없이 환경별 설정 가능.
 
-핵심:
-- **PropertySource 우선순위 (high → low)**: 명령줄 인자 > 환경 변수 > application.yml > 기본값
-- **`@Value("${...}")`** : 단순 주입
-- **`@ConfigurationProperties`** : 타입 안전한 그룹 주입 (권장)
-- **`@Profile`** : 환경별 Bean 분리
+핵심 소스 (우선순위 높은 순):
+1. **Devtools 글로벌 설정** `~/.config/spring-boot/`
+2. **`@TestPropertySource`** (테스트)
+3. **`SPRING_APPLICATION_JSON`** (환경변수)
+4. **Command-line arguments** (`--server.port=9090`)
+5. **OS 환경변수** (`SERVER_PORT=9090`)
+6. **`application-{profile}.yml`** (외부 → jar 안)
+7. **`application.yml`** (외부 → jar 안)
+8. **`@PropertySource`** 어노테이션
+9. **default 값** (`@Value("${x:fallback}")`)
 
-## PropertySource 우선순위 요약
+높은 우선순위 = 운영 환경에서 override 쉬움 패턴.
 
-1. `@TestPropertySource`, `@SpringBootTest properties`
-2. 명령줄 인자 (`--server.port=8081`)
-3. `SPRING_APPLICATION_JSON` 환경 변수
-4. **System properties** (`-Dserver.port=8081`)
-5. **OS 환경 변수** (`SERVER_PORT=8081`)
-6. `application-{profile}.yml` outside jar
-7. `application.yml` outside jar
-8. `application-{profile}.yml` inside jar
-9. `application.yml` inside jar
-10. `@PropertySource` annotation
-11. Default properties
-
-운영 환경 override 패턴: 환경 변수 또는 `--cmd-arg` > 파일 < 기본값.
-
-## 환경 변수 매핑 (Relaxed Binding)
-
-```
-property                      environment variable
-server.port              →    SERVER_PORT
-spring.datasource.url    →    SPRING_DATASOURCE_URL
-spring.jpa.hibernate.ddl-auto → SPRING_JPA_HIBERNATE_DDL_AUTO
-app.feature.new-checkout →    APP_FEATURE_NEW_CHECKOUT
-```
-
-규칙: `.` → `_`, `-` → `_`, 대문자. 컨테이너 (Docker/K8s) 환경 친화적.
-
-## @Value (단순)
-
-```java
-@Service
-class GreetingService {
-    @Value("${app.greeting:Hello}")   // default
-    private String greeting;
-
-    @Value("${app.recipients}")
-    private List<String> recipients;  // 콤마 구분 자동 파싱
-
-    @Value("${app.timeout:5s}")
-    private Duration timeout;
-}
-```
-
-`${key:default}` 형태. SpEL 도 지원 (`#{T(Math).max(...)}`).
-
-복잡한 그룹은 `@ConfigurationProperties` 가 더 적합.
-
-## @ConfigurationProperties (권장)
-
-```java
-@ConfigurationProperties(prefix = "app.mail")
-@Validated
-public record MailProperties(
-    @NotBlank String host,
-    @Min(1) @Max(65535) int port,
-    @NotEmpty List<@Email String> recipients,
-    Duration timeout,
-    Tls tls
-) {
-    public record Tls(boolean enabled, String protocol) {}
-}
-
-@SpringBootApplication
-@EnableConfigurationProperties(MailProperties.class)
-class App {}
-```
+## application.yml vs properties
 
 ```yaml
-app:
-  mail:
-    host: smtp.example.com
-    port: 587
-    recipients:
-      - alice@example.com
-      - bob@example.com
-    timeout: 5s         # Duration 자동 파싱
-    tls:
-      enabled: true
-      protocol: TLSv1.3
+# application.yml (선호: 계층 표현 명확)
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost/myapp
+    username: app
+server:
+  port: 8080
+  servlet:
+    context-path: /api
 ```
 
-장점:
-- 타입 안전 (`int`, `Duration`, `List<T>`)
-- IDE 자동완성 (`spring-boot-configuration-processor` 추가)
-- `@Validated` 로 시작 시점 검증
-- record 사용 시 불변 + 간결
-
-`spring-boot-configuration-processor`:
-```kotlin
-annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
+```properties
+# application.properties (단순)
+spring.datasource.url=jdbc:postgresql://localhost/myapp
+spring.datasource.username=app
+server.port=8080
+server.servlet.context-path=/api
 ```
 
-## Profiles
+같은 폴더에 둘 다 있으면 **properties 가 우선**. 보통 하나만 사용.
 
-환경별 설정 분리:
+## Profile-Specific 설정
 
-```yaml
-# application.yml
+`application-{profile}.yml` 명명 규칙:
+
+```
+src/main/resources/
+├── application.yml             # 공통
+├── application-dev.yml         # dev profile 활성 시
+├── application-prod.yml        # prod profile 활성 시
+└── application-local.yml       # 로컬 개발
+```
+
+활성화 방법:
+
+```bash
+# 1) JVM 인자
+java -jar app.jar --spring.profiles.active=prod
+
+# 2) 환경변수
+SPRING_PROFILES_ACTIVE=prod java -jar app.jar
+
+# 3) application.yml 안에서
 spring:
   profiles:
-    active: ${APP_ENV:dev}
+    active: prod
+```
 
+여러 profile 동시: `dev,debug` 콤마 구분.
+
+## YAML 멀티 문서 (Spring Boot 2.4+)
+
+한 파일 안에 profile 별 섹션:
+
+```yaml
+spring:
+  application:
+    name: myapp
+server:
+  port: 8080
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+server:
+  port: 9090
+spring:
+  datasource:
+    url: jdbc:postgresql://prod-db/myapp
 ---
 spring:
   config:
@@ -130,177 +105,259 @@ spring:
       on-profile: dev
 server:
   port: 8080
-
----
 spring:
-  config:
-    activate:
-      on-profile: prod
-server:
-  port: 80
+  datasource:
+    url: jdbc:h2:mem:dev
 ```
 
-또는 별도 파일:
-```
-application.yml
-application-dev.yml
-application-prod.yml
-application-test.yml
-```
+`---` 로 구분, `spring.config.activate.on-profile` 로 조건. 한 파일에 모아두는 데 유용.
 
-활성화:
-- `spring.profiles.active=dev`
-- `SPRING_PROFILES_ACTIVE=dev`
-- `--spring.profiles.active=dev`
-
-multi-active: `dev,debug` 콤마. 뒤가 우선.
-
-### @Profile (Bean 단위)
+## @ConfigurationProperties (타입 안전 바인딩)
 
 ```java
-@Configuration
-@Profile("dev")
-class DevConfig {
-    @Bean
-    DataSource dataSource() {
-        return new H2DataSource();
-    }
+@ConfigurationProperties(prefix = "app.mail")
+@ConstructorBinding   // record / 불변
+public record MailProperties(
+    String host,
+    int port,
+    String username,
+    String password,
+    Duration timeout,
+    Tls tls,
+    List<String> recipients
+) {
+    public record Tls(boolean enabled, String protocol) {}
 }
 
-@Configuration
-@Profile("!test")   // test 제외
-class NormalConfig {}
+@SpringBootApplication
+@EnableConfigurationProperties(MailProperties.class)
+class App { ... }
 ```
 
+```yaml
+app:
+  mail:
+    host: smtp.example.com
+    port: 587
+    username: ${MAIL_USER}
+    password: ${MAIL_PASSWORD}
+    timeout: 5s        # Duration 자동 파싱
+    tls:
+      enabled: true
+      protocol: TLSv1.3
+    recipients:
+      - alice@example.com
+      - bob@example.com
+```
+
+`@Value` 대비:
+- **타입 검증** (compile 타임)
+- **IDE 자동완성** (spring-boot-configuration-processor 추가 시)
+- **@Validated 와 조합 시 startup 시점 검증**
+- **불변 (record 권장)**
+
+### Relaxed binding
+
+같은 property 를 여러 표기로:
+
+```
+app.mail.timeout-seconds     # kebab-case (yml 표준)
+APP_MAIL_TIMEOUT_SECONDS     # env var (uppercase + underscore)
+app.mail.timeoutSeconds      # camelCase
+app.mail.timeout_seconds     # snake_case
+```
+
+모두 같은 키로 인식. 환경변수 (`APP_MAIL_HOST`) ↔ yml (`app.mail.host`) 자동 매핑.
+
+## @Value (단순 사용)
+
+```java
+@Service
+class GreetingService {
+    @Value("${app.greeting:Hello}")
+    private String greeting;
+
+    @Value("${app.recipients}")
+    private List<String> recipients;   // 콤마 구분 자동 파싱
+
+    @Value("${app.timeout:5s}")
+    private Duration timeout;
+}
+```
+
+`:` 뒤 default. 없으면 startup 실패.
+
+복잡한 구조나 nested 필드면 `@ConfigurationProperties` 권장. `@Value` 는 단발성 simple value 만.
+
+## SpEL 확장
+
+```java
+@Value("#{T(java.lang.Math).max(1024, ${app.min-pool-size:512})}")
+int poolSize;
+
+@Value("#{systemProperties['user.timezone'] ?: 'UTC'}")
+String timezone;
+```
+
+복잡한 식 사용 가능. 가독성 떨어지므로 자제.
+
+## 환경변수 매핑
+
+OS env var → property:
+
+```
+SPRING_DATASOURCE_URL          → spring.datasource.url
+APP_MAIL_HOST                  → app.mail.host
+APP_MAIL_TLS_PROTOCOL          → app.mail.tls.protocol
+APP_RECIPIENTS_0               → app.recipients[0]    (list index)
+APP_RECIPIENTS_1               → app.recipients[1]
+```
+
+Container / K8s 환경에서 표준. ConfigMap / Secret 을 env var 로 mount.
+
 ## SPRING_APPLICATION_JSON
+
+JSON 한 줄로 여러 property 주입:
 
 ```bash
 SPRING_APPLICATION_JSON='{"server":{"port":9090},"spring":{"profiles":{"active":"prod"}}}' \
   java -jar app.jar
 ```
 
-Heroku, Cloud Foundry 등 PaaS 에서 흔히 사용.
+Heroku, Cloud Foundry 같은 PaaS 에서 자주 사용.
 
-## spring.config.import (modern)
+## Command-line override
+
+```bash
+java -jar app.jar \
+  --server.port=9090 \
+  --spring.profiles.active=prod \
+  --logging.level.root=WARN
+```
+
+긴급 운영 변경에 유용.
+
+## 외부 파일 로드
+
+```bash
+# JAR 옆 application.yml 우선 (재배포 없이 변경)
+java -jar app.jar --spring.config.location=classpath:/,file:./config/
+
+# 또는 단일 파일
+java -jar app.jar --spring.config.location=file:/etc/myapp/application.yml
+```
+
+K8s ConfigMap mount 패턴.
+
+## Spring Cloud Config
+
+원격 설정 저장소 (Git, Vault, Consul) 통합:
 
 ```yaml
 spring:
   config:
-    import:
-      - "optional:file:./config/local.yml"
-      - "configtree:/run/secrets/"      # K8s secret volume
-      - "vault://"                       # Spring Cloud Vault
-      - "configserver:http://config:8888"
+    import: "configserver:http://config-server:8888"
 ```
 
-- `optional:` : 없어도 OK
-- `configtree:` : 디렉토리 = 각 파일이 property (K8s secret 마운트 패턴)
-- `vault://` , `consul://` : Spring Cloud
+여러 인스턴스 가 같은 설정 공유. [[spring-cloud]] 참고.
 
-## 비밀 정보
+## 검증 (@Validated)
+
+```java
+@ConfigurationProperties(prefix = "app.mail")
+@Validated
+public record MailProperties(
+    @NotBlank String host,
+    @Min(1) @Max(65535) int port,
+    @NotEmpty List<@Email String> recipients
+) {}
+```
+
+startup 시점에 검증. 잘못된 설정 = 즉시 실패 (운영 환경에서 critical).
+
+## 자주 보는 패턴
+
+### 시나리오 1: dev/prod 분리
 
 ```yaml
-# ❌ 평문
+# application.yml (공통)
 spring:
-  datasource:
-    password: prod-password
+  application:
+    name: myapp
 
-# ✓ 환경 변수
+# application-dev.yml
 spring:
   datasource:
+    url: jdbc:h2:mem:dev
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: create-drop
+
+# application-prod.yml
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
     password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+logging:
+  level:
+    root: WARN
+```
 
-# ✓ Vault
+### 시나리오 2: K8s ConfigMap + Secret
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+data:
+  application.yml: |
+    spring:
+      profiles:
+        active: prod
+    server:
+      port: 8080
+---
+apiVersion: v1
+kind: Secret
+data:
+  DB_PASSWORD: <base64>
+```
+
+Pod env var 로 mount + `--spring.config.location` 으로 ConfigMap 파일 마운트.
+
+### 시나리오 3: 외부 비밀번호 (Vault)
+
+```yaml
 spring:
   config:
     import: "vault://"
   cloud:
     vault:
-      authentication: KUBERNETES
+      authentication: TOKEN
+      token: ${VAULT_TOKEN}
+      uri: https://vault.internal
 ```
 
-운영: yml 평문 절대 금지. 환경 변수 + secret manager.
-
-## RandomValuePropertySource
-
-```yaml
-my:
-  uuid: ${random.uuid}
-  port: ${random.int(1024,65535)}
-  secret: ${random.value}
-```
-
-테스트 / 개발 편의.
-
-## 디버깅: 적용된 properties
-
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: configprops, env
-```
-
-- `/actuator/configprops` : 모든 `@ConfigurationProperties` Bean 의 현재 값
-- `/actuator/env` : 모든 PropertySource + 값 + 우선순위
-
-운영 환경에선 인증 필수 (민감 정보 노출).
-
-## 자주 보는 패턴
-
-### 패턴 1: 환경 변수 우선
-
-```yaml
-spring:
-  datasource:
-    url: ${DATABASE_URL:jdbc:h2:mem:devdb}
-    username: ${DB_USER:admin}
-    password: ${DB_PASSWORD:}
-```
-
-12-factor app 권장 패턴. profile 없이 환경 변수로만 분기.
-
-### 패턴 2: K8s ConfigMap + Secret
-
-```yaml
-# ConfigMap → /etc/app/application.yml 마운트
-spring:
-  config:
-    location: "file:/etc/app/application.yml"
-
-# Secret → 환경 변수
-spring:
-  datasource:
-    password: ${DB_PASSWORD}
-```
-
-### 패턴 3: 외부 파일 hot reload
-
-```yaml
-spring:
-  config:
-    import: "optional:file:./config/app.yml"
-```
-
-배포 시 `config/app.yml` 만 교체. 단, Spring Boot 가 자동 reload 안 함. `@RefreshScope` (Spring Cloud Config) 필요.
+비밀번호 / API 키 분리.
 
 ## 함정과 베스트 프랙티스
 
-- **`@ConfigurationProperties` 우선**: 타입 안전 + 검증
-- **`@Validated` + JSR-303** 으로 startup 검증
-- **kebab-case 권장**: `my-property` (모든 표기 매칭)
-- **secret 은 환경 변수 또는 secret manager**: yml 평문 금지
-- **`spring.config.import`** 가 modern: `@PropertySource` 보다 우선
-- **profile 활성화는 환경 변수 권장**: `SPRING_PROFILES_ACTIVE`
-- **multi-doc YAML** vs 별도 파일: 팀 컨벤션 정하기
-- **`Duration` / `DataSize`** 자동 파싱: `5s`, `1m`, `10MB`
-- **테스트는 `@DynamicPropertySource`** (Testcontainers 환경)
+- **운영 비밀번호는 git 에 절대 commit 금지**: `${ENV_VAR}` 또는 Vault
+- **`@ConfigurationProperties` 권장**: `@Value` 는 단순한 것만
+- **`@Validated` 로 startup 시점 검증**: 운영 실수 조기 감지
+- **Duration / DataSize 표기 활용**: `5s`, `1m`, `10MB`, `1GiB` 자동 파싱
+- **profile 별 파일 분리 vs 멀티 문서 YAML**: 팀 컨벤션 정하기
+- **`spring.config.import` 사용**: Vault, Consul, Cloud Config 같은 외부 소스
+- **`application.yml` 의 environment-specific 값 → env var override**: 12-factor 원칙
+- **`spring-boot-configuration-processor` 추가**: IDE 자동완성 + IntelliJ 의 설정 키 검증
 
 ## 관련 위키
 
 - [[spring-boot-autoconfig]]
-- [[spring-boot-yaml-configuration]]
 - [[spring-conditional]]
 - [[spring-cloud]]
 - [[spring-validation]]

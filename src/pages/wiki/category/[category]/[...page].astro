@@ -1,0 +1,95 @@
+---
+import { type CollectionEntry } from 'astro:content';
+import BaseLayout from '../../../../layouts/BaseLayout.astro';
+import Pagination from '@/shared/ui/Pagination.astro';
+import WikiList from '@/widgets/wiki-list/WikiList.astro';
+import { SITE_LOCALE, WIKI_PER_PAGE } from '@/shared/config';
+import { getWikiTaxonomy } from '@/shared/lib/content/taxonomy';
+import { absoluteUrl, breadcrumbSchema, collectionPageSchema } from '@/shared/lib/seo/schema';
+import type { GetStaticPaths, Page } from 'astro';
+
+export const getStaticPaths = (async ({ paginate }) => {
+  const taxonomy = await getWikiTaxonomy();
+  const all: { params: { category: string }; props: { categoryName: string } }[] = [];
+  for (const [category, items] of taxonomy.categories) {
+    const paginated = paginate(items, { pageSize: WIKI_PER_PAGE, params: { category } });
+    all.push(
+      ...(paginated.map((p) => ({
+        ...p,
+        props: { ...p.props, categoryName: category },
+      })) as never[]),
+    );
+  }
+  return all;
+}) satisfies GetStaticPaths;
+
+type Props = { page: Page<CollectionEntry<'wiki'>>; categoryName: string };
+const { page, categoryName } = Astro.props as Props;
+
+const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
+const categoryBase = `/wiki/category/${encodeURIComponent(categoryName)}/`;
+const pageDescription =
+  `${categoryName} 카테고리에 속한 위키 ${page.total}개. ${page.data[0]?.data.title ? `최근 갱신: ${page.data[0].data.title}` : ''}`.trim();
+
+const jsonLd = [
+  collectionPageSchema({
+    name: `${categoryName} 위키`,
+    description: pageDescription,
+    url: absoluteUrl(page.url.current),
+    itemCount: page.total,
+  }),
+  breadcrumbSchema([
+    { name: '위키', url: absoluteUrl('/wiki/') },
+    { name: categoryName, url: absoluteUrl(categoryBase) },
+  ]),
+];
+
+const prevUrl = page.url.prev ? absoluteUrl(page.url.prev) : undefined;
+const nextUrl = page.url.next ? absoluteUrl(page.url.next) : undefined;
+---
+
+<BaseLayout
+  title={page.currentPage > 1
+    ? `📁 ${categoryName} 위키 (${page.currentPage}페이지)`
+    : `📁 ${categoryName} 위키`}
+  description={pageDescription}
+  jsonLd={jsonLd}
+  prevUrl={prevUrl}
+  nextUrl={nextUrl}
+  keywords={[categoryName, '위키', '카테고리']}
+>
+  <section class="mx-auto max-w-3xl px-5" data-pagefind-ignore="all">
+    <nav class="mb-3 text-xs text-fg-muted">
+      <a href="/" class="hover:text-accent">홈</a>
+      <span class="mx-1">/</span>
+      <a href="/wiki/" class="hover:text-accent">위키</a>
+      <span class="mx-1">/</span>
+      <a href="/wiki/categories/" class="hover:text-accent">카테고리</a>
+      <span class="mx-1">/</span>
+      <span class="text-fg">{categoryName}</span>
+    </nav>
+    <h1 class="mb-2 flex items-center gap-2 text-3xl font-bold tracking-tight">
+      <span
+        class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-surface-elevated text-base"
+        >📁</span
+      >
+      <span>{categoryName}</span>
+    </h1>
+    <p class="mb-8 text-fg-muted">
+      총 {page.total}개의 위키 · {page.currentPage} / {page.lastPage} 페이지
+    </p>
+
+    <WikiList entries={page.data} fmt={fmt} />
+
+    <Pagination
+      currentPage={page.currentPage}
+      lastPage={page.lastPage}
+      baseUrl={categoryBase}
+    />
+  </section>
+</BaseLayout>

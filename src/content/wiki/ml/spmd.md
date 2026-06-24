@@ -2,6 +2,7 @@
 title: "SPMD"
 aliases: ["Single Program Multiple Data", "spmd", "단일 프로그램 다중 데이터"]
 tags: [parallel-computing, programming-model, distributed]
+category: ml
 updated: 2026-06-14
 references:
   - title: "Darema 1988, SPMD model"

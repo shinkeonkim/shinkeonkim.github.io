@@ -2,6 +2,7 @@
 title: "TLS / SSL"
 aliases: ["TLS", "SSL", "Transport Layer Security", "Secure Sockets Layer", "tls", "ssl"]
 tags: [network, security, protocol, cryptography]
+category: network
 updated: 2026-06-15
 references:
   - title: "RFC 8446, TLS 1.3"

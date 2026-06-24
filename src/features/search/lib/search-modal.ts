@@ -256,25 +256,32 @@ export function setupSearchModal(): void {
     stats.textContent = `${result.results.length}개 결과 (${elapsed}ms)`;
     const hits = await Promise.all(
       result.results.slice(0, 12).map((r) => r.data()),
-    ) as { url: string; meta?: { title?: string }; excerpt?: string; filters?: { section?: string | string[] } }[];
+    ) as {
+      url: string;
+      meta?: { title?: string };
+      excerpt?: string;
+      filters?: { section?: string | string[]; category?: string | string[] };
+    }[];
     if (token !== searchToken) return;
     currentItems = hits.map((h) => ({ kind: 'search', href: h.url }));
     container.innerHTML = hits
       .map((h, i) => {
-        const section =
-          h.filters && h.filters.section
-            ? Array.isArray(h.filters.section)
-              ? h.filters.section[0]
-              : h.filters.section
-            : '';
+        const pickFirst = (v: string | string[] | undefined): string =>
+          Array.isArray(v) ? v[0] : (v ?? '');
+        const section = pickFirst(h.filters?.section);
+        const category = pickFirst(h.filters?.category);
         const label = SECTION_LABELS[section] || '';
         const title = escapeHtml(h.meta && h.meta.title ? h.meta.title : h.url);
         const excerpt = h.excerpt || '';
+        const path = category
+          ? `<span class="search-modal-hit-path">${escapeHtml(section)} / ${escapeHtml(category)}</span>`
+          : '';
         return `
           <a href="${escapeHtml(h.url)}" class="search-modal-hit" data-index="${i}">
             ${label ? `<span class="search-modal-hit-badge">${label}</span>` : ''}
             <span class="search-modal-hit-body">
               <span class="search-modal-hit-title">${title}</span>
+              ${path}
               <span class="search-modal-hit-excerpt">${excerpt}</span>
             </span>
           </a>

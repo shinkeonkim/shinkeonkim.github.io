@@ -2,6 +2,7 @@
 title: "HPACK"
 aliases: ["HPACK 헤더 압축", "hpack"]
 tags: [network, http, http2, compression]
+category: network
 updated: 2026-06-13
 references:
   - title: "RFC 7541, HPACK"

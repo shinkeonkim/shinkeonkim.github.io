@@ -2,6 +2,7 @@
 title: "BrainDB"
 aliases: ["braindb", "@braindb/astro"]
 tags: [tool, web, knowledge]
+category: frameworks
 updated: 2026-05-23
 ---
 

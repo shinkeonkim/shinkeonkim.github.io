@@ -1,6 +1,6 @@
 ---
-title: "[Spring Boot] YAML Configuration: multi-document, profiles"
-aliases: ["Spring Boot YAML", "application.yml syntax", "YAML profile spring", "YAML anchor", "spring config import", "스프링 YAML 설정"]
+title: "[Spring Boot] YAML Configuration: multi-document, profiles, anchors"
+aliases: ["Spring Boot YAML", "application.yml", "YAML profile", "YAML anchor", "spring config import", "스프링 YAML 설정"]
 tags: [spring-boot, yaml, configuration, profiles]
 updated: 2026-06-23
 references:
@@ -10,11 +10,15 @@ references:
 
 ## 정의
 
-Spring Boot 의 설정 파일 형식. `application.properties` 와 `application.yml` 모두 지원. YAML 이 계층 / list / map / multi-document 표현이 자연스러워 권장.
+Spring Boot 는 `application.properties` 와 `application.yml` 모두 지원. **YAML 권장**: 계층 구조 가독성, multi-document, anchors / aliases, list / map native 지원.
 
-같은 디렉토리에 둘 다 있으면 properties 가 우선. 보통 하나만 사용.
+설정 파일 search order (classpath):
+1. `application.yml` / `application.yaml`
+2. `application.properties`
 
-## 기본 구조
+두 파일 동시 있으면 properties 가 우선 (Spring Boot 의 default ordering).
+
+## 기본 문법
 
 ```yaml
 spring:
@@ -31,23 +35,21 @@ spring:
     properties:
       hibernate:
         format_sql: true
-
-server:
-  port: 8080
-  servlet:
-    context-path: /api
-
-logging:
-  level:
-    com.example: DEBUG
-
-app:
-  feature:
-    new-checkout: true
-    max-cart-items: 50
 ```
 
-들여쓰기 = 2 space. tab 금지.
+= properties:
+
+```properties
+spring.application.name=my-app
+spring.datasource.url=jdbc:postgresql://localhost/db
+spring.datasource.username=app
+spring.datasource.pool.max-size=20
+spring.datasource.pool.min-idle=5
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+```
+
+들여쓰기 = 2 space 권장. tab 금지.
 
 ## List
 
@@ -61,7 +63,15 @@ spring:
 spring.profiles.active: [web, dev]
 ```
 
-`@ConfigurationProperties` 의 `List<T>` 자동 매핑.
+properties:
+```properties
+spring.profiles.active[0]=web
+spring.profiles.active[1]=dev
+# 또는
+spring.profiles.active=web,dev
+```
+
+YAML 의 list 가 훨씬 가독성 좋음.
 
 ## Map
 
@@ -76,60 +86,109 @@ app:
 ```java
 @ConfigurationProperties(prefix = "app")
 public class AppProps {
-    private Map<String, Object> features;
+    private Map<String, Object> features;   // 자동 매핑
 }
 ```
 
-## Multi-document (한 파일에 profile)
+## Multi-document (한 파일 다 profile)
 
 ```yaml
+# 기본 (모든 profile 에 적용)
 spring:
   application:
     name: my-app
 
+logging:
+  level:
+    org.springframework: INFO
+
 ---
+# dev 만
 spring:
   config:
     activate:
       on-profile: dev
+
 server:
   port: 8080
+datasource:
+  url: jdbc:h2:mem:devdb
 
 ---
+# prod 만
 spring:
   config:
     activate:
       on-profile: prod
+
 server:
   port: 80
+datasource:
+  url: jdbc:postgresql://prod-db/myapp
 ```
 
-`---` 가 document separator. `spring.config.activate.on-profile` 가 modern 문법 (Spring Boot 2.4+).
+`---` 가 document separator. Spring Boot 가 활성 profile 에 해당하는 document 만 적용.
 
-## 별도 파일 (profile-specific)
+`spring.config.activate.on-profile` 가 modern 문법 (Spring Boot 2.4+). 이전엔 `spring.profiles` 였음.
 
-```
-src/main/resources/
-├── application.yml          ← 공통
-├── application-dev.yml      ← dev
-├── application-prod.yml     ← prod
-├── application-test.yml     ← test
-└── application-local.yml    ← 개인 로컬 (gitignore)
-```
-
-활성화: `SPRING_PROFILES_ACTIVE=dev` 또는 `--spring.profiles.active=dev`.
-
-## `${VAR}` vs `@var@`
+## @ 와 ${} 의 차이
 
 ```yaml
 app:
-  version: @project.version@   # build 타임 (Maven/Gradle resource filtering)
-  user: ${USER:default}        # 런타임 (환경 변수 또는 default)
-  secret: ${random.value}      # Spring Boot built-in
-  nested: ${app.user}-suffix   # 다른 property 참조
+  version: @project.version@        # Maven / Gradle resource filtering (빌드 타임)
+  user: ${USER:default}             # 환경 변수 또는 default (런타임)
+  secret: ${random.value}           # Spring Boot built-in
+  nested: ${app.user}-suffix        # 다른 property 참조
 ```
 
-`@var@` : build tool 이 치환. `${var}` : Spring Boot 의 PropertyPlaceholder.
+`@var@`: build tool 이 치환. spring-boot-maven-plugin 의 resource filtering.
+
+`${var}`: Spring Boot 의 PropertyPlaceholder. environment variable / 다른 property / SpEL.
+
+## Profile-specific 파일
+
+```
+src/main/resources/
+├── application.yml              ← 공통
+├── application-dev.yml          ← dev 만 (active 가 dev 일 때)
+├── application-prod.yml         ← prod
+├── application-test.yml         ← test
+└── application-local.yml        ← 개인 로컬 (gitignore)
+```
+
+활성화:
+```yaml
+spring.profiles.active: dev
+```
+
+또는 환경 변수:
+```bash
+SPRING_PROFILES_ACTIVE=dev java -jar app.jar
+```
+
+## YAML Anchors & Aliases
+
+DRY 를 위한 YAML 자체 기능:
+
+```yaml
+defaults: &defaults
+  timeout: 30s
+  retries: 3
+  pool-size: 10
+
+services:
+  user-api:
+    <<: *defaults
+    url: http://user-api
+  order-api:
+    <<: *defaults
+    url: http://order-api
+    timeout: 60s          # 오버라이드
+```
+
+`&defaults` : anchor 정의. `*defaults` : 참조. `<<` : merge.
+
+Spring Boot 의 binding 은 final flat property 만 보므로 anchor 가 작동. 단, Snakeyaml 의 일부 버전 / 옵션은 anchor 비활성화 가능. `spring.yaml.bind.enable-merge=true` 옵션.
 
 ## Multiline 문자열
 
@@ -145,29 +204,42 @@ description: >
   This is a long
   description that
   becomes single line.
+
+# preserve indent
+description: |+
+  Line 1
+
+  Line 3
 ```
 
-## YAML 함정
+## 숫자 / boolean / null
 
 ```yaml
-debug: yes               # ❌ deprecated YAML 1.2: string "yes"
-debug: true              # ✓ boolean
+# boolean
+debug: true               # OK
+debug: yes                # ❌ deprecated YAML (1.2 부터 boolean 아님)
+debug: "yes"              # string
 
-unused: ~                # null
-unused: null             # null
-unused:                  # null
-unused: ""               # 빈 문자열
+# null
+unused: ~                 # null
+unused: null              # null
+unused:                   # null (빈 값)
+unused: ""                # 빈 문자열
 
-big: 1_000_000           # 가독성 (Spring Boot 3+)
+# 숫자
+port: 8080                # int
+ratio: 0.5                # float
+big: 1_000_000            # 가독성 (Spring Boot 3+ 지원)
 
-url: "jdbc:postgresql://host:5432/db?ssl=true"   # 특수문자 quote
+# string with special chars
+url: "jdbc:postgresql://host:5432/db?ssl=true"
 ```
 
-`yes` / `no` 는 YAML 1.2 부터 boolean 아님. `true` / `false` 명시.
+`yes` / `no` 가 boolean 으로 처리 안 됨. 명시적 `true` / `false` 권장.
 
 ## spring.config.import
 
-다른 파일 / 외부 소스:
+다른 설정 파일 / 외부 소스 import:
 
 ```yaml
 spring:
@@ -175,50 +247,48 @@ spring:
     import:
       - "classpath:database.yml"
       - "optional:file:./config/local.yml"
-      - "configtree:/run/secrets/"      # K8s secrets
-      - "vault://"
-      - "configserver:http://config:8888"
+      - "configtree:/run/secrets/"        # K8s secrets
+      - "vault://"                         # Spring Cloud Vault
+      - "consul://"                        # Spring Cloud Consul
 ```
 
-- `optional:` : 없어도 OK
-- `configtree:` : 디렉토리 = 각 파일이 property 키 (K8s secret 마운트)
+- `optional:` : 없어도 에러 안 남
+- `file:` : 파일시스템
+- `classpath:` : 리소스
+- `configtree:` : 디렉토리 = 각 파일이 property
+- `vault://`, `consul://` : Spring Cloud config server
 
-## OS 환경 변수 default
+## OS Environment Override
 
 ```yaml
 spring:
   datasource:
-    url: ${DATABASE_URL:jdbc:h2:mem:devdb}
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:test}
     username: ${DB_USER:admin}
-    password: ${DB_PASSWORD:}
+    password: ${DB_PASSWORD:}             # 빈 default
 ```
 
-Docker / K8s 환경에서 일반적.
+Docker / K8s 환경에서 일반적 패턴. 환경 변수 없으면 default 또는 H2 임시.
 
-## 실전 패턴
+## 운영 / 개발 분리 패턴
 
-### 패턴 1: profile + override
+### 패턴 1: profile
 
 ```yaml
+# application.yml
 spring:
   profiles:
     active: ${APP_ENV:dev}
 
----
+# application-dev.yml
 spring:
-  config:
-    activate:
-      on-profile: dev
-server.port: 8080
-spring.datasource.url: jdbc:h2:mem:devdb
+  datasource:
+    url: jdbc:h2:mem:devdb
 
----
+# application-prod.yml
 spring:
-  config:
-    activate:
-      on-profile: prod
-server.port: 80
-spring.datasource.url: ${PROD_DB_URL}
+  datasource:
+    url: ${PROD_DB_URL}
 ```
 
 ### 패턴 2: 환경 변수만
@@ -227,10 +297,9 @@ spring.datasource.url: ${PROD_DB_URL}
 spring:
   datasource:
     url: ${DATABASE_URL:jdbc:h2:mem:devdb}
-    password: ${DB_PASSWORD}
 ```
 
-profile 없이 환경 변수로만 분기. 12-factor 권장.
+profile 없이 환경 변수로만 분기. 12-factor app 권장 패턴.
 
 ### 패턴 3: 외부 파일 import
 
@@ -245,24 +314,26 @@ spring:
 ## 검증
 
 ```bash
-# Actuator
-curl http://localhost:8080/actuator/configprops
-curl http://localhost:8080/actuator/env
-```
+# spring-boot-properties-migrator
+./gradlew bootRun --args='--spring.profiles.active=prod'
+# 시작 로그에 모든 PropertySource 출력
 
-또는 시작 로그에 `spring.config.import` 로 어떤 파일이 로드됐는지 확인.
+# Actuator endpoint
+GET /actuator/configprops
+GET /actuator/env
+```
 
 ## 함정과 베스트 프랙티스
 
-- **들여쓰기 2 space**, tab 금지
+- **들여쓰기 2 space**, 절대 tab 금지
 - **`yes`/`no` boolean 안 됨**: `true`/`false` 명시
+- **profile 활성화는 환경 변수 권장**: `SPRING_PROFILES_ACTIVE=dev`
 - **secret 은 yml 평문 금지**: 환경 변수 / secret manager
-- **`@ConfigurationProperties` + processor**: IDE 자동완성
-- **`spring.config.import`** 가 modern
-- **multi-document** vs 별도 파일: 가독성에 따라
-- **default profile**: `spring.profiles.default=dev`
-- **profile 그룹**: `spring.profiles.group.staging=cloud,monitoring`
-- **kebab-case 권장**
+- **`@ConfigurationProperties` 와 함께 쓰면 IDE 자동완성** + 검증
+- **`spring.config.import` 가 modern 패턴**: `@PropertySource` 보다 우선
+- **multi-document 는 같은 파일에서 환경 분리할 때**: 별도 파일 (`application-{profile}.yml`) 도 OK
+- **default profile**: `spring.profiles.default=dev` (active 가 set 안 됐을 때)
+- **profile 그룹**: `spring.profiles.group.staging=cloud,monitoring` 으로 묶기
 
 ## 관련 위키
 

@@ -2,6 +2,7 @@
 title: "QUIC"
 aliases: ["QUIC 프로토콜", "quic", "Quick UDP Internet Connections"]
 tags: [network, http, protocol]
+category: network
 updated: 2026-06-13
 references:
   - title: "RFC 9000, QUIC"

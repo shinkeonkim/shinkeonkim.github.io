@@ -2,6 +2,7 @@
 title: "Sticky Session"
 aliases: ["sticky session", "session affinity", "session persistence", "스티키 세션", "세션 어피니티"]
 tags: [network, load-balancing, architecture]
+category: concurrency
 updated: 2026-06-13
 references:
   - title: "AWS, Sticky sessions for your Application Load Balancer"

@@ -2,6 +2,7 @@
 title: "Redis"
 aliases: ["레디스", "redis"]
 tags: [database, in-memory, key-value, nosql, cache]
+category: sql
 updated: 2026-06-15
 references:
   - title: "Redis 공식 문서"

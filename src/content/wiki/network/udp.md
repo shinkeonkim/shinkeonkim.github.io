@@ -2,6 +2,7 @@
 title: "UDP"
 aliases: ["User Datagram Protocol", "udp"]
 tags: [network, protocol, transport-layer]
+category: network
 updated: 2026-06-13
 references:
   - title: "RFC 768, UDP"

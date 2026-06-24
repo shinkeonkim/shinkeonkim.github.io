@@ -2,6 +2,7 @@
 title: "Astro"
 aliases: ["astro.build"]
 tags: [tool, web]
+category: frameworks
 updated: 2026-05-23
 ---
 

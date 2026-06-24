@@ -2,6 +2,7 @@
 title: "SIMT"
 aliases: ["Single Instruction Multiple Threads", "simt", "warp", "SIMT 모델"]
 tags: [gpu, parallel-computing, architecture, cuda]
+category: ml
 updated: 2026-06-13
 references:
   - title: "NVIDIA CUDA C++ Programming Guide, SIMT Architecture"

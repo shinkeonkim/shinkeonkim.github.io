@@ -2,6 +2,7 @@
 title: "DTLS"
 aliases: ["dtls", "Datagram TLS", "Datagram Transport Layer Security"]
 tags: [network, security, protocol, cryptography]
+category: network
 updated: 2026-06-13
 references:
   - title: "RFC 9147, DTLS 1.3"

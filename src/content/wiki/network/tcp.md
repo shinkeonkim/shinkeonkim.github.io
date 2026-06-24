@@ -2,6 +2,7 @@
 title: "TCP"
 aliases: ["Transmission Control Protocol", "tcp"]
 tags: [network, protocol, transport-layer]
+category: network
 updated: 2026-06-13
 references:
   - title: "RFC 9293, TCP"

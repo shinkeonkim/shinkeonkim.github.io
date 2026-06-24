@@ -2,6 +2,7 @@
 title: "HBM"
 aliases: ["High Bandwidth Memory", "hbm", "고대역폭 메모리"]
 tags: [hardware, memory, gpu, tpu, dram]
+category: ml
 updated: 2026-06-13
 references:
   - title: "Micron, HBM3 Specifications"

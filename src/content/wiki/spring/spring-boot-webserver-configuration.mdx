@@ -1,6 +1,6 @@
 ---
 title: "[Spring Boot] Embedded Web Server 설정과 튜닝"
-aliases: ["Spring Boot Embedded Server", "Tomcat tuning", "Netty tuning", "Jetty tuning", "Undertow tuning", "WebServerFactoryCustomizer", "server.port 설정", "내장 웹 서버"]
+aliases: ["Spring Boot Embedded Server", "Tomcat tuning", "Netty tuning", "Jetty tuning", "Undertow tuning", "WebServerFactoryCustomizer", "server.port", "내장 웹 서버"]
 tags: [spring-boot, tomcat, netty, jetty, undertow, performance, tuning]
 updated: 2026-06-23
 references:
@@ -10,20 +10,21 @@ references:
 
 ## 정의
 
-Spring Boot starter 가 내장 서버 번들. 별도 WAR / 외부 Tomcat 불필요.
+Spring Boot 의 starter 가 내장 서버를 함께 번들. 별도 WAR 배포 / 외부 Tomcat 불필요.
 
 기본 매핑:
-- `spring-boot-starter-web` → **Tomcat**
+- `spring-boot-starter-web` → **Tomcat** (기본)
 - `spring-boot-starter-webflux` → **Netty**
 - `spring-boot-starter-jetty` → **Jetty**
 - `spring-boot-starter-undertow` → **Undertow**
 
-서버 교체:
+같은 starter 안에서 교체:
+
 ```kotlin
 implementation("org.springframework.boot:spring-boot-starter-web") {
     exclude(module = "spring-boot-starter-tomcat")
 }
-implementation("org.springframework.boot:spring-boot-starter-undertow")
+implementation("org.springframework.boot:spring-boot-starter-jetty")
 ```
 
 ## 기본 설정
@@ -32,7 +33,7 @@ implementation("org.springframework.boot:spring-boot-starter-undertow")
 server:
   port: 8080
   servlet:
-    context-path: /api
+    context-path: /api          # 모든 경로 prefix
   forward-headers-strategy: native   # reverse proxy 뒤 X-Forwarded-* 처리
   compression:
     enabled: true
@@ -40,13 +41,12 @@ server:
     min-response-size: 1024
   http2:
     enabled: true
-  shutdown: graceful
   error:
     whitelabel:
       enabled: false
 ```
 
-`server.port=0` = random port (테스트).
+`server.port=0` 면 random port (테스트에서 흔히 사용).
 
 ## Tomcat 튜닝
 
@@ -54,29 +54,34 @@ server:
 server:
   tomcat:
     threads:
-      max: 200             # worker thread
+      max: 200                  # 동시 처리 thread
       min-spare: 10
-    accept-count: 100      # 큐 (worker 부족 시)
-    max-connections: 8192  # 동시 연결
+    accept-count: 100           # 큐
+    max-connections: 8192       # 동시 연결
     connection-timeout: 20s
     keep-alive-timeout: 60s
     max-keep-alive-requests: 100
     max-http-form-post-size: 2MB
+    max-swallow-size: 2MB       # 거부 요청의 본문 읽기 제한
+    uri-encoding: UTF-8
     accesslog:
       enabled: true
       pattern: "%t %a \"%r\" %s %b"
+      directory: /var/log/tomcat
 ```
 
 ### threads.max 의미
 
-worker thread 수. **요청마다 1 thread 점유** (blocking 모델).
-- low-traffic + 빠른 응답: 50~200
-- DB call 느린 high-traffic: 500~1000
-- virtual thread (Spring Boot 3.2+) 활성화 시: 의미 없어짐
+worker thread 수. **요청마다 1 thread 점유**. Tomcat 의 blocking 모델이므로:
+- low-traffic, 빠른 응답: 50~200
+- high-traffic, DB call 느림: 500~1000
+- virtual thread 활성화 시 (Spring Boot 3.2+): 의미 사라짐
 
-`max-connections > threads.max` 정상. 연결은 유지, worker 부족 시 큐.
+### max-connections vs threads.max
 
-### Virtual Thread (Spring Boot 3.2+)
+`max-connections > threads.max` 가 정상. 연결은 keep-alive 로 유지되지만 worker 가 부족하면 큐잉. accept-count 만큼 큐.
+
+### virtual thread (Spring Boot 3.2+)
 
 ```yaml
 spring:
@@ -85,7 +90,7 @@ spring:
       enabled: true
 ```
 
-Tomcat worker 가 virtual thread 사용. `threads.max` 무의미. 수백만 동시 요청 처리. [[spring-virtual-threads]] 참고.
+Tomcat worker pool 이 virtual thread 사용. `threads.max` 영향 없음. [[spring-virtual-threads]] 참고.
 
 ## Netty 튜닝 (WebFlux)
 
@@ -94,6 +99,7 @@ server:
   netty:
     connection-timeout: 20s
     idle-timeout: 60s
+    max-keep-alive-requests: 1000
 spring:
   reactor:
     netty:
@@ -102,24 +108,30 @@ spring:
         max-idle-time: 30s
 ```
 
-Netty 는 event loop 기반. thread 적음 (보통 CPU core × 2). 동시 처리는 connection 수.
+Netty 는 **이벤트 루프** 기반. thread 수 적음 (보통 CPU core × 2). 동시 처리는 connection 수가 결정.
 
-WebFlux + Netty 가 reactive non-blocking 의 정석.
+WebFlux + Netty 가 reactive non-blocking 시 가장 자연스러움. [[spring-webflux]] 참고.
 
-## Undertow
+## Jetty / Undertow
 
 ```yaml
 server:
+  jetty:
+    threads:
+      max: 200
+      min: 8
+    accesslog:
+      enabled: true
   undertow:
     threads:
-      io: 4               # I/O 스레드 (CPU core 와 비슷)
-      worker: 64          # blocking 작업용
+      io: 4
+      worker: 64
     buffer-size: 16384
 ```
 
-XNIO 기반. Tomcat 보다 메모리 효율 / throughput 우수.
+Undertow 는 XNIO 기반. Tomcat 보다 메모리 효율적, throughput 우수.
 
-## 동적 customization
+## 다이나믹 customization
 
 application.yml 로 안 되는 세밀 조정:
 
@@ -129,16 +141,21 @@ public class TomcatCustomizer implements WebServerFactoryCustomizer<TomcatServle
     @Override
     public void customize(TomcatServletWebServerFactory factory) {
         factory.addConnectorCustomizers(connector -> {
-            connector.setProperty("relaxedQueryChars", "[]|");
+            connector.setProperty("relaxedQueryChars", "[]|");   // 특수문자 허용
+            connector.setProperty("disableUploadTimeout", "false");
+            connector.setProperty("connectionUploadTimeout", "120000");
         });
+
         factory.addContextCustomizers(context -> {
             context.setCookieProcessor(new Rfc6265CookieProcessor());
         });
+
+        factory.setProtocol("org.apache.coyote.http11.Http11AprProtocol");   // APR
     }
 }
 ```
 
-`WebServerFactoryCustomizer<T>` Bean 자동 적용.
+`WebServerFactoryCustomizer<T>` Bean 으로 등록. 시작 시 자동 적용.
 
 ## 동적 port
 
@@ -146,7 +163,7 @@ public class TomcatCustomizer implements WebServerFactoryCustomizer<TomcatServle
 @SpringBootApplication
 class App {
     public static void main(String[] args) {
-        var ctx = SpringApplication.run(App.class, args);
+        ConfigurableApplicationContext ctx = SpringApplication.run(App.class, args);
         int port = ctx.getWebServer().getPort();
         System.out.println("Started on port " + port);
     }
@@ -157,7 +174,7 @@ class App {
 ```java
 @SpringBootTest(webEnvironment = RANDOM_PORT)
 class IntegrationTest {
-    @LocalServerPort int port;
+    @LocalServerPort int port;   // 자동 주입
 }
 ```
 
@@ -175,7 +192,7 @@ spring:
 - 진행 중 요청 완료 대기 (최대 30s)
 - 이후 강제 종료
 
-K8s `terminationGracePeriodSeconds` 와 맞춤.
+K8s `terminationGracePeriodSeconds` 와 맞춤. `preStop` hook 도 활용.
 
 ## HTTP/2
 
@@ -184,11 +201,12 @@ server:
   http2:
     enabled: true
   ssl:
-    enabled: true          # h2 는 TLS 필수
-    bundle: web-server
+    enabled: true
+    key-store: classpath:keystore.p12
+    key-store-password: ${KEYSTORE_PASSWORD}
 ```
 
-plain HTTP/2 (h2c) 는 reverse proxy 뒤만.
+HTTP/2 는 보통 SSL 필요 (h2). plaintext HTTP/2 (h2c) 는 reverse proxy 뒤.
 
 ## Compression
 
@@ -196,11 +214,20 @@ plain HTTP/2 (h2c) 는 reverse proxy 뒤만.
 server:
   compression:
     enabled: true
-    mime-types: text/html, text/css, application/javascript, application/json
+    mime-types:
+      - text/html
+      - text/xml
+      - text/plain
+      - text/css
+      - text/javascript
+      - application/javascript
+      - application/json
     min-response-size: 1024
 ```
 
-응답 > 1KB 면 gzip. CDN / proxy 가 압축한다면 끄기 (중복 방지).
+응답 크기 > 1KB 이면 gzip. JSON / HTML / CSS 압축으로 대역폭 절약.
+
+CDN / reverse proxy 가 압축한다면 끄기.
 
 ## CORS (전역)
 
@@ -212,15 +239,20 @@ class WebConfig implements WebMvcConfigurer {
         registry.addMapping("/api/**")
             .allowedOrigins("https://app.example.com")
             .allowedMethods("GET", "POST", "PUT", "DELETE")
+            .allowedHeaders("*")
             .allowCredentials(true)
             .maxAge(3600);
     }
 }
 ```
 
-Spring Security 함께 쓰면 `SecurityFilterChain.cors(...)` 활성화 필요.
+Spring Security 도 함께 사용 시 `SecurityFilterChain` 에 cors 활성화 필요:
 
-## Static Resources
+```java
+.cors(c -> c.configurationSource(corsSource))
+```
+
+## Static resources
 
 ```yaml
 spring:
@@ -231,9 +263,13 @@ spring:
         period: 30d
         cachecontrol:
           max-age: 30d
+          must-revalidate: true
+      add-mappings: true
+mvc:
+  static-path-pattern: /static/**
 ```
 
-production: long cache + content hash (Vite `[name].[hash].js`).
+production: long cache + content hash (Vite / webpack `[name].[hash].js`).
 
 ## Error pages
 
@@ -243,11 +279,12 @@ server:
     whitelabel:
       enabled: false
     include-message: always
-    include-stacktrace: on-param   # ?trace=true 일 때만 (보안)
+    include-binding-errors: always
+    include-stacktrace: on-param   # ?trace=true 일 때만
     include-exception: false
 ```
 
-전역 `@ControllerAdvice` 가 더 깔끔. `ProblemDetail` (RFC 7807) 추천.
+전역 `@ControllerAdvice` 또는 `ErrorController` 로 custom.
 
 ## 모니터링
 
@@ -256,24 +293,24 @@ management:
   endpoints:
     web:
       exposure:
-        include: health, metrics, threaddump
+        include: health, metrics, info, threaddump
   metrics:
     enable:
       tomcat: true
       jvm: true
 ```
 
-`tomcat.threads.busy`, `tomcat.threads.current`, `tomcat.connections.current` 같은 metric.
+Tomcat 의 thread pool / connection 상태 → Prometheus / Grafana.
 
 ## 함정과 베스트 프랙티스
 
-- **production: graceful shutdown 필수**
-- **Tomcat threads.max 와 DB pool size 균형**: worker > pool
-- **reverse proxy 뒤** : `forward-headers-strategy: native`
-- **HTTPS terminate** : 보통 reverse proxy (LB, nginx) 가 처리
-- **virtual thread 활성화 시 worker pool 튜닝 무의미**
-- **server 선택**: 대부분 기본 Tomcat. 특수 요구 (memory, async) 시만 교체
-- **Netty + WebFlux 페어**: blocking 코드 섞으면 의미 없음
+- **production: graceful shutdown + 적절한 timeout**
+- **Tomcat threads.max** 는 DB connection pool size 와 균형 (worker > pool)
+- **CDN / reverse proxy 뒤** 면 `forward-headers-strategy: native` 필수
+- **HTTPS terminate 위치**: 보통 reverse proxy. Spring 은 plain HTTP 받음
+- **virtual thread 활성화 시** worker pool 튜닝 무의미해짐
+- **embedded server 선택**: 대부분 기본 Tomcat 으로 충분. 특수 요구 (메모리 ↓, 비동기 ↑) 시만 교체
+- **Netty 와 WebFlux 페어**: blocking 코드 섞으면 의미 없음. 모든 단계 reactive 여야
 
 ## 관련 위키
 
@@ -283,4 +320,3 @@ management:
 - [[spring-webflux]]
 - [[spring-virtual-threads]]
 - [[spring-actuator]]
-- [[java-servlet-lifecycle]]
