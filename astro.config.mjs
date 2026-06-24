@@ -154,7 +154,16 @@ export default defineConfig({
         } else if (path.startsWith('/posts/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.8;
-        } else if (path === '/wiki/' || path.startsWith('/wiki/')) {
+        } else if (path === '/wiki/' || (path.startsWith('/wiki/') && isPaginated && !path.startsWith('/wiki/category/'))) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.85;
+        } else if (path === '/wiki/categories/') {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.7;
+        } else if (path.startsWith('/wiki/category/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.65;
+        } else if (path.startsWith('/wiki/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.7;
         } else if (path === '/notes/' || path.startsWith('/notes/')) {
