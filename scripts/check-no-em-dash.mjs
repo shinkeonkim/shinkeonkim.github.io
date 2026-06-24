@@ -14,7 +14,7 @@
 //   bun scripts/check-no-em-dash.mjs --quiet    # exit code only
 //   bun scripts/check-no-em-dash.mjs --json     # machine-readable
 
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');

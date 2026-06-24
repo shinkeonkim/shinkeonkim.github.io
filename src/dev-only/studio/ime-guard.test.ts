@@ -75,7 +75,7 @@ describe('Property 8: IME composition guards Enter commits', () => {
   describe('Inline Text Editor (main.ts startInlineTextEdit)', () => {
     it('SHALL NOT commit when isComposing is true (any text)', () => {
       fc.assert(
-        fc.property(fc.string(), (text) => {
+        fc.property(fc.string(), (_text) => {
           // Simulate: user typed `text`, then presses Enter while IME is composing
           const committed = inlineTextEditKeydown({
             key: 'Enter',
@@ -89,7 +89,7 @@ describe('Property 8: IME composition guards Enter commits', () => {
 
     it('SHALL NOT commit when isComposingFallback is true (any text)', () => {
       fc.assert(
-        fc.property(fc.string(), (text) => {
+        fc.property(fc.string(), (_text) => {
           // Simulate: compositionstart fired, Enter pressed
           const committed = inlineTextEditKeydown({
             key: 'Enter',
@@ -103,7 +103,7 @@ describe('Property 8: IME composition guards Enter commits', () => {
 
     it('SHALL NOT commit when both isComposing and isComposingFallback are true', () => {
       fc.assert(
-        fc.property(fc.string(), (text) => {
+        fc.property(fc.string(), (_text) => {
           const committed = inlineTextEditKeydown({
             key: 'Enter',
             isComposing: true,
@@ -116,7 +116,7 @@ describe('Property 8: IME composition guards Enter commits', () => {
 
     it('SHALL commit when isComposing is false and isComposingFallback is false', () => {
       fc.assert(
-        fc.property(fc.string(), (text) => {
+        fc.property(fc.string(), (_text) => {
           const committed = inlineTextEditKeydown({
             key: 'Enter',
             isComposing: false,
@@ -255,7 +255,7 @@ describe('Property 8: IME composition guards Enter commits', () => {
             { minLength: 0, maxLength: 30 },
           ),
           fc.string(),
-          (events, text) => {
+          (events, _text) => {
             const fallbackState = compositionLifecycle(events);
             const committed = inlineTextEditKeydown({
               key: 'Enter',
