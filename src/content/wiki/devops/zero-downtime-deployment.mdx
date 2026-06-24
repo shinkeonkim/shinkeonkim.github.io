@@ -1,0 +1,375 @@
+---
+title: "[DevOps] 무중단 배포: Blue-Green, Canary, Rolling, Expand-Contract"
+aliases: ["zero-downtime deployment", "blue green", "canary deployment", "rolling update", "feature flag", "expand contract migration", "무중단 배포", "제로 다운타임"]
+tags: [devops, deployment, blue-green, canary, rolling, feature-flag, database-migration]
+category: devops
+updated: 2026-06-24
+references:
+  - title: "Martin Fowler: Blue Green Deployment"
+    url: "https://martinfowler.com/bliki/BlueGreenDeployment.html"
+    note: "원조 정의 + 패턴"
+  - title: "Martin Fowler: Canary Release"
+    url: "https://martinfowler.com/bliki/CanaryRelease.html"
+    note: "Canary 패턴"
+  - title: "Martin Fowler: Feature Toggles"
+    url: "https://martinfowler.com/articles/feature-toggles.html"
+    note: "Feature flag 분류"
+  - title: "Stripe Engineering: Online Migrations"
+    url: "https://stripe.com/blog/online-migrations"
+    note: "Expand-Contract DB 마이그레이션 실전"
+---
+
+## 정의
+
+**무중단 배포 (Zero-Downtime Deployment)** 는 서비스 가동을 멈추지 않고 새 버전을 배포하는 일련의 전략. 핵심 도전 4가지:
+
+1. **트래픽 전환**: 어떻게 라우팅을 안전하게?
+2. **세션 / 인플라이트 요청**: 진행 중 요청 보호
+3. **DB 스키마 변경**: 두 버전 동시 동작 가능해야
+4. **롤백 보장**: 실패 시 즉시 이전 버전으로
+
+전략 매트릭스:
+
+| 전략 | 인프라 비용 | 롤백 속도 | 점진성 | 복잡도 |
+|---|---|---|---|---|
+| **Blue-Green** | 2배 | 즉시 (스위치) | 없음 (한 번에) | 낮음 |
+| **Rolling Update** | 1배 | 느림 (재배포) | 있음 (pod 단위) | 낮음 |
+| **Canary** | 1.x배 | 빠름 (canary 제거) | 정밀 (트래픽 %) | 중간 |
+| **A/B Test** | 1.x배 | 즉시 (flag off) | 사용자 segment | 높음 |
+| **Feature Flag** | 1배 | 즉시 (flag off) | 코드 path 단위 | 높음 |
+
+## Blue-Green Deployment
+
+두 환경 (Blue, Green) 을 동시에 운영, 라우터로 한쪽만 활성:
+
+```
+[현재 활성: Blue]
+Router → Blue (v1, traffic 100%)
+         Green (v2, idle, 배포 중)
+
+[배포 완료, smoke test 통과]
+Router → Green (v2, traffic 100%)
+         Blue (v1, standby for rollback)
+
+[안정 후 다음 배포]
+Router → Green (v2, traffic 100%)
+         Blue (v3 배포 중)
+```
+
+장점:
+- **즉시 스위치 + 즉시 롤백**: 라우터 변경만
+- **운영 환경에서 최종 테스트**: 같은 인프라
+- **재해 복구 연습**: 매 배포마다 hot-standby 검증
+
+단점:
+- **2배 인프라 비용**: 두 환경 항상 가동
+- **DB 공유 처리**: 두 버전이 같은 DB → 스키마 호환 필수 (expand-contract)
+- **인플라이트 요청 손실 위험**: 스위치 시점에 처리 중이던 요청
+- **all-or-nothing**: 점진 배포 불가
+
+### 인플라이트 요청 처리
+
+```yaml
+# K8s 의 graceful shutdown
+spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+    - lifecycle:
+        preStop:
+          exec:
+            command: ["sh", "-c", "sleep 5"]   # readiness 빠지는 시간
+```
+
+readiness false → LB 가 제외 → 신규 요청 안 받음 → 진행 요청 완료 대기 → SIGTERM → graceful shutdown.
+
+Spring Boot 의 `server.shutdown: graceful` + `spring.lifecycle.timeout-per-shutdown-phase: 30s` 와 조합 ([[spring-boot-webserver-configuration]] 참고).
+
+## Rolling Update (K8s 기본)
+
+pod 를 한 번에 N개씩 교체:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  replicas: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%          # 임시로 추가 가능한 pod %
+      maxUnavailable: 25%    # 동시 unavailable 허용 %
+```
+
+flow:
+1. 새 ReplicaSet 생성, pod 1개 시작
+2. readiness OK → LB 추가, 옛 pod 1개 제거
+3. 반복
+
+장점:
+- **인프라 비용 1배** (혹은 약간 +)
+- **K8s native**: 추가 도구 없음
+- **점진성**: pod 1개씩 = 영향 최소
+
+단점:
+- **두 버전 동시 운영 시간 길다**: 5~10분 (큰 cluster 면 30분+)
+- **롤백 느림**: 다시 rolling 으로 이전 버전 배포
+- **두 버전 호환성 필수**: DB / API contract 양방향
+
+## Canary Deployment
+
+일부 트래픽만 새 버전으로 보내 검증:
+
+```
+[Phase 1] 1% canary
+Router → 99% v1, 1% v2
+
+[Phase 2] 안정 → 5% → 25% → 50% → 100%
+Router → v2 로 점진 증가
+
+[중간 실패 시] canary 즉시 제거
+Router → 100% v1
+```
+
+K8s + Istio / Linkerd / Argo Rollouts 같은 service mesh / progressive delivery 도구로 구현:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  strategy:
+    canary:
+      steps:
+        - setWeight: 1
+        - pause: { duration: 10m }
+        - setWeight: 5
+        - pause: { duration: 30m }
+        - setWeight: 25
+        - pause: { duration: 1h }
+        - setWeight: 50
+        - pause: { duration: 1h }
+        - setWeight: 100
+      analysis:
+        templates:
+          - templateName: success-rate
+          - templateName: latency
+```
+
+자동 분석: 에러율 / latency / 비즈니스 metric 이 SLO 위반 시 자동 rollback.
+
+장점:
+- **실제 사용자에 미세 검증**: 합성 테스트로 못 잡는 버그 발견
+- **빠른 롤백**
+- **자동 분석 + 자동 진행**
+
+단점:
+- **복잡한 인프라** (service mesh 또는 Argo Rollouts)
+- **두 버전 호환성 필수**
+- **canary 가 너무 작으면 통계 의미 없음**: 1% 가 충분한 트래픽이어야
+
+## A/B Testing vs Canary
+
+| 항목 | Canary | A/B Test |
+|---|---|---|
+| 목적 | 새 코드 **안전성** 검증 | **비즈니스 가설** 검증 |
+| 라우팅 기준 | 트래픽 % (random) | 사용자 segment (cookie, user_id) |
+| 측정 metric | 에러율 / latency / SLO | conversion / CTR / revenue |
+| 기간 | 시간 단위 | 일~주 |
+| 결정 주체 | SRE / 자동화 | PM / data scientist |
+
+같은 인프라 위에서 동작하지만 의도가 다름. A/B 가 더 오래 지속.
+
+## Feature Flag
+
+코드 path 단위 토글. 배포와 release 분리:
+
+```java
+@Service
+class CheckoutService {
+    private final FeatureFlagClient flags;
+
+    public Order checkout(Cart cart, User user) {
+        if (flags.isEnabled("new-checkout-v2", user)) {
+            return newCheckoutFlow(cart, user);
+        }
+        return legacyCheckoutFlow(cart, user);
+    }
+}
+```
+
+flag 종류 (Martin Fowler 분류):
+| 종류 | 수명 | 동적성 | 예시 |
+|---|---|---|---|
+| **Release toggle** | 짧음 (배포 후 제거) | 정적 | "new-feature-x" |
+| **Experiment toggle** | 중간 (A/B 끝나면 제거) | 사용자별 | "checkout-variant-a" |
+| **Ops toggle** | 길음 | 실시간 | "circuit-breaker", "rate-limit" |
+| **Permission toggle** | 영구 | 사용자별 | "premium-feature" |
+
+도구: LaunchDarkly, Unleash, Flagsmith, Split.io, 또는 자체 구현 (DB + Redis 캐시).
+
+```yaml
+spring:
+  cloud:
+    config:
+      enabled: true
+# 또는 Redis hash 기반
+```
+
+flag 평가는 hot path 에 있으므로 **로컬 캐시 + 백그라운드 sync** 가 권장.
+
+## DB Migration: Expand-Contract
+
+무중단 배포의 가장 어려운 부분. **두 버전 동시 동작 가능한 스키마** 필요.
+
+### 위험 변경 예: 컬럼 rename `email_addr` → `email`
+
+❌ 위험한 single-step:
+```sql
+ALTER TABLE users RENAME COLUMN email_addr TO email;
+-- 배포 동시에: 옛 코드는 email_addr, 새 코드는 email
+-- 둘 중 하나 무조건 깨짐
+```
+
+✓ Expand-Contract (4단계):
+
+**Step 1: Expand** — 새 컬럼 추가 (NULL 허용)
+```sql
+ALTER TABLE users ADD COLUMN email VARCHAR(255);
+```
+배포: 없음. 옛 코드 정상.
+
+**Step 2: Backfill** — 데이터 복사
+```sql
+UPDATE users SET email = email_addr WHERE email IS NULL;
+-- 대용량이면 배치 (1000 row 씩)
+```
+배포: 없음. 옛 코드 정상.
+
+**Step 3: Dual-write** — 새 코드 배포 (둘 다 쓰고 새 컬럼 읽기)
+```java
+user.setEmail(email);
+user.setEmailAddr(email);   // 호환을 위해 둘 다 쓰기
+```
+배포: 새 코드. 옛 코드 / 새 코드 모두 정상.
+
+**Step 4: Contract** — 옛 코드 모두 사라진 후 + 충분한 안정 기간
+```sql
+ALTER TABLE users DROP COLUMN email_addr;
+-- 옛 컬럼 제거
+```
+배포: 없음. 옛 코드 이제 없으므로 안전.
+
+각 step 마다 rollback point. 한 번에 1 단계만, 충분한 검증 후 다음.
+
+### NOT NULL 추가
+
+❌ 단일 step:
+```sql
+ALTER TABLE users ALTER COLUMN email SET NOT NULL;
+-- 기존 NULL row 가 있으면 실패, lock 발생
+```
+
+✓ 다단계:
+1. backfill (NULL 채우기)
+2. 코드가 항상 NOT NULL 으로 쓰도록 배포
+3. constraint 추가 (`NOT VALID` 으로 lock 없이) → `VALIDATE`
+
+PostgreSQL 의 `ADD CONSTRAINT ... NOT VALID` + `VALIDATE CONSTRAINT` 분리가 lock 없이.
+
+### 인덱스
+
+```sql
+-- PostgreSQL
+CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
+
+-- MySQL 8+
+ALTER TABLE users ADD INDEX idx_email (email), ALGORITHM=INPLACE, LOCK=NONE;
+```
+
+`CONCURRENTLY` / `ALGORITHM=INPLACE` 가 lock 회피.
+
+### 외래키
+
+```sql
+-- 1. 추가 (validate 없이)
+ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID;
+-- 2. 검증 (lock 적음)
+ALTER TABLE orders VALIDATE CONSTRAINT fk_user;
+```
+
+## Backward / Forward Compatibility
+
+배포 중 두 버전 동시 동작 → 양방향 호환:
+
+### API
+- **항상 추가만**: 새 field 는 optional default, 제거는 deprecation 후 충분한 시간
+- **버전 prefix** (`/v1/`, `/v2/`): breaking change 시 새 경로
+- **JSON unknown field 무시**: Jackson `@JsonIgnoreProperties(ignoreUnknown = true)`
+
+### Message Queue
+- **Avro / Protobuf schema evolution**: 옵션 필드 추가 OK, 제거는 deprecation
+- **새 producer + 옛 consumer**: 새 field 무시
+- **옛 producer + 새 consumer**: default 값 사용
+
+### 직렬화 (Java)
+- **`serialVersionUID` 유지**: 옛 클래스 인스턴스 deserialize 가능
+- **field 제거 금지** (충분한 transition 기간 전까지)
+- **Jackson polymorphic deserialization 주의**: `@JsonTypeInfo`
+
+## 헬스체크 + readiness 분리
+
+K8s 의 3가지 probe:
+
+| Probe | 실패 시 동작 | 사용 |
+|---|---|---|
+| **startupProbe** | 컨테이너 재시작 (initial delay 길게) | 느린 시작 (JVM, DB pool warmup) |
+| **livenessProbe** | 컨테이너 재시작 | 복구 불가 상태 (deadlock, OOM) |
+| **readinessProbe** | LB 에서 제외 (재시작 X) | 일시적 unavailable (DB 연결 끊김) |
+
+Spring Boot 의 `/actuator/health/liveness` + `/actuator/health/readiness` 가 표준 매핑 ([[spring-boot-container-deployment]]).
+
+## Outbox 패턴 (DB + 메시지 큐 일관성)
+
+DB 트랜잭션 + Kafka publish 가 atomic 하지 않음 (분산 트랜잭션 회피):
+
+```
+[종래 문제]
+INSERT order → 성공
+kafka.publish(OrderPlaced) → 실패 (네트워크)
+→ DB 에 order 있지만 알림 없음 = inconsistent
+
+[Outbox 패턴]
+TRANSACTION:
+  INSERT order
+  INSERT outbox(event=OrderPlaced, status=pending)
+COMMIT
+
+[별도 worker]
+SELECT outbox WHERE status=pending
+  → Kafka publish
+  → UPDATE outbox SET status=sent
+```
+
+`@TransactionalEventListener(phase=AFTER_COMMIT)` 도 비슷한 효과 (단, 워커 인스턴스 죽으면 event 손실 → outbox 가 더 안전).
+
+## 함정과 베스트 프랙티스
+
+- **DB schema 변경은 항상 expand-contract**: single-step 은 무중단 X
+- **graceful shutdown + preStop sleep**: K8s 환경 필수
+- **readiness 와 liveness 분리**: 일시 문제로 재시작 폭주 회피
+- **session affinity 최소화**: blue-green / rolling 시 세션 분실 위험 → 외부 store (Redis)
+- **canary 자동 분석 + 자동 rollback**: 사람의 판단 늦음
+- **feature flag 정리**: release toggle 은 배포 후 즉시 제거 (코드 cruft 방지)
+- **API breaking change = 새 버전 endpoint**: 옛 endpoint 충분 기간 유지
+- **테스트 환경에서 무중단 시나리오 연습**: 진짜 배포 때 처음 보면 늦음
+- **rollback 도 무중단**: forward 만 가능하면 디자인 결함
+
+## 관련 위키
+
+- [[spring-boot-container-deployment]]
+- [[spring-boot-deployment]]
+- [[spring-boot-webserver-configuration]]
+- [[spring-boot-database-initialization]]
+- [[concurrency/stateless]]
+- [[concurrency/sticky-session]]
+- [[spring-kafka]]
+- [[spring-resilience4j]]
