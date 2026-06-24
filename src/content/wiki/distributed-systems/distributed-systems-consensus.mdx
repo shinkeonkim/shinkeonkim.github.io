@@ -1,0 +1,238 @@
+---
+title: "[Distributed Systems] Consensus: Raft, Paxos"
+aliases: ["Raft", "Paxos", "consensus algorithm", "leader election", "replicated log", "분산 합의", "합의 알고리즘"]
+tags: [distributed-systems, consensus, raft, paxos, leader-election]
+category: distributed-systems
+updated: 2026-06-24
+references:
+  - title: "Raft Paper (2014)"
+    url: "https://raft.github.io/raft.pdf"
+    note: "In Search of an Understandable Consensus Algorithm"
+  - title: "Paxos Made Simple (Lamport, 2001)"
+    url: "https://lamport.azurewebsites.net/pubs/paxos-simple.pdf"
+    note: "Leslie Lamport"
+  - title: "Raft Visualization"
+    url: "https://raft.github.io/"
+    note: "interactive demo"
+---
+
+## 정의
+
+**Consensus** (합의): **여러 노드가 같은 값에 동의** 하는 분산 알고리즘. CAP 의 C 보장의 기반.
+
+용도:
+- **Leader election**: 1개 leader 선출 (ZooKeeper, etcd, Consul)
+- **Replicated log**: 모든 노드가 같은 명령 순서로 적용 (DB replication, K8s etcd)
+- **Distributed lock**: 글로벌 락
+- **Configuration management**: cluster 설정
+
+대표 알고리즘:
+- **Paxos** (1989, Lamport): 이론적 정석, 이해 어려움
+- **Raft** (2014, Ongaro & Ousterhout): Paxos 의 이해 가능한 대안. 현재 대세
+- **PBFT, Byzantine fault tolerance**: 악의적 노드 가정 (blockchain)
+
+이 페이지는 Raft 중심 (가장 보편적).
+
+## Raft 의 3가지 역할
+
+```
+[Leader]   ─── 1명만 존재
+   └── 모든 write 받음, log replication 책임
+   
+[Follower] ─── 나머지 모두
+   └── leader 의 명령 받아 적용
+
+[Candidate] ─── 전이 상태 (선거 중)
+   └── leader 가 사라지면 follower 가 candidate 로 전환, 투표 요청
+```
+
+## Raft 의 핵심: term
+
+시간을 term (선거 회차) 으로 나눔:
+
+```
+term 1: Leader = A
+term 2: Leader = B  (A 죽음, B 선출)
+term 3: Leader = A  (B 죽음, A 복귀)
+```
+
+각 노드는 자신의 currentTerm 보유. **term 이 낮은 노드의 요청은 거부** (오래된 leader 격리).
+
+## Leader Election
+
+```
+follower 가 randomized timeout (150~300ms) 동안 leader heartbeat 못 받으면:
+  1. 자신을 candidate 로 전환
+  2. currentTerm++
+  3. 자기 자신에 투표
+  4. 다른 노드에 RequestVote RPC 전송
+  
+응답 시나리오:
+  - 과반수 (N/2 + 1) 표 받으면 → Leader 됨
+  - 다른 candidate 의 더 높은 term 보면 → follower 로 복귀
+  - 표 안 모이면 → 새 election (다른 timeout 후)
+```
+
+`randomized timeout` 이 split vote 회피의 핵심.
+
+## Log Replication
+
+```
+[Leader] receives "x = 5" from client
+   ↓
+1. Leader appends to its log:  [..., (term=3, x=5)]
+2. Leader sends AppendEntries RPC to all followers
+3. Each follower appends to its log + replies OK
+4. Once majority replied → Leader commits (apply to state machine)
+5. Leader notifies followers in next AppendEntries
+6. Followers apply committed entries to their state machine
+```
+
+핵심: **commit = majority 가 log 에 기록**. apply 는 그 후.
+
+### Log Matching Property
+
+```
+같은 index + 같은 term 의 entry = 같은 명령 (강력한 invariant)
+```
+
+따라서 leader 의 log 가 truth. follower 가 mismatch 면 leader 의 것으로 덮어쓰기.
+
+## Safety: 어떤 leader 가 선출되나?
+
+새 leader 는 **모든 committed entry 를 가진 노드** 만 가능.
+
+RequestVote 시 candidate 가 자신의 last log term, index 보냄. follower 는 **자기보다 stale 한 candidate 에게 투표 안 함** (rejects vote if candidate's log is less up-to-date).
+
+majority vote 보장 + commit 조건 = "어느 commit 된 entry 는 영구히 보존".
+
+## Membership Changes
+
+cluster 멤버 추가 / 제거는 위험 (두 majority 존재 시 split brain):
+
+```
+old: {A, B, C} → majority = 2
+new: {A, B, C, D, E} → majority = 3
+
+전환 중에 둘 다 자기를 majority 라고 주장 가능
+```
+
+Raft 의 해결:
+- **Joint consensus** (논문): old 와 new config 의 majority 모두 필요
+- **Single server changes** (실용): 한 번에 1명만 추가 / 제거
+
+## Snapshot + Log Compaction
+
+log 가 무한히 커지면 안 됨. 주기적으로 snapshot:
+
+```
+1. State machine 의 현재 상태를 disk 에 저장
+2. 그 시점 이전 log entry 삭제
+3. Snapshot 에 last included index, term 기록
+```
+
+복구 시 snapshot 적용 + 그 이후 log replay.
+
+## Raft 구현체
+
+| 시스템 | 사용처 |
+|---|---|
+| **etcd** | Kubernetes 의 control plane |
+| **Consul** | service discovery |
+| **CockroachDB** | distributed SQL |
+| **TiKV** | TiDB 의 storage |
+| **MongoDB (3.2+)** | replication |
+| **Hazelcast (4.0+)** | distributed cache |
+
+대부분 시스템이 직접 구현하거나 hashicorp/raft 라이브러리 사용.
+
+## Paxos 와의 비교
+
+| 항목 | Paxos | Raft |
+|---|---|---|
+| 발표 | 1989 | 2014 |
+| 이해도 | 매우 어려움 | 비교적 쉬움 |
+| Leader 개념 | 명시적 X (Multi-Paxos 추가) | 명시적 |
+| Log replication | 명시적 X | 명시적 |
+| 산업 채택 | Spanner, Chubby | etcd, Consul, ... |
+
+Raft 가 "이해 가능한 alternative" 를 목표로 설계. 안전성은 동등.
+
+### Paxos 의 단계
+
+1. **Prepare** (round): proposer 가 proposal number 보내 majority 의 promise 받음
+2. **Accept**: 가장 높은 proposal number 의 value 를 majority 에 보냄
+3. **Learn**: 결정된 값 전파
+
+Multi-Paxos: leader 가 prepare 한 번 + 여러 accept (Raft 의 leader 와 유사).
+
+## ZooKeeper 와 Zab
+
+ZooKeeper 의 합의 알고리즘 **Zab** (ZooKeeper Atomic Broadcast):
+
+- Paxos / Raft 와 유사하지만 **total order** 강제
+- Leader 가 모든 update 를 ordered broadcast
+- ZooKeeper 의 `zxid` (zookeeper transaction id) 가 순서 보장
+
+ZooKeeper 는 분산 락 / leader election 의 standard. ephemeral node + watch 가 강력.
+
+## CAP 와 합의의 관계
+
+합의 알고리즘 = CP (강한 일관성).
+
+분할 시 minority partition 의 노드들은:
+- leader 가 없음 → write 불가
+- 또는 old leader 였다면 commit 못 함 → 정지
+
+majority partition 만 진행. **가용성 손실 + 일관성 보장**.
+
+## 자주 보는 함정
+
+### 함정 1: split brain
+
+분할 후 양쪽이 각자 leader 선출 → 둘 다 update → 복구 후 충돌.
+
+Raft 의 term + majority 가 방어. minority 의 "leader" 는 다음 term 의 leader 로 인해 거부됨.
+
+### 함정 2: clock skew
+
+Lamport timestamp / Vector clock 같은 logical clock 사용. wall clock 의존 시 NTP drift 로 깨짐.
+
+Raft 는 wall clock 의존 안 함 (term 이 logical).
+
+### 함정 3: 2 노드 cluster 의 위험
+
+majority = 2/2. 1 노드 죽으면 cluster 정지. 3 노드가 최소.
+
+### 함정 4: 짝수 노드 cluster
+
+4 노드 cluster 의 majority = 3. 즉 3 노드 cluster 와 같은 fault tolerance (1 노드 fail). 그러나 메시지 비용 ↑. 홀수 권장.
+
+### 함정 5: cross-DC 합의의 latency
+
+majority 가 다른 DC 면 매 write 가 cross-DC latency. 보통 같은 region 에 3 노드. cross-region 은 별도 consensus (geo-replication).
+
+## 성능 trade-off
+
+- **3 node cluster**: 1 fail tolerance, 빠른 합의
+- **5 node cluster**: 2 fail tolerance, 약간 느림
+- **7+**: 거의 안 함 (메시지 비용 폭증)
+
+write throughput = 1 / RTT (대략). leader 가 majority 응답 기다림.
+
+## 함정과 베스트 프랙티스
+
+- **홀수 노드 (3, 5, 7)**: 짝수는 메시지 비용만 ↑
+- **majority 가 같은 region**: cross-DC 면 latency 폭주
+- **clock skew 무관**: 합의 자체엔 영향 X (logical clock)
+- **snapshot 주기적 + tunable**: log 무한 성장 방지
+- **client retry + idempotent**: leader 전환 중에도 안전
+- **monitoring**: leader election 빈도, log size, applied vs committed gap
+
+## 관련 위키
+
+- [[cap-theorem]]
+- [[distributed-systems-distributed-transaction]]
+- [[zero-downtime-deployment]]
+- [[concurrency/stateful]]
+- [[spring-cloud]]

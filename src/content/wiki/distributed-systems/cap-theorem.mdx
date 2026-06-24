@@ -1,0 +1,189 @@
+---
+title: "[Distributed Systems] CAP Theorem과 PACELC"
+aliases: ["CAP theorem", "PACELC", "Brewer's theorem", "consistency availability partition tolerance", "CAP 정리"]
+tags: [distributed-systems, cap, consistency, availability, partition]
+category: distributed-systems
+updated: 2026-06-24
+references:
+  - title: "Brewer's CAP Theorem (2000)"
+    url: "https://en.wikipedia.org/wiki/CAP_theorem"
+    note: "원조 개념"
+  - title: "Daniel Abadi: PACELC (2010)"
+    url: "https://dbmsmusings.blogspot.com/2010/04/problems-with-cap-and-yahoos-little.html"
+    note: "PACELC 확장"
+---
+
+## 정의
+
+**CAP Theorem** (Eric Brewer, 2000): 분산 시스템에서 **3가지 중 2개만 동시에 보장 가능**.
+
+- **C (Consistency)**: 모든 노드가 같은 시점에 같은 데이터 반환 (강한 일관성)
+- **A (Availability)**: 모든 요청이 응답 받음 (실패도 응답)
+- **P (Partition Tolerance)**: 네트워크 분할이 있어도 동작
+
+현실: **P 는 선택지 아님** (네트워크는 항상 깨질 수 있음). 따라서 실질적 선택은:
+- **CP**: 분할 시 일관성 우선 → 일부 노드 응답 안 함
+- **AP**: 분할 시 가용성 우선 → 일관성 일시 깨짐
+
+## CAP 의 한계와 PACELC
+
+CAP 는 "분할 시" 시나리오만 다룸. **정상 작동 시의 trade-off** 는?
+
+**PACELC** (Daniel Abadi, 2010):
+- **P** artition 시: **A** vailability vs **C** onsistency
+- **E** lse (정상): **L** atency vs **C** onsistency
+
+| 시스템 | PACELC | 해석 |
+|---|---|---|
+| MongoDB | PA / EC | 분할 시 A, 정상 시 C |
+| Cassandra | PA / EL | 분할 시 A, 정상 시 L (낮은 latency) |
+| HBase | PC / EC | 항상 C |
+| DynamoDB | PA / EL | 항상 가용성 / latency 우선 |
+| PostgreSQL | PC / EC | 단일 노드 강한 일관성 |
+
+PACELC 가 더 실제적: 정상 시간이 훨씬 길기 때문.
+
+## CP 시스템 예: HBase, MongoDB (default)
+
+```
+[Node A (Primary)] ←── network OK ──→ [Node B (Secondary)]
+                    ↓
+                replication
+                    ↓
+            consistent read
+
+[Node A] ←── network 분할 ──→ [Node B]
+   ↓ leader election 발동
+   write → A 만 받음
+   B 의 read → 실패 또는 stale 반환 거부
+```
+
+분할 시 minority partition 은 응답 거부 → **가용성 손실**, 일관성 보장.
+
+장점: 사용자가 항상 최신 데이터를 봄.
+단점: 일부 사용자가 아예 응답 못 받음.
+
+## AP 시스템 예: Cassandra, DynamoDB
+
+```
+[Node A] ←── 분할 ──→ [Node B]
+
+write A → A 의 view 만 업데이트
+write B → B 의 view 만 업데이트
+both nodes 응답 OK → 가용성 보존
+
+나중에 분할 복구:
+A 와 B 의 view 가 다름 → conflict resolution (LWW, vector clock 등)
+```
+
+장점: 사용자가 항상 응답 받음.
+단점: 일시적으로 다른 사용자가 다른 결과 봄 (eventual consistency).
+
+## Consistency Spectrum
+
+CAP 의 "C" 는 strong consistency. 실무는 더 세밀한 spectrum:
+
+```
+Strong consistency     ─── 가장 엄격
+   ↓
+Linearizability        (실시간 순서 보장)
+   ↓
+Sequential consistency
+   ↓
+Causal consistency     (인과 관계만 보장)
+   ↓
+Eventual consistency   ─── 가장 느슨
+```
+
+대부분 AP 시스템 = eventual. CP 시스템 = strong (or linearizable).
+
+### Tunable consistency (Cassandra 패턴)
+
+```
+CONSISTENCY LEVEL = ONE / QUORUM / ALL / EACH_QUORUM
+```
+
+- ONE: 1개 노드 응답이면 OK (빠르지만 stale 위험)
+- QUORUM: 과반수 (N/2 + 1)
+- ALL: 모든 replica 응답 (느리지만 가장 일관)
+
+write QUORUM + read QUORUM = strong consistency 보장 (N=3 면 2+2 = 4 > 3).
+
+## 실무 선택 기준
+
+### 금융 / 결제: CP
+
+```
+계좌 잔액은 절대 stale 안 됨
+→ HBase, PostgreSQL (single instance), Spanner
+→ 분할 시 거래 차단이 안전
+```
+
+### SNS / Feed: AP
+
+```
+타임라인이 일시적으로 다르게 보여도 됨
+→ Cassandra, DynamoDB
+→ 분할이라도 게시 / 조회 가능
+```
+
+### 검색 인덱스: AP (eventual)
+
+```
+검색 결과가 몇 초 지연돼도 OK
+→ Elasticsearch (near real-time)
+```
+
+### 메시지 큐: 두 모드
+
+- Kafka: AP (high throughput)
+- RabbitMQ: 모드별 선택 (mirror queue 는 CP)
+
+## CAP 의 흔한 오해
+
+### 오해 1: CA 시스템도 가능?
+
+NO. 분산 환경에서 P 는 선택지 아님 (네트워크는 항상 깨질 수 있음). "CA" 는 single-node 시스템 (MySQL standalone).
+
+### 오해 2: AP = 일관성 없음?
+
+NO. AP 는 eventual consistency 또는 weaker. 결국엔 수렴.
+
+### 오해 3: CAP 가 영구 선택?
+
+NO. 분할 발생 시점에만 trade-off. 정상 시간엔 PACELC 의 E (latency vs consistency).
+
+### 오해 4: P 는 datacenter 분할만?
+
+분할 = network 가 잠시라도 깨짐. 짧은 packet loss / latency spike 도 포함. 빈번히 발생.
+
+## consensus 와의 관계
+
+CAP 의 "C" 를 보장하려면 합의 (consensus) 필요. Raft, Paxos 같은 알고리즘이 분할 시 majority 만 진행:
+
+```
+5-node cluster
+└── 3-node majority (가능, 진행)
+└── 2-node minority (정지)
+```
+
+majority 가 사라지면 (3+ 노드 분할) cluster 전체 정지. [[distributed-systems-consensus]] 참고.
+
+## 함정과 베스트 프랙티스
+
+- **CAP 는 정상 시 trade-off 안 다룸**: PACELC 가 더 현실적
+- **P 는 항상**: CA 시스템은 single-node 에서만
+- **eventual consistency 도 정확한 정의**: 결국 수렴, 시간 보장 X
+- **Tunable consistency 활용**: Cassandra 의 QUORUM 패턴
+- **금융은 CP, SNS 는 AP**: 도메인 별 명확
+- **단순화하지 말 것**: 모든 read 가 strong 필요 X, 모든 write 가 eventual OK X
+- **monitoring**: stale read 비율, partition 빈도 추적
+
+## 관련 위키
+
+- [[distributed-systems-consensus]]
+- [[distributed-systems-distributed-transaction]]
+- [[concurrency/stateless]]
+- [[concurrency/stateful]]
+- [[spring-cloud]]
+- [[zero-downtime-deployment]]

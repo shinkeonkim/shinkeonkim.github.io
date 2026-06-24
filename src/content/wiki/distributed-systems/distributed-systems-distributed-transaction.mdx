@@ -1,0 +1,287 @@
+---
+title: "[Distributed Systems] 분산 트랜잭션: 2PC, Saga, Outbox"
+aliases: ["distributed transaction", "2PC", "two phase commit", "Saga pattern", "Outbox pattern", "XA transaction", "분산 트랜잭션"]
+tags: [distributed-systems, transaction, 2pc, saga, outbox, eventual-consistency]
+category: distributed-systems
+updated: 2026-06-24
+references:
+  - title: "Microservices.io: Saga Pattern"
+    url: "https://microservices.io/patterns/data/saga.html"
+    note: "Chris Richardson"
+  - title: "microservices.io: Transactional Outbox"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    note: "Outbox 패턴"
+---
+
+## 정의
+
+**분산 트랜잭션** 은 여러 service / DB / 메시지 큐에 걸친 작업을 ACID 처럼 묶는 문제. 마이크로서비스 / 이벤트 기반 아키텍처의 핵심 도전.
+
+3가지 접근:
+1. **2PC (Two-Phase Commit)**: 동기 ACID, 전통적, 거의 안 씀
+2. **Saga**: 비동기 compensating action, 마이크로서비스 표준
+3. **Outbox**: DB 트랜잭션 + 메시지 큐 일관성 보장 (Saga 의 보조)
+
+선택 기준: 시스템 복잡도, 일관성 요구, 가용성 trade-off.
+
+## 2PC (Two-Phase Commit)
+
+**1단계 (Prepare)**: coordinator → 모든 participant 에게 "준비 됐어?"
+**2단계 (Commit)**: 모두 OK 면 → "commit". 한 명이라도 NO 면 → "rollback"
+
+```
+       [Coordinator]
+            │
+   ┌────────┼────────┐
+   ↓        ↓        ↓
+ [DB A]   [DB B]   [DB C]
+
+Phase 1 (Prepare):
+   coordinator → "준비?"
+   each DB → write log, lock rows, "yes"
+
+Phase 2 (Commit):
+   coordinator → "commit"
+   each DB → commit, release lock, "done"
+```
+
+장점:
+- 강한 ACID 보장
+- 표준 (XA Transaction)
+- 동기적 - 결과 즉시
+
+단점:
+- **Blocking**: coordinator 죽으면 participant 가 락 잡은 채 영원히 대기
+- **Performance**: 매 트랜잭션 = 2 라운드 + N participant
+- **Single point of failure**: coordinator
+- **CP 시스템**: 가용성 손실
+
+JTA (Java Transaction API) + XA driver 가 구현. 대부분 modern 시스템은 회피.
+
+## Saga Pattern
+
+**전체 트랜잭션을 여러 local 트랜잭션의 chain** 으로:
+
+```
+T1 (서비스 A) → T2 (서비스 B) → T3 (서비스 C)
+                                ↓ 실패
+              C2 (B 보상) ← C3 (실패 처리)
+```
+
+각 step 이 commit 후 다음 발동. 실패 시 **compensating transaction** 으로 되돌리기.
+
+### 예: 주문 처리
+
+```
+Step 1: Order Service → 주문 생성 (status=pending)
+Step 2: Payment Service → 결제 시도
+   성공 → Step 3
+   실패 → Compensating: Order Service → 주문 취소
+
+Step 3: Inventory Service → 재고 차감
+   성공 → Step 4
+   실패 → Compensating: Payment Service → 환불 → Order Service → 취소
+
+Step 4: Shipping Service → 배송 시작
+   성공 → 완료
+   실패 → Compensating: 재고 복구, 환불, 주문 취소
+```
+
+각 service 가 자기 local 트랜잭션만 책임. cross-service 락 없음.
+
+### 두 가지 구현 방식
+
+**1. Choreography**: 각 service 가 이벤트 발행 + 구독
+
+```
+Order Service → "OrderCreated" 이벤트 → Kafka
+Payment Service ← "OrderCreated" 구독 → 결제 시도 → "PaymentCompleted" 발행
+Inventory Service ← "PaymentCompleted" 구독 → ...
+```
+
+장점: 분산, 결합도 낮음.
+단점: 흐름 추적 어려움, 디버깅 복잡.
+
+**2. Orchestration**: 중앙 orchestrator 가 흐름 제어
+
+```
+Saga Orchestrator
+  ├── Order Service: 생성
+  ├── Payment Service: 결제 (실패 시 → 이전 단계 보상)
+  ├── Inventory Service: 차감
+  └── Shipping Service: 시작
+```
+
+장점: 흐름 명시적, 디버깅 쉬움.
+단점: orchestrator 가 단일 장애점, 복잡한 로직.
+
+도구: AWS Step Functions, Camunda, Temporal, Conductor.
+
+### Saga 의 제약
+
+- **Isolation 없음**: 진행 중인 saga 의 중간 상태가 다른 트랜잭션에 보임 → "dirty read" 가능
+- **Eventually consistent**: 보상 완료까지 일시 비일관
+- **Compensating transaction 설계 어려움**: idempotent + 영구 부수효과 없어야 (이메일 발송 후 보상 어려움)
+
+대응 패턴:
+- **Semantic lock**: 진행 중 자원에 flag 표시 (e.g., `order.status=processing`)
+- **Commutative updates**: 순서 무관하게 결과 동일하도록
+- **Pessimistic view**: 보수적 처리 (e.g., 미리 예약 → 확정)
+
+## Outbox Pattern
+
+**DB 트랜잭션 + 메시지 큐 발행** 의 atomicity 보장:
+
+```
+[전통 문제]
+INSERT order INTO orders ─ DB transaction ─ OK
+kafka.publish(OrderPlaced) ─ network call ─ 실패
+→ DB 에 order 있지만 알림 X (inconsistent)
+
+또는 반대로:
+kafka.publish(OrderPlaced) ─ 성공
+INSERT order ─ rollback
+→ 알림 갔지만 DB 에 order 없음 (worse!)
+```
+
+**Outbox 패턴**:
+
+```
+[같은 DB 트랜잭션 안]
+BEGIN
+  INSERT INTO orders (...);
+  INSERT INTO outbox (event_type, payload, status='pending');
+COMMIT
+
+[별도 worker]
+SELECT * FROM outbox WHERE status='pending'
+  → Kafka publish
+  → UPDATE outbox SET status='sent'
+```
+
+장점:
+- DB 트랜잭션 = 단일 commit (atomic)
+- Worker 가 죽어도 row 가 outbox 에 살아 있어 재시도
+- at-least-once delivery (idempotent consumer 필요)
+
+도구:
+- **Debezium**: outbox 테이블의 CDC (Change Data Capture)
+- **Spring Modulith Events**: Spring 통합
+- **직접 구현**: 간단한 polling worker
+
+### Spring Boot 의 outbox 예
+
+```java
+@Service
+@Transactional
+public class OrderService {
+    private final OrderRepository orderRepo;
+    private final OutboxRepository outboxRepo;
+    private final ObjectMapper objectMapper;
+
+    public Order place(Cart cart) {
+        Order order = orderRepo.save(new Order(cart));
+
+        OutboxEvent event = new OutboxEvent();
+        event.setAggregateType("Order");
+        event.setAggregateId(order.getId().toString());
+        event.setEventType("OrderPlaced");
+        event.setPayload(objectMapper.writeValueAsString(toEvent(order)));
+        event.setStatus("pending");
+        outboxRepo.save(event);
+
+        return order;
+    }
+}
+
+@Component
+public class OutboxRelay {
+    private final OutboxRepository outboxRepo;
+    private final KafkaTemplate<String, String> kafka;
+
+    @Scheduled(fixedDelay = 1000)
+    public void relay() {
+        List<OutboxEvent> events = outboxRepo.findTop100ByStatusOrderById("pending");
+        for (OutboxEvent e : events) {
+            kafka.send("orders", e.getAggregateId(), e.getPayload());
+            e.setStatus("sent");
+            outboxRepo.save(e);
+        }
+    }
+}
+```
+
+`@TransactionalEventListener(AFTER_COMMIT)` 도 비슷한 효과 ([[spring-events]]) 지만 worker 인스턴스 죽으면 event 손실 → outbox 가 더 안전.
+
+## Outbox vs 2PC vs Saga 정리
+
+| 항목 | 2PC | Saga | Outbox |
+|---|---|---|---|
+| 일관성 | Strong | Eventual | Eventual |
+| Blocking | Yes (락) | No | No |
+| Compensating 필요 | No | Yes | (개별 step 에 따름) |
+| 운영 복잡도 | 높음 | 중간 | 낮음 |
+| 가용성 | 낮음 (CP) | 높음 (AP) | 높음 |
+| 사용처 | legacy (XA) | 마이크로서비스 표준 | DB + MQ 양립 |
+
+대부분 modern: **Saga + Outbox 조합**. 2PC 회피.
+
+## Idempotency
+
+분산 시스템의 모든 작업은 **idempotent**:
+- 재시도해도 결과 같음
+- 중복 메시지 처리해도 OK
+- network 재시도 안전
+
+구현 패턴:
+- **Idempotency key**: 클라이언트가 unique key 동봉 → 서버가 처음 보면 처리, 두 번째 보면 캐시 결과 반환
+- **Conditional update**: `WHERE status='pending'` → 이미 처리된 row 는 변경 안 됨
+- **Distributed lock + check**: race 회피
+
+## 자주 보는 함정
+
+### 함정 1: 보상 트랜잭션의 부수효과
+
+"이메일 발송" 같은 영구 부수효과는 보상 불가. 패턴:
+- 외부 호출은 saga 의 마지막 단계로
+- 또는 confirmation 단계 분리 (`PaymentPending` → `PaymentConfirmed`)
+
+### 함정 2: at-least-once delivery 의 중복
+
+Kafka / SQS 는 at-least-once. consumer 는 idempotent 처리 필수. Outbox 자체도 publish 후 status update 사이 crash 시 중복 가능.
+
+### 함정 3: outbox 의 throughput 한계
+
+polling worker 가 단일 인스턴스면 bottleneck. 해결:
+- partition 별 worker
+- Debezium 같은 CDC tool 활용
+
+### 함정 4: Saga 의 부분 실패 디버깅
+
+choreography 면 흐름 추적 어려움. distributed tracing (OpenTelemetry) + correlation ID 필수.
+
+### 함정 5: Two-Generals 문제
+
+DB commit + 메시지 큐 publish 의 atomicity 는 본질적으로 불가 (network 위에선). Outbox 가 best-effort.
+
+## 함정과 베스트 프랙티스
+
+- **2PC 회피**: 모든 modern 시스템
+- **Saga + Orchestration**: 흐름 추적 / 디버깅 우선이면
+- **Outbox 가 DB+MQ 일관성의 표준**
+- **모든 작업 idempotent**: idempotency key + conditional update
+- **distributed tracing 필수**: traceId + spanId
+- **compensating action 설계가 핵심**: 영구 부수효과는 마지막에
+- **eventual consistency 명시적 안내**: UX 에 반영
+- **Outbox 의 worker scaling**: 단일 worker 가 bottleneck
+
+## 관련 위키
+
+- [[cap-theorem]]
+- [[distributed-systems-consensus]]
+- [[spring-events]]
+- [[spring-kafka]]
+- [[spring-amqp-rabbitmq]]
+- [[spring-transaction]]
+- [[zero-downtime-deployment]]
+- [[concurrency/pubsub-bus]]
