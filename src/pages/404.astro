@@ -49,6 +49,20 @@ const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
       </div>
     </div>
 
+    <section
+      id="suggest-section"
+      class="mt-8 hidden rounded-md border border-border bg-surface-elevated p-4"
+    >
+      <h2 class="mb-2 text-base font-semibold">
+        혹시 이 페이지를 찾으셨나요?
+      </h2>
+      <p class="mb-3 text-xs text-fg-muted">
+        URL의 단어로 검색한 결과입니다.
+        <span id="suggest-query" class="font-mono"></span>
+      </p>
+      <ul id="suggest-list" class="space-y-2 text-sm"></ul>
+    </section>
+
     {
       recent.length > 0 && (
         <section class="mt-10">
@@ -80,3 +94,64 @@ const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
     }
   </section>
 </BaseLayout>
+
+<script>
+  function extractQueryFromPath(): string {
+    const path = window.location.pathname;
+    const segments = path.split('/').filter(Boolean);
+    const last = segments[segments.length - 1] ?? '';
+    // Decode and turn separators into spaces so 'sql-join' becomes 'sql join'.
+    return decodeURIComponent(last)
+      .replace(/[-_+]/g, ' ')
+      .replace(/\.html?$/, '')
+      .trim();
+  }
+
+  async function runSuggest() {
+    const query = extractQueryFromPath();
+    if (!query || query.length < 2) return;
+    const section = document.getElementById('suggest-section');
+    const queryEl = document.getElementById('suggest-query');
+    const list = document.getElementById('suggest-list');
+    if (!section || !queryEl || !list) return;
+    queryEl.textContent = `"${query}"`;
+    try {
+      const pagefindUrl = '/pagefind/pagefind.js';
+      const mod = (await import(/* @vite-ignore */ pagefindUrl)) as {
+        search: (q: string) => Promise<{ results: { data: () => Promise<unknown> }[] }>;
+        options: (o: object) => Promise<void>;
+        init: () => Promise<void>;
+      };
+      await mod.options({});
+      await mod.init();
+      const result = await mod.search(query);
+      if (!result || result.results.length === 0) return;
+      const hits = (await Promise.all(
+        result.results.slice(0, 5).map((r) => r.data()),
+      )) as { url: string; meta?: { title?: string }; excerpt?: string; filters?: { section?: string | string[]; category?: string | string[] } }[];
+      const pickFirst = (v: string | string[] | undefined) =>
+        Array.isArray(v) ? v[0] : (v ?? '');
+      const SECTION_LABELS: Record<string, string> = { posts: '글', notes: '노트', wiki: '위키' };
+      list.innerHTML = hits
+        .map((h) => {
+          const section = pickFirst(h.filters?.section);
+          const category = pickFirst(h.filters?.category);
+          const badge = SECTION_LABELS[section] ?? section;
+          const title = h.meta?.title ?? h.url;
+          const path = category ? ` <span class="text-xs text-fg-muted">${section} / ${category}</span>` : '';
+          return `<li><a href="${h.url}" class="block no-underline hover:text-accent">
+            ${badge ? `<span class="mr-1 inline-block rounded-sm border border-border px-1 text-xs">${badge}</span>` : ''}
+            <span class="font-medium">${title}</span>
+            ${path}
+          </a></li>`;
+        })
+        .join('');
+      section.classList.remove('hidden');
+    } catch {
+      /* pagefind unavailable in dev; silently skip */
+    }
+  }
+
+  if (document.readyState !== 'loading') runSuggest();
+  else document.addEventListener('DOMContentLoaded', runSuggest);
+</script>
