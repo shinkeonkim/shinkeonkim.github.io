@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { renderOgPng, type OgImageProps } from '@/shared/lib/seo/og-image';
 import { getPublishedPosts, getPublishedWiki } from '@/shared/lib/content/content-queries';
+import { getWikiTaxonomy } from '@/shared/lib/content/taxonomy';
 import { SITE_TITLE, SITE_DESCRIPTION } from '@/shared/config';
 
 interface SerializedProps {
@@ -13,7 +14,11 @@ interface SerializedProps {
 }
 
 export async function getStaticPaths() {
-  const [posts, wiki] = await Promise.all([getPublishedPosts(), getPublishedWiki()]);
+  const [posts, wiki, wikiTaxonomy] = await Promise.all([
+    getPublishedPosts(),
+    getPublishedWiki(),
+    getWikiTaxonomy(),
+  ]);
 
   const paths: { params: { slug: string }; props: SerializedProps }[] = [];
 
@@ -43,6 +48,27 @@ export async function getStaticPaths() {
       },
     });
   }
+
+  for (const [cat, items] of wikiTaxonomy.categories) {
+    paths.push({
+      params: { slug: `wiki/category/${cat}` },
+      props: {
+        title: `${cat} 위키`,
+        description: `${items.length}개의 위키 페이지`,
+        category: cat,
+        kind: 'site',
+      },
+    });
+  }
+
+  paths.push({
+    params: { slug: 'wiki/categories' },
+    props: {
+      title: '위키 카테고리',
+      description: `${wikiTaxonomy.categories.size}개 카테고리`,
+      kind: 'site',
+    },
+  });
 
   paths.push({
     params: { slug: 'site' },
