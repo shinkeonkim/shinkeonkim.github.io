@@ -1,0 +1,122 @@
+---
+title: "[AWS] ECS + Fargate: 컨테이너 오케스트레이션"
+aliases: ["ECS", "Amazon ECS", "Fargate", "Task Definition", "Service", "Cluster", "ECS Anywhere"]
+tags: [aws, ecs, fargate, container, cloud]
+category: cloud
+updated: 2026-06-25
+references:
+  - title: "Amazon ECS"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html"
+---
+
+## 정의
+
+**ECS (Elastic Container Service)** = AWS 의 *컨테이너 오케스트레이션*. K8s 보다 단순. **Fargate** = ECS / EKS 의 *서버리스 실행 환경* (EC2 관리 없음).
+
+## ECS 구조
+
+```mermaid
+flowchart TB
+    Cluster[Cluster] --> Service1[Service A]
+    Cluster --> Service2[Service B]
+    Service1 --> Task1[Task<br/>(컨테이너 묶음)]
+    Service1 --> Task2[Task]
+    Task1 --> Cont1[Container 1]
+    Task1 --> Cont2[Container 2]
+```
+
+| 객체 | 의미 |
+|---|---|
+| **Cluster** | 논리 그룹 |
+| **Task Definition** | YAML 같은 spec (K8s Pod 비슷) |
+| **Task** | 실행된 인스턴스 |
+| **Service** | desired count, LB 통합 (K8s Deployment 비슷) |
+
+## Task Definition
+
+```json
+{
+  "family": "web",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [
+    {
+      "name": "nginx",
+      "image": "nginx:1.27",
+      "portMappings": [{ "containerPort": 80 }],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/web",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+```
+
+## Launch Types
+
+| | EC2 | Fargate |
+|---|---|---|
+| 노드 관리 | *사용자* | *AWS* |
+| 가격 | EC2 시간 | Task 의 CPU/Memory 시간 |
+| 시작 속도 | 빠름 (예약 EC2) | 약간 느림 |
+| GPU | 가능 | 일부 |
+| 호스트 권한 | 가능 | 제한 |
+| Spot | 가능 | Fargate Spot |
+| 비용 | 일반적으로 *저렴* (밀도) | 운영 비용 *0* |
+
+> [!TIP]
+> *작은 팀 / 가변 워크로드* = Fargate. *큰 규모 / 비용 최적화* = EC2.
+
+## Service (Deployment 비슷)
+
+```yaml
+service:
+  cluster: prod
+  taskDefinition: web:42
+  desiredCount: 3
+  deploymentConfiguration:
+    minimumHealthyPercent: 100
+    maximumPercent: 200
+  loadBalancers:
+    - targetGroupArn: arn:aws:elasticloadbalancing:...
+      containerName: nginx
+      containerPort: 80
+```
+
+## ECS vs EKS
+
+| 항목 | ECS | EKS |
+|---|---|---|
+| 학습 곡선 | *낮음* | 높음 |
+| 표준 | AWS 전용 | *K8s 표준 (이식성)* |
+| 운영 | 단순 | 복잡 |
+| 가격 | cluster 무료 | $0.10/h per cluster |
+| ecosystem | 작음 | *방대* |
+| 적합 | AWS lock-in OK, 빠른 시작 | 멀티 클라우드 / 큰 규모 |
+
+## ECS Anywhere
+
+자체 데이터센터 / edge 의 *외부 머신을 ECS 에서 관리*. *온프레미스 + 클라우드 통합*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Fargate Spot 의 중단** = stateless 만. *batch* 에 권장.
+> 2. **awsvpc network mode 의 *ENI 한도*** = EC2 instance type 별 *최대 ENI 수*. 한 노드에 *수십 task* 가능한지 확인.
+> 3. **CloudWatch Logs 비용** = 모든 컨테이너 로그가 CW Logs 로. *fluent-bit + S3* 으로 비용 절감.
+> 4. **Service Auto Scaling** = *target tracking* 기본. step / scheduled 도 가능.
+
+## 관련 위키
+
+- [[k8s-deployment]] (대조)
+- [[docker]]
+- [[aws-ec2]]
+- [[aws-eks]]
+- [[aws-alb-nlb]]

@@ -1,0 +1,126 @@
+---
+title: "[AWS] Route 53: DNS, routing policies, health checks"
+aliases: ["Route 53", "Route53", "DNS", "weighted routing", "latency routing", "failover routing", "geolocation"]
+tags: [aws, route53, dns, network, cloud]
+category: cloud
+updated: 2026-06-25
+references:
+  - title: "Route 53 Developer Guide"
+    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html"
+---
+
+## 정의
+
+**Route 53** = AWS 의 *글로벌 DNS + health check + 라우팅 정책*. 단순 DNS 뿐 아니라 *글로벌 트래픽 분산*.
+
+## Hosted Zone
+
+```
+Hosted Zone: example.com
+└── Record:
+    A      api.example.com   →  192.0.2.1
+    CNAME  www.example.com   →  example.com
+    MX     example.com       →  mail.example.com
+    TXT    _verification     →  "google-site-verification=..."
+```
+
+## Alias Record (AWS 전용)
+
+```
+A alias api.example.com → AWS Load Balancer (xx.amazonaws.com)
+```
+
+CNAME 보다:
+
+- *root domain 가능* (CNAME 은 root 불가)
+- *무료 query*
+- *IP 자동 갱신*
+
+## 라우팅 정책 7가지
+
+```mermaid
+flowchart TB
+    Q[Routing Policy]
+    Q --> Simple[Simple]
+    Q --> Weighted[Weighted<br/>10% canary]
+    Q --> Latency[Latency<br/>가장 빠른 region]
+    Q --> Failover[Failover<br/>primary + secondary]
+    Q --> Geo[Geolocation<br/>국가별]
+    Q --> GeoProx[Geoproximity<br/>바이어스 적용]
+    Q --> MV[Multi-Value Answer<br/>여러 IP 반환]
+```
+
+### Weighted (Canary)
+
+```
+api.example.com (200)
+  → 10% → 신 ALB
+  → 90% → 옛 ALB
+```
+
+### Latency-Based
+
+```mermaid
+flowchart LR
+    Client[Asia 사용자] -->|DNS query| R53[Route 53]
+    R53 -->|measure latency| Asian[Asia ALB]
+    R53 -->|measure| US[US ALB]
+    R53 -->|measure| EU[EU ALB]
+    R53 -->|가장 빠른 = Asia| Client
+    Client --> Asian
+```
+
+### Failover
+
+```
+primary: api-prod.example.com (health check)
+secondary: api-dr.example.com (health check)
+```
+
+primary unhealthy → secondary 자동 응답.
+
+## Health Check
+
+```yaml
+HealthCheck:
+  Type: HTTPS
+  ResourcePath: /health
+  FullyQualifiedDomainName: api.example.com
+  RequestInterval: 30
+  FailureThreshold: 3
+  Regions: [us-east-1, us-west-2, ap-northeast-1]  # 다중 region 동시 체크
+```
+
+3개 region 의 *과반* 이상 unhealthy → unhealthy 판정.
+
+## DNSSEC
+
+```bash
+aws route53 enable-hosted-zone-dnssec --hosted-zone-id Z0123
+```
+
+DNS 응답에 *디지털 서명* → DNS 위조 (cache poisoning) 방어.
+
+## Private Hosted Zone
+
+```
+domain: internal.local
+visibility: VPC associated
+```
+
+VPC 안에서만 resolve. 내부 service 명명에 활용.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **TTL 너무 큼** = failover 시 *옛 IP 캐시* → 다운타임 길음. 일반 60s.
+> 2. **CNAME root domain 시도** = 거절. *Alias* 또는 *redirect (CloudFront)*.
+> 3. **Health check 의 IP-only** = TLS 검증 안 됨. HTTPS health check 권장.
+> 4. **다중 region failover 의 *RTO*** = TTL + health check interval. 분 단위 가능.
+
+## 관련 위키
+
+- [[network-dns]]
+- [[aws-alb-nlb]]
+- [[aws-cloudfront-cdn]]
+- [[aws-vpc]]

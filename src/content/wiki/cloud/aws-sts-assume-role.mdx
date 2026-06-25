@@ -1,0 +1,131 @@
+---
+title: "[AWS] STS / AssumeRole: 임시 자격, cross-account"
+aliases: ["STS", "AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML", "external ID", "cross-account"]
+tags: [aws, sts, assume-role, iam, cloud]
+category: cloud
+updated: 2026-06-25
+references:
+  - title: "AWS STS"
+    url: "https://docs.aws.amazon.com/STS/latest/APIReference/welcome.html"
+---
+
+## 정의
+
+**STS (Security Token Service)** = *임시 자격 증명 발급*. *short-lived (15분-12시간) credentials*.
+
+## 5가지 API
+
+| API | 사용 |
+|---|---|
+| `AssumeRole` | IAM role assume |
+| `AssumeRoleWithWebIdentity` | OIDC (EKS IRSA, GitHub OIDC) |
+| `AssumeRoleWithSAML` | SAML SSO |
+| `GetSessionToken` | MFA token |
+| `GetCallerIdentity` | 누구인지 |
+
+## AssumeRole 흐름
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User
+    participant STS
+    participant TargetRole
+    participant S3
+
+    User->>STS: AssumeRole(arn:role/admin)
+    Note over STS: 신뢰 관계 + 권한 확인
+    STS-->>User: { AccessKeyId, SecretAccessKey, SessionToken, Expiration }
+    User->>S3: GET object (임시 credentials)
+    S3-->>User: object
+    Note over User: 1시간 후 만료
+    User->>STS: AssumeRole 다시
+```
+
+## Cross-Account AssumeRole
+
+```mermaid
+flowchart LR
+    Acct1["Account 1<br/>(User alice)"] -->|AssumeRole| Acct2Role["Account 2<br/>Role: data-reader"]
+    Acct2Role -->|trust policy| Trust["Principal: arn:aws:iam::1:user/alice"]
+    Acct2Role -->|permission| S3["S3 in Account 2"]
+```
+
+### Trust Policy (Account 2 role)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::ACCOUNT-1:root" },
+    "Action": "sts:AssumeRole",
+    "Condition": {
+      "StringEquals": { "sts:ExternalId": "shared-secret-string" }
+    }
+  }]
+}
+```
+
+> [!IMPORTANT]
+> *External ID* 가 *confused deputy 공격* 방어. SaaS 가 우리 계정 접근 시 *반드시*.
+
+## Web Identity (OIDC) - GitHub Actions
+
+```yaml
+permissions:
+  id-token: write
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: arn:aws:iam::123:role/github-actions
+      aws-region: us-east-1
+```
+
+GitHub 의 OIDC token → AWS role assume. *long-term access key 없이*.
+
+```mermaid
+sequenceDiagram
+    GH[GitHub Actions] ->>OIDC: token 발급 (jwt)
+    GH->>STS: AssumeRoleWithWebIdentity(token)
+    STS->>AWS_OIDC: token 검증 (jwks)
+    AWS_OIDC-->>STS: OK
+    STS-->>GH: temporary credentials
+    GH->>AWS: API 호출
+```
+
+## EKS IRSA (위와 동일)
+
+자세한 건 [[aws-eks]] 의 IRSA 절.
+
+## Session Tags
+
+```bash
+aws sts assume-role \
+  --role-arn arn:role/x \
+  --role-session-name session \
+  --tags Key=Team,Value=backend
+```
+
+```json
+"Condition": {
+  "StringEquals": { "aws:PrincipalTag/Team": "backend" }
+}
+```
+
+> 같은 role 의 *세션마다 다른 tag* → *세분화 권한*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **External ID 누락** = 3rd party 신뢰 약함.
+> 2. **장기 access key 와 혼용** = role 의 의미 깨짐.
+> 3. **세션 만료 갱신 안 함** = 1시간 후 API 호출 실패. SDK 의 *자동 refresh* 확인.
+> 4. **trust policy 의 *너무 넓은 Principal*** = 모든 user 가 assume.
+
+## 관련 위키
+
+- [[aws-iam]]
+- [[OAuth2]]
+- [[github-actions]]
+- [[aws-eks]]
