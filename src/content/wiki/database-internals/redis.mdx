@@ -1,0 +1,415 @@
+---
+title: "[DB Internals] Redis 8 / Valkey 9: 라이센스 분기, 신 데이터 구조, 실전 운영"
+aliases:
+  - "Redis"
+  - "Redis 8"
+  - "Redis Stack"
+  - "Valkey"
+  - "Valkey 9"
+  - "antirez"
+  - "vector set"
+  - "RediSearch"
+  - "RedisJSON"
+  - "RedisTimeSeries"
+  - "Redlock"
+  - "Sidekiq Redis"
+  - "Sentinel"
+  - "Redis Cluster"
+  - "AOF"
+  - "RDB"
+  - "AGPLv3"
+  - "SSPL"
+  - "RSALv2"
+tags: [database, redis, valkey, cache, queue, vector-search, key-value, in-memory]
+category: database-internals
+updated: 2026-06-25
+references:
+  - id: redis-docs
+    note: "AGPL 추가, Redis Stack 코어 통합, vector sets 도입, antirez 복귀."
+  - id: redis-docs
+    note: "BSD → RSALv2 / SSPLv1 전환 공지."
+  - title: "antirez: I returned to Redis (2024-11)"
+    url: "https://antirez.com/news/144"
+    note: "Salvatore Sanfilippo 복귀 글."
+  - title: "Introducing Valkey (Linux Foundation, 2024-03)"
+    url: "https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community"
+    note: "Redis 7.2.4 기반 BSD-3 fork 발표."
+  - id: valkey-docs
+    note: "Atomic Slot Migration, Hash Field Expiration, Numbered Databases."
+  - id: valkey-docs
+    note: "보안 / 성능 / 관측성."
+  - title: "Redis Software 8.0.2-17 Release Notes (2025-10)"
+    url: "https://github.com/redis/docs/blob/main/content/operate/rs/release-notes/rs-8-0-releases/rs-8-0-2-17.md"
+    note: "8.0 / 8.2 feature set 정리."
+  - id: redis-docs
+    note: "develop/interact/search-and-query/advanced-concepts/vectors"
+  - title: "DragonflyDB"
+    url: "https://www.dragonflydb.io/"
+    note: "Redis 호환 25x throughput claim, BSL 라이센스 (모던 대안)."
+  - title: "Martin Kleppmann: How to do distributed locking"
+    url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+    note: "Redlock 의 안전성 논쟁."
+  - id: redis-docs
+    note: "redis.io"
+  - id: valkey-docs
+    note: "valkey.io"
+  - id: redis-docs
+    note: "Redis adopts dual licensing (2024-03)"
+  - id: redis-docs
+    note: "Redis + AGPL (2025-05)"
+  - title: "antirez.com/news/144"
+    url: "https://antirez.com/news/144"
+  - id: valkey-docs
+    note: "Introducing Valkey 9"
+  - id: valkey-docs
+    note: "Valkey 9.1"
+  - title: "Kleppmann"
+    url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+  - title: "antirez 반박"
+    url: "http://antirez.com/news/101"
+---
+
+## 정의
+
+**Redis** 는 *in-memory key-value 데이터 구조 서버*. 2009년 [Salvatore Sanfilippo (antirez)](https://github.com/antirez) 가 [Lua Manuscripts](https://github.com/redis/redis/commit/ed9b544e10c731b32a0876d56b9215f0c89f7a73) 의 한 줄에서 시작해 *서비스 인프라의 표준 부품* 이 되었다.
+
+2026-06 시점의 풍경은 *2년 전과 완전히 다르다*:
+
+- **라이센스 분기**: 2024-03 의 BSD 종료 이후 [Valkey](https://valkey.io) 라는 *Linux Foundation 산하 BSD fork* 가 본격 자리잡았다.
+- **antirez 복귀**: 2024-11 에 antirez 가 Redis 사로 돌아오고, 2025-05 의 *Redis 8* 에서 *AGPLv3 옵션 추가* + 새 데이터 구조 *vector set* 를 직접 만들어 발표.
+- **Stack 통합**: RediSearch, RedisJSON, RedisTimeSeries, Bloom, CMS, TopK 가 *Redis 8 코어* 로 들어왔다.
+- **Vector DB 로서의 부상**: LLM semantic cache, conversation memory, agent memory 의 *de facto* 저장소.
+
+이 페이지는 *2026-06 시점의 운영자/도입자 시점* 에서 Redis / Valkey 양쪽의 동향과 *실전 결정점* 을 정리한다.
+
+## 라이센스 분기 타임라인
+
+| 시점 | 이벤트 |
+|---|---|
+| 2009 | antirez 가 Redis 0.x 공개. BSD-3 |
+| 2018-2019 | Redis Labs (이후 Redis Inc.) 가 *모듈 (RediSearch, RedisJSON 등)* 에 RSAL/Commons Clause 적용 |
+| 2024-03-20 | **Redis 7.4** 부터 *core* 까지 [RSALv2 + SSPLv1 dual](https://redis.io/blog/redis-adopts-dual-source-available-licensing/). BSD 종료 |
+| 2024-03-28 | **Linux Foundation 이 [Valkey](https://valkey.io) fork 발표**. Redis 7.2.4 기반 BSD-3. AWS / Google / Oracle / Snap / Ericsson 등 참여 |
+| 2024-04-16 | Valkey 7.2.5 GA (BSD-3, 첫 안정 fork 릴리즈) |
+| 2024-09-16 | Valkey 8.0 GA |
+| 2024-11 | **[antirez 가 Redis 로 복귀](https://antirez.com/news/144)** (developer evangelist). 커뮤니티 신호 큼 |
+| 2025-04-02 | Valkey 8.1 (new hash table, 50M ZSet 처리) |
+| 2025-05-01 | **[Redis 8 + AGPLv3 옵션 추가](https://redis.io/blog/agplv3/)**. Redis Stack 코어 통합. vector set 첫 공개 |
+| 2025-10-21 | Valkey 9.0 (atomic slot migration, hash field expiration, numbered databases) |
+| 2026-05-19 | Valkey 9.1 (보안 / 성능 / 관측성) |
+
+### 핵심 의미
+
+- **Redis** 는 *AGPLv3 (OSI 승인) / RSALv2 / SSPLv1* 의 *triple license*. 사용자는 *AGPLv3 옵션* 으로 *진짜 OSS* 로 쓸 수 있다.
+- **Valkey** 는 *BSD-3*. 라이센스 제약이 가장 가볍다. AWS / Google / Oracle 의 *managed 서비스* 가 대부분 Valkey 기반.
+- *API 호환* 은 *대체로* 유지된다. 2026-06 시점 두 줄기 모두 *RESP3 호환*. 다만 *신 데이터 구조 (vector set, Array, RediSearch SVS-VAMANA)* 는 *각자 자기 동네에서 먼저* 나온다.
+
+> 도입 결정: *managed* 면 클라우드 벤더가 미는 *Valkey* 를 우선 검토. *Stack 기능 (search, JSON, time-series)* 을 *통째로* 쓰려면 *Redis 8*. 직접 호스팅하면 *AGPL 의 obligation* 을 평가.
+
+## Redis 8 시리즈 (2025-05 ~ )
+
+### Redis 8.0 (2025-05)
+
+- **Vector set 데이터 구조 (preview)**: *antirez 가 직접 작성*. HNSW 인덱싱 + 도메인 임베딩 친화 API.
+- **Stack 통합**: `RediSearch`, `RedisJSON`, `RedisTimeSeries`, `RedisBloom`, `Cuckoo`, `Count-Min Sketch`, `TopK` 가 *core 안* 으로. 더 이상 *modules 묶음* 을 별도 배포할 필요가 없다.
+- **새 hash 명령어**: `HGETEX`, `HSETEX`, `HGETDEL` (세션 / 캐시 패턴에서 *atomic + ttl*).
+- **성능**: 일부 명령어 *최대 87% latency 단축*, replica 메모리 *35% 절감*, *2x throughput*.
+- **확장 ACL**: 새 데이터 구조에 맞춘 권한 모델.
+
+### Redis 8.2
+
+- **Streams**: `XDELEX` / `XACKDEL` (라이프사이클 명령). consumer group 관리가 *세분화*.
+- **BITOP** 새 연산자 (복잡한 bitmap 워크플로).
+- **RediSearch**: `SVS-VAMANA` *벡터 인덱스 타입*, `SHARD_K_RATIO` (KNN 샤드 후보 조절).
+- **Keyspace notifications**: 새 event type 으로 *데이터 변경 추적* 강화.
+
+### Redis 8.4
+
+- **Strings**: *atomic compare-and-set*.
+- **Streams**: *idle entry claiming*.
+- **Search**: *hybrid search* (벡터 + 텍스트 + 태그를 한 쿼리에서).
+- **SIMD 최적화**, **JSON 처리 개선**.
+
+### Redis 8.6 → 8.8
+
+- *새 데이터 구조* **`Array`** (antirez 직접). *append-mostly + index access* 워크로드 타겟.
+- **`INCREX`**: *INCR + 윈도우 카운터 + bounds + expiration* 통합 *rate limiter*. 한 줄로 토큰 버킷 비슷한 패턴 구현 가능.
+- **`XNACK`**: streams 에서 *consumer 가 명시적으로 메시지를 release*.
+- **`ZUNION` / `ZINTER` / `ZUNIONSTORE` / `ZINTERSTORE`**: 새 `COUNT` aggregator.
+- **`JSON.SET`**: 새 `FPHA` argument (homogeneous FP array).
+- **`TS.RANGE` / `TS.MRANGE`**: 한 명령에서 *multiple aggregators*.
+- **`FT.HYBRID`**: 새 `KNN` 절 옵션 + `FT.PROFILE` 지원.
+
+## Valkey 시리즈 (2024-04 ~ )
+
+### Valkey 7.2.5 (2024-04)
+
+Redis 7.2.4 기반 첫 GA. BSD-3. *드롭인 호환*.
+
+### Valkey 8.0 (2024-09)
+
+- 메모리 효율 개선 (압축 인코딩 튜닝).
+- 1M RPS 벤치마크 달성 (싱글 노드 + 클라이언트 fleet).
+- 새 *async I/O* 모델.
+
+### Valkey 8.1 (2025-04)
+
+- 새 *hash table* 디자인 ([blog](https://valkey.io/blog/new-hash-table/)). 50M 멤버 ZSet 시나리오에서 메모리 / 처리량 *동시 개선*.
+- 성능 / 관측성 강화.
+
+### Valkey 9.0 (2025-10-21)
+
+- **Atomic Slot Migration**: 리샤딩이 *원자적*. 기존의 *복잡한 PRE/MIGRATE/MIGRATING/STABLE* 트랜잭션을 *추상화* 했다.
+- **Hash Field Expiration**: 키 전체가 아니라 *해시 필드 하나마다* TTL. 세션 / 토큰 관리 패턴이 *훨씬 간결*.
+- **Numbered Databases (재설계)**: cluster 모드에서도 namespacing 가능하도록 *부활*.
+- **Vector Search 모듈 1.0** (별도 GA: 2025-07).
+- **Bloom Filter / JSON / Search** 가 *valkey-bundle* 단일 컨테이너로 묶임.
+
+### Valkey 9.1 (2026-05-19)
+
+- 보안 강화 (TLS 운영 옵션, 기본값 정비).
+- 관측성 (`COMMANDLOG`, `SLOT-STATS`, per-thread I/O metrics).
+- 효율성, 클라이언트 라이브러리 호환성.
+
+## 데이터 구조 카탈로그 (2026)
+
+| 구조 | 핵심 명령 | 사용 케이스 |
+|---|---|---|
+| String | `SET`, `GET`, `INCR`, `APPEND` | 캐시, 카운터, flag |
+| List | `LPUSH`, `RPOP`, `LRANGE`, `BLPOP` | 큐, 큐 (FIFO), 최근 이벤트 |
+| Hash | `HSET`, `HGET`, `HGETEX`, `HEXPIRE` (필드 단위) | 객체, 세션, 사용자 프로필 |
+| Set | `SADD`, `SISMEMBER`, `SINTER` | 태그, 멤버십, 중복 제거 |
+| Sorted Set (ZSet) | `ZADD`, `ZRANGEBYSCORE`, `ZRANGEBYLEX`, `ZUNION ... COUNT` | 리더보드, 시간순 인덱스, 우선순위 큐 |
+| Stream | `XADD`, `XREAD`, `XREADGROUP`, `XACK`, `XACKDEL`, `XNACK` | append-only log, 메시지 큐, event sourcing |
+| HyperLogLog | `PFADD`, `PFCOUNT` | 대규모 cardinality 추정 (UV 등) |
+| Geo | `GEOADD`, `GEOSEARCH` | 위치 인덱스, 반경 검색 |
+| Bitmap | `SETBIT`, `BITCOUNT`, `BITOP` | 일자별 활성 사용자, 권한 비트 |
+| Bitfield | `BITFIELD` | 작은 정수 패킹 (memory micro-opt) |
+| **Vector Set** *(Redis 8)* | `VADD`, `VSIM`, `VLINKS` | 임베딩 검색, semantic cache, agent memory |
+| **Array** *(Redis 8.8)* | `ARRPUSH`, `ARRGET` 등 | append-mostly index 패턴 |
+| Bloom / Cuckoo / CMS / TopK | `BF.ADD`, `BF.EXISTS` 등 | 확률적 자료구조 |
+| JSON *(Redis 8 / Valkey JSON)* | `JSON.SET`, `JSON.GET`, `JSON.ARRAPPEND` | 문서 저장, partial update |
+| Time Series | `TS.ADD`, `TS.RANGE`, `TS.MRANGE` | 메트릭, IoT 텔레메트리 |
+
+### Stream vs Pub/Sub
+
+| 항목 | Pub/Sub | Stream |
+|---|---|---|
+| 영속성 | *없음* (구독자가 없으면 사라짐) | 영속 (TTL/MAXLEN 으로 관리) |
+| Consumer group | 없음 | *있음* (Kafka 와 유사) |
+| ACK | 없음 | `XACK`, `XACKDEL`, `XNACK` |
+| 적합 | 알림, 신호 (lossy OK) | 메시지 큐, event log |
+
+Pub/Sub 의 *fan-out 신호* 동작:
+
+```anim:pubsub-bus
+{}
+```
+
+Stream / List 큐의 *FIFO* 동작:
+
+```anim:queue
+{}
+```
+
+자세한 비교는 [[Redis Pub Sub vs Streams]] 참고.
+
+## RediSearch / Valkey Search: 벡터 + 텍스트
+
+LLM 시대의 *Redis 의 두 번째 정체성*. 벡터 인덱스 + 텍스트 + 태그 + 숫자를 *한 쿼리* 에서.
+
+```text
+FT.CREATE idx ON HASH PREFIX 1 doc:
+  SCHEMA
+    title TEXT
+    tag   TAG
+    embedding VECTOR HNSW 6
+      TYPE FLOAT32
+      DIM 1536
+      DISTANCE_METRIC COSINE
+
+FT.SEARCH idx "@tag:{backend} =>[KNN 10 @embedding $vec AS score]"
+  PARAMS 2 vec <bytes> DIALECT 2
+```
+
+| 알고리즘 | 특징 |
+|---|---|
+| `FLAT` | 정확한 brute-force, 작은 데이터셋 |
+| `HNSW` | Approximate Nearest Neighbor 표준. 빠름, 메모리 큼 |
+| `SVS-VAMANA` *(Redis 8.2+)* | 대규모 + 메모리 효율. Intel/Microsoft 가 밀고 있는 알고리즘 |
+
+> *Hybrid search* (`FT.HYBRID`) 는 *키워드 + 벡터* 점수를 합쳐 *RRF (Reciprocal Rank Fusion)* 로 섞는다. RAG 시스템에서 *키워드 매치 + 의미 검색* 을 한 호출로.
+
+## 실전 운영 패턴
+
+### 1. 캐시 (가장 흔한 시작)
+
+캐시 HIT (~6ms) 와 MISS (~72ms) 의 직관:
+
+```anim:redis-cache-hit
+{}
+```
+
+```anim:redis-cache-miss
+{}
+```
+
+- **TTL 정책**: *짧고 자주* 가 안전. 데이터 모양 / 인기 분포에 따라 *layered TTL* (자주 쓰이는 키는 길게, 나머지 짧게).
+- **Cache stampede**: TTL 만료 시 *동시에 많은 클라이언트* 가 백엔드를 친다. *probabilistic early refresh*, *single-flight lock*, *stale-while-revalidate* 패턴으로 완화.
+- **Cache aside vs Read-through vs Write-behind**: Rails 의 `Rails.cache.fetch` 는 *cache aside*. write-through 는 트랜잭션 보장이 필요.
+
+자세한 패턴 카탈로그는 [[Redis Cache Patterns]] 참고.
+
+### 2. 분산 락
+
+`SET key value NX PX <ms>` + Lua 로 *compare-and-delete*. Redis 의 [Redlock](https://redis.io/docs/latest/develop/use/patterns/distributed-locks/) 알고리즘.
+
+> [Martin Kleppmann 의 비판](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) 과 antirez 의 [반박](http://antirez.com/news/101) 이 유명. *정확한 mutual exclusion* 을 보장해야 하는 영역 (예: 결제) 에는 *Redlock 만으로 충분하지 않다*. *fencing token* 이 추가로 필요.
+>
+> *idempotent + retry-safe* 한 작업에는 Redlock 단순 패턴이 *충분히 실용적*.
+
+### 3. 큐 (Sidekiq / BullMQ / RQ)
+
+producer / consumer 의 *blocking queue* 동작:
+
+```anim:java-blocking-queue-pc
+{}
+```
+
+| 라이브러리 | 언어 | 큐 구현 |
+|---|---|---|
+| [Sidekiq](https://github.com/sidekiq/sidekiq) | Ruby | List + Sorted Set (scheduled) + Hash (job hash) |
+| [BullMQ](https://docs.bullmq.io/) | Node | Stream + Sorted Set, 강력한 priority |
+| [RQ](https://python-rq.org/) | Python | List 기반 단순 |
+| [Resque](https://github.com/resque/resque) | Ruby | List 기반 (Sidekiq 의 선조) |
+| [Celery (Redis broker)](https://docs.celeryq.dev/) | Python | List + ZSet |
+
+*Sidekiq Pro/Enterprise* 는 *reliable fetch* (RPOPLPUSH 패턴) 으로 *crash 시 작업 손실* 을 막는다. *Stream + consumer group* 으로 다시 짤 수 있는 영역이지만 *호환성* 으로 List 가 유지.
+
+### 4. Vector store / Semantic cache (LLM 시대)
+
+| 패턴 | 구현 |
+|---|---|
+| **Semantic cache** | 질문 embedding 으로 *KNN search* → 임계값 이상이면 *캐시 히트*. LLM 호출 비용 절감 |
+| **Conversation memory** | `XADD` 로 turn 을 append + `VADD` 로 embedding 저장. 검색 시 *최근 N turn + 의미 유사 M turn* 혼합 |
+| **Agent memory (Mem0 식)** | *세션 단위 short-term* + *장기 long-term* 분리. Valkey + Mem0 사례 ([blog](https://valkey.io/blog/ai-agent-memory-with-valkey-and-mem0/)) |
+| **RAG retrieval** | `FT.HYBRID` 로 *키워드 + 벡터* 결합 |
+
+### 5. Rate Limiting
+
+- **Token bucket**: ZSet timestamp 또는 *Lua script* 로 atomic.
+- **Sliding window**: 마찬가지로 *Lua* 또는 `INCREX` *(Redis 8.8)* 단일 명령.
+- **Fixed window**: `INCR` + `EXPIRE NX`.
+
+## 운영 결정점
+
+### Persistence: RDB vs AOF
+
+| 옵션 | 동작 | 트레이드오프 |
+|---|---|---|
+| RDB | 주기적 snapshot | 빠름, *분 단위 손실* |
+| AOF | 모든 write 를 *append-only file* | 손실 최소, *느림 + 큰 파일* |
+| RDB + AOF | 둘 다 | *부팅* 빠르고 *손실* 적음. 권장 |
+| `appendfsync everysec` | 1초 1회 fsync | 손실 ≤ 1초, 거의 표준 |
+| `appendfsync always` | 매 write fsync | 손실 0, throughput 큰 영향 |
+
+캐시 전용이면 *둘 다 끄고* 도 OK. *primary data store* 면 *AOF + RDB hybrid* + replica.
+
+### Cluster vs Sentinel vs Standalone
+
+| 모드 | 핵심 |
+|---|---|
+| Standalone | 단일 노드 + replica 옵션. *작은 워크로드* |
+| Sentinel | 자동 failover, *키 분할 없음*. *데이터셋이 한 노드 메모리 안* |
+| Cluster | 16384 슬롯 분할. 수평 확장. *멀티 키 명령 제약* (`{hashtag}`) |
+
+> Valkey 9.0 의 *atomic slot migration* 으로 *Cluster 운영의 가장 무서운 부분* 이 크게 완화. 2026 시점 *Cluster 진입 장벽* 이 낮아졌다.
+
+### 메모리 / Eviction
+
+LRU 의 동작 직관:
+
+```anim:lru-cache
+{}
+```
+
+
+`maxmemory <bytes>` + `maxmemory-policy`:
+
+| Policy | 설명 |
+|---|---|
+| `noeviction` (기본) | 메모리 초과 시 write 에러 |
+| `allkeys-lru` | 모든 키 중 LRU (캐시 전용) |
+| `volatile-lru` | TTL 있는 키 중 LRU |
+| `allkeys-lfu` | LFU (자주 쓰이는 키 우선 유지) |
+| `allkeys-random` | 랜덤 |
+
+*memory fragmentation* 모니터링: `INFO memory` 의 `mem_fragmentation_ratio` (이상적 1.0 ~ 1.5). 1.5 초과면 jemalloc 의 fragmentation. `MEMORY PURGE` 또는 *restart*.
+
+### Pipeline vs Lua vs Function
+
+| 도구 | 의미 |
+|---|---|
+| Pipeline | 여러 명령을 *한 번에 보내고 응답을 모음*. atomic 아님. RTT 절약 |
+| `MULTI / EXEC` | atomic batch. WATCH 로 *optimistic* |
+| `EVAL` (Lua) | atomic 스크립트. *SCRIPT LOAD* 로 캐시 |
+| `FUNCTION` *(Redis 7+)* | Lua 함수를 *서버에 등록*. 명명 + 버전 관리 가능. Lua 보다 권장 |
+
+## 대안
+
+| 대안 | 라이센스 | 특징 |
+|---|---|---|
+| [Valkey](https://valkey.io) | BSD-3 | Redis 7.2 fork. Linux Foundation. AWS / Google managed |
+| [DragonflyDB](https://www.dragonflydb.io/) | BSL 1.1 | *멀티스레드* 재구현. Redis API 호환. 25x throughput claim |
+| [KeyDB](https://docs.keydb.dev/) | BSD-3 (Snap 인수) | Redis fork + 멀티스레드. *최근 활동 줄어듦* |
+| [Memcached](https://memcached.org/) | BSD-3 | *순수 캐시*. 데이터 구조 / 영속성 없음. 멀티스레드 |
+| [Garnet](https://microsoft.github.io/garnet/) | MIT (Microsoft) | RESP 호환 *.NET* 구현. cluster 미흡 |
+| [Etcd](https://etcd.io/) | Apache 2.0 | 강한 일관성 (Raft). *KV + watch*. 캐시 아닌 *coordination* 용 |
+
+선택 기준:
+
+- *managed 가격 + 호환성* → Valkey (대형 클라우드 추천)
+- *throughput* + *멀티코어 풀활용* → DragonflyDB
+- *Stack 기능 (vector / search / JSON)* 전부 + AGPL 가능 → Redis 8
+- *순수 캐시 + 단순함* → Memcached
+
+## 김신건의 현장 메모 (hera-webapp 운영)
+
+- *Sidekiq + Redis* 4년 운영. 가장 자주 본 알람은 *Sidekiq 큐 적체* 와 *Redis 메모리 사용량*. `INFO memory` 와 `INFO clients` 를 *대시보드 핵심 지표* 로.
+- *enqueue 폭발* 은 보통 *큐별 분리* 와 *concurrency 분리* 로 해결. *critical / default / mailers / low* 등 우선순위 큐를 정의하고 워커 풀을 *큐별로 분리*.
+- *대량 job + Redis 메모리 압박* 시: *job payload 를 Redis 에 넣지 말고* *DB id 만* (또는 *S3 reference*). Sidekiq 의 default 가 *전체 args 직렬화* 라 의외로 함정.
+- *Sentinel* 운영 시 *failover 동안 short-lived 클라이언트 timeout* 이 가장 흔한 사고. *application level retry* 와 *connection pool* 의 *failover 동작 명세* 가 같이 가야 한다.
+- *RediSearch / vector* 는 hera-webapp 시기에는 별 필요 없었지만 *역량 리포트* 같은 *세션/대화 기반* 흐름에서는 *Redis 8 vector set + semantic cache* 가 *프롬프트 비용* 을 *주 단위 그래프* 로 끌어내릴 수 있는 가장 빠른 손.
+- *AGPL* 의무: *SaaS 노출* 면 *AGPL 의 source 공개 의무* 가 켜진다. 도입 전 *법무 / 컴플라이언스* 와 확인. *Valkey 가 BSD* 라는 점이 *managed 환경* 에서 거의 결정 요인.
+
+## 관련 위키
+
+운영 / 아키텍처 개념:
+
+- [[Redis Persistence]] (RDB / AOF / Hybrid, fsync 정책)
+- [[Redis Replication]] (PSYNC, Sentinel, failover)
+- [[Redis Cluster]] (16384 슬롯, MOVED/ASK, atomic slot migration)
+- [[Redis Cache Patterns]] (cache-aside, stampede, eviction)
+- [[Redis Pub Sub vs Streams]] (휘발 신호 vs 영속 로그, consumer group)
+- [[Redis Distributed Lock]] (SET NX, Redlock, fencing token)
+- [[Redis Vector Search]] (HNSW, SVS-VAMANA, semantic cache)
+
+자료구조별:
+
+- [[Redis Strings]] (String + Bitmap + Bitfield, counter)
+- [[Redis Lists]] (List, quicklist/listpack, Sidekiq 큐)
+- [[Redis Hashes]] (Hash + Field TTL (7.4+))
+- [[Redis Sets]] (Set, intset / hashtable, 멤버십)
+- [[Redis Sorted Sets]] (ZSet, skiplist + dict, 리더보드)
+- [[Redis Streams]] (Stream, radix tree, consumer group 내부)
+- [[Redis HyperLogLog Geo]] (HLL + Geo, 카디널리티 / 공간 인덱스)
+- [[Redis Probabilistic]] (Bloom / Cuckoo / CMS / TopK)
+
+인접 위키:
+
+- [[Sidekiq]] (Rails + Redis 큐 운영)
+- [[MVCC]] (DB 와의 일관성 패턴 대비)
+- [[Zero Downtime Deployment]] (Sentinel / Cluster failover 와 무중단)
+
+## 참고
+
