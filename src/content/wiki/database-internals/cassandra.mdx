@@ -1,0 +1,191 @@
+---
+title: "[DB] Cassandra: LSM-tree, quorum, eventually consistent"
+aliases: ["Cassandra", "Apache Cassandra", "LSM tree", "memtable", "SSTable", "quorum read/write", "CQL", "ScyllaDB"]
+tags: [cassandra, nosql, distributed, lsm-tree, database]
+category: database-internals
+updated: 2026-06-25
+references:
+  - title: "Apache Cassandra"
+    url: "https://cassandra.apache.org/_/index.html"
+  - title: "ScyllaDB"
+    url: "https://www.scylladb.com/"
+---
+
+## 정의
+
+**Apache Cassandra** = *마스터리스 (peer-to-peer) 분산 KV 스토어*. *write 우선*, *eventually consistent*, *수평 무한 확장*. 2008 Facebook 의 Dynamo + BigTable 결합.
+
+**ScyllaDB** = Cassandra 호환 *C++ 재구현*. *10x throughput*.
+
+## 핵심 특성
+
+| | Cassandra |
+|---|---|
+| 토폴로지 | *peer-to-peer* (master 없음) |
+| 일관성 | *튜닝 가능* (per query) |
+| 스토리지 | *LSM-tree* (write-optimized) |
+| 쿼리 언어 | *CQL* (SQL-like) |
+| 인덱스 | primary key + secondary (제한) |
+| Join | *없음* |
+| 트랜잭션 | *제한적* (LWT, lightweight transaction) |
+
+## LSM-Tree (Log-Structured Merge-Tree)
+
+```mermaid
+flowchart TB
+    Write[Write] --> CommitLog[Commit Log<br/>(WAL)]
+    Write --> Memtable[Memtable<br/>(메모리)]
+    Memtable -.flush.-> SST1[SSTable L0]
+    SST1 -.compact.-> SST2[SSTable L1]
+    SST2 -.compact.-> SST3[SSTable L2]
+    SST3 -.compact.-> SST4[SSTable L3]
+```
+
+| 컴포넌트 | 의미 |
+|---|---|
+| **Commit Log** | WAL (crash recovery) |
+| **Memtable** | 메모리 정렬 자료 |
+| **SSTable** | 불변 정렬 파일 (디스크) |
+| **Compaction** | SSTable 들을 *큰 SSTable 로 병합* |
+
+```anim:external-merge-sort
+{}
+```
+
+> 외부 정렬 머지의 일반 직관. LSM-tree 의 *compaction* 도 *level 들을 순차 머지*.
+
+### LSM vs B-tree
+
+| 항목 | B-tree | LSM |
+|---|---|---|
+| Write | *in-place* (random) | *append* (sequential) |
+| Read | 1 lookup | *여러 SSTable 검색* |
+| Write amplification | 작음 | 큼 (compaction) |
+| Read amplification | 작음 | 큼 |
+| 적합 | OLTP read-heavy | write-heavy, log-like |
+
+## 클러스터 토폴로지
+
+```mermaid
+flowchart LR
+    subgraph Ring[Token Ring]
+        N1[Node A<br/>token 0]
+        N2[Node B<br/>token 1/3]
+        N3[Node C<br/>token 2/3]
+    end
+    N1 --- N2 --- N3 --- N1
+    Key1[hash key=42] -->|시계방향| N2
+```
+
+- *consistent hashing ring*.
+- *N 개 노드*, *Replication Factor (RF)* 만큼 복제.
+- *전체가 peer*. master 없음.
+
+## Consistency Level (per query)
+
+| Level | 의미 |
+|---|---|
+| `ANY` | 어떤 노드라도 응답 (write) |
+| `ONE` | 1 노드 응답 |
+| `TWO`, `THREE` | 2 / 3 노드 |
+| `QUORUM` | 과반 (RF/2 + 1) |
+| `LOCAL_QUORUM` | 같은 DC 안 과반 |
+| `EACH_QUORUM` | 모든 DC 의 과반 |
+| `ALL` | 모든 replica |
+
+### Quorum 의 W + R > N 조건
+
+```mermaid
+flowchart LR
+    Write[W = QUORUM] --> N[RF = 3]
+    Read[R = QUORUM]
+    Cond["W + R > N → 항상 최신 read"]
+    Write --> Cond
+    Read --> Cond
+```
+
+> RF = 3, W = QUORUM (2), R = QUORUM (2). W + R = 4 > 3 → *최소 1 노드는 양쪽 모두 봄* → *strong consistency*.
+
+## Read Path
+
+```mermaid
+sequenceDiagram
+    Client->>Coord: SELECT
+    Coord->>R1: read
+    Coord->>R2: read
+    par 응답 대기
+        R1-->>Coord: v1 (ts=100)
+        R2-->>Coord: v2 (ts=110)
+    end
+    Coord->>Coord: 최신 (ts=110) 반환
+    Coord->>R1: read repair (백그라운드)
+```
+
+> *Last-write-wins by timestamp*. *시계 어긋남* 이 *데이터 정정* 의 함정.
+
+## CQL (Cassandra Query Language)
+
+```sql
+CREATE KEYSPACE shop
+  WITH replication = { 'class': 'NetworkTopologyStrategy', 'dc1': 3 };
+
+CREATE TABLE orders (
+  user_id UUID,
+  order_id TIMEUUID,
+  total INT,
+  status TEXT,
+  PRIMARY KEY (user_id, order_id)
+) WITH CLUSTERING ORDER BY (order_id DESC);
+
+-- partition key = user_id, clustering key = order_id
+SELECT * FROM orders WHERE user_id = ? AND order_id > ?;
+INSERT INTO orders (user_id, order_id, total, status)
+  VALUES (?, now(), ?, ?);
+```
+
+| 키 | 의미 |
+|---|---|
+| **Partition Key** | partition (노드) 결정 |
+| **Clustering Key** | partition 안의 정렬 |
+
+## LWT (Lightweight Transaction)
+
+```sql
+INSERT INTO users (id, email) VALUES (?, ?) IF NOT EXISTS;
+UPDATE users SET email = ? WHERE id = ? IF email = ?;
+```
+
+- *Paxos 기반*. *4 round-trip*.
+- *느림*. 가끔만 사용.
+
+## 적합 / 부적합
+
+```mermaid
+flowchart TD
+    Q{사용 패턴}
+    Q --> Good[적합]
+    Q --> Bad[부적합]
+    Good --> G1[Write-heavy log]
+    Good --> G2[Time-series]
+    Good --> G3[IoT telemetry]
+    Good --> G4[수십 TB 데이터]
+    Bad --> B1[복잡한 ad-hoc 쿼리]
+    Bad --> B2[강한 트랜잭션]
+    Bad --> B3[Join 많음]
+    Bad --> B4[작은 데이터셋]
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Secondary index 남용** = 거의 항상 *전체 노드 fan-out*. 모든 access pattern 에 *전용 테이블*.
+> 2. **Tombstone (삭제 마커) 누적** = 압축 안 되면 read 폭증. `gc_grace_seconds` + 정기 repair.
+> 3. **Cross-partition query** = 비싸다. partition key 디자인이 *결정적*.
+> 4. **Strong consistency 기대** = QUORUM 으로도 *시계 어긋남 시 잘못된 결과*. *NTP + 보수적 timestamp*.
+
+## 관련 위키
+
+- [[dynamodb]] (비슷한 디자인)
+- [[mongodb]]
+- [[sharding-vs-partitioning]]
+- [[distributed-systems-consensus]]

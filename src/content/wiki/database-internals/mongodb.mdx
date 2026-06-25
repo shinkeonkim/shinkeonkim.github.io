@@ -1,0 +1,167 @@
+---
+title: "[DB] MongoDB: 문서 DB, WiredTiger, replica set, aggregation"
+aliases: ["MongoDB", "BSON", "WiredTiger", "replica set", "sharding", "aggregation pipeline", "Atlas"]
+tags: [mongodb, nosql, document, database]
+category: database-internals
+updated: 2026-06-25
+references:
+  - title: "MongoDB Manual"
+    url: "https://www.mongodb.com/docs/manual/"
+---
+
+## 정의
+
+**MongoDB** 는 *BSON (binary JSON) 문서 기반 NoSQL DB*. *schema-less* 라기보다 *flexible schema*. 2026 시점 *Atlas (managed)* 가 대다수.
+
+## 핵심 개념
+
+| RDB | MongoDB |
+|---|---|
+| Database | Database |
+| Table | Collection |
+| Row | Document (BSON) |
+| Column | Field |
+| Index | Index (B-tree) |
+| JOIN | `$lookup` (aggregation) |
+| Foreign key | 없음 (수동 관리) |
+
+## 문서 모델
+
+```json
+{
+  "_id": ObjectId("..."),
+  "name": "koa",
+  "email": "koa@x.com",
+  "addresses": [
+    { "type": "home", "city": "Seoul" },
+    { "type": "work", "city": "SF" }
+  ],
+  "tags": ["admin", "pro"],
+  "createdAt": ISODate("2026-06-25T00:00:00Z")
+}
+```
+
+*nested + 배열* 자유로움. *non-join read* 가 빠름.
+
+## WiredTiger 스토리지 엔진
+
+```mermaid
+flowchart TB
+    Op[op] --> WT[WiredTiger]
+    WT --> Cache[메모리 cache (~50% RAM)]
+    WT --> Journal[Journal (WAL)]
+    WT --> Snappy[Snappy 압축]
+    WT --> DataFiles[(BTree 데이터 파일)]
+```
+
+- B-tree 인덱스.
+- *Document-level locking* (이전 글로벌 lock 에서 진화).
+- Snappy / Zstd 압축.
+
+## Replica Set
+
+```mermaid
+flowchart LR
+    P[(Primary)] -->|oplog| S1[(Secondary 1)]
+    P -->|oplog| S2[(Secondary 2)]
+    Client -->|write| P
+    Client -->|read (옵션)| S1
+    Client -->|read (옵션)| S2
+```
+
+- 1 primary + N secondary.
+- *자동 failover* (election).
+- *읽기 분산* 옵션 (read preference).
+
+## Sharding
+
+```mermaid
+flowchart TB
+    Client --> Mongos[mongos<br/>(라우터)]
+    Mongos --> Config[(Config Servers)]
+    Mongos --> Shard1[(Shard 1)]
+    Mongos --> Shard2[(Shard 2)]
+    Mongos --> Shard3[(Shard 3)]
+```
+
+- *shard key* 로 분산.
+- `hashed`, `ranged`, `zone` 정책.
+- *chunk* 단위 자동 balancing.
+
+## Aggregation Pipeline
+
+```js
+db.orders.aggregate([
+  { $match: { status: "paid" } },
+  { $lookup: { from: "users", localField: "userId", foreignField: "_id", as: "user" } },
+  { $unwind: "$user" },
+  { $group: { _id: "$user.country", total: { $sum: "$amount" } } },
+  { $sort: { total: -1 } },
+  { $limit: 10 },
+]);
+```
+
+| Stage | 의미 |
+|---|---|
+| `$match` | WHERE |
+| `$project` | SELECT |
+| `$group` | GROUP BY |
+| `$sort` | ORDER BY |
+| `$limit` / `$skip` | LIMIT / OFFSET |
+| `$lookup` | LEFT JOIN |
+| `$unwind` | 배열 분해 |
+| `$facet` | 다중 sub-pipeline |
+| `$bucket` | 범위 그룹화 |
+
+> [!TIP]
+> *aggregation 순서 최적화*: `$match` 와 `$project` 를 *최대한 일찍*. 인덱스 활용 + 처리량 감소.
+
+## Index
+
+| 종류 | 의미 |
+|---|---|
+| Single field | 단일 |
+| Compound | 다중 |
+| Multikey | 배열 필드 |
+| Text | full-text |
+| 2dsphere | 공간 |
+| Hashed | sharding 친화 |
+| Wildcard | 임의 필드 |
+| TTL | 자동 만료 |
+
+```js
+db.orders.createIndex({ userId: 1, createdAt: -1 });
+db.events.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 });
+```
+
+## Transactions (4.0+, 4.2+ sharded)
+
+```js
+const session = db.startSession();
+session.startTransaction();
+try {
+  await coll1.updateOne({ _id: 1 }, { $inc: { x: 1 } }, { session });
+  await coll2.insertOne({ ... }, { session });
+  await session.commitTransaction();
+} catch (e) {
+  await session.abortTransaction();
+}
+```
+
+> [!CAUTION]
+> *과거 MongoDB = 트랜잭션 없음* 이미지가 강했으나, 4.0+ 부터 *multi-document ACID*. *Sharded 트랜잭션은 비용 큼*, *document 안에 묶을 수 있으면 그게 정통*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`_id` 의 ObjectId 가 *random* 으로 *clustered index 미친 분포*** = MongoDB 는 *_id index 의 random 분포* 가 의도. 옛 PK 사고 패턴.
+> 2. ***join 이 무거움*** = `$lookup` 은 NoSQL 답지 않은 비용. *임베드 (embedding) 가 정통 패턴*.
+> 3. **transaction 남용** = single document 안의 동작은 *항상 atomic*. transaction 은 *진짜 필요할 때만*.
+> 4. **shard key 잘못 선택** = *재선택 가능* 했지만 옛 버전은 *불가*. *write 분포가 균등하지 않은 키* 가 가장 큰 함정.
+
+## 관련 위키
+
+- [[postgresql]] (대안)
+- [[dynamodb]] (NoSQL 대안)
+- [[Redis]] (KV)
+- [[sharding-vs-partitioning]]
