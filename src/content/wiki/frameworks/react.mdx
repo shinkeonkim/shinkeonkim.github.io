@@ -1,0 +1,308 @@
+---
+title: "[Frontend] React 19.x: Actions, Activity, RSC, Foundation"
+aliases:
+  - "React 19"
+  - "React 19.1"
+  - "React 19.2"
+  - "React Server Components"
+  - "useActionState"
+  - "useFormStatus"
+  - "useOptimistic"
+  - "useEffectEvent"
+  - "Activity component"
+  - "Partial Pre-rendering"
+  - "React Foundation"
+  - "ref as prop"
+  - "Document Metadata"
+  - "Asset Loading"
+tags: [react, frontend, javascript, server-components, ssr]
+category: frameworks
+updated: 2026-06-25
+references:
+  - id: react-docs
+    note: "Actions, ref-as-prop, Document Metadata, Asset Loading, use(), useActionState/useFormStatus/useOptimistic 의 정식 공개."
+  - id: react-docs
+    note: "Breaking changes 와 codemod."
+  - id: react-docs
+    note: "Activity, Performance Tracks, useEffectEvent, cacheSignal, Partial Pre-rendering, Web Streams for Node."
+  - id: react-docs
+    note: "CRA 종료. Vite/Next/RSBuild/Parcel 로 이전 권장."
+  - id: react-docs
+    note: "Compiler 1.0 / Foundation / Activity / Performance Tracks."
+  - id: react-docs
+    note: "RCE 취약점, 19.0.1 / 19.1.2 / 19.2.1 으로 패치."
+  - id: react-docs
+    note: "추가 취약점 공개."
+  - id: react-docs
+    note: "Linux Foundation 산하 출범."
+  - id: react-docs
+    note: "react.dev"
+  - id: react-docs
+    note: "react.dev/blog"
+  - title: "github.com/facebook/react/blob/main/CHANGELOG.md"
+    url: "https://github.com/facebook/react/blob/main/CHANGELOG.md"
+---
+
+## 정의
+
+**React 19** (`2024-12-05`) 는 *Server Components 의 정식화* 와 *Actions* 라는 새 패러다임을 들고 나온 메이저 릴리즈. 이후 `19.1` (`2025-06`), `19.2` (`2025-10-01`) 까지 *minor 릴리즈에서 Activity / Performance Tracks / Partial Pre-rendering 같은 굵직한 기능* 이 계속 추가되었다.
+
+> 2026-06 시점 기준 *현재 LTS 줄기는 19.x*. React 20 / 19.3 은 *아직 공식 발표 전*. 이 페이지는 *2026-06 의 운영자 시점* 에서 정리한 React 19.x 의 *작은 백과*.
+
+## 버전 매트릭스
+
+| 버전 | 출시 | 핵심 |
+|---|---|---|
+| 19.0 | 2024-12-05 | Actions, ref-as-prop, Document Metadata, Asset Loading, `use()`, `useActionState` / `useFormStatus` / `useOptimistic`, Server Components 안정화 |
+| 19.1 | 2025-06 | 점진 안정화 + 버그 픽스 (큰 신 기능 없음) |
+| 19.2 | 2025-10-01 | `<Activity>`, `useEffectEvent`, `cacheSignal`, Performance Tracks, Partial Pre-rendering, Web Streams for Node, `useId` prefix `_r_` |
+| 19.0.1 / 19.1.2 / 19.2.1 | 2025-12-03 | *RSC RCE 보안 패치* |
+
+## Actions: 폼/네트워크 워크플로의 새 표준
+
+폼 제출 같은 *비동기 전이* 를 `useTransition` 위에서 *정식화* 한 것이 Actions. 함수 자체에 `async` 가 들어가도 `isPending` 이 자동으로 잡힌다.
+
+```jsx
+function UpdateName() {
+  const [name, setName] = useState('');
+  const [error, setError] = useState(null);
+  const [isPending, startTransition] = useTransition();
+
+  const handleSubmit = () => {
+    startTransition(async () => {
+      const err = await updateName(name);
+      if (err) {
+        setError(err);
+        return;
+      }
+      redirect('/path');
+    });
+  };
+
+  return (
+    <div>
+      <input value={name} onChange={(e) => setName(e.target.value)} />
+      <button onClick={handleSubmit} disabled={isPending}>Update</button>
+      {error && <p>{error}</p>}
+    </div>
+  );
+}
+```
+
+위 패턴 위에 *3 종 hook* 이 얹힌다:
+
+| Hook | 역할 |
+|---|---|
+| [`useActionState(action, initial)`](https://react.dev/reference/react/useActionState) | Action 의 *마지막 결과* + `isPending` 보관. 폼 결과 처리의 표준 |
+| [`useFormStatus()`](https://react.dev/reference/react-dom/hooks/useFormStatus) | `<form>` 의 *자손 컴포넌트* 에서 부모 폼의 pending 상태 조회 (prop drilling 없이) |
+| [`useOptimistic(state, updater)`](https://react.dev/reference/react/useOptimistic) | *낙관적 업데이트* (서버 응답 전 미리 UI 갱신) |
+
+`<form action={fn}>` 형태로 *DOM 액션 prop* 도 추가. Server Actions (`'use server'`) 와 합쳐지면 *클라이언트 → 서버 mutation* 의 일등 시민이 된다.
+
+## Server Components 정식화
+
+`'use client'` / `'use server'` 디렉티브 기반의 *분할*. 19 에서 안정 API 로 진입.
+
+| 디렉티브 | 의미 |
+|---|---|
+| `'use client'` | 번들러에게 *클라이언트 경계* 알림. 별도 `<script>` 청크로 묶임 |
+| `'use server'` | 번들러에게 *서버 endpoint* 알림. 클라이언트에서 호출하면 *POST 가 일어남* |
+
+> *번들러 기능* 이지 React 의 런타임 기능이 아니다. Next.js, Waku, RedwoodJS 같은 *프레임워크* 가 묶어서 제공.
+
+## ref 가 prop 이 되다
+
+`forwardRef` 는 더 이상 필요 없다. 함수 컴포넌트가 *그냥 `ref` prop 을 받을 수 있다*.
+
+```jsx
+// 19 이전
+const Button = forwardRef(function Button(props, ref) {
+  return <button ref={ref} {...props} />;
+});
+
+// 19+
+function Button({ ref, ...props }) {
+  return <button ref={ref} {...props} />;
+}
+```
+
+`forwardRef` 자체는 *deprecated*. 새 코드는 바로 prop 으로 받자.
+
+## Document Metadata
+
+`<title>`, `<meta>`, `<link>` 를 *컴포넌트 트리 어디에서나* 렌더 가능. React 가 자동으로 `<head>` 로 올린다. [React Helmet](https://github.com/nfl/react-helmet) 같은 라이브러리가 사실상 *불필요*.
+
+```jsx
+function BlogPost({ post }) {
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <title>{post.title}</title>
+      <meta name="author" content="Josh" />
+      <link rel="author" href="https://twitter.com/joshcstory/" />
+      <meta name="keywords" content={post.keywords} />
+    </article>
+  );
+}
+```
+
+SSR / RSC / CSR 어디서나 같은 방식. 중복 태그는 React 가 알아서 dedupe.
+
+## Asset Loading 과 `preload` / `preinit`
+
+스타일시트, 스크립트, 폰트, 이미지의 *로딩 라이프사이클* 을 Suspense 와 연결. 데이터처럼 *준비될 때까지 일관되게 기다림*.
+
+```jsx
+import { preload, preinit } from 'react-dom';
+
+// 곧 쓸 자원을 미리 로드 (priority hint)
+preload('https://example.com/font.woff2', { as: 'font' });
+
+// 다운로드 + 초기화까지
+preinit('https://example.com/script.js', { as: 'script' });
+```
+
+라우터 / 코드 스플리트 시점에 미리 호출해두면 *TTI 개선*.
+
+## `use()` API: Promise / Context 의 일관된 read
+
+[`use(promise)`](https://react.dev/reference/react/use) 는 *렌더 중 Promise 결과* 를 읽는다. Suspense 가 받아서 *fallback* 을 띄운다.
+
+[`use(context)`](https://react.dev/reference/react/use) 는 `useContext` 와 거의 같지만 *if 안에서 호출 가능*. Rules of Hooks 의 *최상위 호출* 제약을 *조건부 사용 영역에서 풀어준 첫 hook*.
+
+```jsx
+function Message({ messagePromise }) {
+  const msg = use(messagePromise); // Suspense 가 받음
+  return <p>{msg}</p>;
+}
+```
+
+## 19.2 의 큰 4가지
+
+### 1. `<Activity>`: pre-render + 상태 보존
+
+```jsx
+// 이전
+{isVisible && <Page />}
+
+// 19.2+
+<Activity mode={isVisible ? 'visible' : 'hidden'}>
+  <Page />
+</Activity>
+```
+
+| mode | 효과 |
+|---|---|
+| `visible` | 정상 렌더 + effect mount |
+| `hidden` | 렌더는 *유지* 하되 effect 는 unmount, 업데이트는 *우선순위 낮춤* |
+
+> 다음 페이지로 갈 가능성이 높은 영역을 *백그라운드로 미리 그려두기*. 뒤로가기 시 *입력값/스크롤 등 상태 보존*. SPA 라우터의 *워킹 디스플레이* 패턴.
+
+### 2. `useEffectEvent`
+
+`useEffect` 의 *의존성으로 들어가야 하는 값* 과 *그 안에서 단순히 읽기만 하는 값* 을 *문법적으로 분리*. *eslint-plugin-react-hooks@latest* 가 디펜던시 배열에 자동으로 넣지 않도록 처리한다.
+
+```jsx
+function ChatRoom({ roomId, theme }) {
+  // theme 가 바뀌어도 effect 는 재실행 안 됨
+  const onConnected = useEffectEvent(() => {
+    showNotification('Connected!', theme);
+  });
+
+  useEffect(() => {
+    const conn = createConnection(serverUrl, roomId);
+    conn.on('connected', () => onConnected());
+    conn.connect();
+    return () => conn.disconnect();
+  }, [roomId]); // theme 는 의존성이 *아니다*
+}
+```
+
+> "이건 이벤트인데 effect 안에서 발생한다" 라는 *드문 사례* 만 사용. 모든 함수를 wrap 하는 *남발 금지*.
+
+### 3. Performance Tracks (Chrome DevTools)
+
+Chrome DevTools 의 *custom track* 으로 React 의 *Scheduler* / *Components* 두 트랙 추가.
+
+- **Scheduler ⚛**: blocking / transition / idle 우선순위별 작업 흐름.
+- **Components ⚛**: 컴포넌트 트리의 mount / render / effect 시점.
+
+기존 *React DevTools Profiler* 보다 *브라우저 전체 timing* 과 함께 볼 수 있어서 *interaction → first paint* 까지 일관된 그림. [`reference/dev-tools/react-performance-tracks`](https://react.dev/reference/dev-tools/react-performance-tracks) 참고.
+
+### 4. Partial Pre-rendering
+
+정적 부분은 *미리 빌드해 CDN* 에서, 동적 부분은 *런타임에 이어서* 렌더.
+
+```js
+// 빌드 시
+const { prelude, postponed } = await prerender(<App />, {
+  signal: controller.signal,
+});
+await savePostponedState(postponed);
+// prelude 를 CDN 으로
+
+// 런타임
+const postponed = await getPostponedState(request);
+const resumeStream = await resume(<App />, postponed);
+// 클라이언트로 스트림
+```
+
+Next.js / Vercel 의 *Partial Pre-rendering (PPR)* 이 같은 의도. React 가 *직접 지원* 하게 됨.
+
+## 사라지는 것들
+
+| 항목 | 상태 |
+|---|---|
+| `forwardRef` | *deprecated*. `ref` prop 사용 |
+| `defaultProps` (함수 컴포넌트) | *제거* |
+| String refs (`<X ref="foo">`) | *제거* |
+| Module Pattern Factories | *제거* |
+| `createFactory` | *제거* |
+| `react-test-renderer/shallow` | *제거* (Enzyme 종료 흐름) |
+| Create React App | [2025-02-14 sunsetting](https://react.dev/blog/2025/02/14/sunsetting-create-react-app) |
+
+> CRA 는 *공식 종료*. 새 프로젝트는 Vite, Next.js, Parcel, RSBuild, Expo 중 선택. *프레임워크 없이 시작* 도 공식 가이드가 있다.
+
+## 보안: 2025-12 RSC 사건
+
+| 날짜 | 사건 |
+|---|---|
+| 2025-12-03 | **RSC 의 unauthenticated RCE** 공개. 19.0.1 / 19.1.2 / 19.2.1 으로 즉시 업그레이드 권장 |
+| 2025-12-11 | 동일 패치 시도 중 *추가 취약점* 2건 (DoS, Source Code Exposure) 발견 |
+
+*Server Components 를 *프로덕션* 에서 쓰는 모든 곳* 이 영향. RSC 위에 *입력 검증 / 권한 체크* 가 반드시 들어가야 한다는 점이 다시 부각되었다.
+
+## React Foundation
+
+| 날짜 | 사건 |
+|---|---|
+| 2025-10-07 | [React Foundation 발표](https://react.dev/blog/2025/10/07/introducing-the-react-foundation). *Meta 단독* 에서 *재단 거버넌스* 로 |
+| 2026-02-24 | [Linux Foundation 산하](https://react.dev/blog/2026/02/24/the-react-foundation) 정식 출범. AWS, Amazon, Callstack, Expo, Microsoft, Software Mansion, Vercel 합류 |
+
+> Meta 의 *내부 release process* 가 *외부 stakeholder* 와 *공동 운영* 으로 전환. Vue 와 비슷한 *재단 거버넌스* 모델.
+
+## React 17/18 에서 19 로
+
+`19 Upgrade Guide` 의 골자:
+
+1. *모든 변경* 이 codemod 로 자동화되어 있다 (`@codemod/react-19-codemod` 류).
+2. *Suspense 안의 사이드 이펙트* 가 더 엄격해짐. `useEffect` 의 클린업 누락 등이 새로 잡힘.
+3. *Strict Mode* 가 더 강력해짐 (double-invoke 가 *effect* 까지 확장).
+4. *peer dep* 으로 react@18 을 요구하는 라이브러리들이 *대부분 19 호환* 되었다. 안 된 곳만 알림.
+
+## 김신건의 현장 메모
+
+- *Asset Loading* 은 SSR 페이지에서 *FOUC* 줄이는 효과가 즉시 보인다. 라우트 진입 직전 `preinit('app.css', { as: 'style' })` 한 줄.
+- *Actions* 는 `<form action={...}>` 형태로 *progressive enhancement* 가 그대로 가능. JS off 인 환경에서도 폼이 동작하는 것이 *오랜만에 부활한 정통*.
+- *Activity* 는 *탭 전환이 많은* admin 같은 곳에서 강력. *상태 보존* 이 직접 코드보다 깔끔.
+- *Performance Tracks* 는 *언제 effect 가 늦게 mount 되었는지* 가 Chrome 화면 안에서 그대로 보여서 *문제 재현* 의 grep 가능 영역이 커졌다.
+
+## 관련 위키
+
+- [[React Compiler]] (19 와 함께 권장되는 *자동 memoization*)
+- [[SPA Architecture]] (Server Components 와의 대비)
+- [[Zero Downtime Deployment]] (RSC 보안 패치를 *무중단* 으로 흘려보내는 패턴)
+- [[JS Async Await]] (Actions 의 underlying 모델)
+
+## 참고
+

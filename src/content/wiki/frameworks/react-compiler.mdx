@@ -1,0 +1,285 @@
+---
+title: "[Frontend] React Compiler 1.0: 자동 memoization 의 새 표준"
+aliases:
+  - "React Compiler"
+  - "react-compiler"
+  - "babel-plugin-react-compiler"
+  - "automatic memoization"
+  - "use memo"
+  - "use no memo"
+  - "React Forget"
+  - "compiler-powered linting"
+tags: [react, compiler, performance, memoization, frontend]
+category: frameworks
+updated: 2026-06-25
+references:
+  - id: react-docs
+    note: "v1.0 stable 출시 공지. Meta Quest Store 사례."
+  - id: react-docs
+    note: "공식 학습 페이지 (Quickstart, incremental adoption)."
+  - id: react-docs
+    note: "compilationMode, target, panicThreshold, logger, gating."
+  - id: react-docs
+    note: "'use memo' / 'use no memo' directive 의미와 우선순위."
+  - title: "React Conf 2024 - Forget about memo (Xuan Huang)"
+    url: "https://www.youtube.com/watch?v=lGEMwh32soc"
+    note: "현 아키텍처의 첫 prototype 데모 (2021)."
+  - id: react-docs
+    note: "임의 코드를 HIR + 출력 코드까지 시각화."
+  - title: "Sanity Studio 도입 사례"
+    url: "https://github.com/reactwg/react-compiler/discussions/33"
+    note: "복잡한 에디터에서의 도입 회고."
+  - title: "Wakelet 도입 사례"
+    url: "https://github.com/reactwg/react-compiler/discussions/52"
+    note: "프로덕션 도입 후 측정 결과."
+  - id: react-docs
+    note: "react.dev/learn/react-compiler"
+  - id: react-docs
+    note: "React Compiler v1.0 (2025-10-07)"
+  - id: react-docs
+    note: "react.dev/reference/react-compiler/configuration"
+  - id: react-docs
+    note: "playground.react.dev"
+---
+
+## 정의
+
+**React Compiler** 는 React 컴포넌트와 hook 의 *불필요한 재계산* 을 빌드 타임에 자동으로 잡아주는 *optimizing compiler*. 손으로 [`useMemo`](https://react.dev/reference/react/useMemo) / [`useCallback`](https://react.dev/reference/react/useCallback) / [`React.memo`](https://react.dev/reference/react/memo) 를 박는 대신, 컴파일러가 *값과 함수의 변경 여부* 를 분석해 자동으로 캐싱한다.
+
+핵심 약속 4가지:
+
+1. **자동 memoization**: 손으로 쓰지 않아도 정확하게 박힌다.
+2. **조건부 memoization**: `if`/`return` *이후의 값* 까지 memoize 가능 (수동 hook 으로는 불가능했던 영역).
+3. **Rules of React 강제**: ESLint 와 함께 위반을 *조용히 잡아낸다*.
+4. **점진 도입**: `'use memo'` 디렉티브 하나로 *컴포넌트 단위* 부터 켤 수 있다.
+
+`v1.0` 은 [2025년 10월 7일](https://react.dev/blog/2025/10/07/react-compiler-1) 출시. 거의 *10년에 걸친 컴파일러 실험* 의 첫 안정 결과물이다.
+
+## 왜 컴파일러인가?
+
+React 의 *멘탈 모델은 "매 렌더마다 새로 계산"*. 깔끔하지만, *비싼 계산* 이나 *자식의 reference equality* 가 필요한 곳에서는 다음 같은 코드가 불가피했다:
+
+```jsx
+const filtered = useMemo(
+  () => items.filter((it) => it.tag === activeTag),
+  [items, activeTag],
+);
+
+const handleClick = useCallback(
+  (id: string) => onSelect(id),
+  [onSelect],
+);
+
+const Child = memo(function Child({ data }) {
+  // ...
+});
+```
+
+문제는 3가지:
+
+1. **디펜던시 배열을 사람이 관리**: 빠뜨리면 stale, 너무 많이 넣으면 무의미.
+2. **memoize 한 함수도 변하면 자식이 다시 렌더**: 한 군데서 끊기면 사슬 전체가 무너진다.
+3. **`useMemo` 자체가 비용**: dependency 비교 + 캐시 슬롯 관리. *오히려 무겁다*.
+
+> 자동화는 *비용 자체를 줄이는 것이 아니라 사람의 일관성을 보장* 하기 위한 것. 컴파일러는 *조건부 early-return 이후* 의 값까지 memoize 한다.
+
+## 컴파일러는 어떻게 동작하는가
+
+Babel 이 만든 *Abstract Syntax Tree (AST)* 를 받아서, *자체 IR (HIR, High-Level Intermediate Representation)* 로 lowering. HIR 은 *Control Flow Graph (CFG)* 기반이라 정확한 *data-flow analysis* 와 *mutability inference* 가 가능하다.
+
+```
+Source (JSX/TS)
+  ↓ Babel parse
+AST
+  ↓ React Compiler lowering
+HIR (CFG-based)
+  ↓ multi-pass
+    ├ data-flow analysis
+    ├ mutability inference
+    ├ scope formation (memoization 단위)
+    └ rules-of-react validation
+  ↓ codegen
+Optimized output (AST)
+  ↓ Babel print
+JS
+```
+
+이 분리 덕에 다음이 가능:
+
+- **조건부 분기 이후 memoize**: `useMemo` 의 *최상위* 위치 제약이 사라진다.
+- **세분화 (granular) scope**: 거대한 `useMemo` 하나가 아니라 *필요한 값마다 따로*.
+- **lint 가 같은 분석을 재활용**: `eslint-plugin-react-hooks` 의 새 규칙들이 compiler 의 HIR 분석 결과를 그대로 쓴다.
+
+공식 예시 (조건부 return 후의 `theme` 값까지 memoize):
+
+```jsx
+import { use } from 'react';
+
+export default function ThemeProvider(props) {
+  if (!props.children) {
+    return null;
+  }
+  // 컴파일러는 conditional return 이후의 값도 memoize 한다
+  const theme = mergeTheme(props.theme, use(ThemeContext));
+  return (
+    <ThemeContext value={theme}>
+      {props.children}
+    </ThemeContext>
+  );
+}
+```
+
+수동 `useMemo` 로는 *불가능한 위치*. 컴파일러만의 강점.
+
+## 컴파일 모드와 디렉티브
+
+| 모드 | 동작 | 용도 |
+|---|---|---|
+| `infer` (기본) | 컴포넌트 / hook 으로 *추론* 되면 자동 컴파일 | 새 코드, 전체 도입 |
+| `annotation` | `'use memo'` 가 명시된 함수만 컴파일 | 점진 도입 초기 |
+| `all` | 모든 함수를 컴파일 시도 | 보통 권장하지 않음 |
+| `syntax` | parse 만 하고 실제 변환은 하지 않음 | debugging |
+
+함수 단위 디렉티브 (모드와 무관하게 우선):
+
+```jsx
+function StableComponent() {
+  'use memo';      // 이 컴포넌트는 *반드시* 컴파일
+  // ...
+}
+
+function ProblematicComponent() {
+  'use no memo';   // 이 컴포넌트는 *반드시* 컴파일에서 제외
+  // 보통 Rules of React 위반을 발견한 임시 escape
+}
+```
+
+권장 도입 흐름:
+
+1. `compilationMode: 'annotation'` 으로 켜고, *잘 검증된* 컴포넌트부터 `'use memo'` 추가.
+2. ESLint 새 규칙으로 *위반 코드* 식별 + 수정.
+3. `compilationMode: 'infer'` 로 전환.
+4. 문제 발견된 컴포넌트만 `'use no memo'` 로 *임시 격리* + 원인 수정 후 제거.
+
+## 설정 (`babel.config.js`)
+
+```js
+// babel.config.js
+module.exports = {
+  plugins: [
+    [
+      'babel-plugin-react-compiler',
+      {
+        compilationMode: 'annotation',
+        target: '18',                  // '17' | '18' | '19' (기본 '19')
+        panicThreshold: 'none',        // 'all_errors' | 'critical_errors' | 'none'
+        logger: {
+          logEvent(filename, event) {
+            if (event.kind === 'CompileSuccess') {
+              console.log('Compiled:', filename);
+            }
+          },
+        },
+        gating: {
+          source: 'my-feature-flags',           // 모듈 경로
+          importSpecifierName: 'isCompilerEnabled', // 토글 함수
+        },
+      },
+    ],
+  ],
+};
+```
+
+주요 옵션:
+
+- **`target: '17' | '18'`**: React 19 미만이면 [`react-compiler-runtime`](https://www.npmjs.com/package/react-compiler-runtime) 을 의존성에 추가하고 target 을 명시. v1.0 의 *놀라운 약속*.
+- **`panicThreshold`**: 일반적으로 `'none'` 권장. 컴파일에 실패한 함수는 *그대로 두고 넘어감*.
+- **`gating`**: A/B 테스트나 feature flag 로 *환경에 따라 켜고 끄기*. Meta 가 내부적으로 쓰던 방식.
+
+## 빌드 도구 매트릭스
+
+| 빌드 도구 | 지원 상태 (2026-06) |
+|---|---|
+| Babel | 1차 (`babel-plugin-react-compiler`) |
+| Vite | `@vitejs/plugin-react` 의 Babel 옵션 경유, 또는 [`vite-plugin-react-compiler`](https://github.com/vitejs/vite-plugin-react-compiler) |
+| Next.js | `next.config.js` 의 `reactCompiler: true`. 15.3.1+ 에서 swc plugin 으로 빌드 속도 크게 개선 |
+| swc | *experimental*. [@kdy1dev](https://x.com/kdy1dev) 가 작업. Next.js 가 먼저 활용 |
+| oxc | *작업 중* ([oxc-project/oxc#10048](https://github.com/oxc-project/oxc/issues/10048)) |
+| Rsbuild | 1차 지원 |
+| Expo | SDK 54 부터 *기본 enable* |
+
+> 새 프로젝트는 `create-vite`, `create-next-app`, `create-expo-app` 모두 컴파일러 *enable 옵션* 을 제공한다. 새 코드면 거의 무조건 켜는 것이 권장.
+
+## ESLint 통합
+
+v1.0 부터 *별도 `eslint-plugin-react-compiler` 는 폐지*. `eslint-plugin-react-hooks` 의 `recommended` preset 안으로 통합되었다.
+
+```js
+// eslint.config.js (Flat Config)
+import reactHooks from 'eslint-plugin-react-hooks';
+import { defineConfig } from 'eslint/config';
+
+export default defineConfig([
+  reactHooks.configs.flat.recommended,
+]);
+```
+
+새 규칙 일부:
+
+- [`set-state-in-render`](https://react.dev/reference/eslint-plugin-react-hooks/lints/set-state-in-render): 렌더 중 `setState` 호출로 인한 *무한 루프* 패턴.
+- [`set-state-in-effect`](https://react.dev/reference/eslint-plugin-react-hooks/lints/set-state-in-effect): Effect 안에서 *불필요한 state 동기화* 를 잡음.
+- [`refs`](https://react.dev/reference/eslint-plugin-react-hooks/lints/refs): 렌더 중 ref 접근 같은 *unsafe* 사용을 잡음.
+
+> ESLint 만 켜는 것도 *유의미*: 컴파일러를 실제로 도입하지 않아도, *Rules of React* 위반을 컴파일러의 IR 수준 분석으로 잡아낼 수 있다.
+
+## `useMemo` / `useCallback` / `React.memo` 는 이제 필요 없나?
+
+대부분의 경우 *그렇다*. 컴파일러는 손으로 쓴 것보다 *더 정밀하게* memoize 한다.
+
+다만 다음 세 경우는 *escape hatch* 로 그대로 둘 가치가 있다:
+
+1. **`useEffect` 의 dependency 가 *정확히* memoize 된 값이어야 할 때**: 컴파일러가 *언제 reference 가 바뀌는지* 의 의도를 표현할 곳이 코드에 명시되어 있어야 안전.
+2. **외부 라이브러리에 *stable reference* 를 넘겨야 할 때**: 라이브러리의 hook 내부가 dep array 를 보는 경우.
+3. **이미 깔린 기존 `useMemo` 를 제거**: *컴파일 결과가 미세하게 달라질 수 있어*, 코드를 건드리지 않고 두는 편이 안전. 새 코드는 안 써도 OK.
+
+## 프로덕션 결과
+
+Meta 가 자체 앱들에 *수년간* 적용한 결과 (공식 글):
+
+- **Meta Quest Store**: 초기 로드와 페이지 이동 *최대 12% 개선*. 일부 인터랙션은 *2.5배 이상* 빨라짐.
+- **메모리 사용량은 중립**: memoize 추가 비용이 *그만한 가치* 가 있도록 균형.
+
+오픈소스 사례:
+
+- **Sanity Studio**: 거대한 *content editor* 의 복잡한 트리에서 도입 회고 ([discussion #33](https://github.com/reactwg/react-compiler/discussions/33)).
+- **Wakelet**: *측정된 수치* 와 함께 도입 회고 ([discussion #52](https://github.com/reactwg/react-compiler/discussions/52)).
+
+## v1.0 까지의 타임라인
+
+| 시점 | 이벤트 |
+|---|---|
+| 2017 | Meta 의 [Prepack](https://github.com/facebookarchive/prepack) 실험. 종료되었지만 *Hooks 설계의 토대* 가 됨 |
+| 2021 | [Xuan Huang](https://x.com/Huxpro) 의 [첫 prototype 데모](https://www.youtube.com/watch?v=lGEMwh32soc) |
+| 2024-02 | React Labs 글, 본격적인 *Compiler 작업 상황* 공개 |
+| 2024-05 | React Conf 2024 에서 *experimental* 공개 |
+| 2024-10 | Beta 출시. Meta 사내 사용량 확대 |
+| 2025-10-07 | **v1.0 stable**, ESLint 통합, 새 프로젝트 기본 enable |
+| 2025-10-16 | React Conf 2025 에서 리뷰 |
+
+## 다음
+
+v1.0 은 *시작점*. 공식 글이 명시하는 방향:
+
+- 더 정밀한 memoization (현재보다 *세분화* + *예측 가능성*).
+- 더 많은 *Rules of React* 를 정적으로 검증.
+- swc / oxc 와의 통합 강화 → 빌드 속도.
+- *Library precompilation*: 라이브러리 저작자가 *미리 컴파일된 결과* 를 패키지에 동봉.
+
+## 관련 위키
+
+- [[React]] (React 19/19.x 핵심 기능)
+- [[SPA Architecture]] (memoization 의 역사적 맥락)
+- [[JS Closure]] (memoize 가 의존하는 어휘 환경)
+
+## 참고
+
