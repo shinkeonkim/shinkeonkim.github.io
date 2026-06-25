@@ -1,0 +1,180 @@
+---
+title: "[Network] gRPC: HTTP/2 + Protobuf, 4가지 streaming 패턴"
+aliases: ["gRPC", "Protocol Buffers", "Protobuf", "gRPC streaming", "unary RPC", "bidirectional streaming", "grpc-web"]
+tags: [grpc, rpc, network, backend, protobuf, http2]
+category: network
+updated: 2026-06-25
+references:
+  - title: "gRPC 공식"
+    url: "https://grpc.io/docs/"
+  - title: "Protocol Buffers 공식"
+    url: "https://protobuf.dev/"
+  - title: "gRPC over HTTP/2"
+    url: "https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md"
+---
+
+## 정의
+
+**gRPC** 는 *HTTP/2 위에서 Protobuf 직렬화* 로 동작하는 *고성능 RPC 프레임워크*. Google 내부 *Stubby* 의 오픈소스 후계.
+
+핵심 4가지:
+
+1. **Protobuf**: IDL + binary 직렬화 (JSON 대비 *수배 작고 빠름*)
+2. **HTTP/2**: multiplexing + binary framing
+3. **Streaming 4종**: unary, server-stream, client-stream, bidi
+4. **Code generation**: `.proto` → 다국어 stub 자동 생성
+
+## Proto 정의
+
+```protobuf
+syntax = "proto3";
+package shop.v1;
+
+service Shop {
+  // Unary: 1 req → 1 res
+  rpc GetItem(GetItemRequest) returns (Item);
+
+  // Server streaming: 1 req → N res
+  rpc ListItems(ListRequest) returns (stream Item);
+
+  // Client streaming: N req → 1 res
+  rpc UploadEvents(stream Event) returns (UploadAck);
+
+  // Bidirectional: N req ↔ N res
+  rpc Chat(stream Message) returns (stream Message);
+}
+
+message Item {
+  string id = 1;
+  string name = 2;
+  int32 price_cents = 3;
+}
+```
+
+## 4가지 Streaming 패턴
+
+```mermaid
+flowchart TB
+    subgraph Unary["Unary RPC"]
+        U1[Client] -->|1 request| U2[Server]
+        U2 -->|1 response| U1
+    end
+    subgraph ServerStream["Server Streaming"]
+        S1[Client] -->|1 request| S2[Server]
+        S2 -->|stream of N| S1
+    end
+    subgraph ClientStream["Client Streaming"]
+        C1[Client] -->|stream of N| C2[Server]
+        C2 -->|1 response| C1
+    end
+    subgraph BiDi["Bidirectional Streaming"]
+        B1[Client] -->|stream of N| B2[Server]
+        B2 -->|stream of M| B1
+    end
+```
+
+| 패턴 | 사용 |
+|---|---|
+| Unary | 일반 API |
+| Server stream | 라이브 피드, log tail, 실시간 시세 |
+| Client stream | 파일 업로드, 이벤트 일괄 전송 |
+| Bidi stream | 채팅, 게임, 협업 |
+
+## HTTP/2 위 동작
+
+```anim:http2-multiplexing
+{}
+```
+
+```http
+:method = POST
+:scheme = https
+:path = /shop.v1.Shop/GetItem
+:authority = api.example.com
+content-type = application/grpc
+grpc-encoding = gzip
+grpc-accept-encoding = identity,deflate,gzip
+grpc-timeout = 1S
+
+<protobuf-encoded body>
+```
+
+각 RPC = HTTP/2 *stream 하나*. *Trailers* 로 `grpc-status`, `grpc-message` 전달.
+
+## Status Code
+
+| 코드 | 의미 |
+|---|---|
+| 0 OK | 성공 |
+| 1 CANCELLED | 클라이언트가 cancel |
+| 2 UNKNOWN | 정체불명 에러 |
+| 3 INVALID_ARGUMENT | 입력 오류 |
+| 4 DEADLINE_EXCEEDED | timeout |
+| 5 NOT_FOUND | 리소스 없음 |
+| 6 ALREADY_EXISTS | 중복 |
+| 7 PERMISSION_DENIED | 권한 |
+| 8 RESOURCE_EXHAUSTED | quota 초과 |
+| 9 FAILED_PRECONDITION | 사전조건 위배 |
+| 10 ABORTED | 동시성 충돌 |
+| 11 OUT_OF_RANGE | 범위 외 |
+| 12 UNIMPLEMENTED | 구현 안됨 |
+| 13 INTERNAL | 내부 에러 |
+| 14 UNAVAILABLE | 일시 불가, *retry 권장* |
+| 15 DATA_LOSS | 손실 |
+| 16 UNAUTHENTICATED | 인증 실패 |
+
+> [!IMPORTANT]
+> *UNAVAILABLE (14)* 만 retry 안전. *DEADLINE_EXCEEDED (4)* 는 *side effect 가 발생했을 수* 있어 *idempotent operation* 만 retry.
+
+## Deadline (timeout)
+
+```python
+# Python
+response = stub.GetItem(req, timeout=1.0)  # 1초
+
+# 또는 metadata
+metadata = (("grpc-timeout", "1S"),)
+```
+
+> 클라이언트의 deadline 은 *서버에 전파 (header)*. 서버가 더 깊은 RPC 를 부르면 *남은 deadline 만 전달*. *분산 timeout chaining*.
+
+## gRPC vs REST
+
+| 항목 | gRPC | REST |
+|---|---|---|
+| Wire 포맷 | Binary (Protobuf) | Text (JSON) |
+| 크기 | *수배 작음* | 크다 |
+| Schema | *IDL 필수* | 옵션 (OpenAPI) |
+| Streaming | *4 모드* | SSE / WebSocket 별도 |
+| 브라우저 직접 호출 | grpc-web 필요 | *기본 지원* |
+| Debugging | 도구 필요 | curl 가능 |
+| 캐싱 | 직접 구현 | HTTP cache |
+| Mobile / IoT | *유리* | OK |
+
+> *내부 microservice 통신* → gRPC. *외부 public API* → REST/GraphQL.
+
+## gRPC-Web
+
+브라우저는 HTTP/2 trailer 미지원 → *Envoy / proxy* 가 *gRPC ↔ gRPC-Web* 변환:
+
+```mermaid
+flowchart LR
+    Browser -->|gRPC-Web<br/>over HTTP/1.1| Envoy
+    Envoy -->|gRPC<br/>over HTTP/2| Backend
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Field number 재사용** = proto 의 *tag 번호* 가 *wire format 의 identity*. 한 번 쓴 번호 *영구히 reserved*.
+> 2. **`required` 필드** = proto2 의 *legacy*. proto3 는 *모든 필드가 optional 류*. *`required` 사용 금지*.
+> 3. **string vs bytes** = string 은 *UTF-8 검증*. binary 데이터는 *bytes*.
+> 4. **stream 의 *완료 표시*** = 클라이언트 stream 은 *반드시 half-close (closeSend)* 해야 서버가 finalize.
+
+## 관련 위키
+
+- [[HTTP/2]]
+- [[Protobuf]] (별도 자료)
+- [[REST API Design]]
+- [[GraphQL]]
+- [[Microservices]]

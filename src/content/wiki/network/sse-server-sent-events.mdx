@@ -1,0 +1,174 @@
+---
+title: "[Network] SSE (Server-Sent Events): 단방향 영속 스트림"
+aliases: ["SSE", "Server-Sent Events", "EventSource", "text/event-stream"]
+tags: [sse, network, realtime, backend, streaming]
+category: network
+updated: 2026-06-25
+references:
+  - title: "WHATWG: Server-Sent Events"
+    url: "https://html.spec.whatwg.org/multipage/server-sent-events.html"
+  - title: "MDN: Using SSE"
+    url: "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events"
+---
+
+## 정의
+
+**Server-Sent Events (SSE)** 는 *HTTP 위 단방향 (서버 → 클라이언트) 영속 스트림*. `text/event-stream` MIME + 클라이언트의 `EventSource` API.
+
+장점: *HTTP/1.1 위에서 동작*, *자동 재연결*, *브라우저 native*, *프록시/방화벽 친화*.
+
+## 메시지 포맷
+
+```
+data: hello\n
+\n
+
+data: line 1\n
+data: line 2\n
+\n
+
+event: ping\n
+data: {"t":1234}\n
+\n
+
+id: 42\n
+data: msg\n
+retry: 5000\n
+\n
+```
+
+| 필드 | 의미 |
+|---|---|
+| `data:` | 본문 (여러 줄 가능, JOIN 으로 합쳐짐) |
+| `event:` | 커스텀 이벤트 이름 (없으면 `message`) |
+| `id:` | 메시지 ID. 재연결 시 `Last-Event-ID` 헤더로 보냄 |
+| `retry:` | 재연결 간격 (ms) |
+| `\n\n` | 메시지 끝 구분 |
+
+## 서버 응답
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+
+data: {"price":42000}\n
+\n
+
+data: {"price":42100}\n
+\n
+```
+
+## 클라이언트 (브라우저)
+
+```js
+const es = new EventSource('/api/prices/stream');
+
+es.onopen = () => console.log('open');
+
+es.onmessage = (e) => {
+  const data = JSON.parse(e.data);
+  console.log('price', data.price);
+};
+
+es.addEventListener('ping', (e) => {
+  console.log('ping', e.data);
+});
+
+es.onerror = (e) => {
+  // 자동 재연결 (브라우저가 처리)
+  console.log('error', e);
+};
+
+// 명시 종료
+es.close();
+```
+
+## 동작 흐름
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Server
+
+    C->>S: GET /stream<br/>Accept: text/event-stream
+    S-->>C: 200 OK<br/>Content-Type: text/event-stream
+    loop 연결 유지
+        S-->>C: data: ...\n\n
+    end
+    Note over C: 네트워크 끊김
+    Note over C: 자동 재시도 (3s 기본)
+    C->>S: GET /stream<br/>Last-Event-ID: 42
+    S-->>C: 200 OK (id=43 부터 재개)
+```
+
+> [!TIP]
+> *서버는 `Last-Event-ID` 헤더를 검증하고 *그 ID 이후 이벤트* 만 보내야* 완벽한 재개. 보통 이벤트 ID 를 *DB 또는 Redis Stream offset* 으로.
+
+## 백엔드 구현 (Node)
+
+```js
+app.get('/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  const lastId = req.headers['last-event-id'];
+  const startFrom = lastId ? +lastId + 1 : 0;
+
+  let id = startFrom;
+  const t = setInterval(() => {
+    res.write(`id: ${id}\n`);
+    res.write(`data: ${JSON.stringify({ t: Date.now() })}\n\n`);
+    id++;
+  }, 1000);
+
+  req.on('close', () => clearInterval(t));
+});
+```
+
+## SSE vs WebSocket vs Polling
+
+| 항목 | SSE | WebSocket | Long Polling |
+|---|---|---|---|
+| 방향 | 서버 → 클라이언트 | 양방향 | 양방향 |
+| 프로토콜 | HTTP/1.1 (또는 H2/H3) | 자체 (RFC 6455) | HTTP |
+| 자동 재연결 | *내장* | 직접 구현 | 직접 |
+| 텍스트 / 바이너리 | *텍스트만* (UTF-8) | 둘 다 | 텍스트 |
+| 프록시 / 방화벽 친화 | *최고* | 보통 | 최고 |
+| 브라우저 호환 | 모던 OK | 모던 OK | 모두 |
+| 서버 자원 (idle 연결) | 가벼움 | 가벼움 | *무거움* (반복 연결) |
+
+> [!IMPORTANT]
+> *서버 → 클라이언트 일방향 푸시* (알림, 라이브 피드, 진행률) 면 *SSE 가 거의 항상 더 단순*. 양방향이 *진짜 필요할 때만* WebSocket.
+
+## HTTP/2 위 SSE
+
+HTTP/2 에서는 *multiplexing* 으로 *여러 SSE stream + 일반 요청* 한 연결에서. *HTTP/1.1 의 6 connection limit* 문제 해결.
+
+## 활용
+
+1. **알림 / 토스트**: 새 알림이 도착했을 때 push
+2. **라이브 대시보드**: 메트릭 실시간
+3. **AI Streaming (LLM 응답)**: OpenAI / Anthropic SDK 의 *streaming* 이 SSE 위에서
+4. **빌드 / 배포 로그 tail**
+5. **주식 / 코인 시세** (단방향 충분)
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **PROXY 의 *response buffering*** = nginx 의 `proxy_buffering on` 이 *모든 데이터를 모아 보냄*. SSE 는 *즉시 flush* 필요. `proxy_buffering off` + `X-Accel-Buffering: no` 헤더.
+> 2. **HTTP/1.1 의 6 connection limit** = 한 도메인에 *6개 이상* SSE 불가. HTTP/2 로 해결.
+> 3. **`EventSource` 가 *재연결 시 자동* 인데 *지수 백오프 없음*** = 서버 과부하 위험. *서버에서 `retry:` 헤더로 조정*.
+> 4. **CORS preflight + EventSource** = EventSource 는 *기본 헤더만* 지원. 커스텀 헤더 (Authorization) 가 필요하면 *URL 쿼리* 또는 *쿠키*.
+
+## 관련 위키
+
+- [[WebSocket]] (양방향)
+- [[realtime-comparison]]
+- [[HTTP/1.1]], [[HTTP/2]]
+- [[Redis Pub Sub vs Streams]] (fan-out)

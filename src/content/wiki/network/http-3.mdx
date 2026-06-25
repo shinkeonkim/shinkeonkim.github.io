@@ -1,0 +1,142 @@
+---
+title: "[Network] HTTP/3: QUIC 위의 HTTP, 0-RTT, connection migration"
+aliases: ["HTTP/3", "h3", "QUIC", "0-RTT", "connection migration", "QPACK"]
+tags: [http, network, backend, protocol, quic, udp]
+category: network
+updated: 2026-06-25
+references:
+  - title: "RFC 9114 (HTTP/3)"
+    url: "https://datatracker.ietf.org/doc/html/rfc9114"
+  - title: "RFC 9000 (QUIC)"
+    url: "https://datatracker.ietf.org/doc/html/rfc9000"
+  - title: "Cloudflare: QUIC and HTTP/3"
+    url: "https://blog.cloudflare.com/http3-the-past-present-and-future/"
+---
+
+## 정의
+
+**HTTP/3** (2022, [RFC 9114](https://datatracker.ietf.org/doc/html/rfc9114)) 는 HTTP 의 *전송 레이어를 TCP → QUIC* 으로 교체한 버전. *UDP 위에 QUIC, QUIC 위에 HTTP*.
+
+핵심 동기: **TCP HoL blocking 해결** + **0-RTT 핸드셰이크** + **connection migration** (IP 변경 시 연결 유지).
+
+```mermaid
+flowchart TB
+    HTTP[HTTP semantics] --> QUIC[QUIC<br/>multi-streams + crypto + congestion]
+    QUIC --> UDP[UDP]
+    UDP --> IP[IP]
+```
+
+## QUIC 의 핵심 (1분 요약)
+
+```anim:http3-quic
+{}
+```
+
+| 특성 | TCP+TLS+HTTP/2 | QUIC+HTTP/3 |
+|---|---|---|
+| 핸드셰이크 | 3-way + TLS = 2-3 RTT | *1 RTT* (또는 0-RTT 재방문) |
+| HoL Blocking | TCP 레벨 발생 | *stream 별 독립* |
+| Connection migration | 불가 | *가능* (NAT 변경, WiFi → 4G) |
+| 암호화 | 옵션 | *필수* (TLS 1.3 통합) |
+| 패킷 손실 영향 | 모든 stream 대기 | *해당 stream 만* |
+| 구현 위치 | OS (TCP) + 라이브러리 (TLS) | *전부 user-space* (배포 빠름) |
+
+## Handshake: 0-RTT 의 마법
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Server
+
+    rect rgb(220,240,220)
+    Note over C,S: 첫 방문 (1-RTT)
+    C->>S: Initial (TLS ClientHello + crypto frames)
+    S-->>C: Initial + Handshake (server params + cert)
+    C->>S: Handshake (finish) + HTTP request
+    S-->>C: HTTP response
+    end
+
+    rect rgb(255,235,220)
+    Note over C,S: 재방문 (0-RTT)
+    C->>S: 0-RTT (HTTP request + cached params)
+    S-->>C: HTTP response (즉시)
+    end
+```
+
+> [!CAUTION]
+> *0-RTT 데이터는 replay 공격에 취약*. *비멱등 요청* (POST 결제) 은 *반드시 1-RTT 후 처리*. GET / HEAD 같은 *안전한 method* 만 0-RTT 권장.
+
+## TCP HoL vs QUIC stream 독립
+
+```mermaid
+flowchart TB
+    subgraph T["TCP (HTTP/2)"]
+        TS["stream 1, 3, 5 가<br/>같은 TCP 시퀀스 안"]
+        TPacket1[패킷 1: 일부 stream 1]
+        TPacket2[패킷 2: 일부 stream 3, *손실!*]
+        TPacket3[패킷 3: 일부 stream 5]
+        TS --> TPacket1 & TPacket2 & TPacket3
+        TPacket2 -.->|"모든 stream 대기"| Block1["모든 stream 대기"]
+    end
+    subgraph Q["QUIC (HTTP/3)"]
+        QS["stream 1, 3, 5 가<br/>각자 시퀀스"]
+        QPacket1[패킷 1: stream 1 ✓]
+        QPacket2[패킷 2: stream 3, *손실*]
+        QPacket3[패킷 3: stream 5 ✓]
+        QS --> QPacket1 & QPacket2 & QPacket3
+        QPacket2 -.->|stream 3 만 대기| Block2["stream 1, 5 계속"]
+    end
+```
+
+## Connection Migration
+
+WiFi → 4G 전환, NAT 재할당 시 *연결 유지*. *Connection ID* 가 *src IP/port 와 무관*.
+
+```mermaid
+sequenceDiagram
+    Client->>Server: WiFi IP 192.168.1.10:54321 (conn_id=XYZ)
+    Server-->>Client: 응답 (conn_id=XYZ)
+    Note over Client: 지하철 진입, 4G 전환
+    Client->>Server: 4G IP 10.0.0.5:65432 (conn_id=XYZ)
+    Server-->>Client: 응답 (같은 connection 이어감)
+    Note over Client,Server: TLS / 세션 유지, 처음부터 다시 안 함
+```
+
+## QPACK 헤더 압축
+
+HPACK 의 *순서 의존성 문제* 를 해결한 변형. *encoder/decoder stream 분리*.
+
+| HPACK | QPACK |
+|---|---|
+| 헤더가 *정확한 순서* | *stream 독립 디코딩* 가능 |
+| 인덱스 갱신 → 모든 stream 영향 | 별도 stream 으로 동기화 |
+
+## 도입 현황 (2026)
+
+| 영역 | 비중 |
+|---|---|
+| Cloudflare / Fastly / Akamai (CDN) | *기본 활성* |
+| 모바일 앱 (gRPC, 자체 클라이언트) | 빠르게 증가 |
+| 일반 웹 사이트 (브라우저 트래픽) | 약 35%+ |
+| 기업 내부 (방화벽 UDP 차단) | 더딤 |
+
+> [!NOTE]
+> *방화벽이 UDP 를 차단* 하면 HTTP/3 fallback → HTTP/2 (TCP). 도입의 가장 큰 *현실 장벽*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **방화벽 / 미들박스의 UDP 차단** = 사내망에서 H3 가 안 되는 가장 흔한 이유.
+> 2. **0-RTT 의 replay 위험** = POST / DELETE 등 비멱등은 0-RTT 거절.
+> 3. **Connection ID 가 *식별자처럼* 쓰임** = 추적 / privacy 우려. RFC 가 *주기적 변경* 권장.
+> 4. **부하 분산기의 *UDP 5-tuple 해싱*** = NAT 변경 시 *다른 백엔드* 로. *connection ID 기반 라우팅* 필요.
+
+## 관련 위키
+
+- [[HTTP/2]] (전 단계)
+- [[QUIC]] (전송 레이어)
+- [[UDP]]
+- [[TLS]] (QUIC 내부)
+- [[head-of-line-blocking]]
+- [[Load Balancer]] (UDP / QUIC LB)

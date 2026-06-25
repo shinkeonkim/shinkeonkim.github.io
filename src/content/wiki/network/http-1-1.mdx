@@ -1,0 +1,175 @@
+---
+title: "[Network] HTTP/1.1: keep-alive, pipelining, chunked transfer"
+aliases: ["HTTP/1.1", "keep-alive", "pipelining", "chunked encoding", "Content-Length", "Connection: close"]
+tags: [http, network, backend, protocol]
+category: network
+updated: 2026-06-25
+references:
+  - title: "RFC 9112 (HTTP/1.1)"
+    url: "https://datatracker.ietf.org/doc/html/rfc9112"
+    note: "HTTP/1.1 의 1차 출처. 1999년 RFC 2616 의 재정리."
+  - title: "MDN: HTTP messages"
+    url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Messages"
+---
+
+## 정의
+
+**HTTP/1.1** (1997, [RFC 9112](https://datatracker.ietf.org/doc/html/rfc9112) 으로 재정리) 는 *텍스트 기반 stateless request/response 프로토콜*. 2026 시점에도 *대부분의 트래픽이 HTTP/1.1 + 일부 HTTP/2/3* 분포.
+
+핵심 진화 (HTTP/1.0 대비):
+
+| 기능 | HTTP/1.0 | HTTP/1.1 |
+|---|---|---|
+| 기본 연결 | *매 요청 새 TCP* | *Persistent (keep-alive)* |
+| Host 헤더 | 옵션 | *필수* (가상호스팅) |
+| Chunked transfer | 없음 | *있음* |
+| 캐시 제어 | `Expires` | `Cache-Control` |
+| 부분 요청 | 없음 | *Range / 206 Partial Content* |
+
+## 메시지 구조
+
+```anim:http-request
+{}
+```
+
+```http
+GET /api/users/42 HTTP/1.1
+Host: api.example.com
+User-Agent: curl/8.1
+Accept: application/json
+
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 42
+Connection: keep-alive
+
+{"id":42,"name":"koa","tier":"pro"}
+```
+
+## Keep-Alive (Persistent Connection)
+
+```anim:http1-keep-alive
+{}
+```
+
+`Connection: keep-alive` 헤더로 *TCP 연결 재사용*. 한 연결에서 *여러 요청/응답*. TLS 핸드셰이크 비용 절감의 *결정적 기능*.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Server
+
+    C->>S: TCP SYN / handshake (3-way)
+    S-->>C: SYN-ACK
+    C->>S: GET /a
+    S-->>C: 200 OK (Connection: keep-alive)
+    C->>S: GET /b (같은 TCP)
+    S-->>C: 200 OK
+    C->>S: GET /c (같은 TCP)
+    S-->>C: 200 OK
+    Note over C,S: idle timeout (예: 60s) 후 close
+```
+
+| 헤더 / 설정 | 의미 |
+|---|---|
+| `Connection: keep-alive` | 연결 재사용 (HTTP/1.1 기본) |
+| `Connection: close` | 응답 후 즉시 close |
+| `Keep-Alive: timeout=60, max=100` | idle 60s, max 100 요청 |
+
+> [!TIP]
+> 서버 (nginx, ELB) 의 *idle timeout* 과 클라이언트 *connection pool TTL* 의 불일치가 *간헐적 connection reset* 의 가장 흔한 원인. 보통 *클라이언트 < 서버* 로 잡는다.
+
+## Pipelining (구현 함정)
+
+같은 연결에서 *응답을 기다리지 않고 여러 요청 동시 전송*. *Head-of-Line Blocking* 문제 → 실전 거의 사용 안 됨.
+
+```
+요청: A → B → C → D (즉시 연속)
+응답: A → B → C → D (반드시 순서대로)
+
+문제: A 가 느리면 B/C/D 도 모두 대기
+```
+
+→ HTTP/2 의 *multiplexing* 이 이 문제를 *프레임 인터리빙* 으로 해결. 자세한 건 [[head-of-line-blocking]] / [[HTTP/2]].
+
+## Content-Length vs Chunked
+
+본문 끝을 알리는 *두 가지 방법*:
+
+```http
+# 1. Content-Length (크기 미리 알 때)
+HTTP/1.1 200 OK
+Content-Length: 12345
+
+<12345 bytes>
+
+# 2. Transfer-Encoding: chunked (streaming)
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+
+7\r\n
+Mozilla\r\n
+9\r\n
+Developer\r\n
+0\r\n
+\r\n
+```
+
+| 방식 | 동작 | 사용 |
+|---|---|---|
+| `Content-Length` | 정확한 바이트 수 | 정적 파일, 작은 응답 |
+| `chunked` | 청크 단위 전송 | *streaming* (SSE, long-poll, 대용량 응답) |
+
+> [!IMPORTANT]
+> *동일 응답에 두 방식 모두 설정* 하면 *RFC 위반*. 일부 프록시는 chunked 우선, 일부는 Content-Length 우선 → *HTTP Request Smuggling* 공격의 토대. 항상 *하나만*.
+
+## 상태 코드 카테고리
+
+| 범위 | 의미 | 대표 |
+|---|---|---|
+| 1xx | Informational | `100 Continue`, `101 Switching Protocols` |
+| 2xx | Success | `200 OK`, `201 Created`, `204 No Content`, `206 Partial Content` |
+| 3xx | Redirection | `301 Moved Permanently`, `302 Found`, `304 Not Modified`, `307 Temporary Redirect`, `308 Permanent Redirect` |
+| 4xx | Client Error | `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable`, `429 Too Many Requests` |
+| 5xx | Server Error | `500`, `502 Bad Gateway`, `503 Service Unavailable`, `504 Gateway Timeout` |
+
+> [!NOTE]
+> `307/308` vs `302/301` 의 핵심 차이: **307/308 은 HTTP method 를 보존**. `POST → 302 → GET` 의 *옛 클라이언트 동작* 이 *307 에서는 POST → POST*.
+
+## Cache 헤더 (HTTP/1.1 의 가장 큰 진화)
+
+```http
+Cache-Control: public, max-age=3600, must-revalidate
+ETag: "abc123"
+Last-Modified: Wed, 25 Jun 2026 12:00:00 GMT
+```
+
+```mermaid
+flowchart LR
+    A[클라이언트<br/>If-None-Match: abc123] --> B[서버]
+    B -->|ETag 일치| C[304 Not Modified<br/>body 없음]
+    B -->|ETag 불일치| D[200 OK<br/>새 본문 + 새 ETag]
+```
+
+자세한 캐시 패턴은 [[network-http-caching]] 참고.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`Host` 헤더 누락** = HTTP/1.1 에서 *400 Bad Request*. 가상호스팅 때문에 필수.
+> 2. **Content-Length 거짓말** = 본문이 짧으면 *클라이언트가 무한 대기*, 길면 *다음 요청과 섞임* (smuggling).
+> 3. **`Connection: close` 남발** = TCP/TLS 비용 폭증. 명시적 이유 없으면 *기본 keep-alive*.
+> 4. **`Cache-Control: no-cache` 와 `no-store` 혼동** = no-cache 는 *재검증 필요*, no-store 는 *저장 자체 금지*.
+
+## 관련 위키
+
+- [[TCP]], [[TLS]]
+- [[HTTP/2]] (multiplexing 으로 HoL blocking 해결)
+- [[HTTP/3]] (QUIC 위 HTTP)
+- [[head-of-line-blocking]], [[hpack]]
+- [[network-http-caching]] (캐시 헤더 깊게)
+- [[Load Balancer]]

@@ -1,0 +1,161 @@
+---
+title: "[Network] Load Balancer: L4 vs L7, 알고리즘, sticky session"
+aliases: ["Load Balancer", "L4 LB", "L7 LB", "round-robin", "least connections", "consistent hashing", "health check", "sticky session"]
+tags: [load-balancer, network, devops, infrastructure]
+category: network
+updated: 2026-06-25
+references:
+  - title: "AWS: ALB vs NLB"
+    url: "https://aws.amazon.com/elasticloadbalancing/features/"
+  - title: "Cloudflare: Load Balancing"
+    url: "https://www.cloudflare.com/learning/performance/what-is-load-balancing/"
+  - title: "envoy proxy: load balancing"
+    url: "https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/overview"
+---
+
+## 정의
+
+**Load Balancer** 는 *트래픽을 여러 백엔드로 분산* 하는 인프라. *수평 확장 + 가용성 + 무중단 배포* 의 토대.
+
+```anim:load-balancer
+{}
+```
+
+## L4 vs L7
+
+| 구분 | L4 (Transport) | L7 (Application) |
+|---|---|---|
+| 본 계층 | TCP/UDP | HTTP/gRPC/WebSocket |
+| 보는 정보 | IP + port | URL, 헤더, 쿠키, body |
+| 처리 비용 | 가벼움 | 무거움 (parse) |
+| 기능 | 단순 분산 | path/header routing, rewrite, auth, rate limit |
+| TLS 종료 | 옵션 (passthrough 가능) | 보통 종료 후 분배 |
+| 예 | AWS NLB, HAProxy TCP, IPVS | AWS ALB, nginx, Envoy, Traefik |
+
+```mermaid
+flowchart LR
+    subgraph L4
+        C1[Client] -->|TCP| LB4[L4 LB]
+        LB4 -->|TCP forward| B1[Backend 1]
+        LB4 -->|TCP forward| B2[Backend 2]
+    end
+    subgraph L7
+        C2[Client] -->|HTTP| LB7[L7 LB]
+        LB7 -->|URL = /api| BA[API service]
+        LB7 -->|URL = /static| BS[Static service]
+    end
+```
+
+## 알고리즘
+
+| 알고리즘 | 동작 |
+|---|---|
+| **Round Robin** | 순서대로 |
+| **Weighted RR** | 가중치 비율 |
+| **Least Connections** | 현재 연결 가장 적은 백엔드 |
+| **Least Response Time** | 평균 응답 시간 가장 짧은 |
+| **IP Hash** | 클라이언트 IP 해시 → 같은 IP 는 같은 백엔드 |
+| **Consistent Hashing** | hash 링 → 노드 추가/제거 시 *최소 재분배* |
+| **Random (P2C)** | 무작위 2개 중 *덜 바쁜* |
+
+### Power of Two Choices (P2C)
+
+```mermaid
+flowchart LR
+    R[Request] -->|random pick 2| P[Pool of N]
+    P --> S1[Server A: load=5]
+    P --> S2[Server B: load=8]
+    P -->|선택| S1
+```
+
+> [!TIP]
+> *완전 random* 보다 좋고 *least-conn* 보다 *cheap*. Netflix, Twitter 등 *대규모 서비스의 기본*.
+
+### Consistent Hashing
+
+노드 추가/제거 시 *N/M 만 재분배* (vs 일반 hash 의 *전체 재분배*).
+
+```mermaid
+flowchart LR
+    Ring(("Hash Ring<br/>0 → 2^32")) --> N1[Node A<br/>at hash 100]
+    Ring --> N2[Node B<br/>at hash 500]
+    Ring --> N3[Node C<br/>at hash 900]
+    Key1[key: hash 300] -->|시계방향| N2
+    Key2[key: hash 700] -->|시계방향| N3
+```
+
+- *Sticky session*, *cache 라우팅*, *DB sharding*.
+- *virtual node* (각 노드를 *수십 개 ring 점*) 로 *분포 균등화*.
+
+## Health Check
+
+```mermaid
+sequenceDiagram
+    loop 30초마다
+        LB->>Backend: GET /health
+        Backend-->>LB: 200 OK
+    end
+    Note over Backend: 다운
+    LB->>Backend: GET /health
+    Backend-xLB: timeout
+    Note over LB: 3회 연속 실패 → 풀에서 제외
+```
+
+- *Active*: LB 가 주기 ping.
+- *Passive*: 실제 요청 실패율로 판단.
+- *Composite*: 둘 다.
+
+> [!CAUTION]
+> Health check 가 *너무 단순* (예: 200 OK 만) 하면 *DB 다운인데 healthy* 로 판정. *deep health* (DB, cache 까지 ping) vs *shallow health* (애플리케이션만) 의 *분리*.
+
+## Sticky Session
+
+| 방식 | 동작 | 단점 |
+|---|---|---|
+| Cookie | LB 가 *쿠키 박음* | 쿠키 위변조 / 제거 시 깨짐 |
+| IP Hash | 클라이언트 IP 기준 | NAT 뒤 사용자가 *같은 노드 몰림* |
+| Application | 앱이 *자기 ID* 응답 헤더로 | 구현 복잡 |
+
+자세한 건 [[Sticky Session]] 참고.
+
+## 보안 / 옵저버빌리티
+
+L7 LB 의 추가 능력:
+
+- **TLS termination** (인증서 관리)
+- **WAF** (SQLi, XSS 차단)
+- **Rate limiting**
+- **Request/response 로깅**
+- **Header rewrite, redirect**
+- **Path-based routing**
+- **A/B testing, canary**
+
+## 실전 LB 선택
+
+| 도구 | L4/L7 | 사용처 |
+|---|---|---|
+| AWS ALB | L7 | AWS 표준 L7 |
+| AWS NLB | L4 | 초저지연, gRPC, WebSocket |
+| AWS CLB | L4/L7 | (legacy) |
+| nginx | L7 (L4 옵션) | self-host 가장 흔함 |
+| HAProxy | L4/L7 | 고성능 |
+| Envoy | L7 | service mesh, gRPC |
+| Traefik | L7 | K8s 친화 |
+| IPVS | L4 | 커널 모듈, 극저지연 |
+| Caddy | L7 | 자동 TLS |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **WebSocket 의 *idle timeout*** = ALB 60s default 가 silent close. *ping/pong* 으로.
+> 2. **gRPC 의 *long-lived HTTP/2 연결*** = L4 LB 의 *connection 단위 분산* 때문에 *불균등 분포*. *gRPC 자체 load balancing* (Envoy, GRPC client-side LB) 필요.
+> 3. **Health check 의 *서버 자살*** = HC 자체가 부하 → 서버 다운. *분리된 endpoint* + *경량 응답*.
+> 4. **Sticky session + auto-scaling** = scale-in 시 *stuck* 사용자 세션 손실. *세션을 *외부 store* (Redis)* 로 옮기는 게 정통.
+
+## 관련 위키
+
+- [[Sticky Session]]
+- [[HTTP/2]] (long-lived 연결과 LB)
+- [[Redis Pub Sub vs Streams]] (분산 fan-out)
+- [[Kubernetes Service]] (K8s LB)
+- [[AWS ALB NLB]]
