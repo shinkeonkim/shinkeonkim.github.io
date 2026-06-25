@@ -1,0 +1,278 @@
+---
+title: Segment Tree Beats
+aliases:
+  - Segment Tree Beats
+  - Ji Driver Segment Tree
+  - STB
+  - 세그먼트 트리 비츠
+tags:
+  - algorithm
+  - data-structure
+  - segment-tree
+  - lazy-propagation
+category: algorithm
+subcategory: data-structure
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 자료구조 > Segment Tree Beats
+  - id: koosaga-blog
+    note: https://koosaga.com/307
+  - id: infossm-blog
+    note: rdd6584, Segment Tree Beats (2019-10-19)
+  - title: jiry_2, Segment Tree Beats!
+    url: https://codeforces.com/blog/entry/57319
+    author: jiry_2
+  - title: Errichto, Segment Tree Beats lecture
+    url: https://youtu.be/wFqKgrW1IMQ
+    author: Errichto
+---
+
+## 정의
+
+**Segment Tree Beats (STB)**, 일명 **Ji Driver Segment Tree** 는 *naive lazy propagation 으로는 표현 불가능한 비단조 lazy* (예: 구간 chmin, chmax) 를 **각 노드에 max / second-max 같은 추가 정보** 를 들고 amortized 로 처리하는 세그먼트 트리 기법.
+
+2016 년 중국 IOI 후보자 *Ji Ruoyu (吉如一)* 가 발표해서 "Ji Driver" 라는 별명이 붙었다. 표준 lazy 가 `+x`, `:=x` 같은 가역/단조 연산만 다루는 반면 STB 는 `a_i := min(a_i, x)` 같은 *원소별로 다르게 적용되는 연산* 도 합 / 최댓값 같은 집계 쿼리와 함께 처리.
+
+## 문제 상황과 동기
+
+**문제**: 배열 `a[0..N-1]` 에 대해 다음 쿼리를 빠르게 처리하고 싶다.
+
+1. `chmin(l, r, x)`: `a[i] := min(a[i], x)` for all `i` in `[l, r]`
+2. `sum(l, r)`: 구간 합 반환
+
+**Naive 접근**: 각 chmin 마다 O(N) 으로 배열을 순회하면, Q 번의 쿼리에 O(NQ). N, Q ≤ 10^5 이면 TLE.
+
+**표준 lazy 로는 왜 안되나**: `+x` / `:=x` 같은 lazy tag 는 구간 전체에 단조롭게 적용되어 합 갱신이 단순하다. 하지만 `chmin(x)` 는 원소별로 다르게 적용된다. `a[i] > x` 인 원소만 x 로 갱신되기 때문에, 합 갱신을 위해서는 "몇 개가 x 보다 큰지" 를 알아야 하는데 이는 자식을 모두 봐야 한다.
+
+**핵심 통찰**: 구간의 최댓값 `max1` 과 두 번째 최댓값 `max2` 를 들고 있으면,
+- `max1 <= x` 면 아무 변화 없음 (early return)
+- `max2 < x < max1` 이면 **max1 인 원소들만** x 로 갱신 (노드에서 바로 처리)
+- `max2 >= x` 면 자식으로 내려감 (복잡한 케이스)
+
+amortized 분석 결과, 전체 O((N+Q) log² N). 구간 chmin 같은 비단조 lazy 를 세그트리에서 처리할 수 있게 된다.
+
+**실전 출현**: BOJ "수열과 쿼리" 시리즈, CodeForces Div1 hard 문제에 주기적으로 등장.
+
+## 시각화
+
+```anim:segment-tree-beats
+{}
+```
+
+## 핵심 아이디어
+
+`a_i := min(a_i, x)` 연산을 구간에 적용한다고 하자. naive 는 모든 원소를 봐야 하지만, **구간 max 가 x 이하면 아무 변화 없음**, **구간 max 가 x 초과지만 second max 가 x 이하면 max 인 원소들만 x 로 갱신** 할 수 있다.
+
+```text
+노드 정보:
+  sum         : 구간 합
+  max1        : 최댓값
+  max1_cnt    : 최댓값의 개수
+  max2        : 두번째 최댓값 (max1 미만)
+
+chmin(l, r, x):
+  if max1 <= x:           return                  # 변화 없음
+  if max2 < x:                                    # max1 만 갱신
+    sum -= (max1 - x) * max1_cnt
+    max1 = x
+    lazy 갱신
+    return
+  # max2 >= x : 자식으로 내려감
+  recurse left, right
+  pull up
+```
+
+`max2 >= x` 인 경우만 자식으로 내려가는데, 이 경우 다음 번 chmin 으로 `max1` 과 `max2` 사이의 거리가 좁혀진다. amortized 분석에 의해 전체 O(N log² N) 또는 O((N+Q) log² N).
+
+### 작동 예시
+
+```text
+초기 배열: [8, 5, 12, 3, 9]
+
+트리 노드 (단순화, 루트만):
+  [0..4]  sum=37, max1=12, max1_cnt=1, max2=9
+
+chmin(0, 4, 10):
+  max1=12 > 10, max2=9 < 10
+  → max1 만 갱신: sum -= (12-10)*1 = 35
+  → max1 = 10
+  → 배열: [8, 5, 10, 3, 9]
+
+chmin(0, 4, 7):
+  max1=10 > 7, max2=9 < 7? 아니다 (9 > 7)
+  → 자식으로 내려가서 재귀
+  → 각 원소별로 처리
+  → 배열: [7, 5, 7, 3, 7]
+```
+
+**핵심 불변량**: 각 노드의 `max2 < max1` 관계 유지. break (자식 재귀) 가 일어날 때마다 구간 내 distinct value 개수가 줄어든다. potential function 으로 이 개수를 잡으면 amortized 분석이 닫힌다.
+
+## 복잡도
+
+| 연산 | 시간 (amortized) |
+|:---|:---|
+| chmin / chmax | O(log² N) |
+| 구간 +x | O(log N) |
+| 구간 합 | O(log N) |
+| 구간 max / min | O(log N) |
+
+증명: potential function = `Σ (구간 내 서로 다른 값의 개수)`. 한 번의 *break* (자식 재귀) 마다 distinct count 가 감소.
+
+## 변형
+
+### 구간 chmin + chmax + 합
+
+기본 변형. max1/max2/min1/min2 + 카운트 모두 유지.
+
+### 구간 chmin + +x + 합
+
+`+x` 가 들어오면 max1, max2 같은 양 모두 +x. 단순 추가.
+
+### 더 어려운 변형 ("ADD, DIV, MAX")
+
+각 원소를 `a/d` (정수 나눗셈) 로 갱신. STB 의 확장.
+
+## 함정
+
+### 1. amortized 분석은 깨질 수 있다
+
+특정 변형 (예: 구간 chmin + 구간 chmax 가 동시) 은 amortized 가 O(log³ N) 까지 갈 수 있다. 안전 한계는 작품마다 다름.
+
+### 2. 코드 복잡도
+
+기본 lazy seg tree 의 3 ~ 5 배 코드. break / tag / pull 함수가 case 별로 갈라진다. 검증된 구현체 (jiry_2 / koosaga) 복붙이 권장.
+
+### 3. 다중 lazy 우선순위
+
+`chmin`, `+`, `:=` 가 섞이면 lazy 합치는 순서 정의가 까다롭다. 정의를 종이에 적고 일관되게.
+
+## 구현
+
+```cpp
+// O(log^2 N) chmin, O(log N) sum query. (구간 chmin 같은 비단조 lazy 처리)
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Node {
+    long long sum;
+    long long max1, max2;
+    int max1_cnt;
+    long long lazy_min;  // chmin lazy tag
+    
+    Node() : sum(0), max1(-1e18), max2(-1e18), max1_cnt(0), lazy_min(1e18) {}
+};
+
+struct SegTreeBeats {
+    int n;
+    vector<Node> t;
+    
+    SegTreeBeats(int n) : n(n), t(4*n) {}
+    
+    void pull(int v) {
+        Node &p = t[v], &l = t[2*v], &r = t[2*v+1];
+        p.sum = l.sum + r.sum;
+        
+        if (l.max1 == r.max1) {
+            p.max1 = l.max1;
+            p.max1_cnt = l.max1_cnt + r.max1_cnt;
+            p.max2 = max(l.max2, r.max2);
+        } else {
+            if (l.max1 > r.max1) {
+                p.max1 = l.max1;
+                p.max1_cnt = l.max1_cnt;
+                p.max2 = max(l.max2, r.max1);
+            } else {
+                p.max1 = r.max1;
+                p.max1_cnt = r.max1_cnt;
+                p.max2 = max(l.max1, r.max2);
+            }
+        }
+    }
+    
+    void push_min(int v, long long x) {
+        if (x >= t[v].max1) return;
+        t[v].sum -= (t[v].max1 - x) * t[v].max1_cnt;
+        t[v].max1 = x;
+        t[v].lazy_min = min(t[v].lazy_min, x);
+    }
+    
+    void push(int v) {
+        if (t[v].lazy_min < 1e18) {
+            push_min(2*v, t[v].lazy_min);
+            push_min(2*v+1, t[v].lazy_min);
+            t[v].lazy_min = 1e18;
+        }
+    }
+    
+    void build(int v, int tl, int tr, const vector<long long> &a) {
+        if (tl == tr) {
+            t[v].sum = t[v].max1 = a[tl];
+            t[v].max1_cnt = 1;
+            t[v].max2 = -1e18;
+        } else {
+            int tm = (tl + tr) / 2;
+            build(2*v, tl, tm, a);
+            build(2*v+1, tm+1, tr, a);
+            pull(v);
+        }
+    }
+    
+    void update_min(int v, int tl, int tr, int l, int r, long long x) {
+        if (l > r || t[v].max1 <= x) return;
+        if (l <= tl && tr <= r && t[v].max2 < x) {
+            push_min(v, x);
+            return;
+        }
+        push(v);
+        int tm = (tl + tr) / 2;
+        update_min(2*v, tl, tm, l, r, x);
+        update_min(2*v+1, tm+1, tr, l, r, x);
+        pull(v);
+    }
+    
+    long long query_sum(int v, int tl, int tr, int l, int r) {
+        if (l > r) return 0;
+        if (l <= tl && tr <= r) return t[v].sum;
+        push(v);
+        int tm = (tl + tr) / 2;
+        return query_sum(2*v, tl, tm, l, r) + query_sum(2*v+1, tm+1, tr, l, r);
+    }
+    
+    void chmin(int l, int r, long long x) { update_min(1, 0, n-1, l, r, x); }
+    long long sum(int l, int r) { return query_sum(1, 0, n-1, l, r); }
+};
+```
+
+**핵심 구현 포인트**:
+- `pull`: 자식 두 개의 max1/max2 를 합쳐 부모의 max1/max2 생성
+- `push_min`: 노드에 chmin tag 적용, `max1 <= x` 면 변화 없음
+- `update_min`: `max2 < x` 일 때만 break (노드에서 처리), 아니면 재귀
+
+## 어떤 문제에 쓰는가
+
+- 구간에 `chmin(x)` 또는 `chmax(x)` 같은 비가역 연산
+- 동시에 구간 합 / 구간 max 쿼리
+- N, Q ≤ 10^5 ~ 10^6 규모
+- naive O(NQ) 는 TLE 지만 단순 lazy 로는 표현 불가능
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 17474 | 수열과 쿼리 26 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17474) |
+| BOJ 14899 | 수열과 쿼리 19 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14800-14899/14899) |
+| BOJ 17476 | 수열과 쿼리 28 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17476) |
+| BOJ 19277 | ADD, DIV, MAX | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/19200-19299/19277) |
+| BOJ 17473 | 수열과 쿼리 25 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17473) |
+| BOJ 17477 | 수열과 쿼리 29 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17477) |
+| BOJ 17475 | 수열과 쿼리 27 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17475) |
+
+## 참고
+
+- [[Kinetic Segment Tree]]
+- [[BBST]]
+- [[Fast I/O]] (수열과 쿼리 시리즈는 I/O 도 빡빡)
+- [Unknown-To-Wellknown - Segment Tree Beats](https://github.com/justiceHui/Unknown-To-Wellknown#segment-tree-beats)
+- [jiry_2, Segment Tree Beats!](https://codeforces.com/blog/entry/57319)
+- [koosaga, Segment Tree Beats](https://koosaga.com/307)

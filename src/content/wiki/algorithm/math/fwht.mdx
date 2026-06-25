@@ -1,0 +1,256 @@
+---
+title: FWHT (Fast Walsh-Hadamard Transform)
+aliases:
+  - FWHT
+  - Fast Walsh-Hadamard Transform
+  - Subset Convolution
+  - XOR Convolution
+tags:
+  - algorithm
+  - math
+  - fwht
+  - convolution
+  - xor
+category: algorithm
+subcategory: math
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 수학 > FWHT
+  - title: gina0605, FWHT
+    url: https://gina65.tistory.com/30
+    author: gina0605
+  - title: upobir, FWHT
+    url: https://codeforces.com/blog/entry/71899
+    author: upobir
+---
+
+## 정의
+
+**FWHT (Fast Walsh-Hadamard Transform)** 은 *비트 연산 (XOR, AND, OR) 에 대한 컨볼루션* 을 O(N log N) 에 계산하는 변환. [[FFT, NTT|FFT]] 의 비트 연산 버전.
+
+```text
+c[k] = Σ_{i ⊕ j = k} a[i] · b[j]    ⊕ ∈ {XOR, AND, OR}
+```
+
+`N = 2^d` 일 때 변환 / inverse 모두 O(N log N), 점별 곱셈 O(N).
+
+## 문제 상황과 동기
+
+XOR/AND/OR 컨볼루션이란 두 수열 a, b 로부터 `c[k] = Σ_{i ⊕ j = k} a[i]·b[j]` 를 계산하는 것. naive 이중 루프는 O(N²).
+
+PS 응용 예시:
+- **XOR Convolution**: 부분집합의 XOR 합 카운팅, XOR DP
+- **OR Convolution**: subset sum, 비트마스크 DP 의 "두 집합 합치기"
+- **AND Convolution**: superset DP
+
+일반적인 [[FFT, NTT|FFT/NTT]] 는 *정수 덧셈* `i+j=k` 에 대한 컨볼루션이지 *비트 연산* 에는 직접 쓸 수 없다.
+
+**FWHT 의 아이디어**: XOR, AND, OR 각각에 대응하는 butterfly 연산을 정의하면, [[FFT, NTT|FFT]] 의 Cooley-Tukey 분할정복과 똑같은 구조로 O(N log N) 변환이 가능. 값 표현 → 점별 곱 → 역변환 패턴 동일.
+
+이로써 XOR DP / Subset Sum / 비트마스크 DP 의 merge 단계를 O(N²) → O(N log N) 으로 가속. [[FFT, NTT|FFT/NTT]] 가 다항식 곱에 혁신을 준 것처럼, FWHT 는 비트 DP 에 혁신을 준다.
+
+## 문제 상황과 동기
+
+수열 A, B 의 컨볼루션 `c[k] = Σ a[i]·b[k-i]` 는 [[FFT, NTT|FFT]] 로 O(N log N). 그런데 비트 연산 컨볼루션은?
+
+```text
+c[k] = Σ_{i XOR j = k} a[i]·b[j]
+c[k] = Σ_{i AND j = k} a[i]·b[j]
+c[k] = Σ_{i OR  j = k} a[i]·b[j]
+```
+
+Naive 는 O(N²). N = 2^20 이면 불가능.
+
+**핵심 아이디어**: XOR/AND/OR 는 비트별 독립이므로 **각 비트 레벨에서 2x2 butterfly** 를 재귀 적용하면 [[FFT, NTT|FFT]] 와 같은 분할정복 구조. O(N log N).
+
+이는 비트마스크 DP, Subset Sum 카운팅, XOR 기반 점화식의 **사실상 유일한 O(N log N) 솔루션**. 대표 응용: SOS DP (Sum over Subsets), 부분집합 합 카운팅, XOR 경로 가중치 합.
+
+## 시각화
+
+```anim:fwht
+{}
+```
+
+## 시각화
+
+```anim:fwht
+{}
+```
+
+## 핵심 아이디어
+
+길이 2 의 butterfly 한 단계:
+
+| 연산 | butterfly (forward) | inverse |
+|:---|:---|:---|
+| XOR | `(a, b) -> (a + b, a - b)` | 같고 마지막 `/n` |
+| AND | `(a, b) -> (a + b, b)` | `(a, b) -> (a - b, b)` |
+| OR | `(a, b) -> (a, a + b)` | `(a, b) -> (a, b - a)` |
+
+이 butterfly 를 모든 비트 레벨에 적용 (FFT 의 Cooley-Tukey 와 동일 구조).
+
+### Step trace (XOR, N=4 예)
+
+```text
+a = [1, 2, 3, 4]  (idx 0, 1, 2, 3 in binary: 00, 01, 10, 11)
+
+비트 0 단계 (h=1):
+  pair (0, 1): (1, 2) -> (1+2=3, 1-2=-1) = (3, -1)
+  pair (2, 3): (3, 4) -> (3+4=7, 3-4=-1) = (7, -1)
+  → a = [3, -1, 7, -1]
+
+비트 1 단계 (h=2):
+  pair (0, 2): (3, 7) -> (10, -4)
+  pair (1, 3): (-1, -1) -> (-2, 0)
+  → a = [10, -2, -4, 0]
+
+결과: fwht_xor(a) = [10, -2, -4, 0]
+inverse: 각 원소 /4 → [2.5, -0.5, -1, 0]
+```
+
+## 구현
+
+### O(N log N) FWHT for XOR, AND, OR
+
+```cpp
+// Fast Walsh-Hadamard Transform, O(N log N) 비트 연산 컨볼루션
+// XOR: c[k] = Σ_{i⊕j=k} a[i]·b[j]
+// AND: c[k] = Σ_{i&j=k} a[i]·b[j]
+// OR:  c[k] = Σ_{i|j=k} a[i]·b[j]
+#include <vector>
+using namespace std;
+using ll = long long;
+
+void fwht_xor(vector<ll>& a, bool inverse) {
+    int n = a.size();
+    for (int h = 1; h < n; h <<= 1) {
+        for (int i = 0; i < n; i += h * 2) {
+            for (int j = i; j < i + h; j++) {
+                ll x = a[j], y = a[j + h];
+                a[j] = x + y;
+                a[j + h] = x - y;
+            }
+        }
+    }
+    if (inverse) {
+        for (auto& x : a) x /= n;   // mod 환경이면 x *= inv(n)
+    }
+}
+
+void fwht_and(vector<ll>& a, bool inverse) {
+    int n = a.size();
+    for (int h = 1; h < n; h <<= 1) {
+        for (int i = 0; i < n; i += h * 2) {
+            for (int j = i; j < i + h; j++) {
+                ll x = a[j], y = a[j + h];
+                if (!inverse) {
+                    a[j] = x + y;   // a[j+h] = y 유지
+                } else {
+                    a[j] = x - y;
+                }
+            }
+        }
+    }
+}
+
+void fwht_or(vector<ll>& a, bool inverse) {
+    int n = a.size();
+    for (int h = 1; h < n; h <<= 1) {
+        for (int i = 0; i < n; i += h * 2) {
+            for (int j = i; j < i + h; j++) {
+                ll x = a[j], y = a[j + h];
+                if (!inverse) {
+                    a[j + h] = x + y;   // a[j] = x 유지
+                } else {
+                    a[j + h] = y - x;
+                }
+            }
+        }
+    }
+}
+
+// XOR 컨볼루션 wrapper
+vector<ll> convolution_xor(vector<ll> a, vector<ll> b) {
+    int n = 1;
+    while (n < (int)max(a.size(), b.size())) n <<= 1;
+    a.resize(n); b.resize(n);
+    
+    fwht_xor(a, false);
+    fwht_xor(b, false);
+    for (int i = 0; i < n; i++) a[i] *= b[i];   // 점별 곱
+    fwht_xor(a, true);
+    
+    return a;
+}
+```
+
+### Subset Convolution (disjoint union)
+
+조금 다른 변형. `c[k] = Σ_{i ∪ j = k, i ∩ j = ∅} a[i] · b[j]` (disjoint union). FWHT(OR) + **rank function (정확히 비트 카운트 단위로 누적)** 로 O(2^N · N²).
+
+## 복잡도
+
+| 변환 | 시간 |
+|:---|:---|
+| FWHT (XOR/AND/OR) | O(N log N) |
+| Subset Convolution | O(N · N²) = O(2^n · n²) |
+| 점별 곱셈 | O(N) |
+
+## 응용
+
+### 1. XOR DP
+
+`dp[mask]` 를 업데이트하는 `dp' = dp ⊕ b` 같은 DP.
+
+### 2. 부분 수열의 XOR 합
+
+길이 N 의 수열에서 부분수열을 골랐을 때 XOR 합의 분포. 각 원소를 `[1, x] (1 in position 0, 1 in position x)` 다항식으로 보고 FWHT.
+
+### 3. ANY / ALL bit 마스크 DP
+
+비트마스크 DP 에서 superset / subset sum 을 O(N · 2^N) 으로.
+
+### 4. Subset Sum 카운팅
+
+각 부분집합 합이 K 가 되는 경우의 수.
+
+## 함정
+
+### 1. inverse 단계의 나눗셈
+
+XOR FWHT 는 inverse 후 `n` 으로 나눠야 함. mod 환경이면 `n` 의 역원.
+
+### 2. AND / OR 의 부호
+
+inverse OR 은 `(a, b) -> (a, b - a)` 같이 자릿수 빼기. 헷갈리면 표 확인.
+
+### 3. 비트 길이
+
+N 이 2 의 거듭제곱이 아니면 0-padding.
+
+### 4. Subset Convolution 의 rank function
+
+|popcount(i) + popcount(j) = popcount(i ∪ j)| 인 케이스만 합치는 추가 차원이 필요. 단순 FWHT(OR) 만으로는 부족.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 14878 | 부분 수열 XOR합 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14800-14899/14878) |
+| BOJ 25563 | AND, OR, XOR | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/25500-25599/25563) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Subset Convolution | https://judge.yosupo.jp/problem/subset_convolution |
+
+## 참고
+
+- [[FFT, NTT|FFT 와 NTT]]
+- [[Mobius Function]]
+- [[Generating Function]]
+- [[Bitset Optimization]]
+- [Unknown-To-Wellknown - FWHT](https://github.com/justiceHui/Unknown-To-Wellknown#fwht)
+- [gina0605, FWHT](https://gina65.tistory.com/30)

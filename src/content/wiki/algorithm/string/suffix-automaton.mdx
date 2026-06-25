@@ -1,0 +1,239 @@
+---
+title: Suffix Automaton, Suffix Tree
+aliases:
+  - Suffix Automaton
+  - SAM
+  - Suffix Tree
+  - 접미사 오토마타
+tags:
+  - algorithm
+  - string
+  - suffix-automaton
+  - suffix-tree
+  - dfa
+category: algorithm
+subcategory: string
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 문자열 > Suffix Automaton, Suffix Tree
+  - id: koosaga-blog
+    note: https://koosaga.com/314
+---
+
+## 정의
+
+**Suffix Automaton (SAM)** 은 문자열 `s` 의 *모든 부분문자열을 단어로 받는 최소 결정성 유한 오토마타 (minimal DFA)*. 노드 수 ≤ 2n, 간선 수 ≤ 3n 의 **선형 크기** + **선형 시간 O(n)** 구축.
+
+**Suffix Tree** 는 같은 정보를 *문자열 trie* 의 압축 형태로 표현. SAM 의 reversal 과 동등 (정확히는 SAM(s 의 reverse) = Suffix Tree(s) 의 link tree).
+
+PS 에서는 *서로 다른 부분문자열 개수*, *k 번째 부분문자열*, *패턴 등장 위치*, *공통 부분문자열* 같은 문자열 쿼리의 표준 도구.
+
+## 문제 상황과 동기
+
+*"문자열 s 의 서로 다른 부분문자열이 몇 개인가?"* 같은 문제는 단순 접근으로 **O(n² log n)** (모든 부분문자열을 set 에 삽입) 또는 **O(n²)** (suffix array + LCP). 길이 10⁵ 문자열도 TLE 위험.
+
+일반적인 trie 에 모든 suffix 를 넣으면 O(n²) 노드가 생긴다. *압축 (compression)* 으로 경로를 묶어도 여전히 heavy.
+
+핵심 통찰은 **같은 endpos 집합을 가지는 부분문자열들은 하나의 state 로 합칠 수 있다**는 것 (Myhill-Nerode). 이 최소화를 *incremental* 로 하면 각 문자 추가가 O(1) amortized. 결과가 Suffix Automaton: 노드 ≤ 2n, 간선 ≤ 3n, 구축 O(n).
+
+PS 에서는 *부분문자열 쿼리*, *LCS*, *반복 부분문자열* 등의 디폴트 도구.
+
+## SAM 구조
+
+각 노드 (state) 는 *같은 endpos 집합을 가지는 부분문자열들의 클래스*. 각 노드:
+
+- `len` : 이 state 가 표현하는 가장 긴 문자열의 길이
+- `link` : suffix link (이 클래스의 *최장 proper suffix* 가 속한 state)
+- `next[c]` : 문자 c 로 가는 전이
+
+문자를 하나씩 추가하며 *새 state* + *suffix link 갱신* + *기존 state 분할 (clone)*. 한 문자당 amortized O(1).
+
+## 시각화
+
+```anim:suffix-automaton
+{}
+```
+
+## 알고리즘
+
+```text
+extend(c):
+    cur = new state(len = last.len + 1)
+    p = last
+    while p ≠ NULL and p.next[c] is empty:
+        p.next[c] = cur
+        p = p.link
+    if p == NULL:
+        cur.link = root
+    else:
+        q = p.next[c]
+        if q.len == p.len + 1:
+            cur.link = q
+        else:
+            clone q with len = p.len + 1
+            cur.link = clone, q.link = clone
+            backtrack p.next[c] update
+    last = cur
+```
+
+### 동작 예제
+
+문자열 `"abc"` 를 한 글자씩 추가:
+
+```text
+초기: root (state0, len=0)
++ a:  state1 (len=1, 문자열 "a")
++ b:  state2 (len=2, "ab"), state1.next[b] = state2
++ c:  state3 (len=3, "abc"), state2.next[c] = state3
+```
+
+서로 다른 부분문자열 = 1 (a) + 1 (b) + 1 (ab) + 1 (c) + 1 (bc) + 1 (abc) = 6. 각 state 의 기여 = `len[v] - len[link[v]]`.
+
+## 구현
+
+C++ 구현. clone 케이스 포함, O(n) 노드.
+
+```cpp
+// Suffix Automaton, O(n) build, O(n) space
+#include <bits/stdc++.h>
+using namespace std;
+
+struct State {
+    int len, link;
+    map<char, int> next;  // 알파벳 큰 경우 map, 작으면 int[26]
+};
+
+struct SuffixAutomaton {
+    vector<State> sa;
+    int last;
+
+    SuffixAutomaton() {
+        sa.push_back({0, -1, {}});  // root
+        last = 0;
+    }
+
+    void extend(char c) {
+        int cur = sa.size();
+        sa.push_back({sa[last].len + 1, 0, {}});
+
+        int p = last;
+        while (p != -1 && !sa[p].next.count(c)) {
+            sa[p].next[c] = cur;
+            p = sa[p].link;
+        }
+
+        if (p == -1) {
+            sa[cur].link = 0;  // root
+        } else {
+            int q = sa[p].next[c];
+            if (sa[p].len + 1 == sa[q].len) {
+                sa[cur].link = q;
+            } else {
+                // clone 케이스: q 를 복제해 sa[p].len + 1 길이로
+                int clone = sa.size();
+                sa.push_back({sa[p].len + 1, sa[q].link, sa[q].next});
+                while (p != -1 && sa[p].next[c] == q) {
+                    sa[p].next[c] = clone;
+                    p = sa[p].link;
+                }
+                sa[q].link = sa[cur].link = clone;
+            }
+        }
+        last = cur;
+    }
+
+    long long count_distinct() {
+        long long res = 0;
+        for (int i = 1; i < sa.size(); i++) {
+            res += sa[i].len - sa[sa[i].link].len;
+        }
+        return res;
+    }
+};
+```
+
+**clone 로직이 핵심**: `q.len != p.len + 1` 일 때 q 를 복제해야 minimality 유지.
+
+## 복잡도
+
+| 작업 | 비용 |
+|:---|:---|
+| 구축 | O(n · alphabet) 또는 O(n log alphabet) |
+| 패턴 검색 (길이 m) | O(m) |
+| 서로 다른 부분문자열 수 | O(n) (구축 후 DP) |
+| k 번째 부분문자열 | O(n) 전처리 + O(n) 출력 |
+| 공간 | O(n) |
+
+## 응용
+
+### 1. 서로 다른 부분문자열 개수
+
+각 state 가 표현하는 문자열 개수 = `len[v] - len[link[v]]`. 합산.
+
+### 2. k 번째 부분문자열
+
+각 state 별 *그 state 로 시작하는 부분문자열 수* DP → k 를 따라 탐색.
+
+### 3. 패턴 등장 위치 / 횟수
+
+state 별 endpos 크기 = 부분문자열 등장 횟수. suffix link tree 의 서브트리 size 로 계산.
+
+### 4. 두 문자열 LCS
+
+`SAM(s)` 위에서 `t` 를 한 문자씩 시뮬레이션, 매칭 길이 추적.
+
+### 5. 가장 긴 반복 부분문자열
+
+endpos 크기 ≥ 2 인 state 중 `len` 이 최대.
+
+## Suffix Tree 와의 관계
+
+| 항목 | SAM | Suffix Tree |
+|:---|:---|:---|
+| 노드 의미 | 부분문자열 클래스 | suffix 의 가지 |
+| 구축 | Online (extend) | Online (Ukkonen) |
+| 구현 길이 | 짧음 | 김 |
+| 메모리 | 작음 | 작음 (압축) |
+| 패턴 검색 | O(m) | O(m) |
+| 부분문자열 카운팅 | 자연스러움 | 별도 작업 |
+
+PS 에서는 SAM 이 *코드 짧고 응용 다양해서* 디폴트.
+
+## 함정
+
+### 1. clone
+
+`q.len ≠ p.len + 1` 케이스에서 clone 을 만들어야 함. 빠뜨리면 *minimality* 깨짐.
+
+### 2. endpos 크기 계산
+
+clone 은 `cnt[clone] = 0`, 원본 q 만 `cnt += 1`. 그 후 suffix link tree DFS 로 자식 합 누적.
+
+### 3. alphabet 큰 경우
+
+`next[c]` 를 배열로 두면 메모리 O(n · alphabet). hash map / sorted list 대안.
+
+### 4. 문자열 끝 처리
+
+EOF 문자를 추가하거나 endpos 크기 정의를 명확히. 안 그러면 카운팅 off-by-one.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 11479 | 서로 다른 부분 문자열의 개수 2 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11400-11499/11479) |
+| BOJ 16907 | 서로 다른 부분 문자열 쿼리 2 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16900-16999/16907) |
+| BOJ 19515 | Jong Hyok and String | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/19500-19599/19515) |
+| BOJ 13541 | K번째 부분 문자열 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13541) |
+| BOJ 26109 | Longest Substring | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/26100-26199/26109) |
+| BOJ 14436 | 서로 다른 부분 문자열 쿼리 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14400-14499/14436) |
+| BOJ 18544 | Incomparable Pairs | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18500-18599/18544) |
+| BOJ 18349 | 천지창조 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18300-18399/18349) |
+
+## 참고
+
+- [[Palindrome Tree]]
+- [[Run Enumerate]]
+- [Unknown-To-Wellknown - Suffix Automaton, Suffix Tree](https://github.com/justiceHui/Unknown-To-Wellknown#suffix-automaton-suffix-tree)
+- [koosaga, Suffix Automaton](https://koosaga.com/314)

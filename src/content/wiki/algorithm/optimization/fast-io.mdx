@@ -1,0 +1,272 @@
+---
+title: Fast I/O
+aliases:
+  - Fast I/O
+  - 빠른 입출력
+  - fastio
+tags:
+  - algorithm
+  - optimization
+  - io
+  - constant-factor
+category: algorithm
+subcategory: optimization
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 이상한 최적화 > Fast I/O
+  - title: cgiosy, Fast I/O
+    url: https://cgiosy.github.io/posts/fast-io
+    author: cgiosy
+---
+
+## 정의
+
+**Fast I/O** 는 표준 라이브러리의 일반 목적 입출력 (C 의 `scanf`/`printf`, C++ 의 `std::cin`/`std::cout`, Python 의 `input`) 대신, 버퍼와 바이트 단위 처리에 특화된 직접 구현으로 **상수항을 깎아 시간 제한을 통과** 시키는 기법.
+
+[[정렬 알고리즘]] 의 시간 복잡도가 동일하더라도 상수항 차이로 실측이 갈리는 것처럼, PS 에서는 **I/O 한 줄 차이로 TLE / AC 가 갈리는 문제** 가 흔히 출제된다. `10^7` 줄 이상을 입력받는 문제, 출력 양이 큰 문제, [[Segment Tree Beats|수열과 쿼리]] 시리즈, 적분/시뮬레이션 출력 문제 등.
+
+## 문제 상황과 동기
+
+### 왜 sync_with_stdio(false) 한 줄로 보통 충분한가
+
+대부분의 PS 문제는 알고리즘 시간 복잡도가 지배적이다. `10^5` 입력에 `O(N log N)` 알고리즘이면 실제 수행 시간 10 ~ 100 ms, I/O 는 10 ms 내외. 그런데 *입력 줄 수가 10^7 이상* 이거나 *출력 양이 10^8 자릿수* 로 넘어가면 I/O 자체가 1 초를 잡아먹는다.
+
+**naive 접근**: 모든 PS 문제를 기본 `cin`/`cout` 으로 푼다. `N=10^7` 정수 입력에 6 초 소요 → TLE.
+
+**Fast I/O 의 1차 방어선**: `ios_base::sync_with_stdio(false)` 와 `cin.tie(nullptr)` 두 줄로 입력 시간 1.2 초로 감소. **5 배 빨라져서 대부분 문제가 통과**.
+
+**2차, 3차 단계**: 그래도 안 풀리면 `getchar_unlocked` (15 배) 또는 `mmap` (30 배) 로 상수항 한계까지 깎는다. 단, 코드 복잡도와 이식성을 희생.
+
+### 어디서 더 깎아야 하나
+
+다음 케이스에서는 sync 해제로도 부족하다.
+
+1. **입력이 10^7 ~ 10^8 줄**: 기본 `cin` 으로 5 초, sync 해제로 1 초, getchar_unlocked 로 0.3 초 → 문제 시간 제한 0.5 초면 getchar_unlocked 필수.
+2. **실시간 온라인 저지 (ICPC, 일부 Codeforces)**: 채점 서버가 느려서 여유 시간이 적음. sync 해제만으로도 TLE 나는 경우 존재.
+3. **출력 양 10^8 자릿수 이상**: 적분 근사 결과 출력, [[FFT, NTT|FFT]] 후 큰 수 출력. `endl` 하나로 TLE, `'\n'` 으로 AC.
+
+공통점: **알고리즘 자체는 개선 못함, I/O 가 병목** 이라는 확신 하에 상수항 최적화로 돌파.
+
+## 시각화
+
+```anim:fast-io
+{}
+```
+
+## 핵심 아이디어
+
+표준 입출력이 느린 이유는 세 가지로 정리할 수 있다.
+
+1. **포맷 파싱 오버헤드** - `scanf("%d", ...)` 는 매 호출마다 포맷 문자열을 해석한다.
+2. **C / C++ 스트림 동기화** - `std::cin` 은 기본적으로 `stdio` 와 동기화 (`std::ios::sync_with_stdio(true)`) 를 유지해 양쪽 버퍼가 매번 flush.
+3. **시스템 콜 빈도** - 줄 단위로 read / write 시스템 콜이 발생하면 user/kernel 전환 비용이 누적.
+
+Fast I/O 는 (1) 자체 파싱, (2) 동기화 해제, (3) 한 번에 큰 버퍼 read/write 로 이 세 가지를 다 우회한다.
+
+## 구현
+
+다음은 실무에서 가장 많이 쓰이는 Fast I/O 코드들. 위에서 아래로 갈수록 빠르지만 복잡하고 위험해진다.
+
+### 1단계: C++ sync 해제 (권장)
+
+O(1) 추가 코드, 5 배 빠름. **거의 모든 문제는 여기서 끝**.
+
+```cpp
+// O(1) 코드 추가, 5x 빠름
+#include <iostream>
+using namespace std;
+
+int main() {
+    ios_base::sync_with_stdio(false);
+    cin.tie(nullptr);
+    
+    int n;
+    cin >> n;
+    for (int i = 0; i < n; i++) {
+        int x;
+        cin >> x;
+        cout << x << '\n';  // endl 금지!
+    }
+}
+```
+
+**핵심**: `sync_with_stdio(false)` 는 C 스트림 (`stdin`/`stdout`) 과 C++ 스트림 (`cin`/`cout`) 의 버퍼 동기화를 끈다. `cin.tie(nullptr)` 는 `cin` 호출 전 자동 `cout.flush()` 를 끈다. 두 줄이면 충분.
+
+### 2단계: getchar_unlocked (C/C++)
+
+`scanf` 보다 10 ~ 15 배 빠름. 정수 입력만 많은 문제용.
+
+```cpp
+// O(log N) per int, 15x faster than cin
+#include <cstdio>
+
+static inline int readInt() {
+    int x = 0, c, sign = 1;
+    // 공백 / 개행 건너뛰기
+    do { c = getchar_unlocked(); } while (c == ' ' || c == '\n');
+    // 부호 처리
+    if (c == '-') { sign = -1; c = getchar_unlocked(); }
+    // 숫자 파싱
+    for (; '0' <= c && c <= '9'; c = getchar_unlocked()) {
+        x = x * 10 + (c - '0');
+    }
+    return x * sign;
+}
+
+int main() {
+    int n = readInt();
+    for (int i = 0; i < n; i++) {
+        int x = readInt();
+        printf("%d\n", x);
+    }
+}
+```
+
+**장점**: 락 없는 `getchar`, 함수 호출이 인라인으로 컴파일되어 매우 빠름.
+
+**단점**: Linux / macOS 전용 (`getchar_unlocked` 이 POSIX 표준). Windows 는 `_getchar_nolock` 사용.
+
+### 3단계: mmap (최속, 위험)
+
+입력 파일을 메모리에 통째로 매핑. 30 배 빠름. **절대 안 풀릴 때만**.
+
+```cpp
+// O(1) per int amortized, 30x faster than cin (메모리 매핑)
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <cstdio>
+
+const char *p;
+
+void initMmap() {
+    struct stat st;
+    fstat(0, &st);  // stdin (fd=0) 파일 크기
+    p = (const char *)mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, 0, 0);
+}
+
+inline int readInt() {
+    while (*p < '0') ++p;  // 공백 건너뛰기
+    int x = 0;
+    while ('0' <= *p && *p <= '9') {
+        x = x * 10 + (*p++ - '0');
+    }
+    return x;
+}
+
+int main() {
+    initMmap();
+    int n = readInt();
+    for (int i = 0; i < n; i++) {
+        int x = readInt();
+        printf("%d\n", x);
+    }
+}
+```
+
+**장점**: 시스템 콜 한 번으로 전체 입력을 메모리에 올리고 포인터 순회. 캐시 효율 극대화.
+
+**단점**: stdin 이 파일이어야 함 (키보드 입력 불가). 파이프 / 터미널이면 `fstat` 실패. 디버깅 어려움.
+
+### Python: sys.stdin
+
+`input()` 대신 `sys.stdin.readline` 또는 `sys.stdin.read()`.
+
+```python
+# 4x faster than input()
+import sys
+
+# 한 줄씩
+input = sys.stdin.readline
+
+# 전체 읽어서 split
+data = sys.stdin.read().split()
+idx = 0
+n = int(data[idx]); idx += 1
+arr = [int(data[idx + i]) for i in range(n)]
+
+# 출력 한 번에
+answers = [str(x) for x in results]
+print('\n'.join(answers))
+```
+
+### 예제 추적
+
+`10^7` 정수 입력, 합 출력.
+
+```text
+입력 파일:
+10000000
+1 2 3 ... 10000000
+
+1. cin + sync 켜짐:     6.0 s → TLE
+2. cin + sync 해제:     1.2 s → AC
+3. getchar_unlocked:    0.4 s → AC (여유)
+4. mmap:                0.2 s → AC (압도적)
+```
+
+**추적 과정**:
+
+- sync 켜짐: `cin >> x` 마다 C/C++ 버퍼 동기화, `cout << x` 마다 flush 체크 → 6 초
+- sync 해제: 버퍼 독립, flush 안 함 → 1.2 초
+- getchar_unlocked: 바이트 단위 직접 파싱 → 0.4 초
+- mmap: 메모리 매핑 후 포인터 순회 → 0.2 초
+
+## 효과 정량화
+
+대략적인 비율. 같은 알고리즘, `10^7` 정수 입출력 기준.
+
+| 환경 | 기본 | Fast I/O | 배수 |
+|:---|---:|---:|---:|
+| C++ `cin`/`cout` (sync 켜짐) | 6.0s | - | 1.0x |
+| C++ `cin`/`cout` (sync 해제) | - | 1.2s | 5x |
+| C++ `scanf`/`printf` | 1.5s | - | 4x |
+| C++ getchar_unlocked 수작업 | - | 0.4s | 15x |
+| C++ mmap | - | 0.2s | 30x |
+| Python `input()` | 12s | - | 1.0x |
+| Python `sys.stdin.readline` | - | 3s | 4x |
+
+문제 데이터/환경에 따라 편차는 크다. 핵심은 **`cin`/`cout` 동기화 해제만으로도 대부분 케이스가 살아난다** 는 점.
+
+## 함정
+
+### 1. `endl` 은 매번 flush
+
+`std::endl` 은 `'\n'` 출력 + flush. 출력이 많은 문제에서 `endl` 을 쓰면 동기화 해제 효과가 사라진다.
+
+```cpp
+cout << x << endl;   // 느림
+cout << x << '\n';   // 빠름
+```
+
+### 2. `scanf` 와 `cin` 혼용 시 동기화 해제하면 안 됨
+
+`sync_with_stdio(false)` 후 `scanf` 를 같이 쓰면 입력 버퍼가 꼬여서 미정의 동작.
+
+### 3. mmap 은 stdin 이 파이프/터미널이면 실패
+
+로컬 테스트에서 키보드 입력으로 돌리면 `mmap` 이 `EINVAL` 로 죽는다. 채점 환경 (`./a.out < input.txt`) 에서만 동작.
+
+### 4. Java / Kotlin 은 별도 패턴
+
+`BufferedReader` + `StringTokenizer` 가 사실상 표준. `Scanner` 는 PS 에서 사용 금지.
+
+## 언제까지 깎아야 하는가
+
+`scanf` 로 통과한다면 거기서 멈춰도 된다. **`sync_with_stdio(false)` 는 거의 항상 켜고**, `getchar_unlocked` 와 `mmap` 은 진짜 안 풀릴 때 마지막 카드로 꺼낸다. 잘못 짠 알고리즘을 Fast I/O 로 살려내려는 시도는 거의 항상 실패한다.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 비고 | 링크 |
+|:---|:---|:---|:---|
+| BOJ 11921 | 0.1 | 입력 자체가 부담스러운 단순 입출력 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11900-11999/11921) |
+| BOJ 18702 | Array Queries | [[Segment Tree Beats|수열과 쿼리 28]] + Fast I/O 강제 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18700-18799/18702) |
+
+## 참고
+
+- [[Bitset Optimization|Bitset을 이용한 최적화]]
+- [[SIMD]]
+- [[Barrett Reduction]]
+- [Unknown-To-Wellknown - Fast I/O](https://github.com/justiceHui/Unknown-To-Wellknown#fast-io)
+- [cgiosy, Fast I/O](https://cgiosy.github.io/posts/fast-io)

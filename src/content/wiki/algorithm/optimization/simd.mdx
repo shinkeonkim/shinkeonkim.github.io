@@ -1,0 +1,335 @@
+---
+title: SIMD
+aliases:
+  - SIMD
+  - AVX2
+  - Vectorization
+  - SSE
+tags:
+  - algorithm
+  - optimization
+  - simd
+  - avx
+  - constant-factor
+category: algorithm
+subcategory: optimization
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 이상한 최적화 > SIMD
+  - id: jhnah917-blog
+    note: SIMD in PS
+      https://justicehui.github.io/hard-algorithm/2021/11/15/simd-in-ps/
+---
+
+## 정의
+
+**SIMD (Single Instruction Multiple Data)** 는 한 명령어로 *여러 데이터* 를 병렬 처리하는 CPU 기능. x86 의 SSE / AVX / AVX2 / AVX-512, ARM 의 NEON. *128 / 256 / 512 비트* 레지스터에 *4 ~ 64 개 정수 / float* 를 한 번에 묶어 더하기 / 곱하기 / 비교.
+
+PS 에서는 [[Bitset Optimization|bitset]] 으로 부족한 경우 **AVX2 인트린식 (intrinsics)** 을 직접 호출해 *O(N²) 을 O(N²/8)* (32 비트 정수 8 개 묶음) 으로. 채점 서버가 AVX2 를 지원해야 함 (BOJ 는 지원).
+
+## 문제 상황과 동기
+
+### bitset 이 boolean 에 한정인 반면 SIMD 는 int/float 에도
+
+[[Bitset Optimization|bitset]] 은 불리언 배열을 64 배 가속하지만 **정수 / 실수 연산** 은 못 한다. `int A[N][N]` 행렬 곱, 누적 합 배열, DP 테이블 갱신 같은 곳은 bitset 으로 안 된다.
+
+**naive 접근**: `O(N²)` 또는 `O(N³)` 정수 연산을 그냥 for 루프로. `N=10^4` 이면 `10^8 ~ 10^12` 연산 → TLE.
+
+**SIMD 의 돌파구**: AVX2 레지스터는 **256 비트 = 8 개 int32** 를 한 번에 처리. `_mm256_add_epi32` 한 줄로 8 개 덧셈을 동시에. 실제 수행 시간 `/8`.
+
+### AVX2 vs AVX-512 vs bitset trade-off
+
+| 기법 | 타입 | 병렬도 | 지원 환경 | 사용 난이도 |
+|:---|:---|---:|:---|:---|
+| **bitset** | boolean | 64 | 모든 C++ | 쉬움 |
+| **AVX2** | int32 | 8 | BOJ, Codeforces (pragma) | 중간 |
+| **AVX2** | int16 | 16 | 동일 | 중간 |
+| **AVX-512** | int32 | 16 | 서버 급 CPU | 어려움 (거의 안 씀) |
+
+**언제 SIMD 를 쓰나**:
+
+1. **bitset 으로 안 되는 정수 / 실수 연산** (행렬 곱, DP, 누적 합)
+2. **알고리즘 복잡도가 이미 최적인데 상수항이 병목** (예: `O(N²)` 에서 `O(N log N)` 불가능)
+3. **채점 서버가 AVX2 지원** (BOJ, 일부 Codeforces)
+
+**공통 함정**: bitset 보다 코드 복잡도 10 배. 디버깅 어려움. 이식성 낮음. **진짜 마지막 카드**.
+
+## 시각화
+
+```anim:simd
+{}
+```
+
+## 핵심 인트린식 (AVX2, 256 비트)
+
+```c
+#include <immintrin.h>
+
+__m256i v = _mm256_loadu_si256((__m256i*)a);    // 8 개 32 비트 정수 로드
+__m256i u = _mm256_loadu_si256((__m256i*)b);
+__m256i w = _mm256_add_epi32(v, u);             // 8 개 동시 덧셈
+_mm256_storeu_si256((__m256i*)c, w);            // 저장
+```
+
+타입 / 비트수 별 변형이 많음 (`_mm256_add_epi8`, `_epi16`, `_epi32`, `_epi64`, `_ps` for float).
+
+## 핵심 아이디어
+
+CPU 의 SIMD 레지스터 (`__m256i`) 는 **256 비트 = 8 개 int32** 를 한 번에 담는다. `_mm256_add_epi32` 같은 인트린식은 **8 개 덧셈을 한 CPU 명령어로** 실행. 루프를 8 번 돌릴 필요 없이 1 번에 끝.
+
+**불변량**: AVX2 연산은 한 명령어당 8 개 (int32), 16 개 (int16), 32 개 (int8) 병렬 처리. 루프가 8 배 / 16 배 / 32 배 줄어듦.
+
+**핵심 트릭**:
+
+1. **벡터화 가능 루프**: `for (int i = 0; i < n; i++) c[i] = a[i] + b[i]` 같은 독립 연산.
+2. **컴파일러 자동 벡터화 실패 시** 직접 인트린식 호출.
+3. **horizontal reduction**: 8 개 누적 결과를 하나로 합치는 마지막 단계.
+
+## 구현
+
+### 1. 배열 합 (8x int32 병렬)
+
+```cpp
+// O(N / 8), AVX2 (8 개 int32 동시 덧셈 + horizontal sum)
+#include <immintrin.h>
+#include <cstdio>
+
+int sum_array_avx2(const int* a, int n) {
+    __m256i sum_vec = _mm256_setzero_si256();
+    
+    // 8 개씩 묶어 덧셈
+    int i;
+    for (i = 0; i + 7 < n; i += 8) {
+        __m256i v = _mm256_loadu_si256((__m256i*)(a + i));
+        sum_vec = _mm256_add_epi32(sum_vec, v);
+    }
+    
+    // horizontal sum (8 개 누적값을 하나로)
+    __m128i lo = _mm256_castsi256_si128(sum_vec);
+    __m128i hi = _mm256_extracti128_si256(sum_vec, 1);
+    __m128i sum128 = _mm_add_epi32(lo, hi);
+    sum128 = _mm_hadd_epi32(sum128, sum128);
+    sum128 = _mm_hadd_epi32(sum128, sum128);
+    int result = _mm_cvtsi128_si32(sum128);
+    
+    // 나머지 처리
+    for (; i < n; i++) result += a[i];
+    
+    return result;
+}
+
+int main() {
+    int a[1000000];
+    for (int i = 0; i < 1000000; i++) a[i] = i;
+    printf("%d\n", sum_array_avx2(a, 1000000));
+}
+```
+
+**컴파일**: `g++ -O2 -mavx2 main.cpp`.
+
+**핵심**: `_mm256_loadu_si256` 로 8 개 int32 로드, `_mm256_add_epi32` 로 8 개 동시 덧셈. horizontal sum 으로 최종 결과 도출.
+
+### 2. 행렬 곱 inner loop 벡터화
+
+`C[i][j] += A[i][k] * B[k][j]` 의 `k` 루프를 8 개씩 묶음.
+
+```cpp
+// O(N³ / 8), AVX2 (행렬 곱 inner loop 벡터화)
+#include <immintrin.h>
+#include <cstring>
+
+const int N = 1024;
+alignas(32) int A[N][N], B[N][N], C[N][N];
+
+void matmul_avx2() {
+    memset(C, 0, sizeof(C));
+    
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            __m256i sum_vec = _mm256_setzero_si256();
+            
+            int k;
+            for (k = 0; k + 7 < N; k += 8) {
+                __m256i a_vec = _mm256_loadu_si256((__m256i*)&A[i][k]);
+                __m256i b_vec = _mm256_loadu_si256((__m256i*)&B[k][j]);
+                __m256i prod = _mm256_mullo_epi32(a_vec, b_vec);
+                sum_vec = _mm256_add_epi32(sum_vec, prod);
+            }
+            
+            // horizontal sum
+            __m128i lo = _mm256_castsi256_si128(sum_vec);
+            __m128i hi = _mm256_extracti128_si256(sum_vec, 1);
+            __m128i sum128 = _mm_add_epi32(lo, hi);
+            sum128 = _mm_hadd_epi32(sum128, sum128);
+            sum128 = _mm_hadd_epi32(sum128, sum128);
+            C[i][j] = _mm_cvtsi128_si32(sum128);
+            
+            // 나머지
+            for (; k < N; k++) C[i][j] += A[i][k] * B[k][j];
+        }
+    }
+}
+```
+
+**주의**: 이 코드는 `B` 행렬이 행 우선 저장 (`B[k][j]` 가 연속) 이어야 효율적. 실제로는 B 를 전치하거나 캐시 블로킹 필요.
+
+### 예제 추적
+
+배열 `a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]` 의 합을 AVX2 로 계산.
+
+```text
+초기: sum_vec = [0, 0, 0, 0, 0, 0, 0, 0] (8 개 int32)
+
+i=0: v = _mm256_loadu_si256(a + 0) = [1, 2, 3, 4, 5, 6, 7, 8]
+     sum_vec = _mm256_add_epi32(sum_vec, v) = [1, 2, 3, 4, 5, 6, 7, 8]
+
+i=8: v = [9, 10, garbage...] (나머지 2 개만 유효)
+     → 루프 종료 (i + 7 < 10 실패)
+
+horizontal sum:
+  lo = [1, 2, 3, 4]
+  hi = [5, 6, 7, 8]
+  sum128 = lo + hi = [6, 8, 10, 12]
+  hadd 1: [14, 22, ?, ?]
+  hadd 2: [36, ?, ?, ?]
+  result = 36
+
+나머지: result += a[8] + a[9] = 36 + 9 + 10 = 55
+```
+
+**핵심**: 8 개 덧셈을 한 번에, horizontal sum 으로 축약, 나머지 스칼라 처리.
+
+## 응용
+
+### 1. 수열과 쿼리 류
+
+세그먼트 트리 + linear scan 하이브리드. `O(Q log N)` 대신 `O(NQ/8)`.
+
+### 2. Comparing Answers
+
+각 답 비교가 SIMD 한 줄.
+
+### 3. Trio / DP 가속
+
+특정 정형의 DP transition 이 SIMD 한 줄.
+
+## 복잡도 (실측)
+
+| 원래 | SIMD 후 |
+|:---|:---|
+| O(N²) | O(N²/8) (32-bit int) |
+| O(N²) | O(N²/16) (16-bit int) |
+| O(N²) | O(N²/32) (8-bit int) |
+| O(N³) | O(N³/8) ~ O(N³/96) |
+| O(20000 N²) | O(20000 N² / 512) (bit packing + SIMD 결합) |
+
+8 배 ~ 64 배 빠름. [[Bitset Optimization|bitset]] 의 64 와 비슷한 차원.
+
+## 구현 팁
+
+### 1. 정렬 / 정렬 안 된 메모리 접근
+
+- **정렬 load** (`_mm256_load_si256`): 주소가 32 바이트 정렬 (`alignas(32)`) 이어야 함. 아니면 segfault.
+- **정렬 안 된 load** (`_mm256_loadu_si256`): 임의 주소 가능. 약간 느림 (최신 CPU 는 거의 차이 없음).
+
+**권장**: 배열 선언 시 `alignas(32)` 명시하고 `_load_si256` 사용. 정렬 못 하면 `_loadu_si256`.
+
+### 2. 컴파일 옵션 필수
+
+```bash
+g++ -O2 -mavx2 -mpopcnt main.cpp
+```
+
+`-mavx2` 안 주면 인트린식이 **느린 fallback (스칼라 루프)** 으로 컴파일. 효과 0.
+
+Codeforces 는 코드 맨 위에 pragma 추가:
+
+```cpp
+#pragma GCC target("avx2,popcnt")
+#pragma GCC optimize("O3,unroll-loops")
+```
+
+### 3. horizontal reduction 패턴 암기
+
+8 개 누적값을 하나로 합치는 boilerplate. 외워두면 편함.
+
+```cpp
+// 8 개 int32 → 1 개 합
+__m128i lo = _mm256_castsi256_si128(sum_vec);
+__m128i hi = _mm256_extracti128_si256(sum_vec, 1);
+__m128i sum128 = _mm_add_epi32(lo, hi);
+sum128 = _mm_hadd_epi32(sum128, sum128);
+sum128 = _mm_hadd_epi32(sum128, sum128);
+int result = _mm_cvtsi128_si32(sum128);
+```
+
+### 4. naive 버전 먼저 검증
+
+SIMD 코드는 디버깅이 매우 어렵다. **순서**:
+
+1. 스칼라 루프 작성 + 샘플 입력 검증
+2. SIMD 변환
+3. 같은 입력으로 결과 비교
+4. 틀리면 스칼라 버전으로 되돌아가 로직 재확인
+
+## 함정
+
+### 1. 채점 서버 호환
+
+| 환경 | AVX2 지원 | 비고 |
+|:---|:---:|:---|
+| **BOJ** | ✓ | `-mavx2` 만 주면 됨 |
+| **Codeforces** | ✓ | `#pragma GCC target("avx2")` 필요 |
+| **ICPC** | ✗ (대부분) | 서버마다 다름, 위험 |
+| **AtCoder** | ✓ | 최신 서버는 지원 |
+
+**함정**: 로컬에서 AC 인데 채점 서버에서 RE (Illegal Instruction) → AVX2 미지원.
+
+### 2. 정렬 안 된 데이터에 정렬 load
+
+```cpp
+int a[100];  // 정렬 안 됨
+__m256i v = _mm256_load_si256((__m256i*)a);  // segfault!
+```
+
+**해결**: `_mm256_loadu_si256` 사용 또는 `alignas(32) int a[100]`.
+
+### 3. 부동소수점 vs 정수 혼동
+
+- `__m256i`: int8 / int16 / int32 / int64
+- `__m256`: float (32 비트)
+- `__m256d`: double (64 비트)
+
+**혼동 시 컴파일 에러**. 타입 일치 필수.
+
+### 4. 나머지 처리 누락
+
+`n` 이 8 의 배수가 아니면 마지막 몇 개는 스칼라 루프로. **자주 빠뜨림**.
+
+```cpp
+for (i = 0; i + 7 < n; i += 8) { /* SIMD */ }
+for (; i < n; i++) { /* 스칼라 */ }  // 이거 빼먹으면 틀림
+```
+
+### 5. 가독성 / 유지보수
+
+SIMD 코드는 팀원이 못 읽는다. **문서화 + 스칼라 버전 병기** 필수.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 비고 | 링크 |
+|:---|:---|:---|:---|
+| BOJ 14438 | 수열과 쿼리 17 | O(Q log N) vs O(NQ/8) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14400-14499/14438) |
+| BOJ 3847 | Comparing answers | O(N²) vs O(N³/8) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/3800-3899/3847) |
+| BOJ 13925 | 수열과 쿼리 13 | O(Q log N) vs O(NQ/8) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13900-13999/13925) |
+| BOJ 23577 | Trio | O(81N²) vs O(N³/96) vs O(20000N²/512) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/23500-23599/23577) |
+
+## 참고
+
+- [[Bitset Optimization]]
+- [[Fast I/O]]
+- [[Barrett Reduction]]
+- [[Segment Tree Beats]]
+- [Unknown-To-Wellknown - SIMD](https://github.com/justiceHui/Unknown-To-Wellknown#simd)
+- [jhnah917, SIMD in PS](https://justicehui.github.io/hard-algorithm/2021/11/15/simd-in-ps/)

@@ -1,0 +1,291 @@
+---
+title: FFT, NTT
+aliases:
+  - FFT
+  - NTT
+  - Fast Fourier Transform
+  - Number Theoretic Transform
+  - 고속 푸리에 변환
+tags:
+  - algorithm
+  - math
+  - fft
+  - ntt
+  - convolution
+  - polynomial
+category: algorithm
+subcategory: math
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 수학 > FFT, NTT
+  - title: namnamseo, FFT in competitive programming
+    url: https://namnamseo.tistory.com/entry/FFT-in-competitive-programming
+    author: namnamseo
+  - id: jhnah917-blog
+    note: 정확도 높은 FFT와 NTT, https://algoshitpo.github.io/2020/05/20/fft-ntt/
+---
+
+## 정의
+
+**FFT (Fast Fourier Transform, 고속 푸리에 변환)** 은 길이 `n` 인 수열의 **이산 푸리에 변환 (DFT) 을 O(n log n)** 에 계산하는 분할정복 알고리즘. 1965 년 Cooley-Tukey.
+
+**NTT (Number Theoretic Transform, 수론적 변환)** 은 FFT 와 같은 구조를 **유한체 (modular arithmetic)** 위에서 수행하는 변형. 복소수 정밀도 오차 없이 mod 정수 컨볼루션을 정확하게 계산.
+
+두 변환의 가장 큰 응용은 **다항식 / 수열의 컨볼루션 (convolution)**. 다항식 곱셈을 naive O(n^2) 대신 O(n log n) 으로.
+
+```text
+c[k] = Σ a[i] * b[k - i]
+```
+
+이 한 줄이 큰 수 곱셈, 컨볼루션 DP, 부분합 / 누적합 응용, 패턴 매칭, 생성 함수 등의 기반.
+
+## 문제 상황과 동기
+
+두 다항식 `A(x) = Σ a_i x^i` (차수 n-1), `B(x) = Σ b_j x^j` (차수 m-1) 의 곱 `C(x) = A(x)·B(x)` 를 계산하려면, 계수 표현에서는 **각 항 쌍 `(i, j)` 마다 `a_i · b_j` 를 `c_{i+j}` 에 누적**해야 한다. 이는 이중 루프 `O(nm)`.
+
+수열 컨볼루션 (큰 수 곱셈, DP 전이, 동전 조합) 은 형태가 모두 `c[k] = Σ a[i]·b[k-i]` 로 귀결된다. n = m = 10^5 정도면 O(n^2) = 10^10 은 불가능.
+
+**핵심 아이디어**: 다항식을 *계수 표현 (Coefficient)* 이 아닌 *값 표현 (Evaluation)* 으로 바꾸면, **곱셈이 점별 곱셈 (pointwise product)** 이 된다. n+m 개 점에서 평가 → 점별 곱 → 역변환으로 계수 복원. 평가/역변환을 FFT/NTT 로 O(n log n) 에 하면 전체 O(n log n).
+
+이 트릭은 PS 에서 다항식 / 큰 수 / 컨볼루션 DP 의 **사실상 유일한 O(n log n) 솔루션**이다.
+
+## 시각화
+
+```anim:fft-ntt
+{}
+```
+
+## 핵심 아이디어
+
+### DFT 와 inverse DFT
+
+DFT 는 수열 `a` 를 다항식 `A(x) = Σ a_k x^k` 로 보고, **`n` 차 단위근들 (`ω, ω², ..., ω^n`) 에서의 값** 으로 바꾼다.
+
+```text
+A(ω^k) = Σ_{j} a_j ω^{jk}
+```
+
+값 표현으로 바꾸면 곱셈이 점별 곱셈 한 번. 다시 inverse DFT 로 계수 표현으로.
+
+### Cooley-Tukey 분할
+
+다항식 `A(x)` 를 짝수/홀수 인덱스로 나누면
+
+```text
+A(x) = A_even(x^2) + x * A_odd(x^2)
+```
+
+`n` 이 2 의 거듭제곱일 때 재귀 깊이 `log n`, 각 단계 O(n) 의 butterfly 연산. 총 O(n log n).
+
+### NTT 에서 단위근의 대체
+
+복소수 `e^{2πi/n}` 대신 **NTT prime `p = c · 2^k + 1`** 의 곱셈군에서 위수가 `2^k` 인 원소 `g` 를 단위근으로 사용. 자주 쓰이는 prime:
+
+| `p` | `2^k` | 비고 |
+|:---|:---:|:---|
+| `998244353 = 119·2^23 + 1` | `2^23` | 가장 인기. ICPC, CF 표준 |
+| `1107296257 = 33·2^25 + 1` | `2^25` | 더 긴 길이 |
+| `2281701377 = 17·2^27 + 1` | `2^27` | |
+
+이 prime 안에서 변환하면 결과가 mod `p` 값. 답이 다른 mod 라면 **3 NTT + CRT** 로 합치는 트릭이 표준 (Mod 10^9+7 같은 경우).
+
+## 구현 (NTT)
+
+```cpp
+// O(N log N) Number Theoretic Transform (mod 998244353)
+// 다항식 곱셈 multiply(a, b) 는 O((n+m) log(n+m))
+#include <vector>
+using namespace std;
+
+const long long MOD = 998244353;
+const long long g = 3; // primitive root
+
+long long modpow(long long a, long long b, long long mod) {
+    long long res = 1;
+    a %= mod;
+    while (b > 0) {
+        if (b & 1) res = res * a % mod;
+        a = a * a % mod;
+        b >>= 1;
+    }
+    return res;
+}
+
+void ntt(vector<long long>& a, bool inverse) {
+    int n = a.size();
+    if (n == 1) return;
+
+    // bit-reversal permutation
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) swap(a[i], a[j]);
+    }
+
+    // butterfly
+    for (int len = 2; len <= n; len <<= 1) {
+        long long w = inverse 
+            ? modpow(g, MOD - 1 - (MOD - 1) / len, MOD) 
+            : modpow(g, (MOD - 1) / len, MOD);
+        
+        for (int i = 0; i < n; i += len) {
+            long long wn = 1;
+            for (int j = 0; j < len / 2; j++) {
+                long long u = a[i + j];
+                long long v = a[i + j + len / 2] * wn % MOD;
+                a[i + j] = (u + v) % MOD;
+                a[i + j + len / 2] = (u - v + MOD) % MOD;
+                wn = wn * w % MOD;
+            }
+        }
+    }
+
+    if (inverse) {
+        long long n_inv = modpow(n, MOD - 2, MOD);
+        for (auto& x : a) x = x * n_inv % MOD;
+    }
+}
+
+vector<long long> multiply(vector<long long> a, vector<long long> b) {
+    int result_size = a.size() + b.size() - 1;
+    int n = 1;
+    while (n < result_size) n <<= 1;
+    a.resize(n);
+    b.resize(n);
+
+    ntt(a, false);
+    ntt(b, false);
+    for (int i = 0; i < n; i++) a[i] = a[i] * b[i] % MOD;
+    ntt(a, true);
+
+    a.resize(result_size);
+    return a;
+}
+```
+
+### 예시 실행 (작은 입력)
+
+```text
+a = [1, 2], b = [3, 4]  (즉 (1 + 2x)(3 + 4x) = 3 + 10x + 8x^2)
+
+1. 0-padding → n = 4: a = [1,2,0,0], b = [3,4,0,0]
+2. ntt(a) → [3, ...]  (값 표현)
+   ntt(b) → [7, ...]
+3. 점별 곱 → [21, ...]
+4. inverse ntt → [3, 10, 8, 0]  (계수)
+```
+
+## 시간 복잡도
+
+| 연산 | 비용 |
+|:---|:---|
+| 다항식 곱셈 (degree n) | O(n log n) |
+| 큰 수 곱셈 (d 자리) | O(d log d) |
+| 컨볼루션 DP 한 step | O(N log N) per merge |
+
+상수항이 작지 않다 (cache miss 잦음). N ≤ 10^5 정도면 O(N^2) 가 더 빠를 수도 있다.
+
+## 활용
+
+### 1. 큰 수 곱셈
+
+자릿수 ~10^5 인 두 수의 곱. Python 의 `int` 곱셈도 내부적으로 FFT 변형 사용.
+
+### 2. 컨볼루션 DP
+
+```text
+dp[k] = Σ dp[i] · dp[k-i]
+```
+
+같은 형태의 DP. 한 번 곱셈 = O(N log N).
+
+### 3. Subset Sum / 동전 문제
+
+각 동전 종류를 다항식으로 표현 → 곱하면 동전 조합의 수.
+
+### 4. 패턴 매칭
+
+문자열 매칭에서 와일드카드 / mismatch 카운트를 컨볼루션으로 환원.
+
+### 5. 점화식 가속
+
+[[Berlekamp-Massey]] 나 [[Kitamasa]] 의 다항식 거듭제곱 단계에서 사용.
+
+## FFT 와 NTT, 언제 무엇을 쓰나
+
+| 상황 | 추천 |
+|:---|:---|
+| mod 가 없거나 결과가 작음 (10^15 이내) | FFT (double) |
+| mod 가 NTT prime (998244353 등) | NTT |
+| mod 가 임의 prime (10^9+7 등) | **3 NTT + CRT** 또는 split FFT |
+| 실수 정밀도가 핵심 | FFT 더블/롱 더블, 또는 split |
+| 매우 큰 입력 | NTT (오차 없음) |
+
+> [!CAUTION]
+> double FFT 는 `n` 이 커지면 부동소수점 오차로 ± 한두 단위가 틀린다. mod 문제에는 NTT 가 안전. 그래서 PS 에서 998244353 이 사실상 디폴트 mod 가 되었다.
+
+## 함정
+
+### 1. 길이를 2 의 거듭제곱으로
+
+`a` 길이 `n_a`, `b` 길이 `n_b` 의 컨볼루션은 결과 길이 `n_a + n_b - 1`. 이걸 덮는 가장 작은 2 의 거듭제곱으로 0-padding 후 변환.
+
+### 2. inverse 후 나누기
+
+`IFFT(F(a) * F(b))` 결과를 `n` 으로 나눠야 원래 컨볼루션. 잊으면 모두 `n` 배.
+
+### 3. 정수로 변환
+
+double 결과는 반드시 반올림 (`(long long)round(x)`). 0.999999 가 1 이 되어야 한다.
+
+### 4. 메모리 / 시간 상수
+
+butterfly 의 inner loop 가 캐시 친화적이지 않다. 빠른 구현체 (예: jhnah917 의 정확도 높은 FFT/NTT) 를 베껴 쓰는 것이 안전. 직접 짜면 TLE 자주.
+
+### 5. NTT prime 한계
+
+`998244353` 의 변환 가능 길이는 `2^23 ≈ 8 · 10^6`. 그 이상은 다른 prime.
+
+## 표준 라이브러리에서
+
+| 환경 | 구현 |
+|:---|:---|
+| C++ AtCoder Library | `convolution` (NTT, 998244353), `convolution_ll` |
+| Rust ac-library-rs | 동일 |
+| Python NumPy | `numpy.fft` (double, 컨볼루션은 정밀도 주의) |
+| Java | 직접 구현 또는 BigInteger 곱 |
+| Mathematica / SciPy | `scipy.signal.fftconvolve` |
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 22289 | 큰 수 곱셈 (3) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/22200-22299/22289) |
+| BOJ 10531 | Golf Bot | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/10500-10599/10531) |
+| BOJ 1067 | 이동 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1067) |
+| BOJ 13279 | 곱의 합 쿼리 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13200-13299/13279) |
+| BOJ 13575 | 보석 가게 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13575) |
+| BOJ 11385 | 씽크스몰 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11300-11399/11385) |
+| BOJ 14882 | 다항식과 쿼리 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14800-14899/14882) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Convolution | https://judge.yosupo.jp/problem/convolution_mod |
+| Library Checker | Convolution (Mod 10^9+7) | https://judge.yosupo.jp/problem/convolution_mod_1000000007 |
+
+## 참고
+
+- [[FWHT]] (XOR/AND/OR 컨볼루션 버전)
+- [[Polynomial Division Kitamasa|Polynomial Division / Kitamasa]]
+- [[Multipoint Evaluation]]
+- [[Polynomial Interpolation]]
+- [[Generating Function]]
+- [[Berlekamp-Massey]]
+- [[Barrett Reduction]]
+- [Unknown-To-Wellknown - FFT, NTT](https://github.com/justiceHui/Unknown-To-Wellknown#fft-ntt)
+- [namnamseo, FFT in competitive programming](https://namnamseo.tistory.com/entry/FFT-in-competitive-programming)
+- [jhnah917, 정확도 높은 FFT와 NTT](https://algoshitpo.github.io/2020/05/20/fft-ntt/)

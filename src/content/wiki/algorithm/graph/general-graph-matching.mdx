@@ -1,0 +1,255 @@
+---
+title: General Graph Matching (Blossom Algorithm)
+aliases:
+  - General Graph Matching
+  - Blossom Algorithm
+  - 일반 그래프 매칭
+  - Edmonds Blossom
+tags:
+  - algorithm
+  - graph
+  - matching
+  - blossom
+category: algorithm
+subcategory: graph
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 그래프 이론 > General Graph Matching
+  - id: koosaga-blog
+    note: https://koosaga.com/258
+---
+
+## 정의
+
+**General Graph Matching (Blossom Algorithm)** 은 *이분 그래프가 아닌 일반 무향 그래프* 에서 최대 매칭 (최대 간선 집합 중 한 정점이 두 번 안 나오는 것) 을 다항 시간에 구하는 알고리즘. Edmonds 1965, *컴퓨터과학 최초의 비자명 다항 알고리즘* 중 하나.
+
+이분 그래프는 [[정렬 알고리즘|Hopcroft-Karp]] 같은 흐름 기반으로 깔끔하게 풀리지만, 일반 그래프는 *홀수 사이클 (blossom)* 때문에 그대로 안 됨. Blossom Algorithm 은 홀수 사이클을 *수축 (contract)* 해 정상화하는 핵심 아이디어.
+
+## 문제 상황과 동기
+
+이분 그래프가 아닌 일반 무향 그래프에서 최대 매칭. 이분 그래프는 *max-flow 로 O(V^2.5)* (Hopcroft-Karp) 에 풀리지만, 일반 그래프는 *홀수 사이클 (blossom)* 이 존재해 augmenting path 탐색이 복잡.
+
+Naive: 모든 정점 부분집합을 매칭 후보로 시도 O(2^N). 이분 그래프처럼 alternating path 를 찾으려 해도 *홀수 길이 사이클* 을 지나면 alternating 이 깨진다.
+
+핵심 아이디어: **홀수 사이클 (blossom) 을 하나의 슈퍼 정점으로 수축** (contract). 수축된 그래프에서 augmenting path 를 찾고, 다시 펼침 (expand). 이 과정을 반복하면 다항 시간 O(V³) 또는 O(V·E·α(V)) 에 최대 매칭.
+
+PS 에서는 *일반 그래프 매칭이 명시된 문제*, *룸메이트 매칭*, *planar max cut 환원* 등. 이분 그래프인지 먼저 확인 (O(V+E) DFS) 후 분기.
+
+## 시각화
+
+```anim:general-graph-matching
+{}
+```
+
+## 핵심 아이디어: Blossom Contraction
+
+이분 그래프에서 augmenting path = "교차 경로의 길이가 홀수". 일반 그래프에서는 *짝수 길이 사이클을 통과하면 또 다른 augmenting path 가 됨*. 이 사이클이 **blossom**.
+
+**Invariant**: alternating tree 를 BFS 로 확장하며 *짝수 레벨 (outer)* 정점들만 매칭 확장 후보. 홀수 사이클 발견 시 *모든 사이클 정점을 하나로 수축* → 수축 그래프에서 다시 BFS → augmenting path 찾으면 *원래 그래프로 복원하며 매칭 갱신*.
+
+```text
+1. 매칭되지 않은 정점에서 BFS / DFS 로 alternating path 탐색
+2. 홀수 사이클 (blossom) 발견 시:
+     - blossom 의 모든 정점을 한 점으로 수축 (contract)
+     - 수축된 그래프에서 다시 augmenting path 탐색
+3. augmenting path 찾으면 매칭 갱신
+4. 더 이상 찾을 수 없으면 종료 -> 최대 매칭
+```
+
+수축한 blossom 들을 펼치는 (expand) 단계가 까다로움. **O(V³)** 또는 **O(V·E·α(V))** (Micali-Vazirani).
+
+### 예시 추적 (5 정점, 홀수 사이클)
+
+```text
+그래프: 정점 {1,2,3,4,5}, 간선 (1,2), (2,3), (3,4), (4,5), (5,1), (1,3)
+초기 매칭: M = {(1,2)}
+
+1. 정점 3 (unmatched) 에서 alternating tree BFS 시작
+   - 3 -> 1 (matched 1-2) -> 2 (outer)
+   - 2 -> 3: 다시 3 방문 -> 홀수 사이클 {1,2,3} (blossom B)
+
+2. blossom B = {1,2,3} 을 슈퍼 정점 B 로 수축
+   - 수축 그래프: 정점 {B, 4, 5}, 간선 (B,4), (4,5), (5,B)
+   - B 에서 BFS: B -> 4 (unmatched) -> augmenting path B-4
+
+3. 원래 그래프로 복원:
+   - B-4 경로를 blossom 내 1-3-4 로 펼침
+   - 매칭 갱신: M = {(1,3), (3,4)} 또는 M = {(2,3), (3,4)} (사이클 구조에 따라)
+
+4. 더 이상 augmenting path 없음 -> 최대 매칭 크기 2
+```
+
+## 구현 (C++): Edmonds Blossom 스켈레톤
+
+```cpp
+// O(V³) 또는 O(V·E·α(V)). Edmonds Blossom Algorithm for max matching.
+#include <bits/stdc++.h>
+using namespace std;
+
+int n; // 정점 수
+vector<int> adj[505]; // 인접 리스트 (무향)
+int match[505]; // match[v] = v 와 매칭된 정점 (없으면 -1)
+int parent[505], base[505]; // alternating tree 구조, blossom base
+bool used[505], blossom[505];
+
+int lca(int a, int b) {
+    // alternating tree 에서 a, b 의 최소 공통 조상 (blossom base)
+    bool mark[505] = {};
+    while (true) {
+        a = base[a];
+        mark[a] = true;
+        if (match[a] == -1) break;
+        a = parent[match[a]];
+    }
+    while (true) {
+        b = base[b];
+        if (mark[b]) return b; // LCA 찾음
+        b = parent[match[b]];
+    }
+}
+
+void mark_blossom(int v, int ancestor, int child) {
+    // blossom 을 ancestor 까지 올라가며 표시
+    while (base[v] != ancestor) {
+        blossom[base[v]] = blossom[base[match[v]]] = true;
+        parent[v] = child;
+        child = match[v];
+        v = parent[match[v]];
+    }
+}
+
+bool augment(int root) {
+    // root 에서 시작해 augmenting path 를 BFS 로 탐색
+    fill(used, used+n+1, false);
+    fill(parent, parent+n+1, -1);
+    for (int i = 1; i <= n; i++) base[i] = i;
+    
+    queue<int> q;
+    q.push(root);
+    used[root] = true;
+    
+    while (!q.empty()) {
+        int v = q.front(); q.pop();
+        for (int u : adj[v]) {
+            if (base[v] == base[u] || match[v] == u) continue;
+            
+            if (u == root || (match[u] != -1 && parent[match[u]] != -1)) {
+                // 홀수 사이클 (blossom) 발견
+                int curbase = lca(v, u);
+                fill(blossom, blossom+n+1, false);
+                mark_blossom(v, curbase, u);
+                mark_blossom(u, curbase, v);
+                
+                for (int i = 1; i <= n; i++) {
+                    if (blossom[base[i]]) {
+                        base[i] = curbase;
+                        if (!used[i]) { used[i] = true; q.push(i); }
+                    }
+                }
+            } else if (parent[u] == -1) {
+                parent[u] = v;
+                if (match[u] == -1) {
+                    // augmenting path 찾음! 매칭 갱신
+                    int d = u, e = v;
+                    while (e != -1) {
+                        int next = match[e];
+                        match[e] = d; match[d] = e;
+                        d = next; e = (d == -1 ? -1 : parent[d]);
+                    }
+                    return true; // 매칭 증가
+                }
+                used[match[u]] = true;
+                q.push(match[u]);
+            }
+        }
+    }
+    return false; // augmenting path 없음
+}
+
+int max_matching() {
+    fill(match, match+n+1, -1);
+    int result = 0;
+    for (int v = 1; v <= n; v++) {
+        if (match[v] == -1 && augment(v)) {
+            result++;
+        }
+    }
+    return result;
+}
+```
+
+**핵심**: `lca()` 로 홀수 사이클 (blossom) 의 base 정점 찾기. `mark_blossom()` 으로 사이클 정점들을 같은 base 로 수축. BFS 중 `base[v] == base[u]` 면 같은 blossom 내 간선 무시.
+
+### 구현 팁
+
+1. **base 배열**: blossom 수축 시 모든 사이클 정점의 base 를 LCA 로 갱신. 이후 같은 base 는 같은 슈퍼 정점.
+2. **매칭 복원**: augmenting path 역추적하며 match 배열 갱신. parent 배열로 경로 추적.
+3. **검증**: 작은 케이스 (5~10 정점) 에서 brute force 와 비교. blossom contraction 버그 잡기.
+
+## 가중치 매칭 (Maximum Weight Matching)
+
+각 매칭의 가중치 합 최대화. **Hungarian Algorithm 의 일반 그래프 버전**. duality 와 primal 변수를 갱신하는 방식. O(V³) 또는 O(V·E·log V).
+
+## 복잡도
+
+| 알고리즘 | 시간 |
+|:---|:---|
+| Edmonds (기본) | O(V³) 또는 O(V²·E) |
+| Micali-Vazirani | O(V·E·α(V)) ≈ O(V·E) |
+| Maximum Weight Matching | O(V³) |
+
+## 응용
+
+### 1. 비이분 페어링
+
+플레이어 매칭, 좌석 배치, 룸메이트 매칭 (Roommates Problem 의 *안정 매칭* 은 별도).
+
+### 2. Smol Vertex Cover
+
+Konig 정리는 이분 그래프 전용. 일반 그래프 vertex cover 는 NP-hard 지만, *매칭 수 ≥ vertex cover / 2* 의 하한 / 상한 으로 활용.
+
+### 3. Planar Max Cut
+
+일부 평면 그래프에서 *general weighted matching 으로 환원* 가능.
+
+## 함정
+
+### 1. 이분 그래프인지 먼저 확인
+
+이분이면 훨씬 단순한 Hopcroft-Karp / 매칭 흐름. blossom 은 일반에만.
+
+### 2. 구현 복잡도
+
+기본 Edmonds 도 300 ~ 500 줄. 가중치 버전은 800 ~ 1500 줄. 검증된 레퍼런스 (koosaga, kactl) 필수.
+
+### 3. backtrack 정확도
+
+blossom contraction / expansion 의 augmenting path 복원에서 인덱싱 오류가 잦다. small case brute force 비교 필수.
+
+## BOJ 연습 문제
+
+### 무가중치
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 15737 | 일반 그래프 매칭 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/15700-15799/15737) |
+| BOJ 21086 | Smol Vertex Cover | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/21000-21099/21086) |
+| BOJ 16661 | Bimatching | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16600-16699/16661) |
+| BOJ 18447 | Angle Beats | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18400-18499/18447) |
+
+### 가중치
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 15741 | 일반 그래프 최대 가중치 매칭 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/15700-15799/15741) |
+| BOJ 21639 | Cooking | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/21600-21699/21639) |
+| BOJ 18519 | Planar Max Cut | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18500-18599/18519) |
+
+## 참고
+
+- [[Push-Relabel, Cost Scaling|Push-Relabel / Cost Scaling]]
+- [[Matroid]] (matching 의 일반화)
+- [[Chordal Graph]]
+- [Unknown-To-Wellknown - General Graph Matching](https://github.com/justiceHui/Unknown-To-Wellknown#general-graph-matching)
+- [koosaga, General Graph Matching](https://koosaga.com/258)

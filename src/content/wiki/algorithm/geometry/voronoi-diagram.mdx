@@ -1,0 +1,202 @@
+---
+title: Voronoi Diagram, Delaunay Triangulation
+aliases:
+  - Voronoi Diagram
+  - Delaunay Triangulation
+  - 보로노이 다이어그램
+  - 들로네 삼각분할
+tags:
+  - algorithm
+  - geometry
+  - voronoi
+  - delaunay
+category: algorithm
+subcategory: geometry
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 기하 > Voronoi Diagram, Delaunay Triangulation
+---
+
+## 정의
+
+**Voronoi Diagram** 은 평면의 N 개 점에 대해 *각 점을 가장 가까운 점으로 가지는 영역* 들로 평면을 분할한 그림. 각 영역은 볼록 다각형 (또는 무한 영역).
+
+**Delaunay Triangulation** 은 점들을 *어떤 삼각형의 외접원에 다른 점이 포함되지 않게* 잇는 삼각분할. **Voronoi 의 dual** (한쪽이 다른 쪽을 결정).
+
+PS 에서는 *최근접 점 / Euclidean MST / 평면 점들의 거리 통계* 가 등장하면 candidate. 직접 구현은 까다로워서 *Fortune 알고리즘* 또는 *증분 / 분할정복* 구현체를 가져다 쓰는 것이 일반적.
+
+## 문제 상황과 동기
+
+N 개 점에서 *각 점의 최근접 점* 을 모두 구하려면 naive O(N²) 거리 계산. N ≥ 10^5 이면 불가능. **Euclidean MST** 도 마찬가지로 N² 간선 중 선택해야 한다.
+
+핵심 통찰: *Voronoi + Delaunay* 를 O(N log N) 에 구축하면 **최근접 점은 Voronoi 인접 영역, MST 는 Delaunay edges 의 부분 집합** 이 된다. 즉 후보 간선이 O(N) 개로 줄어 전체가 O(N log N).
+
+Fortune 의 sweep line 알고리즘 (1987) 이 가장 널리 쓰인다. 구현이 1000 줄 가까이 되어 PS 에서는 CGAL / boost / kactl 레퍼런스를 복붙하는 것이 표준. 직접 짜면 버그 함정이 너무 많다.
+
+## 시각화
+
+```anim:voronoi-diagram
+{}
+```
+
+## 핵심 성질
+
+1. Voronoi 영역은 각 점에 대한 *반평면 교집합* = 볼록 다각형
+2. Voronoi 의 정점 = Delaunay 삼각형의 외심
+3. Voronoi 의 간선 = Delaunay 간선의 수직 이등분선
+4. Delaunay 는 *empty circumcircle property* (Delaunay 정의 ↔ 외접원 내부에 다른 점 없음)
+5. Delaunay 는 *모든 삼각분할 중 최소각이 가장 큼* (well-shaped)
+6. **Euclidean MST ⊆ Delaunay edges**
+
+## 구현
+
+### Delaunay Triangulation via 3D lifting (개념 코드)
+
+Delaunay 를 *3D convex hull* 로 환원하는 트릭: 점 `(x, y)` 를 `(x, y, x²+y²)` paraboloid 위로 들어올린 뒤, 아래쪽 hull 의 면을 xy 평면으로 투영하면 Delaunay.
+
+```cpp
+// Delaunay triangulation via 3D lifting (skeleton 코드)
+// O(N log N). 실전에서는 3D convex hull 라이브러리 필요.
+#include <vector>
+#include <algorithm>
+using namespace std;
+
+struct Point3D {
+    double x, y, z;
+};
+
+// 3D 점을 paraboloid z = x² + y² 로 lifting
+Point3D lift(double x, double y) {
+    return {x, y, x*x + y*y};
+}
+
+// 3D convex hull 의 lower hull (z 방향 아래쪽 면) 을 구한 뒤
+// 각 face 를 xy 평면으로 투영하면 Delaunay 삼각형.
+// (실제 3D hull 구현은 별도 라이브러리 또는 incremental 알고리즘)
+
+vector<array<int, 3>> delaunay_triangles(vector<pair<double,double>> pts) {
+    int n = pts.size();
+    vector<Point3D> lifted(n);
+    for (int i = 0; i < n; i++) {
+        lifted[i] = lift(pts[i].first, pts[i].second);
+    }
+    
+    // 3D convex hull lower hull 구축 (생략, CGAL / QuickHull 등 사용)
+    // ...
+    
+    // lower hull faces 를 (i, j, k) 로 반환
+    vector<array<int, 3>> triangles;
+    // ... (hull 면 순회)
+    return triangles;
+}
+```
+
+### Fortune 알고리즘 (high-level pseudocode)
+
+O(N log N). sweep line + beach line 관리.
+
+```text
+Fortune(points):
+    events = site_events(points) + circle_events
+    beach_line = empty BST (parabola arcs)
+    voronoi_edges = []
+
+    while events 에 이벤트가 남음:
+        e = events.pop()
+        if e is site_event(p):
+            # beach line 에 새 arc 삽입
+            # 교차하는 arc 를 split
+            # 새 circle event 등록
+        else (e is circle_event):
+            # 사라지는 arc 제거
+            # voronoi 정점 추가
+            # 인접 arc 의 circle event 재계산
+
+    return voronoi_edges
+```
+
+실제 구현은 BST + priority queue + 기하 판정 (parabola 교점, circumcircle) 이 얽혀 800~1500 줄. PS 에서는 검증된 레퍼런스를 복붙한다.
+
+### 작은 입력 step trace
+
+```text
+점 3개: (0,0), (1,0), (0.5, 1)
+
+1. Site event (0,0): beach line = arc_0
+2. Site event (1,0): arc_0 split → arc_0_left, arc_1
+   Voronoi edge: 두 점의 수직 이등분선 시작
+3. Site event (0.5,1): 기존 arc 들과 교차, 새 arc 삽입
+   Circle event 등록 (세 점이 이루는 외접원)
+4. Circle event: 세 arc 가 한 점에서 만남
+   → Voronoi 정점 = 외심 (0.5, y_c)
+
+결과:
+- Voronoi: 세 영역의 경계선 (perpendicular bisectors)
+- Delaunay: 하나의 삼각형 (세 점을 잇는 삼각형)
+```
+
+## 응용
+
+### 1. 최근접 점 쿼리
+
+전처리 O(N log N) + 쿼리 O(log N).
+
+### 2. Euclidean MST
+
+Delaunay 만으로 충분 (MST 는 Delaunay 의 부분 그래프). 그 후 일반 MST 알고리즘.
+
+### 3. 영역 면적 / 인접 관계
+
+각 점의 Voronoi 영역 면적, 어느 점이 인접 영역인지.
+
+### 4. Largest Empty Circle
+
+Voronoi 정점 중 외접원 반지름이 최대인 것.
+
+### 5. Convex Hull
+
+Delaunay 의 *경계* = Convex Hull.
+
+## 복잡도
+
+| 작업 | 비용 |
+|:---|:---|
+| 구축 | O(N log N) |
+| 최근접 점 쿼리 | O(log N) (point location) |
+| 면적 합 | O(N) (구축 후) |
+| MST 계산 | O(N log N) |
+
+## 함정
+
+### 1. 정확도
+
+부동소수점 cross product / 외접원 판정에서 오차. *정수 / long double / exact predicates* 사용 권장.
+
+### 2. degenerate input
+
+같은 점이 여러 개, 4 점 공원 (cocircular) 등. 입력 정리 필수.
+
+### 3. 무한 영역
+
+가장 바깥 점들의 Voronoi 영역은 무한. *경계 박스* 로 잘라 다루는 것이 일반적.
+
+### 4. 구현 길이
+
+Fortune 알고리즘 800 ~ 1500 줄. PS 에서는 *CGAL 같은 라이브러리* 가 없으니 검증된 레퍼런스 / kactl 코드 복붙.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 15695 | Panda Preserve | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/15600-15699/15695) |
+| BOJ 21065 | Friendship Circles | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/21000-21099/21065) |
+| BOJ 5401 | Escape from the Minefield | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/5400-5499/5401) |
+| BOJ 18349 | 천지창조 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18300-18399/18349) |
+
+## 참고
+
+- [[Dual of Planar Graph]]
+- [[Bulldozer Trick]]
+- [[Convex Tangent Optimization|볼록 다각형 접선 최적화]]
+- [Unknown-To-Wellknown - Voronoi Diagram, Delaunay Triangulation](https://github.com/justiceHui/Unknown-To-Wellknown#voronoi-diagram-dulaunay-triangulation)

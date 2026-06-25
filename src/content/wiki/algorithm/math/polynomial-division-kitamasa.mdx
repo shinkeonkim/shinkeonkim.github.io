@@ -1,0 +1,234 @@
+---
+title: Polynomial Division, Kitamasa
+aliases:
+  - Polynomial Division
+  - Kitamasa
+  - 키타마사
+  - 다항식 나눗셈
+tags:
+  - algorithm
+  - math
+  - polynomial
+  - kitamasa
+  - linear-recurrence
+category: algorithm
+subcategory: math
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 수학 > Polynomial Division, Kitamasa
+  - id: infossm-blog
+    note: ho94949, Multipoint Evaluation (2019-06-17)
+  - id: jhnah917-blog
+    note: Kitamasa https://justicehui.github.io/hard-algorithm/2021/03/13/kitamasa/
+  - title: hyperbolic, Polynomial Division
+    url: https://hyperbolic.tistory.com/4
+    author: hyperbolic
+  - title: cubelover, Polynomial Division
+    url: https://cubelover.tistory.com/22
+    author: cubelover
+---
+
+## 정의
+
+**Kitamasa** 는 길이 `K` 의 선형 점화식 `a_n = c_1 a_{n-1} + ... + c_K a_{n-K}` 의 `n` 번째 항을 **O(K² log n)** 또는 [[FFT, NTT|FFT/NTT]] 와 결합해 **O(K log K · log n)** 에 계산하는 알고리즘.
+
+행렬 거듭제곱이 O(K³ log n) 인데 비해 훨씬 빠르다. 핵심은 `x^n mod (점화식의 특성다항식)` 의 빠른 계산. **다항식 나눗셈 (Polynomial Division)** 이 기본 연산.
+
+[[Berlekamp-Massey]] 로 점화식을 찾고 Kitamasa 로 N 번째 항 계산하는 것이 PS 의 정형 콤보.
+
+## 문제 상황과 동기
+
+K 차 선형 점화식 `a_n = c_1 a_{n-1} + ... + c_K a_{n-K}` 가 주어졌을 때, **n = 10^18 번째 항을 mod p 로 구하라**.
+
+naive DP 는 `a_0, a_1, ...` 을 순서대로 계산하므로 O(n·K) → n = 10^18 이면 불가능.
+
+**행렬 거듭제곱**: 점화식을 K×K 행렬로 표현 → A^n 계산. 시간복잡도 O(K³ log n). K = 100, n = 10^18 이면 약 10^8 연산이지만 행렬 곱 상수항이 크다.
+
+**Kitamasa 의 아이디어**: 점화식의 특성다항식 `f(x) = x^K - Σ c_i x^{K-i}` 를 생각하면, `x^n mod f(x)` 를 계산했을 때 그 계수가 `a_n = Σ r_i a_i` 의 r_i 가 된다. 이진법 거듭제곱 + 다항식 곱 + mod 로 **O(K² log n)** (또는 FFT 사용 시 O(K log K · log n)) 에 가능. 행렬보다 약 K 배 빠름.
+
+PS 응용: "수열 첫 2K 항 주어짐, 10^18 번째 항 구하기" → [[Berlekamp-Massey]] (O(K²)) 로 점화식 추론 → Kitamasa 로 한 점 평가.
+
+## 시각화
+
+```anim:polynomial-division-kitamasa
+{}
+```
+
+## 핵심 아이디어
+
+수열 `a` 가 점화식 `a_n = Σ c_i a_{n-i}` 를 만족 ↔ 특성다항식 `f(x) = x^K - Σ c_i x^{K-i}` 의 근으로 표현.
+
+`x^n mod f(x)` 를 계산하면 그 계수 `r_0 + r_1 x + ... + r_{K-1} x^{K-1}` 이 점화식의 *선형 결합 계수*. 즉
+
+```text
+a_n = Σ r_i · a_i
+```
+
+`x^n mod f` 는 *이진법 + 다항식 거듭제곱* 으로 O(log n) 단계, 각 단계 다항식 곱 + mod.
+
+```text
+kitamasa(n, c, a):
+    f = x^K - Σ c_i x^{K-i}   # 특성 다항식
+    r = x^n mod f             # 이진법 + 다항식 거듭제곱
+    return Σ r_i · a_i
+```
+
+### 예시 실행
+
+```text
+점화식: a_n = a_{n-1} + a_{n-2}  (피보나치, K=2)
+초기: a_0=0, a_1=1
+특성다항식: f(x) = x^2 - x - 1
+
+a_5 계산:
+x^5 mod f = ?
+
+이진법: 5 = 101_2
+x^1 = x
+x^2 = x^2 → x^2 mod f = x^2  (아직 차수 2)
+    하지만 x^2 ≡ x + 1 (mod f),  (∵ x^2 - x - 1 = 0)
+x^4 = (x+1)^2 = x^2 + 2x + 1 ≡ (x+1) + 2x + 1 = 3x + 2
+x^5 = x^4 · x = (3x+2)·x = 3x^2 + 2x ≡ 3(x+1) + 2x = 5x + 3
+
+∴ a_5 = 5·a_1 + 3·a_0 = 5·1 + 3·0 = 5  ✓
+```
+
+## 구현 (Naive O(K² log n))
+
+```cpp
+// Kitamasa: K 차 선형 점화식의 n 번째 항 O(K^2 log n)
+// c: 점화식 계수 [c_1, ..., c_K], a_n = Σ c_i a_{n-i}
+// a: 초기항 [a_0, a_1, ..., a_{K-1}]
+#include <vector>
+using namespace std;
+
+const long long MOD = 998244353;
+
+long long modpow(long long a, long long b, long long mod) {
+    long long res = 1;
+    a %= mod;
+    while (b) {
+        if (b & 1) res = res * a % mod;
+        a = a * a % mod;
+        b >>= 1;
+    }
+    return res;
+}
+
+// 다항식 A * B mod (x^K - Σ c_i x^{K-i})
+vector<long long> poly_mul_mod(const vector<long long>& A, 
+                                const vector<long long>& B, 
+                                const vector<long long>& c, int K) {
+    // naive 곱셈 O(K^2)
+    vector<long long> res(2*K - 1, 0);
+    for (int i = 0; i < K; i++) {
+        for (int j = 0; j < K; j++) {
+            res[i + j] = (res[i + j] + A[i] * B[j]) % MOD;
+        }
+    }
+    
+    // x^K 이상 항을 reduction: x^K = Σ c_i x^{K-i}
+    for (int i = 2*K - 2; i >= K; i--) {
+        for (int j = 0; j < K; j++) {
+            res[i - K + j] = (res[i - K + j] + res[i] * c[j]) % MOD;
+        }
+        res[i] = 0;
+    }
+    res.resize(K);
+    return res;
+}
+
+long long kitamasa(long long n, vector<long long> c, vector<long long> a) {
+    int K = c.size();
+    // x^n mod f 를 이진법 거듭제곱
+    vector<long long> res(K, 0);
+    res[0] = 1; // 1 (상수)
+    vector<long long> base(K, 0);
+    base[1] = 1; // x
+
+    while (n > 0) {
+        if (n & 1) res = poly_mul_mod(res, base, c, K);
+        base = poly_mul_mod(base, base, c, K);
+        n >>= 1;
+    }
+
+    long long ans = 0;
+    for (int i = 0; i < K; i++) {
+        ans = (ans + res[i] * a[i]) % MOD;
+    }
+    return ans;
+}
+```
+
+## 다항식 곱 + 나눗셈
+
+- 두 차수 K 다항식 곱: naive O(K²), [[FFT, NTT|FFT/NTT]] 사용 시 O(K log K)
+- 다항식 나눗셈 (long division 비슷): naive O(K²), 빠른 reciprocal 곱 사용 시 O(K log K)
+
+따라서 단계당 비용이 O(K²) 또는 O(K log K).
+
+## 복잡도
+
+| 변형 | 시간 |
+|:---|:---|
+| naive (행렬 거듭제곱) | O(K³ log n) |
+| naive Kitamasa | O(K² log n) |
+| FFT / NTT Kitamasa | O(K log K · log n) |
+
+K = 100, n = 10^18 정도면 naive K² 가 충분히 빠르다. K = 1000 + n = 10^18 이면 FFT 가 필수.
+
+## 응용
+
+### 1. Berlekamp-Massey + Kitamasa 콤보
+
+수열의 처음 2K 항을 brute force → BM 으로 점화식 → Kitamasa 로 N 번째 항.
+
+### 2. 행렬 거듭제곱 대체
+
+피보나치 같은 작은 K 도 행렬 거듭제곱보다 약간 빠름.
+
+### 3. RNG 시드 시뮬레이션
+
+긴 LCG / LFSR 출력의 N 번째 항.
+
+## 함정
+
+### 1. 점화식 차수 확인
+
+K 가 정확해야 함. BM 결과를 그대로 신뢰. 의심되면 입력 길이 늘려 재검증.
+
+### 2. mod 환경
+
+모든 연산이 mod p 위에서. p 는 보통 998244353 (NTT 친화). 다른 mod 면 3-NTT + CRT.
+
+### 3. 다항식 reciprocal
+
+빠른 나눗셈은 reciprocal `g(x) ≡ 1/f(x) mod x^d` 의 사전 계산이 필요. Newton iteration 으로 O(K log K).
+
+### 4. 초기항 길이
+
+점화식 외에 `a_0, ..., a_{K-1}` 초기항이 필수.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 13758 | RNG 2 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13700-13799/13758) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Division of Polynomials | https://judge.yosupo.jp/problem/division_of_polynomials |
+
+## 참고
+
+- [[Berlekamp-Massey]]
+- [[FFT, NTT|FFT 와 NTT]]
+- [[Multipoint Evaluation]]
+- [[Polynomial Interpolation]]
+- [[Generating Function]]
+- [Unknown-To-Wellknown - Polynomial Division, Kitamasa](https://github.com/justiceHui/Unknown-To-Wellknown#polynomial-division-kitamasa)
+- [jhnah917, Kitamasa](https://justicehui.github.io/hard-algorithm/2021/03/13/kitamasa/)
+- [hyperbolic, Polynomial Division](https://hyperbolic.tistory.com/4)

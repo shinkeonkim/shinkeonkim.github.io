@@ -1,0 +1,245 @@
+---
+title: Treewidth, Tree Decomposition
+aliases:
+  - Treewidth
+  - Tree Decomposition
+  - 트리 분해
+  - TW
+tags:
+  - algorithm
+  - graph
+  - treewidth
+  - tree-decomposition
+  - dp
+category: algorithm
+subcategory: graph
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 그래프 이론 > Treewidth, Tree Decomposition
+  - id: koosaga-blog
+    note: https://koosaga.com/295
+  - title: Ignasi Sau, Treewidth talk
+    url: https://www.lirmm.fr/~sau/talks/tw-Ignasi-2021.pdf
+    author: Ignasi Sau
+---
+
+## 정의
+
+**Tree Decomposition** 은 그래프 `G` 를 *bag* (정점 집합) 들을 노드로 하는 트리 `T` 로 분해한 것. **Treewidth** `tw(G)` = 가장 작은 분해의 *최대 bag 크기 - 1*.
+
+```text
+조건:
+  1. 모든 정점이 어떤 bag 에 등장
+  2. 모든 간선의 두 끝점이 어떤 같은 bag 에 동시 등장
+  3. 한 정점이 등장하는 bag 들의 집합은 T 의 connected subtree
+```
+
+tw 가 작으면 *NP-hard 문제 (independent set, vertex cover, chromatic, dominating set)* 들이 `O(f(tw) · n)` (FPT) 로 풀린다. 트리 (tw=1), 직렬-병렬 그래프 (tw=2), Halin graph (tw=3) 등이 작은 tw 의 대표.
+
+## 문제 상황과 동기
+
+일반 그래프에서 max independent set, min vertex cover, chromatic number, dominating set 은 모두 NP-hard. Naive backtracking 은 O(2^N). 트리에서는 *트리 DP* 로 O(N) 에 풀린다. 그래프가 *트리에 가까우면* (tw 가 작으면) 트리 DP 를 일반화해 다항 시간 가능.
+
+Treewidth tw 가 작다 = 그래프를 *bag (부분 정점 집합)* 들을 노드로 하는 트리로 분해 가능, 각 bag 크기 ≤ tw+1. 핵심 아이디어: **bag 단위로 DP**. 한 bag 의 *모든 부분집합* 을 상태로 잡아 트리 DP 와 동일 구조. 상태 수 `2^tw · n`. tw=10 이면 10⁶ 수준, tw=20 이면 10⁶×20 수준으로 실용.
+
+일반 그래프의 minimum tw 구하기는 NP-hard. 하지만 PS 에서는 *그래프가 series-parallel, outerplanar, cactus 등 특수하거나*, *tw 가 작음이 보장된 입력* 으로 등장. 이때 O(2^tw · poly(N)) FPT 로 NP-hard 문제를 다항 시간에.
+
+## 시각화
+
+```anim:tree-decomposition
+{}
+```
+
+## 핵심 응용
+
+### 1. Series-Parallel Graph 판정
+
+tw ≤ 2 ↔ Series-Parallel.
+
+### 2. 트리 DP 일반화
+
+tw 가 작으면 *bag 단위 DP* 가 사실상 트리 DP. 한 bag 에서 *모든 부분집합* 을 state 로.
+
+**Invariant**: 각 bag 의 DP 값은 *그 서브트리에서 해당 bag 정점들이 주어진 상태일 때의 최적해*. Introduce / forget / join 전이로 트리를 후위순회하며 갱신.
+
+```text
+dp[bag][subset of bag]
+```
+
+상태 수 `2^tw · n`. tw 가 10 이하면 10⁶ 이하로 실용.
+
+### 3. 최단경로 쿼리
+
+특정 그래프 (planar + bounded tw) 에서 nearest separator decomposition + 트리 DP 로 빠른 쿼리.
+
+## 구현 (C++): Nice Tree Decomposition DP 스켈레톤
+
+```cpp
+// O(2^tw · poly(N)). Nice tree decomposition 기반 DP (예: max independent set).
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Bag {
+    set<int> vertices; // 이 bag 에 속한 정점들
+    int type; // 0=leaf, 1=introduce, 2=forget, 3=join
+    int parent_bag, child1, child2; // 트리 구조
+    int introduced_v, forgotten_v; // introduce/forget 시 대상 정점
+};
+
+vector<Bag> bags;
+map<pair<int, int>, long long> dp; // dp[{bag_id, subset_mask}] = 최적해
+
+long long solve_bag(int b_id, int mask) {
+    if (dp.count({b_id, mask})) return dp[{b_id, mask}];
+    
+    Bag& bag = bags[b_id];
+    long long res = 0;
+    
+    if (bag.type == 0) { // leaf
+        res = 0; // base case
+    } else if (bag.type == 1) { // introduce v
+        int v = bag.introduced_v;
+        int child_mask = mask; // child bag 에서의 mask (v 제외)
+        if (mask & (1 << v)) {
+            // v 를 IS 에 포함 -> child 에서 v 의 이웃들 모두 제외
+            // (여기서는 단순화: child_mask 그대로)
+            res = 1 + solve_bag(bag.child1, child_mask);
+        } else {
+            res = solve_bag(bag.child1, child_mask);
+        }
+    } else if (bag.type == 2) { // forget v
+        int v = bag.forgotten_v;
+        // child 에서 v 포함 / 미포함 둘 다 고려
+        res = max(solve_bag(bag.child1, mask | (1 << v)),
+                  solve_bag(bag.child1, mask & ~(1 << v)));
+    } else { // join
+        // 두 child 의 결과 결합 (예: IS 는 합)
+        res = solve_bag(bag.child1, mask) + solve_bag(bag.child2, mask);
+    }
+    
+    return dp[{b_id, mask}] = res;
+}
+
+// Series-Parallel 분해 (Pseudocode)
+/*
+  Series-Parallel 판정 + 분해:
+  1. 2-터미널 그래프 (s, t) 가 주어짐
+  2. s-t 직접 간선이면 -> base (P)
+  3. s-t path 가 유일하고, 모든 정점이 그 path 위 -> Series
+  4. s-t 간 parallel path 여러 개 -> Parallel
+  5. 재귀적으로 분해
+  
+  Pseudocode:
+  decompose(G, s, t):
+    if direct edge (s,t): return Primitive
+    if unique path: split into series(sub1, sub2)
+    if multiple paths: split into parallel(sub1, sub2, ...)
+    return recursive decompose
+*/
+```
+
+**핵심**: Nice tree decomposition 은 *leaf / introduce / forget / join* 노드로 정규화. DP 전이가 명확. Introduce 는 새 정점 추가, forget 은 정점 제거, join 은 두 서브트리 병합.
+
+### 구현 팁
+
+1. **mask 최적화**: bag 크기가 작으면 (≤10) bitmask DP. 크면 map / unordered_map.
+2. **Nice 형태 변환**: 일반 tree decomposition 을 nice 로 변환하는 전처리 O(bag 수).
+3. **Series-Parallel 분해**: 재귀 분할. 각 단계에서 s-t cut / path 구조 판별 O(V+E).
+
+## 예시 추적 (Series-Parallel 판정)
+
+```text
+그래프: 정점 {s, a, b, t}, 간선 (s,a), (a,b), (b,t), (s,t)
+
+1. s-t 직접 간선 (s,t) 있음 -> Primitive edge P1
+2. s-t path s->a->b->t 도 있음 -> Parallel 구조
+   - P1 = edge (s,t)
+   - P2 = series(s->a, a->b, b->t)
+3. 결과: Parallel(P1, Series(edge(s,a), edge(a,b), edge(b,t)))
+   -> tw ≤ 2 (Series-Parallel)
+```
+
+## 트리 분해 구성
+
+일반 그래프의 minimum tw 구하기는 NP-hard. 특수 그래프 (chordal, series-parallel, planar with small tw) 에는 다항 알고리즘.
+
+| 그래프 종류 | tw 구성 시간 |
+|:---|:---|
+| Tree | tw = 1, O(N) |
+| Series-Parallel | tw ≤ 2, O(N) |
+| Halin | tw ≤ 3, O(N) |
+| Outerplanar | tw ≤ 2, O(N) |
+| Planar | NP-hard 일반, FPT in tw |
+
+[[Chordal Graph]] 라면 PEO 로부터 직접 tree decomposition 추출 (각 bag = PEO 의 한 정점 + 후속 이웃).
+
+## 복잡도 (FPT)
+
+| 문제 | 복잡도 |
+|:---|:---|
+| Max Independent Set | O(2^tw · poly(n)) |
+| Vertex Cover | O(2^tw · poly(n)) |
+| Chromatic Number | O((tw + 1)^tw · poly(n)) |
+| Dominating Set | O(3^tw · poly(n)) |
+| Hamiltonian Path | O(tw^tw · poly(n)) |
+
+## 함정
+
+### 1. tw 구하기 자체가 NP-hard
+
+문제에서 *tree decomposition 이 주어지거나*, *그래프가 특수해서 tw 가 자명한* 경우에만 적용 가능. 일반 그래프에 직접은 못 씀.
+
+### 2. bag 의 부분집합 모두 상태
+
+상태 수 2^tw. tw=20 이면 10⁶, tw=25 면 3·10⁷. tw 가 어느 정도 작아야 한다.
+
+### 3. nice tree decomposition
+
+DP 짜기 쉽게 *introduce / forget / join* 만으로 이루어진 nice 형태로 정규화. 코드 분기 명확.
+
+### 4. PS 에서는 보통 특수 그래프
+
+cactus / series-parallel / 트리에 한정된 문제로 등장. 일반 tree decomposition 코드까지 짜는 일은 ICPC level.
+
+## BOJ 연습 문제
+
+### 트리 분할
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 16183 | Electronic Circuit (Series-Parallel 판별) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16100-16199/16183) |
+| BOJ 26415 | Ghost (Halin Tree Decomposition) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/26400-26499/26415) |
+
+### DP
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 22982 | 선인장의 독립집합 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/22900-22999/22982) |
+| BOJ 17824 | 아폴로니안 네트워크 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17800-17899/17824) |
+| BOJ 19267 | Kid's Nightmare | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/19200-19299/19267) |
+
+### 최단 경로 쿼리
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 11738 | Distance on Triangulation | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11700-11799/11738) |
+| BOJ 17366 | % | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17300-17399/17366) |
+| BOJ 27814 | Emacs++ | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/27800-27899/27814) |
+| BOJ 17697 | Railway Trip | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17600-17699/17697) |
+| BOJ 24710 | Station | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/24700-24799/24710) |
+| BOJ 25407 | 25407 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/25400-25499/25407) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Tree Decomposition (Width 2) | https://judge.yosupo.jp/problem/tree_decomposition_width_2 |
+
+## 참고
+
+- [[Chordal Graph]]
+- [[Dominator Tree]]
+- [[Dynamic Tree]]
+- [Unknown-To-Wellknown - Treewidth, Tree Decomposition](https://github.com/justiceHui/Unknown-To-Wellknown#treewidth-tree-decomposition)
+- [koosaga, Treewidth](https://koosaga.com/295)

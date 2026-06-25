@@ -1,0 +1,247 @@
+---
+title: Polynomial Interpolation
+aliases:
+  - Polynomial Interpolation
+  - 다항식 보간
+  - Lagrange Interpolation
+  - 라그랑주 보간
+tags:
+  - algorithm
+  - math
+  - polynomial
+  - interpolation
+category: algorithm
+subcategory: math
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 수학 > Polynomial Interpolation
+  - title: hyperbolic, Polynomial Interpolation
+    url: https://hyperbolic.tistory.com/5
+    author: hyperbolic
+---
+
+## 정의
+
+**Polynomial Interpolation (다항식 보간)** 은 N+1 개의 점 `(x_0, y_0), ..., (x_N, y_N)` 으로부터 *유일하게 결정되는 차수 ≤ N 의 다항식 `P(x)`* 를 복원하는 것.
+
+PS 에서는 *DP 의 결과가 K 차 다항식임이 보장된* 케이스에서 *K+1 점만 계산 → 나머지를 한 점 평가로 빠르게* 라는 형태로 등장. [[Multipoint Evaluation]] 의 *역방향*.
+
+## 문제 상황과 동기
+
+PS 에서 자주 등장하는 패턴: "f(N) 을 구하시오, N ≤ 10^18" 같은 문제에서 *f(N) 이 차수 K 다항식임이 보장되는 경우* (예: Σ i^k, DP 가 K 차 다항식으로 닫히는 경우).
+
+naive approach: 큰 N 까지 하나하나 계산 → O(N) 또는 O(NK) 로 불가능.
+
+하지만 f(x) 가 K 차 다항식이면, **작은 K+1 개 점 (x_0, f(x_0)), ..., (x_K, f(x_K)) 만 brute force** 로 구하고, 보간으로 다항식 계수 (또는 Lagrange form) 을 복원한 뒤, **큰 N 에서 P(N) 을 O(K) 에 평가** 할 수 있다.
+
+**핵심 인사이트**: 차수 K 다항식은 K+1 점으로 완전히 결정되며, 한 점 평가는 O(K) ~ O(K log K) 로 가능. 전체 O(K²) 또는 O(K log² K) 로 문제가 풀린다.
+
+실전 예시: "N ≤ 10^18, f(N) = Σ_{i=0}^{N} i^5 mod 10^9+7" 같은 문제. f(x) 는 차수 6 다항식 → 0,1,...,6 에서 값 계산 (O(7)) → 보간 (O(49)) → P(10^18) 평가 (O(7)).
+
+## 시각화
+
+```anim:polynomial-interpolation
+{}
+```
+
+## Lagrange Form
+
+가장 직관적. *Σ y_i · L_i(x)*, where `L_i(x) = Π_{j ≠ i} (x - x_j) / (x_i - x_j)`.
+
+```text
+P(x) = Σ y_i · Π_{j ≠ i} (x - x_j) / (x_i - x_j)
+```
+
+한 점에서 평가 O(N²) 또는 *연속한 정수 점* 에 한정하면 O(N).
+
+## Newton Form
+
+분할차 (divided difference) 기반. *증분 평가* 가 쉬움.
+
+```text
+P(x) = a_0 + a_1 (x - x_0) + a_2 (x - x_0)(x - x_1) + ...
+```
+
+`a_i` 들을 한 번 계산해 두면 임의 점 평가 O(N), 새 점 추가 O(N).
+
+## 빠른 보간 (Fast Interpolation)
+
+[[Multipoint Evaluation]] 의 dual. 다항식 분할정복 + [[FFT, NTT|FFT/NTT]] 로 O(N log² N).
+
+## 구현
+
+### 기본 Lagrange 보간 (임의 점, O(N²))
+
+```cpp
+// O(N²) Lagrange interpolation for arbitrary points (x_i, y_i)
+// 한 점 x 에서 P(x) 평가
+#include <vector>
+using namespace std;
+
+long long modpow(long long a, long long b, long long mod) {
+    long long res = 1;
+    a %= mod;
+    while (b > 0) {
+        if (b & 1) res = res * a % mod;
+        a = a * a % mod;
+        b >>= 1;
+    }
+    return res;
+}
+
+long long modinv(long long x, long long mod) {
+    return modpow(x, mod - 2, mod);
+}
+
+// 점 (x[i], y[i]) (i=0..n-1) 로부터 P(val) 평가
+long long lagrange(vector<long long> x, vector<long long> y, long long val, long long mod) {
+    int n = x.size();
+    long long result = 0;
+    for (int i = 0; i < n; i++) {
+        long long num = y[i];
+        long long den = 1;
+        for (int j = 0; j < n; j++) {
+            if (i == j) continue;
+            num = num * ((val - x[j] % mod + mod) % mod) % mod;
+            den = den * ((x[i] - x[j] % mod + mod) % mod) % mod;
+        }
+        result = (result + num * modinv(den, mod) % mod) % mod;
+    }
+    return result;
+}
+```
+
+### 빠른 Lagrange 보간 (연속 정수 점, O(N))
+
+가장 실용적. `x_i = i (i = 0..n-1)` 인 경우 prefix/suffix product 로 분모 일괄 계산.
+
+```cpp
+// O(N) Lagrange interpolation for consecutive integer points 0, 1, ..., n-1
+// y[i] = f(i), i = 0..n-1 일 때 f(x) 를 평가
+#include <vector>
+using namespace std;
+
+long long modpow(long long a, long long b, long long mod) {
+    long long res = 1;
+    a %= mod;
+    while (b > 0) {
+        if (b & 1) res = res * a % mod;
+        a = a * a % mod;
+        b >>= 1;
+    }
+    return res;
+}
+
+long long modinv(long long x, long long mod) {
+    return modpow(x, mod - 2, mod);
+}
+
+long long lagrange_consecutive(vector<long long> y, long long x, long long mod) {
+    int n = y.size();
+    if (x < n) return y[x];
+    
+    // factorial, inv_factorial 전처리
+    vector<long long> fact(n), inv_fact(n);
+    fact[0] = 1;
+    for (int i = 1; i < n; i++) fact[i] = fact[i - 1] * i % mod;
+    inv_fact[n - 1] = modinv(fact[n - 1], mod);
+    for (int i = n - 2; i >= 0; i--) inv_fact[i] = inv_fact[i + 1] * (i + 1) % mod;
+    
+    // prefix, suffix 계산 (분자용)
+    vector<long long> prefix(n), suffix(n);
+    prefix[0] = (x % mod - 0 + mod) % mod;
+    for (int i = 1; i < n; i++) prefix[i] = prefix[i - 1] * ((x % mod - i + mod) % mod) % mod;
+    suffix[n - 1] = (x % mod - (n - 1) + mod) % mod;
+    for (int i = n - 2; i >= 0; i--) suffix[i] = suffix[i + 1] * ((x % mod - i + mod) % mod) % mod;
+    
+    long long result = 0;
+    for (int i = 0; i < n; i++) {
+        long long num = y[i];
+        if (i > 0) num = num * prefix[i - 1] % mod;
+        if (i < n - 1) num = num * suffix[i + 1] % mod;
+        
+        // 분모: (-1)^{n-1-i} · i! · (n-1-i)!
+        long long den = inv_fact[i] * inv_fact[n - 1 - i] % mod;
+        if ((n - 1 - i) & 1) den = (mod - den) % mod;
+        
+        result = (result + num * den % mod) % mod;
+    }
+    return result;
+}
+```
+
+### 예시 실행
+
+```text
+입력: y = [0, 1, 8, 27] (즉 f(i) = i³, i=0,1,2,3)
+      x = 10
+출력: lagrange_consecutive(y, 10, MOD) = 1000
+
+설명:
+- f(x) = x³ 은 차수 3 → 4 개 점으로 완전히 결정
+- Lagrange form 에서:
+    L_0(10) · 0 + L_1(10) · 1 + L_2(10) · 8 + L_3(10) · 27
+  = (10·9·8 / (-1·-2·-3)) · 0 + ... = 1000
+```
+
+## 복잡도
+
+| 알고리즘 | 1 점 평가 | 다항식 계수 복원 |
+|:---|:---|:---|
+| Lagrange (naive) | O(N) (전처리 후) | O(N²) |
+| Newton form | O(N) | O(N²) |
+| Lagrange (연속 정수 점) | O(N) | O(N²) |
+| FFT/NTT 기반 | - | O(N log² N) |
+
+## 응용
+
+### 1. K 차 다항식 답을 가지는 카운팅
+
+`f(N) = Σ_{i=0..K} c_i N^i` 같은 형태가 보장되면, 작은 N 에 대해 brute force 로 K+1 값 계산 → 라그랑주 보간 → 큰 N 평가.
+
+### 2. 격자 점 카운팅
+
+Σ i^k, Σ x^k y^k 같은 합이 차수 k+1 의 다항식.
+
+### 3. modular interpolation
+
+mod p 에서 모든 곱셈 / 나눗셈을 modular inverse 로.
+
+## 함정
+
+### 1. 분모 0
+
+`x_i - x_j = 0` 이 되는 중복 점은 정의 위배. 사전에 중복 제거.
+
+### 2. mod 환경의 inverse
+
+`1 / (x_i - x_j) mod p` 는 *나눗셈이 아닌 모듈러 역원* 으로. 작은 정수 차이는 캐싱 가능.
+
+### 3. 다항식 차수 확인
+
+문제에서 "답이 차수 ≤ K 다항식" 임이 보장되지 않으면 보간이 무의미. 작은 K+2 점으로 *상수 차이로 검증* 하는 sanity check.
+
+### 4. 연속 정수 점의 빠른 변형
+
+`x_i = i (i = 0..N)` 인 경우 `Π (x - j)` 의 누적곱과 factorial 로 O(N) 평가. 일반적인 라그랑주보다 훨씬 빠름.
+
+## BOJ 연습 문제
+
+(원문 Unknown-To-Wellknown 에 BOJ 문제는 명시되어 있지 않음. Library Checker 위주.)
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Polynomial Interpolation | https://judge.yosupo.jp/problem/polynomial_interpolation |
+
+## 참고
+
+- [[Multipoint Evaluation]]
+- [[Polynomial Division Kitamasa|Polynomial Division / Kitamasa]]
+- [[FFT, NTT|FFT 와 NTT]]
+- [[Generating Function]]
+- [[Berlekamp-Massey]]
+- [Unknown-To-Wellknown - Polynomial Interpolation](https://github.com/justiceHui/Unknown-To-Wellknown#polynomial-interpolation)
+- [hyperbolic, Polynomial Interpolation](https://hyperbolic.tistory.com/5)

@@ -1,0 +1,223 @@
+---
+title: Kinetic Segment Tree
+aliases:
+  - Kinetic Segment Tree
+  - KST
+  - 키네틱 세그먼트 트리
+tags:
+  - algorithm
+  - data-structure
+  - segment-tree
+  - kinetic
+category: algorithm
+subcategory: data-structure
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 자료구조 > Kinetic Segment Tree
+  - id: koosaga-blog
+    note: https://koosaga.com/307
+---
+
+## 정의
+
+**Kinetic Segment Tree (KST)** 는 각 원소가 **시간 t 에 대한 일차함수 `a_i(t) = m_i · t + b_i`** 로 변하는 상황에서, *최댓값 / 최솟값 같은 시간 의존 쿼리* 를 효율적으로 처리하는 세그먼트 트리.
+
+[[Segment Tree Beats]] 의 사촌으로, "값이 시간에 따라 단조 변하지만 누가 최대가 될지는 교차점에서 바뀐다" 는 kinetic data structure 의 PS 버전.
+
+## 문제 상황과 동기
+
+**문제**: N 개의 일차함수 `f_i(t) = m_i · t + b_i` 가 있을 때, 특정 시간 `t` 에서의 `max(f_i(t))` 를 빠르게 구하고, 함수가 동적으로 갱신되는 상황.
+
+**Naive 접근**: 매 쿼리마다 O(N) 으로 모든 함수를 평가. Q 번의 쿼리에 O(NQ). N, Q ≤ 10^5 이면 TLE.
+
+**CHT 로는 왜 안되나**: [[Convex Hull Trick]] 은 직선들이 정적이거나 기울기가 단조일 때만 효율적. 일반적인 insert/delete + 시간 진행이 섞이면 O(N) per query.
+
+**핵심 통찰**: 세그먼트 트리의 각 노드에 *현재 시간 t 에서 그 구간의 최댓값을 만드는 직선* 과, *다음으로 다른 직선이 최대가 되는 시간 (melt)* 을 저장. melt 가 도달하면 자식을 재계산. 자주 melt 가 일어나지만 amortized 로 O(log² N).
+
+**실전 출현**: "움직이는 점들의 최단 거리", "시간에 따라 변하는 가격 시뮬레이션", CodeForces Div1 hard 문제에 가끔 등장.
+
+## 시각화
+
+```anim:kinetic-segment-tree
+{}
+```
+
+## 핵심 아이디어
+
+각 노드는 *현재 시간 `t` 에서 그 구간의 최댓값을 만드는 원소* 와, *다음으로 최댓값이 바뀌는 시간 (melting time)* 을 유지.
+
+```text
+노드 정보:
+  best        : 현재 최댓값을 만드는 직선 (m, b)
+  melt        : 다음 교차 시간 (Δt 후 다른 직선이 best 를 초과)
+
+쿼리 (시간 t 에 max):
+  t 를 노드의 best 에 대입
+
+업데이트 (시간 t' 로 진행):
+  if t' < melt:  단순 이동
+  else:          best 재계산, 자식 melt 회복
+```
+
+melt 가 자주 일어나면 깊이 따라 amortized 분석. 일반 입력에 대해 O((N+Q) log² N) 등.
+
+### 작동 예시
+
+```text
+두 직선: L1(t) = 2t + 0, L2(t) = 1t + 5
+
+t=0:  L1(0)=0, L2(0)=5  → best = L2
+t=1:  L1(1)=2, L2(1)=6  → best = L2
+t=5:  L1(5)=10, L2(5)=10 → 교차점 (melt = 5)
+t=6:  L1(6)=12, L2(6)=11 → best = L1
+
+노드 [0..1]:
+  t=0: best=L2, melt=5
+  update(t=6):
+    6 >= 5 → melt 발생
+    → 자식 재계산: best=L1, 다음 melt 계산
+```
+
+**핵심 불변량**: 각 노드의 melt 시간까지는 best 가 유효. melt 이후 자식을 다시 비교해 새로운 best 선택. 한 번 melt 가 일어나면 그 노드의 best 가 바뀌고, potential 이 감소.
+
+## 복잡도
+
+| 연산 | 비용 |
+|:---|:---|
+| 시간 진행 + max 쿼리 | O(log² N) amortized |
+| 일차함수 갱신 | O(log N) |
+| 공간 | O(N log N) |
+
+분석은 [[Segment Tree Beats]] 와 비슷한 potential 함수 (각 구간에서 "best" 가 바뀐 횟수) 로.
+
+## 구현
+
+```cpp
+// O(log^2 N) amortized query_max. (시간에 따라 변하는 직선들의 envelope)
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Line {
+    long long m, b;  // f(t) = m*t + b
+    long long eval(long long t) const { return m * t + b; }
+};
+
+struct Node {
+    Line best;
+    long long melt;  // 다음 교차 시간
+    Node() : melt(1e18) {}
+};
+
+struct KineticSegTree {
+    int n;
+    long long now;  // 현재 시간
+    vector<Node> t;
+    vector<Line> lines;
+    
+    KineticSegTree(int n) : n(n), now(0), t(4*n), lines(n) {}
+    
+    // 두 직선의 교차 시간 계산 (a 가 b 를 추월)
+    long long intersect(const Line &a, const Line &b) {
+        if (a.m == b.m) return (a.b >= b.b ? -1e18 : 1e18);
+        // a.m*t + a.b = b.m*t + b.b
+        // t = (b.b - a.b) / (a.m - b.m)
+        long long num = b.b - a.b;
+        long long den = a.m - b.m;
+        if (den < 0) { num = -num; den = -den; }
+        if (den > 0 && num >= 0) return num / den;
+        return 1e18;
+    }
+    
+    void build(int v, int tl, int tr) {
+        if (tl == tr) {
+            t[v].best = lines[tl];
+            t[v].melt = 1e18;
+        } else {
+            int tm = (tl + tr) / 2;
+            build(2*v, tl, tm);
+            build(2*v+1, tm+1, tr);
+            pull(v, tl, tr);
+        }
+    }
+    
+    void pull(int v, int tl, int tr) {
+        // 현재 시간에서 좌우 자식 중 max 선택
+        long long lval = t[2*v].best.eval(now);
+        long long rval = t[2*v+1].best.eval(now);
+        if (lval >= rval) {
+            t[v].best = t[2*v].best;
+            t[v].melt = min(intersect(t[2*v+1].best, t[2*v].best), 
+                           min(t[2*v].melt, t[2*v+1].melt));
+        } else {
+            t[v].best = t[2*v+1].best;
+            t[v].melt = min(intersect(t[2*v].best, t[2*v+1].best),
+                           min(t[2*v].melt, t[2*v+1].melt));
+        }
+    }
+    
+    void update_time(int v, int tl, int tr, long long t) {
+        if (t < t[v].melt) {
+            now = t;
+            return;
+        }
+        // melt 발생, 자식 재계산 필요
+        if (tl == tr) {
+            now = t;
+            return;
+        }
+        int tm = (tl + tr) / 2;
+        update_time(2*v, tl, tm, t);
+        update_time(2*v+1, tm+1, tr, t);
+        pull(v, tl, tr);
+        now = t;
+    }
+    
+    long long query_max(int v, int tl, int tr, int l, int r) {
+        if (l > r) return -1e18;
+        if (l <= tl && tr <= r) return t[v].best.eval(now);
+        int tm = (tl + tr) / 2;
+        return max(query_max(2*v, tl, tm, l, r),
+                   query_max(2*v+1, tm+1, tr, l, r));
+    }
+    
+    void set_time(long long t) { update_time(1, 0, n-1, t); }
+    long long query(int l, int r) { return query_max(1, 0, n-1, l, r); }
+};
+```
+
+**주의**: 위 코드는 개념 설명용 의사 코드에 가깝다. 실제 구현은 intersect 계산 (정수 나눗셈 / 실수 오차), melt 우선순위 큐, 직선 갱신 등 추가 처리가 필요. 검증된 구현은 koosaga 레퍼런스 참고.
+
+## 응용
+
+- *직선들의 lower / upper envelope 가 시간에 따라 갱신* 되는 상황
+- 점 집합이 시간에 따라 움직이며 최단 거리 / 컨벡스 헐 갱신
+- 보험금 / 주식 시뮬레이션 같은 일차 함수 동시 시뮬레이션
+
+## 함정
+
+### 1. 일차함수만 가능
+
+이차 / 일반 곡선이면 교차점이 두 개가 될 수 있어 melt 모델 깨짐.
+
+### 2. amortized 가 무너지는 입력
+
+특정 적대적 입력에서는 O(log² N) 보장이 깨질 수 있다. 일반 PS 문제에서는 대체로 안전.
+
+### 3. 구현 난도
+
+코드량과 디버깅이 무겁다. STB 보다 쓸 일이 드물어 검증된 레퍼런스 (koosaga) 따라 짜는 것이 안전.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 2788 | 스타트업 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2700-2799/2788) |
+| BOJ 26144 | 꺾이지 않는 마음 3 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/26100-26199/26144) |
+
+## 참고
+
+- [[Segment Tree Beats]]
+- [[Convex Tangent Optimization|볼록 다각형 접선 최적화]]
+- [Unknown-To-Wellknown - Kinetic Segment Tree](https://github.com/justiceHui/Unknown-To-Wellknown#kinetic-segment-tree)
+- [koosaga, KST](https://koosaga.com/307)

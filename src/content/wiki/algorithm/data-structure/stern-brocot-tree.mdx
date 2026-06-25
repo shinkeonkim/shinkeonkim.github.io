@@ -1,0 +1,301 @@
+---
+title: Stern-Brocot Tree
+aliases:
+  - Stern-Brocot Tree
+  - 스턴-브로코 트리
+  - SBT
+tags:
+  - algorithm
+  - data-structure
+  - tree
+  - number-theory
+  - rational
+category: algorithm
+subcategory: data-structure
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 자료구조 > Stern-Brocot Tree
+  - title: myungwoo, Stern-Brocot Tree
+    url: https://blog.myungwoo.kr/126
+    author: myungwoo
+---
+
+## 정의
+
+**Stern-Brocot Tree (SBT)** 는 모든 *양의 기약 분수 (positive coprime fraction)* 를 정확히 한 번씩 노드로 가지는 무한 이진 트리. 1858 년 Moritz Stern 과 1860 년 Achille Brocot 가 독립적으로 발견.
+
+PS 에서는 *목표 분수에 가까운 유리수 근사*, *연속분수 (continued fraction)* 가속, *주어진 조건을 만족하는 최소 분모 분수* 같은 정수론 / 분수 탐색 문제에 활용.
+
+## 문제 상황과 동기
+
+### 왜 필요한가
+
+실수를 유리수로 근사할 때 *분모에 제한* 이 있는 경우가 많다. 예를 들어 기계 가공 톱니바퀴의 기어비 (분모 ≤ 100), 화면 해상도 비율 (작은 정수로 표현), 음악의 음정 비율 등. 실수 x ≈ 0.618... 을 "분모 ≤ 10⁶ 인 분수로 가장 가깝게" 표현해야 한다면?
+
+**Naive 접근**: 분모 q = 1, 2, ..., N 에 대해 각각 `round(x * q) / q` 를 계산하고 오차를 비교. **시간 복잡도 O(N)**, N = 10⁶ 이면 100만 번 반복. 실수 연산 오차와 기약 분수 판정 (GCD) 까지 고려하면 **O(N log N)** 이상. PS 에서 TLE 또는 정밀도 오류.
+
+**핵심 돌파구**: 모든 *양의 기약 분수* 는 Stern-Brocot Tree 라는 무한 이진 트리에 **정확히 한 번씩** 등장한다. 트리는 *mediant 연산* `(a+c)/(b+d)` 로 재귀 생성되며, 목표 실수 x 에 대해 "x 보다 작으면 오른쪽, 크면 왼쪽" 으로 내려가면 **O(log N) 깊이** 로 분모 ≤ N 인 최적 근사에 도달. 이는 *연속분수 전개* 와 동치이며, 부동소수점 없이 정수 비교만으로 정확히 구현 가능.
+
+### 전형적 문제
+
+- **분수 근사**: 실수 x, 분모 한계 N → 가장 가까운 p/q 찾기 (PS: BOJ 22662 Pi is Three)
+- **범위 내 최소 분모**: a < p/q < b 를 만족하는 최소 분모 분수 (Farey sequence 변형)
+- **연속분수 가속**: 무리수의 연속분수 표현을 트리 탐색으로 시각화
+- **기약 분수 카운팅**: 분모 ≤ N 인 기약 분수 개수 (Farey 수열 길이, Euler totient 합)
+
+## 구조
+
+루트는 `1/1`. 임의 노드의 좌/우 자식은 *mediant* 연산으로 정해진다.
+
+```text
+mediant(a/b, c/d) = (a+c) / (b+d)
+```
+
+루트 양 옆에 가상의 `0/1`, `1/0` 을 두고 좌측 자식 = `mediant(좌측 조상, 현재)`, 우측 자식 = `mediant(현재, 우측 조상)`.
+
+```text
+                     1/1
+              /             \
+            1/2              2/1
+          /     \          /     \
+        1/3     2/3      3/2     3/1
+       /  \   /  \      /  \    /  \
+     1/4 2/5 3/5 3/4  4/3 5/3 5/2 4/1
+```
+
+## 핵심 성질
+
+1. **모든 양의 기약분수가 정확히 한 번 등장**
+2. **트리 내 inorder 순회 결과는 분수의 크기 순서**
+3. **각 노드 `p/q` 는 모든 조상보다 분모가 더 큼**
+4. **목표 실수 `x` 로 내려가는 경로** = 연속분수 전개와 동치
+5. **LR 경로 (L, R 시퀀스) 길이** = 분모 + 분자의 비트 길이 정도
+
+## 시각화
+
+```anim:stern-brocot-tree
+{}
+```
+
+## 활용
+
+### 1. 분수 근사
+
+실수 `x` 가 주어지면 트리를 내려가며 *왼쪽으로 가면 더 작은 분수* / *오른쪽으로 가면 더 큰 분수*. 원하는 정밀도까지 내려가서 멈춤. 결과는 분모 한계 내에서 최적 근사.
+
+### 구현 (C++)
+
+```cpp
+// Stern-Brocot Tree: 분모 제한 분수 근사 O(log N)
+// 부동소수점 비교 회피, 정수 연산만 사용
+#include <utility>
+using namespace std;
+
+// x 에 가장 가까운 분수를 분모 ≤ max_denom 조건 하에 찾기
+// 반환: {numerator, denominator}
+pair<long long, long long> best_approx(double x, long long max_denom) {
+    // 초기 mediant 경계: 0/1 (왼쪽), 1/0 (오른쪽)
+    long long la = 0, lb = 1;  // left  a/b
+    long long ra = 1, rb = 0;  // right a/b
+    long long ma, mb;          // mediant
+
+    while (true) {
+        ma = la + ra;
+        mb = lb + rb;
+        if (mb > max_denom) {
+            // 분모 초과, 더 내려갈 수 없음
+            // la/lb vs ra/rb 중 x 에 더 가까운 것 반환
+            // 정수 비교: |x - la/lb| vs |x - ra/rb|
+            // x*lb - la vs ra - x*rb (부호 처리 주의)
+            // 단순화: la/lb 가 분모 한계 내면 la/lb, 아니면 다른 쪽
+            if (lb <= max_denom && rb <= max_denom) {
+                // 둘 다 유효, 거리 비교
+                double dl = (x * lb > la) ? (x - (double)la/lb) : ((double)la/lb - x);
+                double dr = (x * rb > ra) ? (x - (double)ra/rb) : ((double)ra/rb - x);
+                return (dl < dr) ? make_pair(la, lb) : make_pair(ra, rb);
+            }
+            if (lb <= max_denom) return make_pair(la, lb);
+            if (rb <= max_denom) return make_pair(ra, rb);
+            // 둘 다 초과, 마지막 유효 mediant (도달 불가 케이스)
+            return make_pair(la, lb);
+        }
+
+        // x 와 ma/mb 비교 (정수 연산)
+        // x < ma/mb  <=>  x*mb < ma
+        long long lhs = (long long)(x * mb);  // 주의: 정밀도 손실 가능
+        if (lhs < ma) {
+            // x 가 mediant 보다 작음 -> 왼쪽으로
+            ra = ma; rb = mb;
+        } else if (lhs > ma) {
+            // x 가 mediant 보다 큼 -> 오른쪽으로
+            la = ma; lb = mb;
+        } else {
+            // 정확히 일치
+            return make_pair(ma, mb);
+        }
+    }
+}
+
+// 더 정확한 정수 비교 버전 (부동소수점 회피)
+// target = p/q, 분모 ≤ max_denom 인 best approx
+pair<long long, long long> best_approx_int(long long p, long long q, long long max_denom) {
+    long long la = 0, lb = 1;
+    long long ra = 1, rb = 0;
+    long long ma, mb;
+
+    while (true) {
+        ma = la + ra;
+        mb = lb + rb;
+        if (mb > max_denom) break;
+
+        // p/q vs ma/mb: p*mb vs q*ma
+        long long lhs = p * mb;
+        long long rhs = q * ma;
+        if (lhs < rhs) {
+            ra = ma; rb = mb;
+        } else if (lhs > rhs) {
+            la = ma; lb = mb;
+        } else {
+            return make_pair(ma, mb);
+        }
+    }
+
+    // 둘 중 가까운 쪽 반환
+    if (lb <= max_denom && rb <= max_denom) {
+        // |p/q - la/lb| vs |p/q - ra/rb|
+        // (p*lb - la*q)^2 / (q*lb)^2 vs (p*rb - ra*q)^2 / (q*rb)^2
+        // 간단히 numerator 차이 비교
+        long long dl = (p*lb - q*la) * (p*lb - q*la);
+        long long dr = (p*rb - q*ra) * (p*rb - q*ra);
+        return (dl < dr) ? make_pair(la, lb) : make_pair(ra, rb);
+    }
+    if (lb <= max_denom) return make_pair(la, lb);
+    return make_pair(ra, rb);
+}
+```
+
+### 예시 추적
+
+```text
+목표: x = 0.618 (≈ 황금비 - 1), 분모 ≤ 20
+
+초기: L = 0/1, R = 1/0
+
+Step 1: M = (0+1)/(1+0) = 1/1 = 1.0 > 0.618 → R = 1/1
+        L = 0/1, R = 1/1
+
+Step 2: M = (0+1)/(1+1) = 1/2 = 0.5 < 0.618 → L = 1/2
+        L = 1/2, R = 1/1
+
+Step 3: M = (1+1)/(2+1) = 2/3 ≈ 0.667 > 0.618 → R = 2/3
+        L = 1/2, R = 2/3
+
+Step 4: M = (1+2)/(2+3) = 3/5 = 0.6 < 0.618 → L = 3/5
+        L = 3/5, R = 2/3
+
+Step 5: M = (3+2)/(5+3) = 5/8 = 0.625 > 0.618 → R = 5/8
+        L = 3/5, R = 5/8
+
+Step 6: M = (3+5)/(5+8) = 8/13 ≈ 0.6154 < 0.618 → L = 8/13
+        L = 8/13, R = 5/8
+
+Step 7: M = (8+5)/(13+8) = 13/21 ≈ 0.619 > 0.618, but 21 > 20
+
+분모 초과. 최종 후보: 8/13 ≈ 0.6154, 5/8 = 0.625
+|0.618 - 0.6154| ≈ 0.0026 < |0.618 - 0.625| ≈ 0.007
+
+답: 8/13
+```
+
+### 2. 연속분수 가속
+
+같은 방향 연속 이동 (LLLL... 또는 RRRR...) 은 한 묶음으로 처리 가능. 즉 *연속분수 항* 만큼 이진탐색으로 점프하면 O(log) 깊이.
+
+### 3. 분모 제한 분수 탐색
+
+"분모 ≤ N 이면서 어떤 부등식을 만족하는 최대 분수" → SBT 위에서 이분탐색.
+
+## 복잡도
+
+| 작업 | 비용 |
+|:---|:---|
+| 노드 한 단계 내려가기 | O(1) |
+| 연속분수 가속 한 항 | O(log N) (이진 탐색) |
+| 목표 분수 / 실수 도달 | O(log² N) 또는 연속분수 항 수 |
+
+## 구현
+
+```cpp
+// 분모 <= max_denom 인 기약 분수 중 target 에 가장 가까운 분수
+// 시간 O(log max_denom) 평균 (연속분수 가속 시)
+// 모든 비교를 정수 (a*q vs b*p) 로, 부동소수점 정밀도 없이
+#include <utility>
+
+std::pair<long long, long long> best_approx(
+    long long target_p, long long target_q,  // target = target_p / target_q
+    long long max_denom
+) {
+    // SBT 좌/우 경계 (가상 노드 0/1, 1/0)
+    long long lp = 0, lq = 1;   // left bound
+    long long rp = 1, rq = 0;   // right bound
+    long long bp = 1, bq = 1;   // best so far (root)
+
+    while (true) {
+        long long mp = lp + rp;  // mediant
+        long long mq = lq + rq;
+        if (mq > max_denom) break;
+
+        // target 과 mediant 비교: target_p/target_q vs mp/mq
+        // <=> target_p * mq vs mp * target_q
+        long long lhs = target_p * mq;
+        long long rhs = mp * target_q;
+
+        if (lhs < rhs) {
+            // target < mediant -> 왼쪽으로
+            rp = mp; rq = mq;
+        } else if (lhs > rhs) {
+            // target > mediant -> 오른쪽으로
+            lp = mp; lq = mq;
+        } else {
+            // 정확히 같음
+            return {mp, mq};
+        }
+        bp = mp; bq = mq;
+    }
+    return {bp, bq};
+}
+
+// 같은 방향 연속 이동을 한 번에 (O(log) 가속)
+// 실전에서는 매 단계 "같은 방향으로 몇 번 갈 수 있나" 를 이분탐색.
+```
+
+`mq > max_denom` 가 되는 순간 멈추면, 그 직전이 *분모 제한 내 최선 근사*. 더 빠르게는 *연속분수의 한 항 = 같은 방향 연속 이동* 임을 이용해 이진 탐색으로 한 번에 점프 가능.
+
+## 함정
+
+### 1. 부동소수점 정밀도
+
+실수 `x` 와 비교할 때 부동소수점을 쓰면 잘못된 방향. 가능하면 정수 비교 (`a*q vs b*p`) 로 처리.
+
+### 2. 0/1 과 1/0 가상 노드
+
+좌/우 끝 가상 노드를 빠뜨리면 가장자리 mediant 계산 오류.
+
+### 3. SBT 와 Farey Sequence
+
+비슷하지만 다른 개념. Farey 는 *분모 ≤ N* 인 분수의 정렬 수열, SBT 는 *기약 분수 전체* 의 트리. 트리 내 BFS 한 레벨이 곧 Farey 의 일부.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 22662 | Pi is Three | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/22600-22699/22662) |
+
+## 참고
+
+- [[BBST]]
+- [[Mobius Function|Mobius Function]] (정수론 응용)
+- [[Permutation Tree]]
+- [Unknown-To-Wellknown - Stern-Brocot Tree](https://github.com/justiceHui/Unknown-To-Wellknown#stern-brocot-tree)
+- [myungwoo, Stern-Brocot Tree](https://blog.myungwoo.kr/126)

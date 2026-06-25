@@ -1,0 +1,260 @@
+---
+title: Push-Relabel, Cost Scaling
+aliases:
+  - Push Relabel
+  - Push-Relabel Algorithm
+  - Cost Scaling Algorithm
+  - 푸시 리라벨
+tags:
+  - algorithm
+  - graph
+  - max-flow
+  - min-cost-flow
+category: algorithm
+subcategory: graph
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 그래프 이론 > Push Relabel, Cost Scaling
+  - id: koosaga-blog
+    note: Push Relabel https://koosaga.com/287, Cost Scaling https://koosaga.com/289
+---
+
+## 정의
+
+**Push-Relabel** 은 *증가 경로 (augmenting path) 기반* 의 Ford-Fulkerson / Dinic 과 달리 **각 정점의 잉여 흐름 (excess) 을 국소적으로 밀어 (push) 내거나 높이 (height) 를 올려 (relabel)** 최대 유량을 구하는 알고리즘. Goldberg-Tarjan 1986. 일반 그래프에서 **O(V² √E)** 또는 **O(V³)**.
+
+**Cost Scaling** 은 같은 push-relabel 아이디어를 최소 비용 흐름 (min-cost flow) 에 확장. 잔여 비용을 **`ε` 단위로 양자화** 한 뒤 점진적으로 `ε` 을 줄이는 scaling. **O(V² E log(V · C))**.
+
+PS 에서는 Dinic / SSP (Successive Shortest Path) 가 안 통할 만큼 **고밀도 / 대규모 네트워크** 에서 등장. 일반적인 ICPC 문제는 Dinic 으로 충분하지만, *Library Checker 의 max flow / min cost flow* 같은 표준 벤치에서 차이가 난다.
+
+## 문제 상황과 동기
+
+Dinic 은 **O(V² E)** 가 최악이고, 실제로는 성긴 그래프에서 매우 빠르지만 **고밀도 네트워크 (E = Θ(V²))** 에서는 O(V⁴) 까지 가능하다. 또한 min-cost flow 문제에서 [[Dinic]] + SPFA 기반 SSP 는 음수 비용이 많거나 큰 흐름 값 `F` 에 대해 **O(V · E · F)** 까지 악화.
+
+**Push-Relabel 은 증가 경로를 찾지 않는다**. 대신 각 정점이 *잉여 흐름* 을 들고, *국소적으로* 높이가 낮은 인접 정점에 흐름을 밀어낸다. 전역 BFS / DFS 가 필요 없어, **고밀도 그래프에서도 최악 복잡도가 O(V² √E) ~ O(V³)** 로 보장.
+
+**Cost Scaling** 은 비용 함수 `c` 를 `ε` 단위로 양자화, 점진적으로 `ε` 을 반으로 줄이며 ε-optimal 흐름을 보정한다. 각 단계에서 push-relabel 을 돌리므로 대규모 / 음수 비용 그래프에도 안정적 **O(V² E log(V · C))**.
+
+이 둘은 Dinic 보다 코드가 길고 상수항이 나쁘지만, 휴리스틱 (gap relabeling, global relabeling) 을 더하면 **실측 최대 유량 벤치 (Library Checker 등) 에서 Dinic 보다 압도적으로 빠르다**.
+
+## 시각화
+
+```anim:push-relabel
+{}
+```
+
+## Push-Relabel 핵심 아이디어
+
+- 각 정점에 *높이 (height)* `h[v]`, *잉여 (excess)* `e[v]`
+- `e[v] > 0` 인 정점에서, 인접 정점 중 `h[u] = h[v] - 1` 이면 `push`
+- push 할 곳이 없으면 `relabel` 로 높이 +1
+- 종료 시 잉여가 source 와 sink 에만 남고, sink 의 잉여 = 최대 유량
+
+**FIFO 변형 / Highest-label 변형** 이 성능 / 복잡도에서 자주 쓰인다.
+
+```text
+init: h[s] = V, h[else] = 0, push 모든 (s, v) 에 capacity
+while exists v with e[v] > 0:
+    if exists (v, u) with c_f(v,u) > 0, h[v] = h[u] + 1:
+        push min(e[v], c_f(v,u)) along v -> u
+    else:
+        relabel v: h[v] = min(h[u] : c_f(v,u) > 0) + 1
+```
+
+**휴리스틱** (gap relabeling, global relabeling) 으로 실측이 압도적으로 빨라진다.
+
+### 불변량 (Invariant)
+
+- **높이 함수 유효성**: 잔여 간선 `(v, u)` 에 대해 `h[v] ≤ h[u] + 1`
+- **잉여 보존**: 모든 정점의 잉여 합 = source 에서 나간 흐름 합
+
+이 불변량 하에서, 잉여가 있는 정점은 반드시 push 또는 relabel 가능하며, 최종적으로 잉여는 s, t 에만 남아 `e[t]` = max flow.
+
+### 작은 예시 (step trace)
+
+```text
+그래프:
+  s --5--> a --3--> t
+   \--2--> b --4--/
+
+초기화:
+  h[s] = 3, h[a] = h[b] = h[t] = 0
+  e[a] = 5, e[b] = 2  (s 에서 push 완료)
+
+step 1: a 의 잉여 5
+  h[a] = 0, h[t] = 0 → relabel a: h[a] = 1
+  push(a, t) → min(5, 3) = 3
+  e[a] = 2, e[t] = 3
+
+step 2: a 의 잉여 2
+  h[a] = 1, h[t] = 0 → push 불가 → relabel a: h[a] = 2
+  (더 이상 t 에 push 불가)
+
+step 3: b 의 잉여 2
+  h[b] = 0, h[t] = 0 → relabel b: h[b] = 1
+  push(b, t) → min(2, 4) = 2
+  e[t] = 5, e[b] = 0
+
+종료: e[t] = 5 = max flow
+```
+
+## Cost Scaling 핵심 아이디어
+
+각 간선의 잔여 비용을 ε 단위로 양자화 → ε-optimal flow 를 push-relabel 로 보정 → ε 를 절반으로 줄이며 반복.
+
+```text
+while ε > 1 / V:
+    relax: 잔여 비용 < -ε 인 간선을 풀어 ε-optimal 화
+    push-relabel with cost
+    ε /= 2
+```
+
+마지막 단계의 흐름이 최적.
+
+## 복잡도
+
+| 알고리즘 | 시간 |
+|:---|:---|
+| Push-Relabel (FIFO / Highest-label) | O(V² √E) ~ O(V³) |
+| SSP (전형 min-cost flow) | O(V · E · max_flow) |
+| Cost Scaling | O(V² E log(V · C)) |
+
+cost scaling 은 SSP 가 답을 못 찾을 정도의 거대 / 음수 비용 네트워크에서도 안정적.
+
+## 구현
+
+### Push-Relabel (FIFO 변형)
+
+```cpp
+// O(V^2 √E) 또는 O(V^3) (휴리스틱 없으면 느림)
+#include <vector>
+#include <queue>
+using namespace std;
+
+class PushRelabel {
+    struct Edge { int to, rev; long long cap; };
+    vector<vector<Edge>> g;
+    vector<long long> e;  // excess
+    vector<int> h;        // height
+    int n, s, t;
+    
+    void push(int v, Edge& e_vw) {
+        int w = e_vw.to;
+        long long d = min(e[v], e_vw.cap);
+        e_vw.cap -= d;
+        g[w][e_vw.rev].cap += d;
+        e[v] -= d;
+        e[w] += d;
+    }
+    
+    void relabel(int v) {
+        int minh = 2 * n;
+        for (auto& e : g[v]) {
+            if (e.cap > 0) minh = min(minh, h[e.to]);
+        }
+        h[v] = minh + 1;
+    }
+    
+public:
+    PushRelabel(int n_) : n(n_), g(n_), e(n_), h(n_) {}
+    
+    void add_edge(int u, int v, long long cap) {
+        g[u].push_back({v, (int)g[v].size(), cap});
+        g[v].push_back({u, (int)g[u].size() - 1, 0});
+    }
+    
+    long long max_flow(int s_, int t_) {
+        s = s_; t = t_;
+        h[s] = n;
+        for (auto& ed : g[s]) {
+            e[ed.to] += ed.cap;
+            g[ed.to][ed.rev].cap = ed.cap;
+            ed.cap = 0;
+        }
+        
+        queue<int> q;
+        vector<bool> active(n);
+        for (int i = 0; i < n; i++) {
+            if (i != s && i != t && e[i] > 0) {
+                q.push(i);
+                active[i] = true;
+            }
+        }
+        
+        while (!q.empty()) {
+            int v = q.front(); q.pop();
+            active[v] = false;
+            
+            for (auto& ed : g[v]) {
+                if (ed.cap > 0 && h[v] == h[ed.to] + 1) {
+                    push(v, ed);
+                    if (!active[ed.to] && ed.to != s && ed.to != t && e[ed.to] > 0) {
+                        q.push(ed.to);
+                        active[ed.to] = true;
+                    }
+                    if (e[v] == 0) break;
+                }
+            }
+            
+            if (e[v] > 0) {
+                relabel(v);
+                q.push(v);
+                active[v] = true;
+            }
+        }
+        
+        return e[t];
+    }
+};
+```
+
+실전에서는 **gap relabeling**, **global relabeling** 휴리스틱을 추가해야 한다. 위 코드는 기본 FIFO 골격.
+
+## 함정
+
+### 1. 휴리스틱이 사실상 필수
+
+순수 push-relabel 만 짜면 실측이 매우 느림. **gap relabeling** + **global relabeling** 둘 다 켜야 검증된 구현체 수준.
+
+### 2. 인덱싱 / 자료구조
+
+각 정점의 *next admissible edge index* 를 들고 다녀야 push 가 amortized 빠르다.
+
+### 3. 코드 길이
+
+push-relabel 자체는 100 ~ 200 줄, cost scaling 은 400 ~ 800 줄. 검증된 레퍼런스 (koosaga, atcoder library) 가 표준.
+
+### 4. PS 에서 정말 필요한가
+
+대부분의 문제는 Dinic + 적당한 모델링으로 충분. 진짜 큰 그래프나 cost scaling 류는 *Library Checker* 와 일부 ONTAK / Petrozavodsk 셋에서만.
+
+## BOJ 연습 문제
+
+### Push Relabel
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 13161 | 분단의 슬픔 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13100-13199/13161) |
+
+### Cost Scaling
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 19022 | Flow | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/19000-19099/19022) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| LibreOJ | 127 (max flow) | https://loj.ac/p/127 |
+| LibreOJ | 102 (min cost flow) | https://loj.ac/p/102 |
+
+## 참고
+
+- [[Directed MST]]
+- [[General Graph Matching]]
+- [[Dominator Tree]]
+- [Unknown-To-Wellknown - Push-Relabel, Cost Scaling](https://github.com/justiceHui/Unknown-To-Wellknown#push-relabel-algorithm-cost-scaling-algorithm)
+- [koosaga, Push-Relabel](https://koosaga.com/287)
+- [koosaga, Cost Scaling](https://koosaga.com/289)

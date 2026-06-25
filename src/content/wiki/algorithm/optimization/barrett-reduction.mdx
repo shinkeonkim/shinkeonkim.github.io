@@ -1,0 +1,217 @@
+---
+title: Barrett Reduction
+aliases:
+  - Barrett Reduction
+  - 바렛 리덕션
+tags:
+  - algorithm
+  - optimization
+  - modular-arithmetic
+  - barrett-reduction
+  - constant-factor
+category: algorithm
+subcategory: optimization
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 이상한 최적화 > Barrett Reduction
+  - title: Spheniscine, Barrett Reduction
+    url: https://codeforces.com/blog/entry/75406
+    author: Spheniscine
+---
+
+## 정의
+
+**Barrett Reduction** 은 *고정된 modulus `m`* 에 대해 `x mod m` 을 *나눗셈 명령 없이* 곱셈 + 시프트 + 뺄셈 몇 번으로 계산하는 알고리즘. Paul Barrett 1986.
+
+CPU 의 정수 나눗셈은 *덧셈 / 곱셈에 비해 20 ~ 30 배 느림*. [[FFT, NTT|NTT]] 의 핫루프, 모듈러 거듭제곱, 모듈러 행렬 곱 같은 *수십억 회 mod 연산이 일어나는 코드* 에서 큰 차이.
+
+## 문제 상황과 동기
+
+x86/ARM 에서 정수 나눗셈 명령 (div/idiv) 의 레이턴시는 곱셈의 **20~30 배**. 예를 들어 현대 x86 의 mul 은 ~3 사이클, div 는 ~20-30 사이클.
+
+[[FFT, NTT|NTT]] butterfly 의 inner loop, 모듈러 거듭제곱, 큰 행렬의 mod 곱셈처럼 *같은 modulus `m` 에 대해 수억~수십억 번 mod 연산* 을 돌리는 경우, div 명령 하나가 전체 병목이 된다.
+
+**핵심 아이디어**: modulus `m` 이 고정이면 `floor(x / m)` 을 **사전 계산된 곱셈 상수와의 곱셈 + 비트 시프트** 로 근사할 수 있다. 정확도 오차가 최대 1 이하이므로 한 번의 조건 뺄셈으로 정확한 나머지를 얻는다.
+
+이 트릭으로 NTT 벤치마크에서 2~4 배 실측 속도 향상. PS 에서 TLE 를 통과시키는 핵심 최적화.
+
+## 시각화
+
+```anim:barrett-reduction
+{}
+```
+
+## 핵심 아이디어
+
+`x mod m = x - floor(x / m) * m`. 나눗셈을 *역원의 곱셈* 으로 대체.
+
+```text
+사전 계산: M = floor(2^k / m)         (한 번만)
+
+x mod m 계산:
+    q = (x * M) >> k       (대략적인 몫)
+    r = x - q * m
+    if r >= m: r -= m
+    return r
+```
+
+`k` 는 보통 `64` 또는 `2 * bit_length(m)`. 곱셈 결과가 128 비트일 수 있으므로 `__int128` 사용.
+
+### 정확도 보장
+
+`M = floor(2^k / m)` 이면 `(x * M) >> k` 는 `floor(x / m)` 의 근사값 `q` 를 준다. `q` 의 오차는 최대 1 이하이므로
+
+```text
+r = x - q * m
+```
+
+는 `[0, 2m)` 범위. 한 번의 `if r >= m: r -= m` 로 정확한 나머지.
+
+### Step trace (작은 예)
+
+```text
+m = 7, k = 64
+M = floor(2^64 / 7) ≈ 2635249153387078802
+
+x = 50 을 mod 7:
+    z = 50 * M ≈ (50 * 2635249153387078802) / 2^64 ≈ 7.14...
+    q = floor(z) = 7
+    r = 50 - 7*7 = 1
+    1 < 7 이므로 return 1
+```
+
+실제 `50 mod 7 = 1`. 정확.
+
+## 구현
+
+### O(1) Barrett reduction, NTT 환경에서 ~2배 빠름
+
+```cpp
+// Barrett Reduction, O(1) per reduce (실측 ~5 사이클 vs div ~20-30 사이클)
+// 사전 계산: 생성자에서 magic number 계산
+// reduce(x): x mod m 을 나눗셈 없이 계산
+#include <cstdint>
+
+struct Barrett {
+    uint64_t m, im;   // modulus, magic
+    Barrett(uint64_t m_) : m(m_), im(uint64_t(-1) / m_ + 1) {}
+    
+    uint32_t reduce(uint64_t x) const {
+        // q ≈ x / m, 128비트 곱셈으로 근사
+        unsigned __int128 z = (unsigned __int128)x * im;
+        uint64_t q = (uint64_t)(z >> 64);
+        uint64_t r = x - q * m;
+        if (r >= m) r -= m;   // 오차 최대 1 보정
+        return (uint32_t)r;
+    }
+};
+
+// modint wrapper: 산술 연산자 오버로드로 편리하게
+struct modint_barrett {
+    uint32_t v;
+    static Barrett bt;
+    modint_barrett(uint64_t x = 0) : v(bt.reduce(x)) {}
+    
+    modint_barrett operator+(modint_barrett b) const {
+        uint64_t s = v + b.v;
+        return modint_barrett(s >= bt.m ? s - bt.m : s);
+    }
+    modint_barrett operator*(modint_barrett b) const {
+        return modint_barrett(bt.reduce((uint64_t)v * b.v));
+    }
+    // -, /, pow 등 생략
+};
+Barrett modint_barrett::bt(998244353);
+
+// NTT butterfly inner loop 에서의 사용 예 (vs naive mod)
+// naive mod (div 명령): ~20-30 사이클/iteration
+// Barrett mod: ~5-8 사이클/iteration, 실측 2~3배 빠름
+void ntt_butterfly_example(modint_barrett* a, int len, uint64_t w) {
+    modint_barrett wn = 1;
+    for (int j = 0; j < len / 2; j++) {
+        auto u = a[j];
+        auto v = a[j + len / 2] * wn;
+        a[j] = u + v;
+        a[j + len / 2] = u + modint_barrett(modint_barrett::bt.m - v.v);
+        wn = wn * modint_barrett(w);
+    }
+}
+```
+
+한 `reduce` 연산 = 128비트 곱셈 1 + 64비트 시프트 1 + 뺄셈 1 + 조건 뺄셈 1. 총 ~5 사이클.
+
+## Montgomery Reduction 과의 비교
+
+같은 정신의 다른 기법. 가산 / 곱셈을 *Montgomery 형식* 으로 작업 후 마지막에만 원래 형식으로.
+
+| 항목 | Barrett | Montgomery |
+|:---|:---|:---|
+| 사전 계산 | M = 2^k / m | R, R⁻¹ |
+| 가산 | 변환 없이 | 변환 필요 |
+| 곱셈 | 표준 | Montgomery mul |
+| 코드 단순 | 중간 | 복잡 |
+| 속도 | 빠름 | 더 빠름 (반복적 mod 곱셈 환경) |
+
+PS 에서는 Barrett 이 도입이 쉬워 더 자주.
+
+## 응용
+
+### 1. NTT 핫루프
+
+butterfly 의 inner mod 곱셈이 가장 빈번. Barrett 으로 2 배 빠름.
+
+### 2. 모듈러 거듭제곱
+
+거듭제곱 a^n mod m 의 inner mod 연산.
+
+### 3. 모듈러 행렬 곱
+
+`O(N³)` mod 곱셈 + mod 가산. 큰 N 에 mod 가 핫스팟.
+
+### 4. 큰 정수 라이브러리
+
+GMP / NumPy 의 내부 mod 연산.
+
+## 복잡도
+
+| 작업 | 비용 |
+|:---|:---|
+| 사전 계산 | O(1) |
+| reduce 1 회 | O(1) (실측 ~5 사이클) |
+| 표준 mod (div) 1 회 | O(1) (실측 ~20-30 사이클) |
+
+Barrett 이 *2 ~ 4 배 실측 빠름*. 큰 차이.
+
+## 함정
+
+### 1. compile-time 알려진 mod
+
+`x % 998244353` 같이 컴파일러가 *컴파일 시* mod 를 알면 자체적으로 magic number 곱셈을 사용 (자동 Barrett 과 비슷). *런타임에만 정해지는 mod* 에 진가.
+
+### 2. 128 비트 곱
+
+`__int128` 또는 `_umul128` (MSVC). 구식 컴파일러는 지원 안 함.
+
+### 3. 음수 처리
+
+`x` 가 음수일 가능성이 있으면 *양수로 정규화* 후 Barrett.
+
+### 4. AtCoder Library 등에 내장
+
+`atcoder::modint` 같은 표준 라이브러리는 Barrett 또는 Montgomery 를 내장. 직접 구현보다 라이브러리 사용이 안전.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 17467 | N! mod P (2) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17467) |
+
+## 참고
+
+- [[FFT, NTT|FFT 와 NTT]]
+- [[Bitset Optimization]]
+- [[SIMD]]
+- [[Fast I/O]]
+- [Unknown-To-Wellknown - Barrett Reduction](https://github.com/justiceHui/Unknown-To-Wellknown#barrett-reduction)
+- [Spheniscine, Barrett Reduction](https://codeforces.com/blog/entry/75406)

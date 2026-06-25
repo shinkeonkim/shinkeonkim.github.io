@@ -1,0 +1,229 @@
+---
+title: Multipoint Evaluation
+aliases:
+  - Multipoint Evaluation
+  - 다중점 평가
+tags:
+  - algorithm
+  - math
+  - polynomial
+  - multipoint-evaluation
+category: algorithm
+subcategory: math
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 수학 > Multipoint Evaluation
+  - id: infossm-blog
+    note: ho94949, Multipoint Evaluation (2019-06-17)
+  - title: hyperbolic, Multipoint Evaluation / Interpolation
+    url: https://hyperbolic.tistory.com/5
+    author: hyperbolic
+---
+
+## 정의
+
+**Multipoint Evaluation** 은 차수 `M` 의 다항식 `P(x)` 를 **N 개의 점** `x_1, ..., x_N` 에서 동시에 평가 (`P(x_i)` 를 모두 구함) 하는 것을 **O((N + M) log²(N+M))** 에 계산하는 알고리즘.
+
+naive 는 점당 O(M) → 총 O(NM). FFT/NTT + 다항식 나눗셈으로 한 단계 빠르게. [[Polynomial Interpolation]] 의 *역방향*.
+
+## 문제 상황과 동기
+
+차수 `M` 의 다항식 `P(x) = a_0 + a_1 x + ... + a_M x^M` 을 `N` 개 점 `x_1, ..., x_N` 에서 평가하려면, 각 점마다 Horner 법으로 O(M) → 총 O(NM).
+
+N = M = 10^5 이면 O(NM) = 10^10, 불가능. 대표 응용: 다항식 보간 (N+1 점으로 유일 다항식 복원) 의 검증, [[Generating Function|생성 함수]] 계산, 분할정복 다항식 곱의 체크.
+
+**핵심 아이디어**: 평가점들을 이진 트리로 나누고, 각 노드는 자식들의 평가점을 모두 zero 로 만드는 다항식 `Π (x - x_i)` 를 저장. `P(x)` 를 트리 루트부터 내려가며 **mod 연산 (다항식 나머지)** 로 차수를 절반씩 줄이면, 리프에서 상수 한 개만 남는다. 각 단계 다항식 나눗셈 O(K log K), 총 O((N+M) log²(N+M)).
+
+이는 다항식 다중점 평가의 **사실상 유일한 subquadratic 솔루션**. [[Polynomial Interpolation]] 과 쌍을 이루는 dual operation.
+
+## 시각화
+
+```anim:multipoint-evaluation
+{}
+```
+
+## 핵심 아이디어
+
+평가점들로부터 *segment tree of polynomials* 를 만든다. 각 노드는 자식들이 담는 평가점들의 *곱 다항식* `Π (x - x_i)`.
+
+### 1단계: 트리 구축
+
+```text
+build_tree(l, r):
+    if r - l == 1: return (x - x_l)
+    mid = (l+r)/2
+    left = build_tree(l, mid)
+    right = build_tree(mid, r)
+    return left * right    # FFT/NTT 다항식 곱, O(K log K)
+```
+
+총 O((N+M) log(N+M)).
+
+### 2단계: 평가 (top-down)
+
+```text
+eval(P, node, l, r):
+    P = P mod node.poly        # 다항식 나눗셈, O(K log K)
+    if r - l == 1:
+        return P 의 상수항     # = P(x_l)
+    eval(P, left_child, l, mid)
+    eval(P, right_child, mid, r)
+```
+
+각 레벨 O((N+M) log(N+M)), 총 log N 레벨 → O((N+M) log²(N+M)).
+
+### Step trace (작은 예)
+
+```text
+P(x) = x^2 + 2x + 3, 평가점 [1, 2, 3, 4]
+
+트리:
+        (x-1)(x-2)(x-3)(x-4)
+       /                    \
+  (x-1)(x-2)            (x-3)(x-4)
+   /     \               /     \
+ (x-1)  (x-2)         (x-3)  (x-4)
+
+eval(P, root):
+  P mod (x-1)(x-2)(x-3)(x-4) = P (차수 2 < 4이므로 변화 없음)
+  
+  eval(P, left): P mod (x-1)(x-2) = P mod (x^2 - 3x + 2)
+    → 나머지 r = ... (차수 1 이하)
+    eval(r, x-1): r(1) = 1 + 2 + 3 = 6
+    eval(r, x-2): r(2) = 4 + 4 + 3 = 11
+  
+  eval(P, right): P mod (x-3)(x-4) = ...
+    → P(3) = 18, P(4) = 27
+
+결과: [6, 11, 18, 27]
+```
+
+## 구현
+
+### O((N+M) log²) 다중점 평가 (스켈레톤 + 의사코드)
+
+구현이 매우 길고 (다항식 곱, 나눗셈, 역원 계산 포함 ~600줄), 버그가 나기 쉬우므로 검증된 라이브러리 (AtCoder Library, ho94949 구현) 사용 권장. 아래는 핵심 구조만.
+
+```cpp
+// O((N+M) log^2) Multipoint Evaluation
+// 다항식 곱, 나눗셈, 역원 계산 등 기본 다항식 라이브러리 필요 (생략)
+// 실제 구현은 https://judge.yosupo.jp/submission/236749 등 참고
+#include <vector>
+using namespace std;
+using poly = vector<long long>;   // 계수 표현
+
+// 다항식 곱셈 (NTT), O(n log n)
+poly multiply(poly a, poly b);
+
+// 다항식 나눗셈 P mod Q, O(n log n) (역원 + NTT)
+poly mod(poly P, poly Q);
+
+// 트리 노드: [l, r) 구간의 평가점을 zero로 만드는 다항식
+struct TreeNode {
+    int l, r;
+    poly prod;   // Π_{i in [l,r)} (x - x_i)
+    TreeNode *left, *right;
+};
+
+// 1단계: 평가점 트리 구축
+TreeNode* build_tree(const vector<long long>& xs, int l, int r) {
+    auto node = new TreeNode{l, r, {}, nullptr, nullptr};
+    if (r - l == 1) {
+        // 리프: (x - xs[l])
+        node->prod = {-xs[l], 1};   // 계수 표현: a0 + a1*x
+        return node;
+    }
+    int mid = (l + r) / 2;
+    node->left = build_tree(xs, l, mid);
+    node->right = build_tree(xs, mid, r);
+    node->prod = multiply(node->left->prod, node->right->prod);
+    return node;
+}
+
+// 2단계: P(x) 를 각 점에서 평가
+void eval_tree(poly P, TreeNode* node, vector<long long>& result) {
+    P = mod(P, node->prod);   // P %= node.prod
+    if (node->r - node->l == 1) {
+        // 리프: P는 상수 (또는 0), P(xs[l]) = P의 상수항
+        result[node->l] = P.empty() ? 0 : P[0];
+        return;
+    }
+    eval_tree(P, node->left, result);
+    eval_tree(P, node->right, result);
+}
+
+// 전체 평가
+vector<long long> multipoint_eval(poly P, const vector<long long>& xs) {
+    int n = xs.size();
+    auto tree = build_tree(xs, 0, n);
+    vector<long long> result(n);
+    eval_tree(P, tree, result);
+    return result;   // result[i] = P(xs[i])
+}
+```
+
+다항식 곱 / 나눗셈 / 역원은 [[FFT, NTT|NTT]] 기반. 각 연산 O(K log K).
+
+## 복잡도
+
+| 작업 | 비용 |
+|:---|:---|
+| 트리 구축 | O((N+M) log(N+M)) |
+| 평가 | O((N+M) log²(N+M)) |
+| 전체 | O((N+M) log²(N+M)) |
+
+N = M = 10^5 → ~10^7 연산. NTT 상수항이 크므로 실제로는 N ≤ 10^4 정도에서 실용.
+
+## 응용
+
+### 1. 다항식 보간의 역
+
+N+1 점에서의 평가 → naive O(N²) 보다 빠르게 평가.
+
+### 2. 분할정복 다항식 곱
+
+`(x - r_1)(x - r_2)...(x - r_N)` 계산도 같은 트리.
+
+### 3. Game with Polynomials 류
+
+여러 다항식의 동시 평가가 필요한 게임 / 카운팅 문제.
+
+## 함정
+
+### 1. mod 환경
+
+NTT 친화 mod (998244353) 가 표준. 다른 mod 는 3-NTT + CRT.
+
+### 2. 다항식 reciprocal
+
+빠른 나눗셈에는 `f(x)` 의 역원을 사전계산 (Newton iteration). 한 노드당 한 번.
+
+### 3. 구현 길이
+
+다항식 곱 + 다항식 나눗셈 + 트리 분할정복. 600 ~ 1000 줄. 검증된 ho94949 / atcoder library 권장.
+
+### 4. 평가점 중복
+
+평가점이 중복이면 트리 빌드에서 0 차수 처리 주의.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 18168 | Game with Polynomials 2 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18100-18199/18168) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Multipoint Evaluation | https://judge.yosupo.jp/problem/multipoint_evaluation |
+
+## 참고
+
+- [[Polynomial Interpolation]]
+- [[Polynomial Division Kitamasa|Polynomial Division / Kitamasa]]
+- [[FFT, NTT|FFT 와 NTT]]
+- [[Generating Function]]
+- [Unknown-To-Wellknown - Multipoint Evaluation](https://github.com/justiceHui/Unknown-To-Wellknown#multipoint-evaluation)
+- [ho94949, Multipoint Evaluation](https://github.com/infossm/infossm.github.io/blob/master/_posts/2019-06-17-Multipoint-evaluation.md)

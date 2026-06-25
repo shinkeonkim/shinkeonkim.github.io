@@ -1,0 +1,274 @@
+---
+title: Bitset Optimization
+aliases:
+  - Bitset Optimization
+  - 비트셋 최적화
+tags:
+  - algorithm
+  - optimization
+  - bitset
+  - constant-factor
+category: algorithm
+subcategory: optimization
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 이상한 최적화 > Bitset
+  - title: Errichto, Bitset
+    url: https://codeforces.com/blog/entry/73558
+    author: Errichto
+---
+
+## 정의
+
+**Bitset Optimization** 은 *불리언 / 비트 단위 정보* 를 `std::bitset<N>` 또는 `unsigned long long` 배열에 패킹해, **한 명령어로 64 비트씩 병렬 연산** 함으로써 시간 복잡도를 **/64** (또는 `/w`, w = word size) 만큼 단축하는 최적화.
+
+`O(N²)` 을 `O(N²/64)`, `O(N³)` 을 `O(N³/64)` 로. **알고리즘 차원은 그대로지만 상수항이 64 배 빠르다** 는 강력한 트릭.
+
+## 문제 상황과 동기
+
+### 10^9 연산이 한계인데 알고리즘 자체는 개선 못함
+
+DP 나 그래프 알고리즘을 짰는데 `O(N²)` 보다 나은 방법이 없다. `N=10^5` 면 `10^10` 연산 → 10 초 → TLE. 알고리즘 복잡도를 낮출 수 없다면 **상수항을 64 배 깎는다**.
+
+**naive 접근**: `bool adj[N][N]` 로 인접행렬을 저장하고 `for (int j = 0; j < N; j++) if (adj[u][j]) ...` 루프. `N²` 연산, `N=10^5` 면 10^10 → 불가능.
+
+**Bitset 의 돌파구**: `bitset<N> adj[N]` 로 저장하면 한 줄 OR 연산 (`reach |= adj[v]`) 이 64 비트씩 병렬 처리. **실제 수행 시간은 N²/64**, `10^10 / 64 ≈ 1.56 × 10^8` 연산으로 1 ~ 2 초에 통과.
+
+### 비트 단위 패킹으로 64배 가속
+
+CPU 는 64 비트 레지스터에 64 개 불리언을 한 번에 OR/AND/XOR 할 수 있다. `std::bitset<N>` 은 컴파일러가 자동으로 이 최적화를 해준다. 직접 `unsigned long long` 배열로 짜도 되지만 `bitset` 이 편리하고 안전.
+
+**전형적 문제**:
+
+- *그래프 도달 가능성* (BFS / DFS 의 visited 마스크)
+- *boolean 행렬 곱* (`A × B` 가 각 원소 0/1)
+- *DP 전이* (`f[i] |= f[i-k]`, Subset Sum, Knapsack)
+- *LCS / Edit Distance* 의 bitwise DP 변형
+
+공통점: **불리언 배열/행렬을 다루고, OR/AND/XOR 이 주된 연산**.
+
+## 시각화
+
+```anim:bitset-optimization
+{}
+```
+
+## 핵심 응용
+
+### 1. 그래프 인접행렬
+
+`bool adj[N][N]` 대신 `bitset<N> adj[N]`. *어느 정점까지 도달 가능* (`reach |= adj[v]`) 등을 O(N²/64).
+
+### 2. DP `f[i] |= f[i - k]`
+
+부분합 DP, knapsack, Subset Sum 등에서 *비트 OR / shift* 가 주된 연산이면 `bitset<MAX>` 한 줄로 O(N·MAX/64).
+
+### 3. LCS / Edit Distance
+
+비트 DP 변형으로 [[정렬 알고리즘|Hunt-Szymanski / Hyyro 알고리즘]] 이 O(NM/w).
+
+### 4. 행렬 거듭제곱
+
+`A · B` 가 boolean 행렬 곱이면 O(N³/64). [[FFT, NTT|FFT]] 의 boolean 버전.
+
+### 5. 그래프 algorithm
+
+BFS 의 visited 마스크. 모든 정점에 대한 *동시 BFS* 시 O(V²/64).
+
+## 표준 라이브러리
+
+| 환경 | 도구 |
+|:---|:---|
+| C++ | `std::bitset<N>` (컴파일 시 N 고정) 또는 `vector<bitset<N>>` |
+| C++ 가변 | `vector<uint64_t>` 직접 |
+| Java | `BitSet` (가변, 약간 느림) |
+| Python | `int` (임의 정밀 정수) 또는 `gmpy2` |
+| Rust | `bitvec` crate |
+
+C++ 의 `std::bitset` 은 컴파일 시 크기가 고정되어야 함. 가변 크기는 `vector<uint64_t>` 직접 다루는 게 빠름.
+
+## 핵심 아이디어
+
+`std::bitset<N>` 은 N 개의 불리언을 **64 비트 워드 배열** 로 저장하고, 비트 연산 (`|`, `&`, `^`, `<<`, `>>`) 을 **워드 단위로 한 번에** 수행한다.
+
+예: `N=10000` 이면 내부적으로 `unsigned long long arr[157]` (10000 / 64 ≈ 157) 로 저장. `a |= b` 는 157 번의 64 비트 OR. 순진한 for 루프 10000 번 대신 157 번 → **64 배 빠름**.
+
+**불변량**: bitset 의 연산은 모두 `O(N / 64)`. 단, `_Find_first` / `_Find_next` 도 `O(N / 64)` 로 첫 1 비트를 찾는다 (내부적으로 워드별 `__builtin_ffsll` 호출).
+
+## 구현
+
+### 1. Boolean 행렬 곱
+
+`A`, `B` 가 `N×N` boolean 행렬일 때 `C = A × B` (행렬 곱의 덧셈을 OR, 곱셈을 AND 로).
+
+```cpp
+// O(N³ / 64), O(N² / 8) 메모리 (boolean 행렬 곱)
+#include <bitset>
+using namespace std;
+
+const int N = 5000;
+bitset<N> A[N], B[N], C[N];
+
+void matmul() {
+    // B 전치 (열 단위 접근을 행 단위로)
+    bitset<N> Bt[N];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++)
+            Bt[j][i] = B[i][j];
+    
+    // C[i][j] = OR_k (A[i][k] AND B[k][j])
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            C[i][j] = (A[i] & Bt[j]).any();
+        }
+    }
+}
+```
+
+**시간**: `O(N³ / 64)`. `N=5000` 이면 `125 × 10^9 / 64 ≈ 2 × 10^9` → 2 초 정도.
+
+**핵심**: `(A[i] & Bt[j]).any()` 가 한 줄로 `N` 개 AND + OR 축약을 64 배 빠르게.
+
+### 2. LCS bitwise DP
+
+두 문자열 `s`, `t` 의 LCS 길이를 bitset DP 로 `O(NM / 64)`.
+
+```cpp
+// O(NM / 64), O(M / 8) 메모리 (LCS bitset DP)
+#include <bits/stdc++.h>
+using namespace std;
+
+const int M = 100000;
+bitset<M> dp;
+bitset<M> match[26];  // match[c][i] = (t[i] == c)
+
+int lcs(const string& s, const string& t) {
+    int n = s.size(), m = t.size();
+    
+    // match 전처리
+    for (int i = 0; i < m; i++) {
+        match[t[i] - 'a'][i] = 1;
+    }
+    
+    // DP: dp[i] = (현재까지 s 를 보고 t[i] 로 끝나는 부분 수열 존재 여부)
+    for (char c : s) {
+        bitset<M> cur = match[c - 'a'] & dp;
+        dp |= cur << 1;
+        dp |= match[c - 'a'];
+    }
+    
+    return dp.count();
+}
+```
+
+**아이디어**: 각 문자 `c` 마다 `t` 에서 `c` 가 나타나는 위치를 bitset 으로 전처리. DP 행을 bitset 한 개로 유지, shift 와 OR 로 전이.
+
+**시간**: `O(N × (M / 64))`. `N=M=10^5` 면 `10^5 × (10^5 / 64) ≈ 1.56 × 10^8` → 1 초 내외.
+
+### 예제 추적
+
+`N=4` boolean 행렬 곱 `A × B`.
+
+```text
+A = [[1,0,1,0],     B = [[1,1,0,0],
+     [0,1,0,1],          [0,0,1,1],
+     [1,1,0,0],          [1,0,1,0],
+     [0,0,1,1]]          [0,1,0,1]]
+
+bitset 표현:
+A[0] = 1010 (2진)
+A[1] = 0101
+A[2] = 1100
+A[3] = 0011
+
+Bt[0] = 1010  (B 의 0 열 전치)
+Bt[1] = 1001
+Bt[2] = 0110
+Bt[3] = 0101
+
+C[0][0] = (A[0] & Bt[0]).any()
+        = (1010 & 1010).any() = 1010 → true → C[0][0] = 1
+
+C[0][1] = (A[0] & Bt[1]).any()
+        = (1010 & 1001).any() = 1000 → true → C[0][1] = 1
+
+... (16 회 반복, 각 O(4/64) ≈ O(1))
+
+최종 C = [[1,1,1,0],
+          [0,1,0,1],
+          [1,1,1,1],
+          [1,0,1,1]]
+```
+
+**핵심**: 한 행 × 한 열을 64 비트 AND + any() 한 번에. `N=5000` 이면 78 개 워드 AND 만 하면 됨.
+
+## 자주 쓰는 연산
+
+```cpp
+bitset<N> a, b;
+a |= b;                      // OR (64 비트씩 병렬)
+a &= b;                      // AND
+a ^= b;                      // XOR
+a <<= k;                     // 좌측 shift k
+a._Find_first();             // 첫 1 비트 위치 (O(N/64))
+a._Find_next(p);             // p 이후 첫 1 비트
+a.count();                   // 1 비트 개수 (popcount, O(N/64))
+a.test(p);                   // p 비트 확인 (O(1))
+a.any();                     // 1 비트 하나라도 있는지 (O(N/64))
+```
+
+`_Find_first` / `_Find_next` 는 *N/64 시간* 으로 1 비트 위치 탐색. 매우 유용.
+
+## 복잡도
+
+| 원래 | bitset 후 |
+|:---|:---|
+| O(N²) | O(N²/64) |
+| O(NM) | O(NM/64) |
+| O(N³) | O(N³/64) |
+| O(N²V) | O(N²V/64) |
+
+10⁹ 연산이 1.5 · 10⁷ 정도가 된다. 5 ~ 10 배 실속 빨라짐.
+
+## 함정
+
+### 1. 메모리
+
+`bitset<N>` 은 N/8 바이트. `bitset<N> arr[M]` 은 NM/8 바이트. N=M=10⁵ 면 ~1.25 GB → memory exceeded.
+
+### 2. compile-time N
+
+C++ `std::bitset` 의 N 이 매크로 / 상수여야 함. 동적이라면 직접 구현.
+
+### 3. _Find_first 비호환
+
+GCC 전용 확장. clang / MSVC 는 직접 구현 필요.
+
+### 4. cache miss
+
+bitset 큰 행 단위로 처리하는 게 캐시 효율적. 임의 접근 위주면 효과 감소.
+
+### 5. 알고리즘 자체 개선과 혼동
+
+`O(N²/64)` 가 `O(N · √N)` 보다 빠른 경우도 흔하다. 알고리즘 / 상수항 최적화 우선순위.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 비고 | 링크 |
+|:---|:---|:---|:---|
+| BOJ 20501 | Facebook | | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/20500-20599/20501) |
+| BOJ 9423 | 레슬링 팀 선발 | | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9400-9499/9423) |
+| BOJ 9789 | Friendship Graph | O(N³/w) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9700-9799/9789) |
+| BOJ 23373 | Jack the Mole | O(N³W/w) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/23300-23399/23373) |
+| BOJ 17184 | Nautilus | | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17100-17199/17184) |
+| BOJ 18439 | LCS 6 | | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18400-18499/18439) |
+
+## 참고
+
+- [[Fast I/O]]
+- [[SIMD]]
+- [[Barrett Reduction]]
+- [[FWHT]]
+- [Unknown-To-Wellknown - Bitset](https://github.com/justiceHui/Unknown-To-Wellknown#bitset%EC%9D%84-%EC%9D%B4%EC%9A%A9%ED%95%9C-%EC%B5%9C%EC%A0%81%ED%99%94)
+- [Errichto, Bitset](https://codeforces.com/blog/entry/73558)

@@ -1,0 +1,273 @@
+---
+title: Matroid, Matroid Intersection
+aliases:
+  - Matroid
+  - Matroid Intersection
+  - 매트로이드
+tags:
+  - algorithm
+  - math
+  - matroid
+  - combinatorics
+  - matroid-intersection
+category: algorithm
+subcategory: math
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 수학 > Matroid
+  - id: infossm-blog
+    note: ainta, Matroid 1/2 (2019-05-08, 2019-06-17)
+  - title: ATSTNG, Matroid
+    url: https://codeforces.com/blog/entry/69287
+    author: ATSTNG
+  - title: imeimi, Matroid
+    url: https://imeimi.tistory.com/45
+    author: imeimi
+---
+
+## 정의
+
+**Matroid** 는 *독립 집합 (independent set)* 의 추상 구조. 유한 집합 `E` 와 그 부분집합족 `I` 가 다음을 만족하면 matroid `(E, I)`.
+
+```text
+1. ∅ ∈ I                                       (비어 있음)
+2. A ∈ I, B ⊆ A  ⇒  B ∈ I                     (유전 hereditary)
+3. A, B ∈ I, |A| < |B|                         (교환 exchange)
+   ⇒  ∃ x ∈ B \ A : A ∪ {x} ∈ I
+```
+
+PS 에서는 *두 매트로이드의 공통 최대 독립집합* (Matroid Intersection) 이 다항 시간이라는 사실이 핵심. NP-hard 처럼 보이는 문제들이 두 매트로이드의 교집합으로 환원되어 풀린다.
+
+## 문제 상황과 동기
+
+**단일 매트로이드의 최대 가중 독립집합은 greedy 로 최적**. 무게 순 정렬 후 독립성 체크하며 추가 → O(n log n). MST 가 대표적.
+
+하지만 *두 개 이상의 제약 (partition + graphic, 색별 ≤ 1 + 트리 조건)* 은 greedy 가 최적을 보장하지 않는다. 직관적으로는 NP-hard 처럼 보인다.
+
+**핵심 인사이트**: 두 매트로이드의 교집합 `I_1 ∩ I_2` 도 유전성을 만족하지만 exchange 는 깨진다. 하지만 **Edmonds 1970** 이 exchange graph 기반 augmenting path 로 **다항 시간** 알고리즘을 발견.
+
+PS 에서는 "각 X 에서 ≤ 1, 각 Y 에서 ≤ 1 + 가중치" 같은 이중 제약 최적화 문제가 matroid intersection 으로 환원되어 해결된다.
+
+단, **3 개 이상 매트로이드의 교집합은 일반적으로 NP-hard**. 두 개까지만 다항.
+
+## 대표 Matroid
+
+| 이름 | 정의 | 응용 |
+|:---|:---|:---|
+| **Graphic** | 그래프의 forest 집합 | MST |
+| **Uniform** `U_{n,k}` | 크기 ≤ k 인 부분집합 | 단순 제약 |
+| **Partition** | 각 파티션에서 ≤ 1 원소 | 분할 제약 |
+| **Transversal** | 이분 그래프에서 매칭 가능한 원소 집합 | 이분 매칭 |
+| **Linear / Vector** | 일차독립인 벡터 집합 | 선형대수 |
+| **Colorful** | 각 색마다 ≤ k 원소 | 색칠 제약 |
+
+## 시각화
+
+```anim:matroid
+{}
+```
+
+## Matroid Intersection
+
+두 매트로이드 `M_1 = (E, I_1)`, `M_2 = (E, I_2)` 에 대해 공통 최대 독립집합 (`max |A| s.t. A ∈ I_1 ∩ I_2`) 을 **다항 시간** 에. Edmonds 1970.
+
+- **무가중치**: O(r²·n) 또는 O(r^{1.5}·n) (oracle call 단위)
+- **가중치** (max weight common independent set): O(r²·n) 정도
+
+여기서 `r` = matroid rank, `n` = |E|.
+
+```text
+시작: A = ∅
+repeat:
+    auxiliary graph (exchange graph) 구성
+    augmenting path 탐색
+    찾으면 A 갱신, 못 찾으면 종료
+```
+
+**Exchange graph 구성**: 현재 A ∈ I_1 ∩ I_2 에 대해, x → y 간선:
+- `x ∈ A`, `y ∉ A`, `A - {x} + {y} ∈ I_1` (M_1 방향)
+- `x ∉ A`, `y ∈ A`, `A - {y} + {x} ∈ I_2` (M_2 방향)
+
+두 그래프를 겹쳐 BFS. 경로를 찾으면 A 를 flip → |A| 증가. 찾지 못하면 종료.
+
+## 구현
+
+```cpp
+// O(r² · n) Matroid Intersection (무가중치, skeleton)
+// 각 매트로이드는 is_independent(set, new_elem) oracle 제공
+#include <vector>
+#include <set>
+#include <queue>
+using namespace std;
+
+struct Matroid {
+    // A ∪ {x} 가 독립인지 체크. 매트로이드별 구현 필요.
+    virtual bool is_independent(const set<int>& A, int x) = 0;
+};
+
+// example: Uniform matroid U_{n,k} (크기 ≤ k)
+struct UniformMatroid : Matroid {
+    int k;
+    UniformMatroid(int k) : k(k) {}
+    bool is_independent(const set<int>& A, int x) override {
+        return (int)A.size() < k;
+    }
+};
+
+// Matroid Intersection: max |A| s.t. A ∈ I_1 ∩ I_2
+set<int> matroid_intersection(Matroid& M1, Matroid& M2, int n) {
+    set<int> A; // 현재 공통 독립집합
+    
+    while (true) {
+        // exchange graph 구성 + BFS
+        vector<int> parent(n, -1);
+        vector<bool> in_M1_frontier(n, false);
+        vector<bool> in_M2_frontier(n, false);
+        
+        queue<int> q;
+        // M2 방향: x ∉ A, A ∪ {x} ∈ I_2 → 시작점
+        for (int x = 0; x < n; x++) {
+            if (A.count(x)) continue;
+            if (M2.is_independent(A, x)) {
+                q.push(x);
+                in_M2_frontier[x] = true;
+            }
+        }
+        
+        int goal = -1;
+        while (!q.empty() && goal == -1) {
+            int u = q.front(); q.pop();
+            
+            if (A.count(u)) {
+                // u ∈ A: M1 방향으로 확장 (A - {u} + {v} ∈ I_1)
+                for (int v = 0; v < n; v++) {
+                    if (A.count(v)) continue;
+                    if (in_M1_frontier[v]) continue;
+                    
+                    set<int> tmp = A;
+                    tmp.erase(u);
+                    if (M1.is_independent(tmp, v)) {
+                        parent[v] = u;
+                        in_M1_frontier[v] = true;
+                        
+                        // v ∉ A 이고 A ∪ {v} ∈ I_1 이면서 I_2 도 만족?
+                        if (M2.is_independent(A, v)) {
+                            goal = v;
+                            break;
+                        }
+                        q.push(v);
+                    }
+                }
+            } else {
+                // u ∉ A: M2 방향으로 확장 (A - {w} + {u} ∈ I_2)
+                for (int w : A) {
+                    if (in_M2_frontier[w]) continue;
+                    
+                    set<int> tmp = A;
+                    tmp.erase(w);
+                    if (M2.is_independent(tmp, u)) {
+                        parent[w] = u;
+                        in_M2_frontier[w] = true;
+                        
+                        // w ∈ A, A ∪ {u} ∈ I_2 인 상태에서 I_1 도 만족?
+                        // (실제로는 더 정교한 체크 필요, 이는 skeleton)
+                        q.push(w);
+                    }
+                }
+            }
+        }
+        
+        if (goal == -1) break; // augmenting path 없음 → 최대
+        
+        // augmenting path 로 A 갱신 (flip)
+        int cur = goal;
+        while (cur != -1) {
+            if (A.count(cur)) A.erase(cur);
+            else A.insert(cur);
+            cur = parent[cur];
+        }
+    }
+    
+    return A;
+}
+```
+
+> [!NOTE]
+> 위 코드는 **개념 skeleton** 입니다. 실전에서는 각 matroid 타입 (graphic, partition, transversal 등) 별로 `is_independent` 구현이 달라지며, exchange graph 구성도 정교화가 필요합니다. 검증된 ainta / koosaga 레퍼런스를 권장합니다.
+
+### 예시 실행
+
+```text
+M1 = Uniform(3) (크기 ≤ 3)
+M2 = Uniform(2) (크기 ≤ 2)
+E = {0, 1, 2, 3, 4}
+
+초기: A = {}
+1회: BFS 로 augmenting path {0} 찾음 → A = {0}
+2회: path {1} → A = {0, 1}
+3회: path 없음 → 종료 (|A| = 2 = min(3, 2))
+```
+
+## 응용
+
+### 1. Colorful Spanning Tree
+
+각 간선에 색. 색별 ≤ 1 + 트리 조건 = partition ∩ graphic.
+
+### 2. Rainbow Spanning Tree / Independent Set
+
+각 원소에 색 + 매트로이드 조건. 색 partition + matroid.
+
+### 3. Bimatching 일반화
+
+이분 매칭은 transversal ∩ partition. 더 복잡한 매칭은 둘 다 transversal 또는 응용 매트로이드.
+
+### 4. ICPC 응용
+
+작은 PS 문제에서 *"각 X 에서 ≤ 1, 각 Y 에서 ≤ 1"* 같은 두 종류 제약 + 가중치 → matroid intersection.
+
+## 복잡도
+
+| 작업 | 시간 |
+|:---|:---|
+| matroid rank 쿼리 (oracle) | 매트로이드별 다름 |
+| Matroid Intersection (무가중치) | O(r²·n · T_oracle) |
+| Weighted Matroid Intersection | O(r²·n · T_oracle) |
+
+## 함정
+
+### 1. 단일 매트로이드는 greedy 로 최적
+
+매트로이드 자체의 max weight independent set 은 *greedy* 로 O(n log n). 두 매트로이드의 교집합은 비자명.
+
+### 2. 교집합 ≠ 3 매트로이드 교집합
+
+`M_1 ∩ M_2 ∩ M_3` 는 일반적으로 NP-hard. 두 매트로이드까지만 다항.
+
+### 3. oracle 구현
+
+`Is A ∪ {x} independent?` 가 핵심 oracle. 매트로이드 종류에 따라 구현 복잡도가 천차만별 (graphic 은 union-find, transversal 은 augmenting path 등).
+
+### 4. 코드 길이
+
+기본 알고리즘 300 ~ 600 줄. 검증된 ainta / koosaga 레퍼런스 권장.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 3836 | Coin Collecting | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/3800-3899/3836) |
+| BOJ 16046 | Rainbow Graph | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16000-16099/16046) |
+| BOJ 18890 | Seollal | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/18800-18899/18890) |
+| BOJ 21727 | 아즈텍의 섬 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/21700-21799/21727) |
+| BOJ 23052 | 두 트리 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/23000-23099/23052) |
+
+## 참고
+
+- [[General Graph Matching]]
+- [[Directed MST]]
+- [[Young Tableau]]
+- [Unknown-To-Wellknown - Matroid](https://github.com/justiceHui/Unknown-To-Wellknown#matroid)
+- [ainta, Matroid (InfoSSM)](https://github.com/infossm/infossm.github.io/blob/master/_posts/2019-05-08-introduction-to-matroid.md)
+- [ATSTNG, Matroid](https://codeforces.com/blog/entry/69287)

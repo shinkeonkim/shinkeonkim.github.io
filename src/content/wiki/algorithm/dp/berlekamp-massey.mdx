@@ -1,0 +1,232 @@
+---
+title: Berlekamp-Massey
+aliases:
+  - Berlekamp-Massey
+  - BM 알고리즘
+  - 최소 다항식
+  - Minimal Polynomial
+tags:
+  - algorithm
+  - dp
+  - linear-recurrence
+  - math
+category: algorithm
+subcategory: dp
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 동적 계획법 > Berlekamp-Massey
+  - id: koosaga-blog
+    note: https://koosaga.com/231
+---
+
+## 정의
+
+**Berlekamp-Massey (BM)** 알고리즘은 주어진 수열의 **최단 선형 점화식 (minimal linear recurrence)** 을 O(N²) 에 복원하는 알고리즘. 1968 년 Massey 가 Berlekamp 의 BCH 디코딩 알고리즘을 일반화.
+
+PS 에서는 **"점화식이 있을 것 같은데 모르겠다"** 싶은 수열의 처음 2K 항 정도만 brute force 로 구한 뒤 BM 을 돌리면 점화식 차수 K 를 알아낸다. 이후는 [[Polynomial Division Kitamasa|Kitamasa]] 로 n 번째 항을 O(K² log n) 에 계산.
+
+## 문제 상황과 동기
+
+### 왜 필요한가
+
+행렬 거듭제곱, DP 점화식 계산을 O(K³ log n) 또는 O(K² log n) 으로 하는 건 익숙하다. 그런데 **점화식의 계수 자체를 모른다면?** 예를 들어 "N=10^18 번째 피보나치 수 mod 10^9+7" 은 F_n = F_{n-1} + F_{n-2} 를 알고 있으니 Kitamasa 로 바로 풀지만, "알 수 없는 규칙으로 정의된 수열의 10^18 번째 항" 은 점화식 자체가 숨겨져 있다.
+
+**Naive 접근**: 모든 항을 직접 계산, O(N). N=10^18 이면 불가능.
+
+**Berlekamp-Massey의 돌파구**: 점화식이 존재하고 차수가 K 라면, 처음 **2K 항** 만 brute force 로 계산한 뒤 BM 을 돌리면 점화식 계수를 O(K²) 에 복원. 이후 Kitamasa 로 N 번째 항을 O(K² log N) 에 계산.
+
+실제 PS 에서는 "행렬 점화식이 있을 것 같은데 행렬이 너무 크다", "카운팅 DP 전이 식이 복잡하다" 같은 경우 처음 100~200 항만 계산해 BM 에 넣으면 차수 10~20 의 점화식이 튀어나와 문제가 풀린다.
+
+### 어디서 쓰이는가
+
+- **행렬 점화식의 sparse vector 계산**: 행렬 M 의 최소 다항식을 구하면 M^n v 를 빠르게 계산
+- **카운팅 DP 점화식 자동 발견**: 점화식 형태를 모를 때 첫 항들만 보고 역산
+- **OEIS 후보 검색**: 수열의 점화식 존재 여부를 확인
+
+## 시각화
+
+```anim:berlekamp-massey
+{}
+```
+
+## 핵심 아이디어
+
+수열 `s_0, s_1, ...` 에 대해 길이 `L` 의 점화식 `s_n = c_1 s_{n-1} + ... + c_L s_{n-L}` 을 가정하고, 새 항을 받을 때마다 점화식이 맞는지 확인. 어긋나면 (discrepancy) **이전에 실패했던 점화식과 결합** 해 새 점화식 후보를 만든다.
+
+### 알고리즘 흐름
+
+1. **Discrepancy 계산**: 현재 점화식 C 로 다음 항 s_n 을 예측, 실제와 차이 d = s_n - 예측값
+2. **d=0 이면 통과**: 현재 점화식으로 이 항까지 설명 가능
+3. **d≠0 이고 2L≤n**: 점화식 차수를 늘려야 함. 이전에 실패했던 점화식 B 를 이용해 C 를 갱신, L 증가
+4. **d≠0 이고 2L>n**: 차수는 유지하되 계수만 보정
+
+**불변량**: n 항까지 본 시점에서 L 은 s_0..s_{n-1} 을 설명하는 최소 차수 점화식의 차수.
+
+### 예제 추적
+
+수열 s = [1, 1, 2, 3, 5, 8] (피보나치)
+
+```text
+n=0: s_0=1, d=1 (초기), L=0→1, C=[1,-1]
+n=1: s_1=1, d=0, 통과
+n=2: s_2=2, d=1 (1*1=1≠2), L=1→2, C=[1,-1,-1]
+n=3: s_3=3, d=0, 통과 (1*2+1*1=3)
+n=4: s_4=5, d=0, 통과 (1*3+1*2=5)
+n=5: s_5=8, d=0, 통과 (1*5+1*3=8)
+최종 점화식: s_n = s_{n-1} + s_{n-2}
+```
+
+```text
+BM(s):
+  C = [1], B = [1], L = 0, m = 1, b = 1
+  for n = 0 to len(s) - 1:
+    d = s[n] + Σ_{i=1..L} C[i] * s[n-i]
+    if d == 0:
+      m += 1
+    else if 2L <= n:
+      T = C
+      coef = d / b
+      C = C - coef * x^m * B
+      L = n + 1 - L
+      B = T, b = d, m = 1
+    else:
+      coef = d / b
+      C = C - coef * x^m * B
+      m += 1
+  return C  # 점화식 계수
+```
+
+`mod p` 에서 동작하려면 `b` 의 역원을 곱하면 된다. 정수 / 유리수 위에서도 가능.
+
+## 구현
+
+다음은 mod 환경에서 동작하는 C++ 구현. 입력 수열 s 로부터 최소 점화식 계수를 복원한다. 시간 O(N²), 공간 O(N).
+
+```cpp
+// O(N^2) 시간, O(N) 공간. mod는 소수여야 역원 계산 가능.
+#include <vector>
+using namespace std;
+using ll = long long;
+
+ll mod_pow(ll a, ll e, ll mod) {
+    ll res = 1;
+    for (; e; e >>= 1, a = a * a % mod)
+        if (e & 1) res = res * a % mod;
+    return res;
+}
+ll mod_inv(ll a, ll mod) {
+    return mod_pow(a, mod - 2, mod); // Fermat little theorem
+}
+
+// s: 수열, mod: 소수 모듈로
+// 반환: 점화식 계수 c, s_n = c[1]*s_{n-1} + c[2]*s_{n-2} + ...
+vector<ll> berlekamp_massey(vector<ll> s, ll mod) {
+    int n = s.size();
+    vector<ll> C(n), B(n);
+    C[0] = B[0] = 1;
+    ll b = 1;
+    int L = 0, m = 1;
+    for (int i = 0; i < n; i++) {
+        ll d = s[i];
+        for (int j = 1; j <= L; j++)
+            d = (d + C[j] * s[i - j]) % mod;
+        if (d == 0) {
+            m++;
+            continue;
+        }
+        ll coef = d * mod_inv(b, mod) % mod;
+        vector<ll> T = C;
+        for (int j = m; j < n; j++)
+            C[j] = (C[j] - coef * B[j - m] % mod + mod) % mod;
+        if (2 * L <= i) {
+            L = i + 1 - L;
+            B = T;
+            b = d;
+            m = 1;
+        } else {
+            m++;
+        }
+    }
+    C.resize(L + 1);
+    return C; // C[0]=1, C[1..L]이 점화식 계수
+}
+```
+
+### 사용 예시
+
+피보나치 수열의 처음 6항을 넣으면 s_n = s_{n-1} + s_{n-2} 의 계수 [1, -1, -1] 을 반환한다 (부호 주의, 형식에 따라 다를 수 있음).
+
+```cpp
+vector<ll> fib = {1, 1, 2, 3, 5, 8};
+auto rec = berlekamp_massey(fib, 998244353);
+// rec[0]=1, rec[1], rec[2]가 점화식 계수
+```
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| 시간 | O(N²) |
+| 공간 | O(N) |
+| 검출 보장 | 첫 2K 항으로 차수 K 점화식 복원 |
+
+## 응용
+
+### 1. 행렬 거듭제곱의 sparse matrix-vector 가속
+
+`M^n v` 를 계산할 때 임의 벡터 `u` 에 대해 `(u, M v), (u, M² v), ...` 수열의 점화식이 `M` 의 최소 다항식. 이걸 BM 으로 찾고 [[FFT 와 NTT|FFT]] + 다항식 거듭제곱으로 `M^n` 적용.
+
+### 2. 행렬식 / 정수 점화식 카운팅
+
+[[Polynomial Division Kitamasa|Kitamasa]] 와 결합해 점화식 형태로 표현 가능한 카운팅 DP 의 n 번째 항을 빠르게.
+
+### 3. 알려지지 않은 OEIS 후보 찾기
+
+처음 항 50 개 정도를 BM 에 넣으면 차수가 작으면 알려진 점화식. 차수가 크면 비선형이거나 더 복잡.
+
+## 함정
+
+### 1. mod 환경 필수
+
+정확한 분수 / 다항식 환경이 아니라면 mod prime (보통 998244353) 에서 돌려야 안전. 정수에서는 분모가 폭발한다.
+
+### 2. 입력 길이 부족
+
+`L` 차 점화식을 복원하려면 입력이 최소 `2L` 항. 너무 짧으면 잘못된 짧은 점화식이 나온다. 의심되면 2배 더 넣어 보고 같은 점화식이 나오는지 확인.
+
+### 3. 점화식이 없는 수열
+
+랜덤 수열을 넣으면 차수 N/2 의 무의미한 점화식이 반환된다. BM 자체는 "정말 선형 점화식이 있는지" 검증하지 않는다.
+
+## BOJ 연습 문제
+
+### 점화식 계산
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 12916 | K-Path | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/12900-12999/12916) |
+| BOJ 14559 | Protocol | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14500-14599/14559) |
+| BOJ 12797 | 연금술 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/12700-12799/12797) |
+| BOJ 13727 | 5차원 구사과 초콜릿 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13700-13799/13727) |
+
+### 최소 다항식
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 27071 | 크루스칼 알고리즘 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/27000-27099/27071) |
+
+## 다른 출처 연습 문제
+
+| 출처 | 제목 | 링크 |
+|:---|:---|:---|
+| Library Checker | Find Linear Recurrence | https://judge.yosupo.jp/problem/find_linear_recurrence |
+| Library Checker | Determinant of Sparse Matrix | https://judge.yosupo.jp/problem/sparse_matrix_det |
+
+## 참고
+
+- [[Polynomial Division Kitamasa|Polynomial Division / Kitamasa]]
+- [[FFT, NTT|FFT 와 NTT]]
+- [[Generating Function]]
+- [Unknown-To-Wellknown - Berlekamp-Massey](https://github.com/justiceHui/Unknown-To-Wellknown#berlekamp-massey)
+- [koosaga, Berlekamp-Massey](https://koosaga.com/231)

@@ -1,0 +1,258 @@
+---
+title: Permutation Tree
+aliases:
+  - Permutation Tree
+  - Divide-Combine Tree
+  - 분할-결합 트리
+tags:
+  - algorithm
+  - data-structure
+  - tree
+  - permutation
+category: algorithm
+subcategory: data-structure
+updated: 2026-06-23T00:00:00.000Z
+references:
+  - id: unknown-to-wellknown
+    note: 그들만의 웰노운 사전지식 > 자료구조 > Permutation Tree
+  - title: errorgorn, Permutation Tree
+    url: https://codeforces.com/blog/entry/78898
+    author: errorgorn
+  - title: OI-Wiki, Divide-Combine Tree
+    url: https://oi-wiki.org/ds/divide-combine/
+    author: OI-Wiki
+---
+
+## 정의
+
+**Permutation Tree** (a.k.a. **Divide-Combine Tree**) 는 순열을 **연속 구간 (consecutive interval, 값이 연속인 구간)** 단위로 재귀 분해해 만든 트리. 각 내부 노드는 *increasing / decreasing / prime (분해 불가)* 세 타입 중 하나.
+
+순열 위에서 *연속 구간의 개수 카운팅*, *특정 패턴 매칭*, *역순 / 정렬 쌍 통계* 같은 비자명한 쿼리를 O(N log N) 등으로 처리.
+
+## 문제 상황과 동기
+
+순열 위의 **common interval (연속 값 구간)** 을 카운팅하거나, 순열 패턴 매칭을 효율적으로 하고 싶은 상황.
+
+- **연속 구간 카운팅**: 순열 `[3,1,2,5,4]` 에서 값이 연속인 구간 `[1,2]`, `[3,1,2]`, `[5,4]` 등을 찾기
+- **패턴 매칭**: 길이 M 순열 패턴이 길이 N 순열에 몇 번 등장하는지 (일부 케이스만)
+- **정렬/역순 쌍 통계**: 구간 단위로 inversions 카운트
+
+**Naive 접근의 한계**: 모든 부분 구간 O(N²) 개를 검사하면 각 구간마다 O(N) 검증 필요 → O(N³). N = 10⁴ 이면 TLE.
+
+**핵심 아이디어**: common interval 은 계층적으로 중첩되므로 트리 구조로 표현 가능. 스택 기반 O(N log N) 또는 O(N α(N)) 구성으로 모든 common interval 을 트리 노드로 만들고, 각 내부 노드를 increasing/decreasing/prime 으로 분류. 이후 트리 DP 로 통계 집계.
+
+## 핵심 아이디어
+
+순열의 한 구간 `p[l..r]` 이 **연속 값을 가진다** 는 것은 `max - min = r - l`. 이런 구간을 *common interval* 이라 부르며, 모든 common interval 은 트리 구조로 정리된다.
+
+```text
+순열: [3, 1, 2, 5, 4]
+common intervals:
+  [3] [1] [2] [5] [4]            (leaf)
+  [1, 2]                         (값 {1,2})
+  [3, 1, 2]                      (값 {1,2,3})
+  [5, 4]                         (값 {4,5})
+  [3, 1, 2, 5, 4]                (root)
+```
+
+내부 노드의 타입:
+- **Increasing** : 자식들이 값 / 위치 모두 증가하는 순서
+- **Decreasing** : 자식들이 값 / 위치 모두 감소
+- **Prime** : 더 분해할 수 없음 (4 개 이상의 자식 + 단조성 없음)
+
+## 시각화
+
+```anim:permutation-tree
+{}
+```
+
+## 구현
+
+Permutation Tree 구성은 스택 기반 분할 정복 + Union-Find 로 O(N log N) 또는 O(N α(N)) 에 가능. 핵심은 *연속 구간 (max - min = span)* 을 스택에서 계속 병합하며 트리 노드를 만드는 것.
+
+```cpp
+// Permutation Tree 구성, O(N log N) 또는 O(N α(N))
+#include <vector>
+#include <stack>
+#include <algorithm>
+using namespace std;
+
+struct Node {
+    int lo, hi;          // 구간 [lo, hi)
+    int min_val, max_val;
+    int type;            // 0: leaf, 1: increasing, 2: decreasing, 3: prime
+    vector<int> children;
+};
+
+// 순열 p[0..n) 에서 permutation tree 구성 (단순화된 골격)
+// 실제 구현은 union-find + 타입 재판정 로직으로 250+ 줄
+vector<Node> build_permutation_tree(const vector<int>& p) {
+    int n = p.size();
+    vector<Node> nodes;
+    stack<int> stk;
+
+    for (int i = 0; i < n; i++) {
+        Node leaf;
+        leaf.lo = i; leaf.hi = i+1;
+        leaf.min_val = leaf.max_val = p[i];
+        leaf.type = 0;  // leaf
+        int leaf_id = nodes.size();
+        nodes.push_back(leaf);
+
+        // 스택에서 합칠 수 있는 노드들을 찾아 병합
+        while (!stk.empty()) {
+            int top_id = stk.top();
+            Node& top = nodes[top_id];
+
+            int new_min = min(top.min_val, leaf.min_val);
+            int new_max = max(top.max_val, leaf.max_val);
+            int span = leaf.hi - top.lo;
+
+            if (new_max - new_min + 1 == span) {
+                // common interval 형성, 병합
+                stk.pop();
+                Node parent;
+                parent.lo = top.lo;
+                parent.hi = leaf.hi;
+                parent.min_val = new_min;
+                parent.max_val = new_max;
+                parent.children = {top_id, leaf_id};
+
+                // 타입 결정 (단순화: 자식 2개 기준)
+                if (top.max_val < leaf.min_val) {
+                    parent.type = 1;  // increasing
+                } else if (top.min_val > leaf.max_val) {
+                    parent.type = 2;  // decreasing
+                } else {
+                    parent.type = 3;  // prime
+                }
+
+                int parent_id = nodes.size();
+                nodes.push_back(parent);
+                leaf_id = parent_id;
+            } else {
+                break;
+            }
+        }
+
+        stk.push(leaf_id);
+    }
+
+    // 실제 구현: 스택에 남은 노드들을 root 로 합침
+    // union-find + 재귀 타입 판정 필요 (생략)
+
+    return nodes;
+}
+
+// 트리 DP 로 연속 구간 개수 카운팅
+long long count_common_intervals(const vector<Node>& tree, int node_id) {
+    const Node& nd = tree[node_id];
+    if (nd.type == 0) return 1;  // leaf
+
+    long long cnt = 1;  // 현재 노드 자체
+    for (int ch : nd.children) {
+        cnt += count_common_intervals(tree, ch);
+    }
+
+    // increasing / decreasing: 자식 조합도 연속 구간
+    if (nd.type == 1 || nd.type == 2) {
+        int c = nd.children.size();
+        cnt += (long long)c * (c - 1) / 2;
+    }
+
+    return cnt;
+}
+```
+
+**구현 팁**:
+1. **union-find 병합**: 실제 구현은 구간 병합 시 union-find 로 타입 재판정 필요
+2. **prime 노드 판정**: 자식 4개 이상 + 단조성 없으면 prime. 2-3개일 때도 재귀 검증
+3. **레퍼런스**: errorgorn 의 Codeforces 글 코드 참고 권장 (검증됨)
+
+## 구성
+
+스택 + 단조 stack 기법으로 O(N log N) 또는 O(N α(N)) 구성. errorgorn 의 글이 표준 레퍼런스.
+
+### 작은 예시 추적
+
+```text
+순열: [3, 1, 2]
+
+Step 1: leaf 노드 생성
+  L0: [3]  (min=3, max=3, 구간 [0,1))
+  L1: [1]  (min=1, max=1, 구간 [1,2))
+  L2: [2]  (min=2, max=2, 구간 [2,3))
+
+Step 2: L1, L2 병합
+  합친 구간 [1,2): min=1, max=2, span=2
+  max - min + 1 = 2 - 1 + 1 = 2 = span ✓ common interval
+  새 노드 N1: [1,2] (children: L1, L2)
+  타입: 1 < 2 → increasing
+
+Step 3: L0, N1 병합
+  합친 구간 [0,3): min=1, max=3, span=3
+  3 - 1 + 1 = 3 ✓
+  새 노드 ROOT: [3,1,2] (children: L0, N1)
+  타입: L0.max=3, N1.min=1 → 3 > 1 → decreasing
+
+최종 트리:
+       ROOT (decreasing)
+       /   \
+      L0   N1 (increasing)
+      [3]  / \
+          L1  L2
+          [1] [2]
+
+Common intervals: {[3]}, {[1]}, {[2]}, {[1,2]}, {[3,1,2]} → 5개
+```
+
+## 응용
+
+### 1. 연속 구간 개수
+
+트리의 노드별 *자식 부분합* 으로 카운팅. increasing / decreasing 노드는 자식 개수 c 에 대해 `C(c, 2) + c` 개의 연속 구간 기여.
+
+### 2. 패턴 매칭
+
+순열 패턴 매칭 (PPM, Permutation Pattern Matching) 의 일부 케이스는 permutation tree 로 풀린다.
+
+### 3. 정렬 / 역정렬 쌍
+
+구간 단위 통계를 트리 DP 로.
+
+## 복잡도
+
+| 작업 | 비용 |
+|:---|:---|
+| 트리 구성 | O(N log N) 또는 O(N α(N)) |
+| common interval 개수 쿼리 | O(N) (전체) |
+| 노드 / 구간 별 통계 | 트리 DP O(N) |
+
+## 함정
+
+### 1. prime 노드
+
+분해 불가능한 prime 노드에서 통계를 모으는 방식이 increasing / decreasing 과 다르다. 케이스 분리 누락 시 답이 어긋남.
+
+### 2. 구현 길이
+
+논리는 깔끔하지만 코드는 250 ~ 400 줄. 검증된 레퍼런스 참고가 안전.
+
+### 3. 유사 개념과의 혼동
+
+[[BBST|Treap]] / Cartesian Tree 와 다르고, Suffix Tree 와도 다르다. 순열 *고유* 의 분해.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 링크 |
+|:---|:---|:---|
+| BOJ 25503 | 순열 뒤집기 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/25500-25599/25503) |
+| BOJ 23720 | 움얌얌 | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/23700-23799/23720) |
+
+## 참고
+
+- [[BBST]]
+- [[Suffix Automaton]]
+- [Unknown-To-Wellknown - Permutation Tree](https://github.com/justiceHui/Unknown-To-Wellknown#permutation-tree)
+- [errorgorn, Permutation Tree](https://codeforces.com/blog/entry/78898)
+- [OI-Wiki, Divide-Combine Tree](https://oi-wiki.org/ds/divide-combine/)
