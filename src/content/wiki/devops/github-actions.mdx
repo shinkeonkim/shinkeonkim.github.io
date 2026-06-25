@@ -1,0 +1,197 @@
+---
+title: "[CI/CD] GitHub Actions: workflow, action, runner"
+aliases: ["GitHub Actions", "GHA", "workflow", "self-hosted runner", "matrix build", "reusable workflow", "composite action"]
+tags: [github-actions, ci-cd, devops, automation]
+category: devops
+updated: 2026-06-25
+references:
+  - title: "GitHub Actions docs"
+    url: "https://docs.github.com/en/actions"
+---
+
+## 정의
+
+**GitHub Actions** = GitHub *내장 CI/CD*. *YAML workflow* + *marketplace action*. 2018 출시 → *Travis CI 대체*.
+
+## 구조
+
+```mermaid
+flowchart TB
+    Trigger[Trigger<br/>push, PR, schedule, ...] --> WF[Workflow]
+    WF --> Job1[Job 1<br/>(runner)]
+    WF --> Job2[Job 2]
+    Job1 --> Step1[Step 1 (action 또는 script)]
+    Job1 --> Step2[Step 2]
+```
+
+## Workflow YAML
+
+```yaml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123:role/gh-deploy
+          aws-region: us-east-1
+      - run: aws s3 sync ./dist s3://my-bucket
+```
+
+## Trigger 종류
+
+| Trigger | 의미 |
+|---|---|
+| `push` | branch / tag push |
+| `pull_request` | PR open / sync |
+| `schedule` | cron |
+| `workflow_dispatch` | 수동 실행 |
+| `workflow_call` | 다른 workflow 가 호출 |
+| `repository_dispatch` | 외부 API |
+| `release` | release published |
+| `issue_comment` | comment |
+
+## Runner
+
+| 종류 | 의미 |
+|---|---|
+| **GitHub-hosted** | Ubuntu/Windows/macOS, 매번 fresh |
+| **Self-hosted** | 자체 VM, 빠름, 보안 책임 |
+| **Larger runners** | GitHub-hosted 의 강한 사양 |
+| **ARC (Actions Runner Controller)** | K8s 위 self-hosted |
+
+## Marketplace Action
+
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-python@v5
+  with: { python-version: '3.13' }
+- uses: docker/build-push-action@v6
+- uses: actions/cache@v4
+- uses: aws-actions/configure-aws-credentials@v4
+```
+
+## OIDC + AWS (long-term key 없이)
+
+자세한 건 [[aws-sts-assume-role]] 의 OIDC.
+
+```yaml
+permissions:
+  id-token: write
+steps:
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: arn:aws:iam::123:role/gh-deploy
+      aws-region: us-east-1
+```
+
+## Matrix Build
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    os: [ubuntu-latest, macos-latest]
+    node: [20, 22]
+    include:
+      - os: ubuntu-latest
+        node: 22
+        coverage: true
+    exclude:
+      - os: macos-latest
+        node: 20
+```
+
+> *N × M 조합* 자동 실행.
+
+## Reusable Workflow
+
+```yaml
+# .github/workflows/reusable-deploy.yml
+on:
+  workflow_call:
+    inputs:
+      env:
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [...]
+```
+
+```yaml
+# 호출
+jobs:
+  call:
+    uses: ./.github/workflows/reusable-deploy.yml
+    with: { env: prod }
+```
+
+## Composite Action
+
+`action.yml`:
+```yaml
+name: 'Setup Node + cache'
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+    - uses: actions/cache@v4
+    - run: npm ci
+      shell: bash
+```
+
+## 보안
+
+```
+✓ PR fork 의 secret 노출 방지 (pull_request_target 주의)
+✓ Action SHA pinning (uses: actions/checkout@<sha>)
+✓ OIDC (long-term key 회피)
+✓ Permissions 최소화 (permissions: 명시)
+✓ Secrets 환경 분리 (environment)
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`pull_request_target` + checkout PR code** = *코드 인젝션 가능*. PR 의 코드는 `pull_request` 만.
+> 2. **Long-term AWS key** = 누출 위험. OIDC 권장.
+> 3. **`uses: action@main`** = action 변경에 *영향 받음*. *SHA pinning*.
+> 4. **Self-hosted runner 의 *fork PR*** = 임의 코드 실행. *fork 차단* 또는 GitHub-hosted.
+
+## 관련 위키
+
+- [[argocd]]
+- [[gitops-patterns]]
+- [[aws-sts-assume-role]]
+- [[docker]]

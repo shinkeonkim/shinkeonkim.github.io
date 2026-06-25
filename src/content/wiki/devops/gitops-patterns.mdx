@@ -1,0 +1,161 @@
+---
+title: "[GitOps] 패턴: 단일 vs 다중 repo, environment promotion"
+aliases: ["GitOps patterns", "monorepo manifests", "environment promotion", "image updater", "Renovate"]
+tags: [gitops, argocd, flux, ci-cd, devops]
+category: devops
+updated: 2026-06-25
+references:
+  - title: "GitOps Principles"
+    url: "https://opengitops.dev/"
+---
+
+## GitOps 4가지 원칙 (OpenGitOps)
+
+1. **Declarative**: 시스템 *원하는 상태* 가 *선언적* (YAML).
+2. **Versioned and Immutable**: Git 으로 *버전 + 불변*.
+3. **Pulled Automatically**: 시스템이 *자동 fetch + apply*.
+4. **Continuously Reconciled**: 지속적 *desired vs actual 비교 + 수정*.
+
+## Repo 구조 패턴
+
+```mermaid
+flowchart TD
+    Q{Repo 구조}
+    Q --> Mono[Monorepo<br/>app + manifest 함께]
+    Q --> Two[2-repo<br/>app code / manifest 분리]
+    Q --> Multi[Multi-repo<br/>app / manifest / infra 각자]
+```
+
+### 1. Monorepo (app + manifest)
+
+```
+my-repo/
+├── src/         (app code)
+├── k8s/         (manifest)
+└── .github/workflows/
+```
+
+장점: 단순. 단점: *app PR 이 인프라 변경 동시 일으킴* → 위험.
+
+### 2. 2-repo (권장)
+
+```
+app-repo/
+├── src/
+└── .github/workflows/
+    └── build.yml (image push to ECR)
+
+manifest-repo/
+├── apps/
+│   └── web/
+│       └── deployment.yaml (image: ...:abc123)
+└── argocd/
+    └── applications.yaml
+```
+
+> *CI 가 새 image* → *manifest repo 의 yaml 의 image tag 자동 update* → ArgoCD 가 cluster 동기화.
+
+### 3. Multi-repo
+
+각 app, 각 component, 각 cluster 별 repo. 큰 조직.
+
+## Environment Promotion
+
+```mermaid
+flowchart LR
+    Dev[dev branch] -->|PR| Stage[stage branch]
+    Stage -->|PR| Prod[prod branch]
+    Argo_Dev[ArgoCD dev cluster] -.watch.-> Dev
+    Argo_Stage -.watch.-> Stage
+    Argo_Prod -.watch.-> Prod
+```
+
+또는 *디렉토리 분리*:
+
+```
+manifests/
+├── overlays/
+│   ├── dev/      → dev cluster
+│   ├── stage/    → stage cluster
+│   └── prod/     → prod cluster
+└── base/         → 공통
+```
+
+> *Kustomize* + ArgoCD app 별 path 분리.
+
+## Image Updater
+
+```mermaid
+flowchart LR
+    CI -->|push| Registry[(Container Registry)]
+    Updater[ArgoCD Image Updater<br/>또는 Renovate] -.poll.-> Registry
+    Updater -->|PR / commit| Manifest[manifest repo]
+    Argo -->|sync| Cluster
+```
+
+| 도구 | 의미 |
+|---|---|
+| ArgoCD Image Updater | tag 정책 기반 자동 |
+| Renovate | dependency 갱신 PR |
+| Flux Image Automation | Flux 내장 |
+
+## Secret 처리 (git 안전)
+
+```mermaid
+flowchart TD
+    Q[Secret 처리]
+    Q --> Sealed[Sealed Secrets]
+    Q --> ESO[External Secrets Operator]
+    Q --> SOPS[SOPS + KMS]
+    Q --> Vault[Vault Agent / CSI]
+```
+
+자세한 건 [[k8s-configmap-secret]].
+
+## Multi-cluster GitOps
+
+```mermaid
+flowchart LR
+    Git[Manifest repo]
+    Git --> Argo1[ArgoCD on cluster-dev]
+    Git --> Argo2[ArgoCD on cluster-prod-us]
+    Git --> Argo3[ArgoCD on cluster-prod-eu]
+    Argo1 --> ClusterDev
+    Argo2 --> ProdUS
+    Argo3 --> ProdEU
+```
+
+또는 *중앙 ArgoCD + 다중 cluster credential*:
+
+```yaml
+apiVersion: v1
+kind: Secret
+type: stringData:
+  name: prod-us-cluster
+  server: https://k8s.prod-us.example.com
+  config: |
+    { "bearerToken": "..." }
+```
+
+## Drift Detection
+
+| 상황 | ArgoCD 동작 |
+|---|---|
+| 수동 `kubectl edit` | Out of Sync 표시 + selfHeal 시 자동 복구 |
+| Git update | Sync 트리거 |
+| Image tag 변경 | Image Updater 가 manifest commit |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **수동 hotfix** = git 우회. 항상 git 으로.
+> 2. **Branch 정책 부재** = main 직접 push. *PR + 리뷰 + branch protection*.
+> 3. **모든 cluster 같은 manifest** = 환경별 차이 못 표현. Kustomize / Helm values.
+> 4. **거대한 PR** = ArgoCD 가 *한 번에 모든 변경 적용*. 작은 PR 권장.
+
+## 관련 위키
+
+- [[argocd]]
+- [[github-actions]]
+- [[helm]]
+- [[k8s-configmap-secret]]

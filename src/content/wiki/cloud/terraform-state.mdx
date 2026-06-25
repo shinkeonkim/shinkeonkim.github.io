@@ -1,0 +1,165 @@
+---
+title: "[IaC] Terraform State: backend, locking, drift, import"
+aliases: ["terraform.tfstate", "S3 backend", "state locking", "DynamoDB lock", "drift detection", "terraform import", "state rm"]
+tags: [terraform, state, iac, devops, cloud]
+category: cloud
+updated: 2026-06-25
+references:
+  - title: "Terraform Backends"
+    url: "https://developer.hashicorp.com/terraform/language/settings/backends/configuration"
+---
+
+## 정의
+
+**Terraform State** = *코드 ↔ 실제 인프라 매핑*. JSON 파일. *모든 Terraform 작업의 핵심*.
+
+## State 가 하는 일
+
+```mermaid
+flowchart LR
+    Code["main.tf<br/>(의도)"] --> Plan
+    State["terraform.tfstate<br/>(알려진 실제)"] --> Plan
+    Real["AWS 실제"] --> Refresh
+    Refresh --> State
+    Plan --> Diff[Diff]
+    Diff --> Apply[apply]
+    Apply --> Real
+    Apply --> State
+```
+
+| 역할 | 의미 |
+|---|---|
+| **Mapping** | resource 이름 ↔ AWS ARN |
+| **Metadata** | dependency, version |
+| **Performance** | refresh 캐시 |
+| **Sensitive** | output value 보관 (*평문*) |
+
+## Backend 종류
+
+```mermaid
+flowchart TB
+    B[Backend]
+    B --> Local[local file<br/>team 금지]
+    B --> S3[S3 + DynamoDB lock]
+    B --> TFC[Terraform Cloud / HCP]
+    B --> GCS[GCS]
+    B --> Azure[Azure Blob]
+    B --> Consul[Consul]
+```
+
+### S3 + DynamoDB (AWS 표준)
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket         = "my-tf-state"
+    key            = "prod/web/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    kms_key_id     = "arn:aws:kms:..."
+    dynamodb_table = "tf-lock"
+  }
+}
+```
+
+| 컴포넌트 | 역할 |
+|---|---|
+| S3 bucket | state 저장 + versioning |
+| KMS | 암호화 |
+| DynamoDB | distributed lock |
+
+## State Locking
+
+```mermaid
+sequenceDiagram
+    Dev1->>Lock: acquire (DynamoDB CAS)
+    Lock-->>Dev1: OK
+    Dev1->>State: write
+    Dev2->>Lock: acquire
+    Lock-->>Dev2: 이미 잠겨있음
+    Dev1->>Lock: release
+    Dev2->>Lock: acquire
+    Lock-->>Dev2: OK
+```
+
+> *동시 apply 충돌 방지*. DynamoDB 의 *conditional write*.
+
+## Drift Detection
+
+```mermaid
+flowchart LR
+    State["state"] --> Compare
+    Real["AWS 실제"] --> Refresh --> Compare
+    Compare --> Drift{차이?}
+    Drift -->|있음| Refresh[수동 사람이 AWS 직접 수정한 경우]
+```
+
+```bash
+terraform plan -refresh-only
+# 코드 변경 없이 실제 vs state 차이만 확인
+```
+
+> *prod 의 *수동 변경* 감지*. 정기 drift check.
+
+## State 조작 명령
+
+```bash
+terraform state list                          # 모든 리소스
+terraform state show aws_s3_bucket.data       # 단일 정보
+terraform state mv old.name new.name          # rename
+terraform state rm aws_s3_bucket.old          # state 에서만 제거 (AWS 안 지움)
+terraform state pull > out.tfstate            # download
+terraform state push out.tfstate              # upload (위험!)
+
+terraform import aws_instance.web i-1234abcd  # 기존 리소스 등록
+```
+
+## Import (기존 리소스 등록)
+
+```hcl
+import {
+  to = aws_s3_bucket.legacy
+  id = "my-legacy-bucket"
+}
+
+resource "aws_s3_bucket" "legacy" {
+  bucket = "my-legacy-bucket"
+}
+```
+
+```bash
+terraform plan -generate-config-out=generated.tf
+```
+
+> 옛 리소스를 Terraform 관리로 옮길 때.
+
+## Workspace (환경 분리)
+
+```bash
+terraform workspace new prod
+terraform workspace new staging
+terraform workspace select prod
+```
+
+```hcl
+locals {
+  env = terraform.workspace   # "prod" / "staging"
+}
+```
+
+> 한 backend 의 *여러 state*. 단 *separate backend* 가 더 안전.
+
+## State 의 위험
+
+> [!WARNING]
+> 1. **State 의 *secret 평문*** = `terraform output` 의 password 등 그대로. 접근 제한 + KMS.
+> 2. **수동 state 편집** = 망가짐. *반드시 명령으로*.
+> 3. **State 손실** = 추적 불가. *S3 versioning + 정기 백업*.
+> 4. **여러 사람 동시 apply** = lock 없으면 state 깨짐. DynamoDB lock 필수.
+
+## 관련 위키
+
+- [[terraform]]
+- [[aws-s3]]
+- [[aws-kms]]
+- [[aws-iam]]

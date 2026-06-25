@@ -1,0 +1,181 @@
+---
+title: "[IaC] Terraform: HCL, provider, state"
+aliases: ["Terraform", "HCL", "Terraform provider", "terraform plan", "terraform apply", "tfstate", "OpenTofu"]
+tags: [terraform, iac, infrastructure-as-code, devops, cloud]
+category: cloud
+updated: 2026-06-25
+references:
+  - title: "Terraform docs"
+    url: "https://developer.hashicorp.com/terraform/docs"
+  - title: "OpenTofu"
+    url: "https://opentofu.org/"
+---
+
+## 정의
+
+**Terraform** = *선언적 인프라 코드*. HCL (HashiCorp Configuration Language) 로 *리소스 정의* → AWS/GCP/Azure 등 *provider* 가 실제 생성.
+
+> [!NOTE]
+> 2024 라이센스 변경 (BSL) 으로 *OpenTofu* fork 등장. OSS 분기. *2026 시점 OpenTofu 도 안정적*.
+
+## 흐름
+
+```mermaid
+flowchart LR
+    Code[main.tf] --> Init[terraform init<br/>provider download]
+    Init --> Plan[terraform plan<br/>diff 표시]
+    Plan --> Review[Review by team]
+    Review --> Apply[terraform apply<br/>실제 변경]
+    Apply --> State[(terraform.tfstate)]
+```
+
+## HCL 예시
+
+```hcl
+terraform {
+  required_version = ">= 1.6"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+  backend "s3" {
+    bucket         = "my-tf-state"
+    key            = "prod/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "tf-lock"
+    encrypt        = true
+  }
+}
+
+provider "aws" {
+  region = var.region
+}
+
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}
+
+resource "aws_s3_bucket" "data" {
+  bucket = "myapp-data-${terraform.workspace}"
+  
+  tags = {
+    Environment = terraform.workspace
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "data" {
+  bucket = aws_s3_bucket.data.id
+  versioning_configuration { status = "Enabled" }
+}
+
+output "bucket_name" {
+  value = aws_s3_bucket.data.id
+}
+```
+
+## 핵심 명령
+
+```bash
+terraform init       # provider + module download
+terraform fmt        # 코드 포맷
+terraform validate   # 문법
+terraform plan       # diff (실행 X)
+terraform apply      # 실제 변경
+terraform destroy    # 모두 삭제
+terraform show       # state 출력
+terraform state list # 리소스 목록
+terraform import     # 기존 리소스 → state 등록
+terraform workspace  # 환경 분리
+```
+
+## State
+
+```mermaid
+flowchart LR
+    Code["코드 (의도)"] --> Compare
+    State["state (실제 알려진 상태)"] --> Compare
+    Compare["diff 계산"] --> Plan
+```
+
+| 저장 | 적합 |
+|---|---|
+| Local file | *팀 작업 금지* |
+| S3 + DynamoDB lock | AWS 표준 |
+| Terraform Cloud / HCP | managed |
+| GCS / Azure Blob | GCP / Azure |
+
+자세한 건 [[terraform-state]].
+
+## Module (재사용)
+
+```hcl
+module "vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "5.5.0"
+  
+  name = "prod-vpc"
+  cidr = "10.0.0.0/16"
+  azs  = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  ...
+}
+```
+
+> *Terraform Registry* (수천 모듈), *자체 모듈*, *Git 소스* 가능.
+
+## Lifecycle Meta-arguments
+
+```hcl
+resource "aws_instance" "web" {
+  ...
+  lifecycle {
+    create_before_destroy = true   # 새 생성 후 옛 삭제
+    prevent_destroy       = true   # apply -destroy 차단
+    ignore_changes        = [tags] # 특정 필드 무시
+  }
+}
+```
+
+## for_each / count
+
+```hcl
+# count: 단순 N
+resource "aws_instance" "web" {
+  count = 3
+  ami = "ami-..."
+}
+
+# for_each: 명시적 키 (변경 안전)
+resource "aws_iam_user" "team" {
+  for_each = toset(["alice", "bob", "charlie"])
+  name     = each.key
+}
+```
+
+## Terraform vs Pulumi vs CDK
+
+| | Terraform | Pulumi | AWS CDK |
+|---|---|---|---|
+| 언어 | HCL | TS/Python/Go/.NET | TS/Python/Java |
+| Multi-cloud | *예* | 예 | AWS only |
+| 학습 곡선 | 중간 | 높음 (코드 자유) | 중간 |
+| 생태계 | *가장 큼* | 성장 | AWS 강 |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **State git commit** = secret 노출. *원격 backend* + 암호화.
+> 2. **`apply` 직전 `plan` 안 봄** = 의도하지 않은 destroy.
+> 3. **`destroy` 사고 (production)** = `prevent_destroy` lifecycle + IAM 보호.
+> 4. **버전 미고정** = provider 새 버전 = 다른 결과. `~>` 또는 lock file.
+
+## 관련 위키
+
+- [[terraform-state]]
+- [[pulumi]]
+- [[cdk]]
+- [[aws-iam]]
+- [[github-actions]]
