@@ -1,0 +1,168 @@
+---
+title: "[K8s] Service: ClusterIP / NodePort / LoadBalancer / ExternalName"
+aliases: ["K8s Service", "ClusterIP", "NodePort", "LoadBalancer", "ExternalName", "Headless Service", "kube-proxy", "iptables", "IPVS"]
+tags: [kubernetes, service, network, k8s]
+category: kubernetes
+updated: 2026-06-25
+references:
+  - title: "Kubernetes Docs: Services"
+    url: "https://kubernetes.io/docs/concepts/services-networking/service/"
+---
+
+## 정의
+
+**Service** = *Pod 집합에 *안정 가상 IP + DNS** 부여. Pod 가 죽고 다시 만들어져도 *Service IP 는 그대로*.
+
+```anim:load-balancer
+{}
+```
+
+## 4가지 타입
+
+```mermaid
+flowchart TB
+    Q{Service 종류}
+    Q --> CIP[ClusterIP<br/>(기본)<br/>클러스터 안에서만]
+    Q --> NP[NodePort<br/>각 노드의 포트 노출]
+    Q --> LB[LoadBalancer<br/>클라우드 LB 자동 생성]
+    Q --> EN[ExternalName<br/>외부 DNS 별칭]
+```
+
+### 1. ClusterIP (기본)
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  type: ClusterIP
+  selector: { app: api }
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+- *클러스터 안에서만* 접근.
+- 다른 pod 가 `http://api:80` 로 호출.
+- DNS: `<service>.<namespace>.svc.cluster.local`.
+
+### 2. NodePort
+
+```yaml
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 8080
+      nodePort: 30080   # 옵션
+```
+
+- *모든 노드의 30000-32767 포트* 에서 접근.
+- `http://<any-node>:30080`.
+- 보통 *개발용*. 프로덕션은 LoadBalancer 또는 Ingress.
+
+### 3. LoadBalancer
+
+```yaml
+spec:
+  type: LoadBalancer
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080 }]
+```
+
+- 클라우드 (AWS, GCP) 가 *자동으로 LB 생성* + 외부 IP.
+- AWS = ALB / NLB.
+- *Service 당 LB 하나* → 많으면 *비싸다*. Ingress 가 대안.
+
+### 4. ExternalName
+
+```yaml
+spec:
+  type: ExternalName
+  externalName: api.external.com
+```
+
+- DNS CNAME 처럼 *외부 호스트* 별칭.
+- *기존 외부 service 와 통합* 용.
+
+## Headless Service
+
+```yaml
+spec:
+  clusterIP: None    # ← Headless
+```
+
+- *Service IP 없음*.
+- DNS 가 *모든 pod IP 직접 반환*.
+- StatefulSet 의 *peer discovery* 에 필수.
+
+## DNS 와 Service Discovery
+
+```
+nslookup api
+→ api.default.svc.cluster.local
+→ 10.96.0.42 (ClusterIP)
+
+nslookup api-headless
+→ 10.244.0.5  (pod-1)
+→ 10.244.0.6  (pod-2)
+→ 10.244.0.7  (pod-3)
+```
+
+## 내부 동작: kube-proxy
+
+```mermaid
+flowchart LR
+    Client[Client pod] -->|Service IP| KP[kube-proxy<br/>(node)]
+    KP -->|iptables / IPVS rule| P1[pod 1]
+    KP -->|iptables / IPVS rule| P2[pod 2]
+    KP -->|iptables / IPVS rule| P3[pod 3]
+```
+
+| 모드 | 특징 |
+|---|---|
+| `iptables` (기본) | nat 규칙. 수천 Service 까지 OK |
+| `IPVS` | 더 빠름, 더 큰 규모 |
+| `nftables` (1.31+) | iptables 대체, 더 빠름 |
+
+## 트래픽 분배
+
+```
+Service → endpoints (Pod IP 목록)
+kube-proxy → random pick (iptables) 또는 알고리즘 (IPVS)
+```
+
+> *L4 round-robin*. 세션 sticky 가 필요하면 `service.spec.sessionAffinity: ClientIP`.
+
+## Service 와 Endpoints
+
+```bash
+kubectl get endpoints api
+NAME   ENDPOINTS                                AGE
+api    10.244.0.5:8080,10.244.0.6:8080,...      5m
+```
+
+- Service = *추상*.
+- Endpoints = *실제 pod IP*.
+- Pod 의 *readiness* 가 OK 인 것만 endpoint 에 포함.
+
+## EndpointSlice (1.21+)
+
+큰 클러스터에서 Endpoints 의 *확장*. 1000+ pod 의 Service 에 효율적.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **LoadBalancer 남발** = AWS 1 LB = 시간당 비용 + LCU. *Ingress 로 통합* 권장.
+> 2. **Service IP 변경 시도** = ClusterIP 는 *immutable*. 변경하려면 *삭제 + 재생성*.
+> 3. **Headless 잘못 사용** = LB 동작 없음. StatefulSet 만.
+> 4. **selector label 오타** = endpoints 0개. *Service 동작 안 함*.
+
+## 관련 위키
+
+- [[k8s-ingress]]
+- [[k8s-pod]]
+- [[k8s-statefulset]]
+- [[Load Balancer]]
+- [[CORS]] (Ingress 가 CORS 헤더 추가)

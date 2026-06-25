@@ -1,0 +1,145 @@
+---
+title: "[K8s] NetworkPolicy: pod 간 네트워크 차단"
+aliases: ["NetworkPolicy", "K8s firewall", "Calico", "Cilium", "default deny", "namespace isolation"]
+tags: [kubernetes, network-policy, security, k8s, zero-trust]
+category: kubernetes
+updated: 2026-06-25
+references:
+  - title: "K8s Docs: NetworkPolicy"
+    url: "https://kubernetes.io/docs/concepts/services-networking/network-policies/"
+---
+
+## 정의
+
+**NetworkPolicy** = pod 간 *허용된 트래픽만* 통과. *없으면 모든 pod ↔ pod 가 허용* (기본 open).
+
+> [!IMPORTANT]
+> NetworkPolicy 는 *CNI 플러그인이 구현*. Calico, Cilium, Weave 가 *지원*. *Flannel 단독은 미지원*.
+
+## Default Deny
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny }
+spec:
+  podSelector: {}        # 모든 pod
+  policyTypes: [Ingress, Egress]
+  # ingress / egress 비어있음 → 전부 차단
+```
+
+> *모든 namespace 에 default deny* + 필요한 규칙만 *명시 허용* 이 *Zero-Trust 정통*.
+
+## Ingress 허용 예시
+
+```yaml
+kind: NetworkPolicy
+metadata: { name: allow-frontend-to-api }
+spec:
+  podSelector:
+    matchLabels: { app: api }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: frontend }
+      ports:
+        - protocol: TCP
+          port: 8080
+```
+
+> `api` pod 는 *`frontend` pod 의 8080 트래픽만 허용*.
+
+## Egress 허용 예시
+
+```yaml
+kind: NetworkPolicy
+metadata: { name: allow-egress-to-db }
+spec:
+  podSelector:
+    matchLabels: { app: api }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: db }
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:                    # DNS 허용 (필수)
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+> [!CAUTION]
+> Egress default-deny 시 *DNS (kube-dns) 허용* 잊지 말 것. 안 그러면 *모든 외부 호출이 DNS resolution 실패*.
+
+## Namespace 격리
+
+```yaml
+metadata: { name: allow-from-same-namespace }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: same-namespace
+```
+
+## IP Block (외부 IP 허용)
+
+```yaml
+spec:
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8        # 내부 IP 제외
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+```
+
+## Cilium 의 확장 (L7 NetworkPolicy)
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: { name: api-l7 }
+spec:
+  endpointSelector: { matchLabels: { app: api } }
+  ingress:
+    - fromEndpoints: [{ matchLabels: { app: frontend } }]
+      toPorts:
+        - ports: [{ port: "80", protocol: TCP }]
+          rules:
+            http:
+              - method: GET
+                path: "/api/.*"
+              - method: POST
+                path: "/api/orders"
+```
+
+> L7 (HTTP method / path) 까지. *Service Mesh* 가 아니어도 *L7 보안*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **CNI 가 NetworkPolicy 미지원** = YAML 만 적용되고 *실제 동작 안 함*. Calico/Cilium 확인.
+> 2. **Egress default-deny + DNS 차단** = 모든 외부 호출 실패. DNS 항상 허용.
+> 3. **policyTypes 누락** = `Egress` 없으면 egress 규칙 무시.
+> 4. **namespaceSelector 의 label** = 1.21+ 부터 자동 `kubernetes.io/metadata.name`. 옛 버전은 namespace 에 *직접 label*.
+
+## 관련 위키
+
+- [[k8s-pod]]
+- [[k8s-service]]
+- [[mtls]]
+- [[Service Mesh]]

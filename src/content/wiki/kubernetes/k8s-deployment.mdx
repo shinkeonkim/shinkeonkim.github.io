@@ -1,0 +1,149 @@
+---
+title: "[K8s] Deployment: ReplicaSet, rolling update, rollback"
+aliases: ["Deployment", "ReplicaSet", "rolling update", "k8s rollback", "maxUnavailable", "maxSurge", "RollingUpdate strategy"]
+tags: [kubernetes, deployment, rollout, k8s]
+category: kubernetes
+updated: 2026-06-25
+references:
+  - title: "Kubernetes Docs: Deployments"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
+---
+
+## 정의
+
+**Deployment** = *stateless 워크로드를 위한 컨트롤러*. 내부적으로 *ReplicaSet 관리 + rolling update / rollback*.
+
+## 계층
+
+```mermaid
+flowchart TB
+    Dep[Deployment] --> RS[ReplicaSet]
+    RS --> P1[Pod 1]
+    RS --> P2[Pod 2]
+    RS --> P3[Pod 3]
+    Note["사용자는 Deployment 만 관리.<br/>ReplicaSet 은 자동."]
+```
+
+| 객체 | 책임 |
+|---|---|
+| Deployment | 원하는 상태 + rollout 전략 |
+| ReplicaSet | replica 수 보장 |
+| Pod | 실제 워크로드 |
+
+## YAML
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: web }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+```
+
+## Rolling Update
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as Deployment
+    participant Old as ReplicaSet v1 (3 pods)
+    participant New as ReplicaSet v2 (0 pods)
+
+    D->>New: scale up 1 (maxSurge)
+    Note over Old,New: 4 pods 동안 운영
+    New->>D: pod ready
+    D->>Old: scale down 1 (maxUnavailable)
+    Note over Old,New: 3 pods
+    D->>New: scale up 1
+    Note over Old,New: 4 pods
+    Note over D: 반복...
+    Note over Old: 모두 0
+    Note over New: 모두 3
+```
+
+| 옵션 | 의미 | 기본 |
+|---|---|---|
+| `maxUnavailable` | 동시에 *불가용* 될 수 있는 pod 수 (또는 %) | 25% |
+| `maxSurge` | 동시에 *추가* 될 수 있는 pod 수 | 25% |
+
+> [!TIP]
+> *짧은 maxUnavailable + 짧은 maxSurge* = 안전 + 느림. *zero-downtime* + readiness probe 필수.
+
+## Recreate Strategy
+
+```yaml
+strategy:
+  type: Recreate
+```
+
+- 옛 pod *모두 종료* → 새 pod 시작.
+- *다운타임 발생*.
+- *DB schema 마이그레이션* 같이 *두 버전 동시 운영 불가* 한 경우.
+
+## Rollout 명령
+
+```bash
+kubectl rollout status deployment/web        # 진행 상황
+kubectl rollout history deployment/web        # 이전 버전 목록
+kubectl rollout undo deployment/web           # 이전 버전으로 롤백
+kubectl rollout undo deployment/web --to-revision=3
+kubectl rollout restart deployment/web        # 모든 pod 재시작 (rolling)
+kubectl rollout pause deployment/web          # rollout 일시 정지 (canary 용)
+kubectl rollout resume deployment/web
+```
+
+## Canary / Blue-Green (Deployment 만으로는 부족)
+
+Deployment 의 *기본 rolling* 은 *부분 canary*. *진짜 canary / blue-green* 은:
+
+- **Istio / Linkerd**: traffic 분배 5%, 20%, 50%, 100%
+- **Argo Rollouts**: 정식 canary / blue-green
+- **Flagger**: progressive delivery 자동화
+
+자세한 건 [[Zero Downtime Deployment]] 참고.
+
+## Revision History
+
+```yaml
+spec:
+  revisionHistoryLimit: 10   # 기본 10. 옛 ReplicaSet 보관 수
+```
+
+```bash
+kubectl get rs   # 옛 ReplicaSet 들이 있음 (replica=0)
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`readinessProbe` 없음** = rolling update 가 *준비 안 된 pod 도 ready* 로 인식 → *503 폭증*.
+> 2. **`maxSurge=0`** = 새 pod 만들기 전에 옛 pod 죽임 → 일시 *capacity 부족*.
+> 3. **이미지 tag `latest`** = `kubectl rollout restart` 안 하면 *새 이미지 안 받음*. 항상 *명시 tag* (sha).
+> 4. **Resource limits 없이** = 한 pod 가 *node 자원 독점* → 다른 pod throttle.
+
+## 관련 위키
+
+- [[k8s-pod]]
+- [[k8s-service]]
+- [[k8s-statefulset]]
+- [[k8s-hpa-vpa]]
+- [[Zero Downtime Deployment]]

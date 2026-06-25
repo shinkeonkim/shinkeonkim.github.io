@@ -1,0 +1,104 @@
+---
+title: "[K8s] DaemonSet: 모든 노드에 한 pod"
+aliases: ["DaemonSet", "DS", "node-level pod", "log collector daemonset", "node-exporter"]
+tags: [kubernetes, daemonset, k8s, infrastructure]
+category: kubernetes
+updated: 2026-06-25
+references:
+  - title: "Kubernetes Docs: DaemonSet"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/"
+---
+
+## 정의
+
+**DaemonSet** = *각 노드에 정확히 1 pod 보장*. 노드 추가 시 자동 배치, 노드 제거 시 자동 정리.
+
+## 흔한 사용
+
+| 사용 | 예시 |
+|---|---|
+| **로그 수집** | fluent-bit, fluentd, vector |
+| **메트릭 수집** | node-exporter, datadog-agent |
+| **네트워크** | calico-node, cilium, kube-proxy |
+| **스토리지** | csi-driver, longhorn-manager |
+| **보안** | falco, sysdig |
+
+## YAML
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: logging
+spec:
+  selector: { matchLabels: { app: fluent-bit } }
+  template:
+    metadata: { labels: { app: fluent-bit } }
+    spec:
+      tolerations:
+        - operator: Exists       # 모든 taint 무시 (master 노드도)
+      hostNetwork: true          # 노드 네트워크 직접 사용
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: containers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+      volumes:
+        - name: varlog
+          hostPath: { path: /var/log }
+        - name: containers
+          hostPath: { path: /var/lib/docker/containers }
+```
+
+## 동작
+
+```mermaid
+flowchart TB
+    DS[DaemonSet] --> Node1[Node 1]
+    DS --> Node2[Node 2]
+    DS --> Node3[Node 3]
+    Node1 --> P1[Pod (fluent-bit)]
+    Node2 --> P2[Pod (fluent-bit)]
+    Node3 --> P3[Pod (fluent-bit)]
+    Note["새 노드 자동 배포, 제거 자동 회수"]
+```
+
+## Node Selector / Tolerations
+
+특정 노드에만 배포:
+
+```yaml
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+        accelerator: nvidia-tesla-v100
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+```
+
+> GPU 노드, ARM 노드, edge 노드 등 *특화*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Tolerations 누락** = master node, taint 있는 node 에 *배치 안 됨*. 로그 / 메트릭 누락.
+> 2. **Resource limit 너무 작음** = 트래픽 큰 노드에서 OOM. 노드 크기 비례 *큰 limit*.
+> 3. **hostNetwork 부주의** = 노드 포트 충돌 가능. *명시적 namespace 분리*.
+> 4. **`updateStrategy` 의 *동시 update*** = 클러스터 전체 동시 재시작 → 일시 *log/metric blind*. RollingUpdate + maxUnavailable=1.
+
+## 관련 위키
+
+- [[k8s-pod]]
+- [[k8s-deployment]]
+- [[prometheus]]
+- [[opentelemetry]]

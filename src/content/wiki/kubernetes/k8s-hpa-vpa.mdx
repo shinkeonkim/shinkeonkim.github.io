@@ -1,0 +1,158 @@
+---
+title: "[K8s] HPA / VPA / KEDA: 자동 확장"
+aliases: ["HPA", "Horizontal Pod Autoscaler", "VPA", "Vertical Pod Autoscaler", "KEDA", "Cluster Autoscaler", "Karpenter"]
+tags: [kubernetes, autoscaling, hpa, vpa, keda, k8s]
+category: kubernetes
+updated: 2026-06-25
+references:
+  - title: "K8s Docs: HPA"
+    url: "https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/"
+  - title: "KEDA"
+    url: "https://keda.sh/"
+  - title: "Karpenter"
+    url: "https://karpenter.sh/"
+---
+
+## 3가지 스케일링
+
+```mermaid
+flowchart TB
+    Q[스케일링 종류]
+    Q --> HPA[HPA<br/>Pod 수 ↑↓]
+    Q --> VPA[VPA<br/>Pod resource ↑↓]
+    Q --> CA[Cluster Autoscaler<br/>Karpenter<br/>Node 수 ↑↓]
+```
+
+## HPA (Horizontal Pod Autoscaler)
+
+CPU / Memory / custom metric 기반 *pod 수 조정*.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: web }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+    - type: Pods
+      pods:
+        metric: { name: http_requests_per_second }
+        target: { type: AverageValue, averageValue: "1000" }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+```
+
+## HPA 알고리즘
+
+```
+desired = ceil(currentReplicas × (currentMetric / targetMetric))
+```
+
+예: 현재 4 pod, CPU 80%, 목표 50%:
+- desired = ceil(4 × (80/50)) = 7 pod
+
+## VPA (Vertical Pod Autoscaler)
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata: { name: web }
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  updatePolicy:
+    updateMode: "Auto"   # Off (recommendation only) / Initial / Recreate / Auto
+  resourcePolicy:
+    containerPolicies:
+      - containerName: '*'
+        minAllowed: { cpu: 50m, memory: 64Mi }
+        maxAllowed: { cpu: 2, memory: 2Gi }
+```
+
+> [!CAUTION]
+> *VPA + HPA on CPU 동시 사용 금지*. 둘이 *같은 메트릭으로 다툼*. HPA 는 custom metric, VPA 는 resource → 분리 가능.
+
+## KEDA (Kubernetes Event-Driven Autoscaling)
+
+```mermaid
+flowchart LR
+    Trigger[외부 트리거<br/>Kafka lag, SQS depth, ...] --> KEDA
+    KEDA --> HPA[표준 HPA 생성]
+    HPA --> Deploy[Deployment scale]
+```
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: kafka-consumer }
+spec:
+  scaleTargetRef:
+    name: consumer
+  minReplicaCount: 0
+  maxReplicaCount: 30
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        topic: events
+        consumerGroup: my-group
+        lagThreshold: '1000'
+```
+
+> [!IMPORTANT]
+> KEDA 가 *2026 시점 표준*. 50+ scaler (Kafka, SQS, Prometheus, Redis, DB query, ...) 지원. *scale-to-zero* 가능.
+
+## Cluster Autoscaler / Karpenter
+
+```mermaid
+flowchart LR
+    HPA --> NeedMore[새 pod 들이 Pending]
+    NeedMore --> CA[Cluster Autoscaler]
+    CA -->|EC2 / GCE| AddNode[새 node 추가]
+    AddNode --> Schedule[pending pod 스케줄]
+```
+
+| | Cluster Autoscaler | Karpenter |
+|---|---|---|
+| 종류 | 표준 K8s 도구 | AWS 발 (이제 CNCF) |
+| Node 선택 | 미리 정의된 *node group* | *동적 instance type 선택* |
+| 속도 | 분 단위 | *수십 초* |
+| 비용 최적화 | 제한적 | *우수* (spot, right-sizing) |
+| 클라우드 | 다양 | AWS, Azure |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **stabilization window 너무 짧음** = 빈번한 scale up/down → 비용 + 안정성 문제.
+> 2. **HPA + VPA 동시 (같은 메트릭)** = 충돌. 분리 또는 *VPA off mode + 수동*.
+> 3. **`metrics-server` 미설치** = HPA 작동 안 함. cluster 부팅 시 자동 설치 확인.
+> 4. **resource request 없음** = HPA CPU 기준 무의미. requests 필수.
+
+## 관련 위키
+
+- [[k8s-deployment]]
+- [[k8s-pod]]
+- [[prometheus]] (custom metric)
+- [[kafka-consumer-group]] (lag-based scaling)

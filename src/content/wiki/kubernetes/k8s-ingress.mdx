@@ -1,0 +1,174 @@
+---
+title: "[K8s] Ingress: L7 라우팅, TLS termination, Gateway API"
+aliases: ["Ingress", "IngressController", "nginx-ingress", "Traefik Ingress", "Gateway API", "GatewayClass", "HTTPRoute"]
+tags: [kubernetes, ingress, gateway, network, k8s]
+category: kubernetes
+updated: 2026-06-25
+references:
+  - title: "Kubernetes Docs: Ingress"
+    url: "https://kubernetes.io/docs/concepts/services-networking/ingress/"
+  - title: "Gateway API"
+    url: "https://gateway-api.sigs.k8s.io/"
+---
+
+## 정의
+
+**Ingress** = *클러스터 외부 HTTP/HTTPS 트래픽 → 내부 Service* 라우팅. *L7 LB 역할*. Service 의 *LoadBalancer 다수* 대안.
+
+> [!IMPORTANT]
+> Ingress *오브젝트는 표준*, *컨트롤러는 별도*. nginx, Traefik, Envoy, AWS Load Balancer Controller 등 *직접 설치 필요*.
+
+## 아키텍처
+
+```mermaid
+flowchart LR
+    Internet --> ALB[ALB / nginx<br/>(IngressController)]
+    ALB -->|"Host: api.example.com<br/>Path: /v1/*"| Sv1[Service: api-v1]
+    ALB -->|"Host: api.example.com<br/>Path: /v2/*"| Sv2[Service: api-v2]
+    ALB -->|"Host: web.example.com"| Sv3[Service: web]
+    Sv1 --> P1[Pods]
+    Sv2 --> P2[Pods]
+    Sv3 --> P3[Pods]
+```
+
+## YAML 예시
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  tls:
+    - hosts: [api.example.com]
+      secretName: api-tls
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: api-v1
+                port: { number: 80 }
+          - path: /v2
+            pathType: Prefix
+            backend:
+              service:
+                name: api-v2
+                port: { number: 80 }
+```
+
+## Path Type
+
+| pathType | 동작 |
+|---|---|
+| `Exact` | 정확 일치 |
+| `Prefix` | prefix 일치 (`/api` matches `/api/...`) |
+| `ImplementationSpecific` | 컨트롤러 정의 |
+
+## Ingress Controller 비교
+
+| Controller | 강점 |
+|---|---|
+| **ingress-nginx** | 표준, 모든 기능, 무거움 |
+| **Traefik** | 자동 cert (Let's Encrypt), 동적 |
+| **Envoy / Contour** | L7 advanced, gRPC, service mesh 친화 |
+| **AWS Load Balancer Controller** | ALB / NLB 직접 |
+| **HAProxy Ingress** | 매우 빠름 |
+| **Istio Ingress Gateway** | service mesh 통합 |
+
+## TLS Termination
+
+```mermaid
+flowchart LR
+    Client -->|HTTPS| Ingress
+    Ingress -->|HTTP (cluster-internal)| Service
+    Cert[cert-manager<br/>(Let's Encrypt ACME)] -.자동 갱신.-> Ingress
+```
+
+> *cert-manager* 가 *Let's Encrypt 인증서 자동 발급 / 갱신*. 거의 *모든 클러스터 표준*.
+
+## Gateway API (Ingress 의 차세대)
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: prod-gateway
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+      tls:
+        certificateRefs:
+          - name: prod-tls
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+spec:
+  parentRefs: [{ name: prod-gateway }]
+  hostnames: [api.example.com]
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /v1 }
+      backendRefs:
+        - name: api-v1
+          port: 80
+```
+
+### Ingress vs Gateway API
+
+| 항목 | Ingress | Gateway API |
+|---|---|---|
+| 출시 | 2015 | 2021+ |
+| 표현력 | 제한적 (annotation 의존) | *풍부* (HTTPRoute, TCPRoute, TLSRoute) |
+| 역할 분리 | 단일 | *GatewayClass / Gateway / Route 분리* |
+| 트래픽 정책 | annotation | 정식 필드 |
+| 상태 | stable | beta → GA (2026 대다수) |
+
+> [!IMPORTANT]
+> 2026 시점 *Gateway API 가 점점 표준*. 신규 클러스터는 *Gateway API 추천*.
+
+## 흔한 패턴: Canary
+
+```yaml
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "10"   # 10% 만 새 버전
+```
+
+또는 헤더 기반:
+
+```yaml
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
+    nginx.ingress.kubernetes.io/canary-by-header-value: "always"
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **IngressClass 누락** = 다중 컨트롤러 환경에서 *동작 안 함*. `spec.ingressClassName` 명시.
+> 2. **TLS secret namespace 다름** = Ingress 와 *같은 namespace* 의 secret 만 사용.
+> 3. **cert-manager rate limit** = Let's Encrypt staging 으로 테스트 후 production.
+> 4. **Ingress + WebSocket** = `nginx.ingress.kubernetes.io/proxy-read-timeout`, `proxy-send-timeout` 늘려야 idle close 회피.
+
+## 관련 위키
+
+- [[k8s-service]]
+- [[Load Balancer]]
+- [[TLS]]
+- [[api-gateway]]
+- [[CORS]]
