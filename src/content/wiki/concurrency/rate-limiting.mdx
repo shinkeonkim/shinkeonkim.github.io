@@ -1,0 +1,207 @@
+---
+title: "[Concurrency] Rate Limiting: token bucket, sliding window"
+aliases: ["Rate Limiting", "Token Bucket", "Leaky Bucket", "Sliding Window", "Fixed Window", "GCRA", "429 Too Many Requests"]
+tags: [rate-limit, throttling, concurrency, api, backend]
+category: concurrency
+updated: 2026-06-25
+references:
+  - title: "Stripe: Rate limiters"
+    url: "https://stripe.com/blog/rate-limiters"
+  - title: "Cloudflare: How we built rate limiting"
+    url: "https://blog.cloudflare.com/counting-things-a-lot-of-different-things/"
+---
+
+## 정의
+
+**Rate Limiting** = *시간당 요청 수 제한*. API 보호, fair use, 비용 제어, DDoS 완화.
+
+## 5가지 알고리즘
+
+```mermaid
+flowchart LR
+    A[Fixed Window]
+    B[Sliding Log]
+    C[Sliding Window Counter]
+    D[Token Bucket]
+    E[Leaky Bucket]
+    F[GCRA]
+```
+
+### 1. Fixed Window
+
+```
+[00:00 ~ 00:01] count = 100 (한도)
+[00:01 ~ 00:02] count 리셋 → 100
+```
+
+```python
+key = f"rl:{user}:{minute_bucket}"
+count = redis.incr(key)
+redis.expire(key, 60)
+if count > 100: deny()
+```
+
+- 단순.
+- *경계 burst*: 00:00:59 에 100 + 00:01:00 에 100 = *2초 안에 200*.
+
+### 2. Sliding Log
+
+*모든 요청의 timestamp* 저장 → 윈도우 안 카운트.
+
+```python
+key = f"rl:log:{user}"
+now = time.time()
+redis.zadd(key, { req_id: now })
+redis.zremrangebyscore(key, 0, now - 60)
+count = redis.zcard(key)
+if count > 100: deny()
+```
+
+- *정확*.
+- *메모리 큼* (요청마다 entry).
+
+### 3. Sliding Window Counter
+
+*Fixed Window + 이전 window 비율*.
+
+```
+current_count + previous_count * (1 - elapsed_in_current/window)
+```
+
+- *근사*.
+- *적은 메모리 + Fixed 의 burst 완화*.
+
+### 4. Token Bucket
+
+```mermaid
+flowchart LR
+    Refill[1초마다 토큰 N개] --> Bucket[(Bucket: max 100)]
+    Bucket -->|토큰 1개 소비| Request[요청 통과]
+    Bucket -->|토큰 없음| Deny[429]
+```
+
+- *Burst 허용* (bucket 차있을 때).
+- *평균 rate* 보장.
+- AWS / GitHub / Discord API 표준.
+
+### 5. Leaky Bucket
+
+```mermaid
+flowchart TB
+    Req[요청] -->|채움| B[Bucket]
+    B -->|일정 rate 로 소비| Output[처리]
+    B -.넘침.-> Drop[Drop]
+```
+
+- *완전 평탄화*. burst 흡수 + 일정 출력.
+- queue 기반.
+
+### 6. GCRA (Generic Cell Rate Algorithm)
+
+```
+TAT (Theoretical Arrival Time) 계산
+요청 시각이 TAT 보다 충분히 앞이면 허용
+```
+
+- *Token Bucket 수학적 변형*.
+- *단일 변수* 로 표현. *Redis 1 명령* 으로 가능.
+- Cloudflare, Stripe 가 사용.
+
+## 비교 매트릭스
+
+| 알고리즘 | 메모리 | 정확도 | Burst | 구현 |
+|---|---|---|---|---|
+| Fixed Window | *적음* | 낮음 (경계 burst) | 큼 | 가장 단순 |
+| Sliding Log | *큼* | 정확 | 없음 | Sorted Set |
+| Sliding Window Counter | 적음 | 보통 | 작음 | 2 counter |
+| Token Bucket | 적음 | 좋음 | 허용 | 간단 |
+| Leaky Bucket | 중간 | 좋음 | 평탄 | Queue |
+| GCRA | *최소* (단일 변수) | 정확 | 가능 | 수학적 |
+
+## 분산 환경 구현 (Redis)
+
+```python
+# Token Bucket (Lua atomic)
+TOKEN_BUCKET_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])         -- tokens per sec
+local capacity = tonumber(ARGV[3])
+
+local last = redis.call('HMGET', key, 'tokens', 'last')
+local tokens = tonumber(last[1]) or capacity
+local last_ts = tonumber(last[2]) or now
+
+local delta = math.max(0, now - last_ts) * rate
+tokens = math.min(capacity, tokens + delta)
+local allowed = tokens >= 1
+if allowed then tokens = tokens - 1 end
+
+redis.call('HMSET', key, 'tokens', tokens, 'last', now)
+redis.call('EXPIRE', key, math.ceil(capacity / rate * 2))
+
+return allowed and 1 or 0
+"""
+```
+
+> [!IMPORTANT]
+> 분산 rate limit 는 *Redis 한 곳* 으로 *원자적 카운터*. *분산 락 없이* Lua 스크립트.
+
+## HTTP 응답 표준
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1719318060
+
+{"error": "rate_limit_exceeded", "retry_after": 30}
+```
+
+## 어디서?
+
+```mermaid
+flowchart LR
+    Client --> Edge[CDN / WAF<br/>(IP 단위)]
+    Edge --> GW[API Gateway<br/>(API key 단위)]
+    GW --> App[App<br/>(user 단위)]
+    App --> DB[DB<br/>(쿼리 단위)]
+```
+
+| 레이어 | 단위 |
+|---|---|
+| CDN | IP, geographic |
+| WAF | 의심 패턴 |
+| API Gateway | API key, OAuth token |
+| App | user, tenant |
+| DB | query, connection |
+
+## Tier-based Rate Limit
+
+```python
+limits = {
+    "free":    {"per_min": 60, "burst": 100},
+    "pro":     {"per_min": 600, "burst": 1000},
+    "enterprise": {"per_min": 10000, "burst": 50000},
+}
+```
+
+> Stripe, OpenAI 같은 *유료 API* 의 표준.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **단일 노드 in-memory counter** = N 노드면 N배 한도. *분산 store 필수*.
+> 2. **IP 기반만** = NAT 뒤 *수천 사용자가 한 IP*. user + IP 조합.
+> 3. **Retry-After 무시 (클라이언트)** = 무한 retry → DDoS 자기 자신.
+> 4. **Burst 너무 큼** = bucket 가득 차면 *순간 throughput 폭증*. 백엔드 보호 안 됨.
+
+## 관련 위키
+
+- [[backpressure]]
+- [[circuit-breaker]]
+- [[retry-with-backoff]]
+- [[api-gateway]]
+- [[Redis Sorted Sets]] (sliding window)
+- [[Redis Strings]] (token bucket)
