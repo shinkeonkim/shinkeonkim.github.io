@@ -1,0 +1,170 @@
+---
+title: "[Distributed] NATS: 가벼움, JetStream, subject 라우팅"
+aliases: ["NATS", "NATS.io", "JetStream", "core NATS", "request-reply", "subject hierarchy", "NATS KV"]
+tags: [nats, message-broker, lightweight, edge, distributed]
+category: distributed-systems
+updated: 2026-06-25
+references:
+  - title: "NATS.io"
+    url: "https://nats.io/"
+  - title: "JetStream"
+    url: "https://docs.nats.io/nats-concepts/jetstream"
+---
+
+## 정의
+
+**NATS** = *극도로 가벼운 메시징 시스템*. core NATS = *at-most-once Pub/Sub + request-reply*. JetStream = *영속 / at-least-once / exactly-once* 까지.
+
+특징:
+
+- **1 바이너리** (Go), 메모리 ~10MB.
+- *마이크로초 latency*.
+- *수백만 msg/s/노드*.
+- *edge / IoT / 마이크로서비스* 친화.
+
+## 두 모드: Core vs JetStream
+
+| | Core NATS | JetStream |
+|---|---|---|
+| 영속 | 없음 (in-memory) | *있음* |
+| 신뢰성 | at-most-once | at-least-once / exactly-once |
+| Latency | 매우 낮음 | 낮음 |
+| 사용 | telemetry, signal | event log, queue |
+
+## Subject 계층
+
+```
+orders.created
+orders.paid
+orders.shipped.us
+orders.shipped.eu
+inventory.low.warehouse-a
+```
+
+| 와일드카드 | 의미 |
+|---|---|
+| `*` | 단어 1개 |
+| `>` | 나머지 모두 |
+
+```
+subscribe orders.*    → orders.created, orders.paid (1단 차이만)
+subscribe orders.>    → orders.created, orders.paid, orders.shipped.us, ...
+```
+
+## Request-Reply (Core NATS 의 강점)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Requester
+    participant N as NATS
+    participant S as Service
+
+    S->>N: SUB shop.getItem
+    R->>N: PUB shop.getItem (reply=INBOX.abc)
+    N->>S: deliver
+    S->>S: 처리
+    S->>N: PUB INBOX.abc {결과}
+    N->>R: deliver
+```
+
+- *RPC* 가 *Pub/Sub 위에 자연스럽게*.
+- *load balancing* = 같은 subject 의 *queue group* 으로.
+
+```js
+// Queue group: 여러 service 가 같은 subject 구독, 한 명에게 전달
+nats.subscribe('shop.getItem', { queue: 'shop' }, (msg) => { ... });
+```
+
+## JetStream 메시지 흐름
+
+```mermaid
+flowchart LR
+    P[Producer] -->|PUB orders.>| JS[(JetStream Stream)]
+    JS --> Consumer1[Push consumer]
+    JS --> Consumer2[Pull consumer]
+    JS --> Consumer3[Durable consumer]
+```
+
+| Consumer 타입 | 의미 |
+|---|---|
+| Push | broker 가 능동 push |
+| Pull | consumer 가 poll |
+| Ephemeral | 임시 (재접속 시 처음부터) |
+| Durable | 진행 상태 영속 |
+
+## NATS KV / Object Store
+
+JetStream 위 *추가 추상*:
+
+```js
+// KV
+const kv = await jsm.views.kv('config');
+await kv.put('feature.x', 'enabled');
+const val = await kv.get('feature.x');
+
+// Object Store
+const os = await jsm.views.os('images');
+await os.put('logo.png', readableStream);
+```
+
+> *Redis 같은 KV*, *S3 같은 object store* 가 NATS 안에 통합. *작은 인프라* 친화.
+
+## NATS vs Kafka vs RabbitMQ
+
+| 항목 | NATS | Kafka | RabbitMQ |
+|---|---|---|---|
+| 바이너리 크기 | *10 MB* | 수백 MB | 수십 MB |
+| 운영 복잡도 | *낮음* | 높음 | 중간 |
+| 처리량 | 매우 높음 | 매우 높음 | 중간 |
+| Latency | *최저* | 중간 | 낮음 |
+| 영속 | 옵션 (JS) | 항상 | 옵션 |
+| Replication | 빌트인 (JS) | 빌트인 | mirror queue |
+| 학습 곡선 | *낮음* | 높음 | 중간 |
+
+## Edge / IoT 패턴
+
+```mermaid
+flowchart TB
+    subgraph Edge["Edge devices (수천 ~ 수백만)"]
+        E1[Sensor 1]
+        E2[Sensor 2]
+        EN[Sensor N]
+    end
+    Edge --> NEdge[NATS edge cluster]
+    NEdge --> Leaf[Leaf node]
+    Leaf --> NCloud[NATS central cluster]
+    NCloud --> Apps[Apps / Analytics]
+```
+
+- *Leaf node* = *edge → central* 의 경량 게이트웨이.
+- *bandwidth 최적*: 같은 메시지 한 번만 전송.
+- *오프라인 buffer* + *재연결 시 sync*.
+
+## 적합 / 부적합
+
+```mermaid
+flowchart TD
+    Good[적합]
+    Good --> G1[마이크로서비스 사이 메시징]
+    Good --> G2[Edge / IoT]
+    Good --> G3[Real-time telemetry]
+    Good --> G4[작은 영속 큐 (JS)]
+    Bad[부적합]
+    Bad --> B1[복잡한 라우팅 (Topic exchange 같은)]
+    Bad --> B2[수개월 retention 의 거대 로그]
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Core NATS 의 *손실 가능성 무시*** = subscriber 없으면 *조용히 사라짐*. JS 로 가야.
+> 2. **JS replica 1** = 노드 다운 시 손실. RF 3 권장.
+> 3. **Wildcard 과도 사용** = `>` 가 *모든 메시지* 받음 → 클라이언트 부하.
+> 4. **Subject 표준화 없음** = 작은 팀에서는 OK, 큰 팀에서는 *충돌 / 중복*. 네임스페이스 가이드 필요.
+
+## 관련 위키
+
+- [[kafka]], [[rabbitmq]]
+- [[Redis Pub Sub vs Streams]]
+- [[grpc]]

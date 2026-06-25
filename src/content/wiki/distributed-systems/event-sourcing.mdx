@@ -1,0 +1,188 @@
+---
+title: "[Pattern] Event Sourcing: 상태 대신 이벤트 누적"
+aliases: ["Event Sourcing", "ES", "event store", "aggregate", "snapshot", "replay"]
+tags: [event-sourcing, cqrs, architecture, pattern, backend]
+category: distributed-systems
+updated: 2026-06-25
+references:
+  - title: "Martin Fowler: Event Sourcing"
+    url: "https://martinfowler.com/eaaDev/EventSourcing.html"
+  - title: "Greg Young: Event Sourcing"
+---
+
+## 정의
+
+**Event Sourcing** = *현재 상태 대신 *과거 이벤트 시퀀스* 를 저장*. 현재 상태 = *event 모두 replay 한 결과*.
+
+```
+전통: state = { balance: 100 }
+ES:   events = [Deposited(50), Deposited(60), Withdrawn(10)]
+      state = events.reduce(apply) = { balance: 100 }
+```
+
+## 핵심 약속
+
+- *과거 모든 변화 기록*. 감사 / 디버깅 / 시간 여행 자유.
+- *읽기 모델 자유* (어떻게든 projection).
+- *replay 로 새 view 생성* (옛 데이터에서 새 통찰).
+- *비파괴*. 옛 이벤트는 *불변*.
+
+## 구조
+
+```mermaid
+flowchart LR
+    Cmd[Command<br/>Deposit 50] --> Agg[Aggregate]
+    Agg -->|emit| Event["Deposited(50)"]
+    Event --> Store[(Event Store<br/>append-only)]
+    Store -->|project| V1[(Balance View)]
+    Store -->|project| V2[(Audit View)]
+    Store -->|project| V3[(Search View)]
+```
+
+## Event Store
+
+이벤트 = 불변 사실. 형식:
+
+```json
+{
+  "event_id": "evt_abc",
+  "aggregate_id": "account_42",
+  "aggregate_type": "Account",
+  "event_type": "Deposited",
+  "version": 5,
+  "payload": { "amount": 50, "currency": "USD" },
+  "metadata": { "user_id": "...", "correlation_id": "..." },
+  "occurred_at": "2026-06-25T12:00:00Z"
+}
+```
+
+| Store | 특징 |
+|---|---|
+| Kafka | log + retention |
+| EventStoreDB | ES 전용 |
+| PostgreSQL | append-only 테이블 + outbox |
+| DynamoDB | partition key = aggregate_id |
+| Axon | Java 프레임워크 |
+
+## Replay (재계산)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App
+    participant Store as Event Store
+    App->>Store: load events for aggregate_id=42
+    Store-->>App: [e1, e2, e3, e4, e5]
+    App->>App: state = e1.apply(empty)<br/>state = e2.apply(state)<br/>...
+    Note over App: state 복원 완료
+```
+
+## Snapshot
+
+이벤트 수 만이면 *replay 가 느림*. 주기적 *snapshot* 저장:
+
+```mermaid
+flowchart LR
+    Store[(Event Store)] --> Snap[(Snapshot Store)]
+    Note1["Snapshot at version 1000:<br/>{ balance: 5000 }"]
+    Load[Load aggregate] --> Snap
+    Snap -->|version 1000 부터| Replay[event 1001 ~ 현재 replay]
+```
+
+```python
+def load_aggregate(id):
+    snapshot = snapshot_store.latest(id)
+    events = event_store.from_version(id, snapshot.version)
+    state = snapshot.state
+    for e in events:
+        state = e.apply(state)
+    return state
+```
+
+## CQRS 와의 자연 결합
+
+```mermaid
+flowchart TB
+    Cmd --> Write[Write side]
+    Write --> Store[(Event Store)]
+    Store -->|stream| P1[Projection 1] --> View1[(Read View 1)]
+    Store -->|stream| P2[Projection 2] --> View2[(Read View 2)]
+    Store -->|stream| P3[Projection 3] --> View3[(Read View 3)]
+    Query --> View1 & View2 & View3
+```
+
+자세한 건 [[cqrs]].
+
+## 새 View 추가
+
+*기존 데이터에서 새 인사이트* 가 필요할 때:
+
+```mermaid
+sequenceDiagram
+    Dev->>Code: 새 projection 함수 추가
+    Code->>Store: from version 0 부터 replay
+    Store-->>Code: 모든 이벤트
+    Code->>NewView: 새 view 채우기 (수 시간 ~ 일)
+    Note over Code,NewView: 이후 실시간 stream 으로 유지
+```
+
+> [!IMPORTANT]
+> 이게 *ES 의 가장 큰 매력*. *과거에 안 묻던 질문* 을 *나중에 데이터로* 만들 수 있다.
+
+## 적합 / 부적합
+
+```mermaid
+flowchart TD
+    Good[적합]
+    Good --> G1[감사 추적 필수 (금융, 의료)]
+    Good --> G2[과거 시점 상태 조회]
+    Good --> G3[복잡 비즈니스 (주문 흐름)]
+    Good --> G4[CQRS 가 자연스러운 도메인]
+    Bad[부적합]
+    Bad --> B1[단순 CRUD]
+    Bad --> B2[GDPR 의 *잊혀질 권리* (이벤트 불변과 충돌)]
+    Bad --> B3[빠른 prototype]
+```
+
+## 함정: 이벤트 진화
+
+```
+v1: Deposited(amount: int)
+v2: Deposited(amount: int, currency: string)   ← currency 추가
+```
+
+옛 이벤트는 *currency 가 없다*. 처리 시:
+
+| 전략 | 의미 |
+|---|---|
+| Default value | 옛 이벤트에 currency="USD" 가정 |
+| Up-cast | load 시 옛 → 새 형태로 변환 |
+| Lazy migration | 처리 시점에 보강 |
+| Re-write event (안 권장) | *불변 원칙 위반* |
+
+## GDPR 의 *잊혀질 권리* 문제
+
+```mermaid
+flowchart TD
+    Q[GDPR: 사용자 데이터 삭제 요구]
+    Q --> Issue[ES: 이벤트는 불변 → 어떻게 지움?]
+    Issue --> S1["1. Crypto-shredding: 개인정보 *암호화*, key 만 삭제"]
+    Issue --> S2["2. Event redaction: 특정 필드 null 처리"]
+    Issue --> S3["3. 별도 저장: 개인정보는 가변 DB, 이벤트는 reference"]
+```
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **모든 도메인에 ES** = 단순 CRUD 까지 *복잡 모델*. 진짜 도메인 가치 있는 곳에만.
+> 2. **이벤트 schema *영구 보존* 안 함** = 1년 뒤 옛 이벤트 *해석 불가*. 스키마 진화 정책.
+> 3. **이벤트 크기 폭증** = 작은 이벤트 + 정기 snapshot. 큰 binary 는 reference.
+> 4. **Aggregate 경계 잘못** = aggregate 가 *너무 크면* concurrent write 충돌, 너무 작으면 일관성 사라짐.
+
+## 관련 위키
+
+- [[cqrs]]
+- [[saga-pattern]]
+- [[outbox-pattern]]
+- [[kafka]] (이벤트 저장)
+- [[Redis Streams]]

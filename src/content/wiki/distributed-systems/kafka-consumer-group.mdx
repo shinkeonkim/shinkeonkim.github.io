@@ -1,0 +1,158 @@
+---
+title: "[Distributed] Kafka Consumer Group: rebalancing, offset, lag"
+aliases: ["Kafka consumer group", "Kafka rebalancing", "cooperative rebalancing", "consumer lag", "static membership", "partition assignment"]
+tags: [kafka, consumer-group, rebalancing, backend]
+category: distributed-systems
+updated: 2026-06-25
+references:
+  - title: "Kafka Consumer Configurations"
+    url: "https://kafka.apache.org/documentation/#consumerconfigs"
+  - title: "Incremental Cooperative Rebalancing (KIP-429)"
+    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol"
+---
+
+## 정의
+
+**Consumer Group** = 같은 `group.id` 를 가진 consumer 들이 *함께 한 topic 을 분담 소비*. *partition 단위로 분배*.
+
+## Partition 할당
+
+```mermaid
+flowchart LR
+    subgraph T[Topic: orders, 6 partitions]
+        P0[p0] & P1[p1] & P2[p2] & P3[p3] & P4[p4] & P5[p5]
+    end
+    subgraph CG[Consumer Group]
+        C1[Consumer 1] --> P0 & P1
+        C2[Consumer 2] --> P2 & P3
+        C3[Consumer 3] --> P4 & P5
+    end
+```
+
+규칙:
+
+- *partition 수 ≥ consumer 수* 면 모두 분배.
+- *partition 수 < consumer 수* 면 *일부 consumer idle*.
+- *한 partition → 한 consumer* (group 안).
+
+## Rebalancing
+
+consumer 추가 / 제거 / 죽음 → *partition 재할당*:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C1 as Consumer 1
+    participant C2 as Consumer 2 (new)
+    participant Coord as Group Coordinator
+
+    C1->>Coord: heartbeat
+    C2->>Coord: join group
+    Note over Coord: rebalance 시작
+    Coord->>C1: stop fetching (revoke)
+    C1->>Coord: ack + commit offset
+    Coord->>C1: new assignment (p0, p1, p2)
+    Coord->>C2: new assignment (p3, p4, p5)
+    C1->>C1: resume fetching
+    C2->>C2: start fetching
+```
+
+### Eager vs Cooperative
+
+| | Eager (옛 기본) | Cooperative (Kafka 2.4+) |
+|---|---|---|
+| Rebalance 시 | *모든 consumer 정지* | *영향받는 partition 만* |
+| 처리 중단 | 길음 (수십 초 가능) | *짧음* |
+| Throughput | 하락 큼 | 적음 |
+
+> [!IMPORTANT]
+> *Cooperative rebalancing* 이 *2026 권장 기본*. `partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor`.
+
+## Static Membership (KIP-345)
+
+```properties
+group.instance.id=consumer-1
+```
+
+- consumer 가 *동일 ID 로 재접속* 하면 *partition 유지*.
+- *배포 / 재시작* 시 rebalance 회피.
+- 보통 *수십 초 ~ 수 분 안* 의 짧은 재시작 가정.
+
+## Offset 관리
+
+```mermaid
+flowchart LR
+    C[Consumer] -->|fetch| K[(Kafka)]
+    C -->|commit| Offset["__consumer_offsets<br/>(internal topic)"]
+    Note1[정기 commit 또는 명시적]
+```
+
+| 모드 | 안전성 |
+|---|---|
+| `enable.auto.commit=true` (기본) | *중복 또는 손실* 가능 |
+| 명시적 sync commit | 안전 |
+| 명시적 async commit + 마지막 sync | balanced |
+
+### Auto commit 함정
+
+```
+1. fetch [100, 101, 102]
+2. 처리 중 ...
+3. 5초 후 auto commit (103 까지 commit)
+4. consumer crash (102 처리 미완)
+5. 재시작 → 103 부터 fetch → 102 손실!
+```
+
+> [!CAUTION]
+> *Auto commit 은 *손실 또는 중복** 의 함정. *exactly-once* 가 필요하면 명시적 commit + idempotent 처리.
+
+## Consumer Lag
+
+```mermaid
+flowchart LR
+    Last["partition 의 last offset (LEO): 1000"] --> Lag
+    Curr["consumer current offset: 800"] --> Lag
+    Lag[Lag = 200<br/>processing 못 따라옴]
+```
+
+| 도구 | 의미 |
+|---|---|
+| `kafka-consumer-groups.sh --describe` | 즉시 확인 |
+| Kafka Lag Exporter | Prometheus 메트릭 |
+| Burrow (LinkedIn) | 더 세련된 lag 분석 |
+
+## Lag 기반 Auto-Scaling
+
+```mermaid
+flowchart LR
+    Lag[Consumer Lag] -->|KEDA| HPA[Kubernetes HPA]
+    HPA --> Scale[Consumer pod 수 증가]
+```
+
+[KEDA](https://keda.sh/) 가 Kafka lag 을 *Kubernetes HPA 지표* 로 사용. *spike 자동 흡수*.
+
+## Heartbeat / Session
+
+| 설정 | 의미 | 기본 |
+|---|---|---|
+| `session.timeout.ms` | 이 시간 heartbeat 없으면 *죽었다고 판단* | 45s |
+| `heartbeat.interval.ms` | heartbeat 보내는 주기 | 3s |
+| `max.poll.interval.ms` | poll 사이 최대 시간 | 5min |
+
+> [!WARNING]
+> `max.poll.interval.ms` 초과 = consumer *추방*. 처리 시간이 길면 *명시적 늘림* 또는 *워커 별도 스레드*.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Rebalancing 폭주** = consumer 자주 추가/제거 → 처리 정지 반복. cooperative + static membership.
+> 2. **`auto.offset.reset=latest` + 다운** = 다운 사이 메시지 *손실*. 보통 `earliest`.
+> 3. **너무 큰 batch** = `max.poll.records` 너무 큼 → 처리 시간 길어 추방.
+> 4. **상태 있는 consumer + rebalance** = partition 이 다른 consumer 로 가면서 *처리 진행 정보 손실*. 상태는 *외부 store* 에.
+
+## 관련 위키
+
+- [[kafka]]
+- [[Redis Pub Sub vs Streams]] (consumer group 유사)
+- [[message-broker-comparison]]
+- [[idempotency-keys]]
