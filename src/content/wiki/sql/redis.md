@@ -5,14 +5,14 @@ tags: [database, in-memory, key-value, nosql, cache]
 category: sql
 updated: 2026-06-15
 references:
-  - title: "Redis 공식 문서"
-    url: "https://redis.io/docs/"
+  - id: redis-docs
+    note: "Redis 공식 문서"
   - title: "Antirez (Salvatore Sanfilippo) 블로그"
     url: "http://antirez.com/"
   - title: "Redis in Action (Josiah Carlson)"
     url: "https://redislabs.com/ebook/redis-in-action/"
-  - title: "Redis 명령어 레퍼런스"
-    url: "https://redis.io/commands/"
+  - id: redis-docs
+    note: "Redis 명령어 레퍼런스"
 ---
 
 ## 정의
