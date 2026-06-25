@@ -1,0 +1,268 @@
+---
+title: "정규 표현식 (Regular Expression, Regex)"
+aliases: ["regex", "regular expression", "정규 표현식", "정규식", "NFA", "DFA"]
+tags: [algorithm, string, regex, nfa, dfa]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, regex"
+    url: "https://solved.ac/problems/tags/regex"
+    author: "solved.ac"
+  - title: "Thompson's Construction"
+    url: "https://en.wikipedia.org/wiki/Thompson%27s_construction"
+    author: "Wikipedia"
+---
+
+## 정의
+
+**정규 표현식 (Regular Expression)** 은 문자열 패턴을 형식 언어로 표현한 표기법. Stephen Kleene 이 1956년 정규 언어 (regular language) 를 정의하며 도입. Ken Thompson 이 1968년 이를 **NFA** 로 변환하는 알고리즘 (Thompson construction) 을 구현해 Unix `grep`, `ed` 에 탑재. RE → NFA → DFA (선택) → 매칭.
+
+## 문제 상황과 동기
+
+`"ab*c"` 패턴: `"ac", "abc", "abbc", ...` 모두 매칭.
+
+- **naive**: 모든 경우의 수 직접 확인. `*` (0회 이상) 때문에 지수적 폭발.
+- **Thompson NFA**: 정규식 길이 |R| 에 대해 O(|R|) 크기 NFA 생성. 매칭 O(N x |R|) (NFA simulation) 또는 O(N) (DFA 변환 후).
+
+핵심 통찰: *Kleene star `*` 는 NFA 의 epsilon 전이로 구현. Thompson construction 은 정규식 각 부분을 소형 NFA 조각으로 만들고 epsilon 으로 연결.*
+
+## 시각화
+
+```anim:regex
+{}
+```
+
+## 핵심 아이디어
+
+### 기본 연산
+
+| 연산 | 표기 | 언어 |
+|:---|:---|:---|
+| 문자 | `a` | `{a}` |
+| 연결 | `ab` | `{ab}` |
+| 선택 | `a|b` | `{a, b}` |
+| 반복 | `a*` | `{ε, a, aa, ...}` |
+| 그룹 | `(ab)` | 하위 표현식 |
+
+### Thompson Construction & NFA Simulation
+
+```
+a: ─→[○]─a─→[●]    AB: [A]─ε─→[B]
+A|B: ─→[A]─→ / └→[B]─→    A*: ─→[A]─→ with ε loop back
+```
+
+NFA Simulation:
+
+현재 가능한 상태 집합 유지. 각 문자마다 epsilon closure 계산 후 문자 전이. O(N x |R|). DFA 로 변환 (powerset construction) 시 O(N) 매칭 (공간 2^|R| 최악).
+
+## 알고리즘
+
+```text
+re_to_nfa(regex):
+    postfix = shunting_yard(regex)
+    stack = []
+    for t in postfix:
+        if t is char: stack.push(NFA_fragment(t))
+        elif t == '.': b=stack.pop(); a=stack.pop()
+            a.accept.out = b.start; stack.push(NFA(a.start, b.accept))
+        elif t == '|': b=stack.pop(); a=stack.pop()
+            s = State(); s.out=a.start; s.out1=b.start
+            acc = State(); a.accept.out=acc; b.accept.out=acc
+            stack.push(NFA(s, acc))
+        elif t == '*': a = stack.pop()
+            s = State(); acc = State()
+            s.out=a.start; s.out1=acc
+            a.accept.out=a.start; a.accept.out1=acc
+            stack.push(NFA(s, acc))
+    return stack[0]
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Regex 매칭 (백트래킹 기반, 문자/./*/|/()/연결)
+#include <bits/stdc++.h>
+using namespace std;
+bool match(const string& s, int si, const string& p, int pi) {
+    if (pi == p.size()) return si == s.size();
+    bool star = pi+1 < p.size() && p[pi+1] == '*';
+    if (star) {
+        if (match(s, si, p, pi+2)) return true;
+        while (si < s.size() && (p[pi]=='.' || s[si]==p[pi])) {
+            if (match(s, si+1, p, pi+2)) return true;
+            si++;
+        }
+        return false;
+    }
+    if (si < s.size() && (p[pi]=='.' || s[si]==p[pi]))
+        return match(s, si+1, p, pi+1);
+    return false;
+}
+int main() {
+    string p, s; getline(cin, p); getline(cin, s);
+    cout << match(s, 0, p, 0) << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Thompson NFA 기반 regex 매칭
+import sys
+class State:
+    def __init__(self):
+        self.c = None; self.out = None; self.out1 = None
+class NFA:
+    def __init__(self, s, a): self.start = s; self.accept = a
+def to_nfa(post):
+    stk = []
+    for c in post:
+        if c == '.':
+            b, a = stk.pop(), stk.pop()
+            a.accept.out = b.start; a.accept.c = None
+            stk.append(NFA(a.start, b.accept))
+        elif c == '|':
+            b, a = stk.pop(), stk.pop()
+            s, acc = State(), State()
+            s.out = a.start; s.out1 = b.start
+            a.accept.out = acc; b.accept.out = acc
+            stk.append(NFA(s, acc))
+        elif c == '*':
+            a = stk.pop(); s, acc = State(), State()
+            s.out = a.start; s.out1 = acc
+            a.accept.out = a.start; a.accept.out1 = acc
+            stk.append(NFA(s, acc))
+        else:
+            s, acc = State(), State(); s.c = c; s.out = acc
+            stk.append(NFA(s, acc))
+    return stk[0]
+def eps(states):
+    stk = list(states)
+    while stk:
+        s = stk.pop()
+        if s.c is None:
+            if s.out and s.out not in states: states.add(s.out); stk.append(s.out)
+            if s.out1 and s.out1 not in states: states.add(s.out1); stk.append(s.out1)
+    return states
+def match(nfa, text):
+    states = eps({nfa.start})
+    for ch in text:
+        nxt = set()
+        for s in states:
+            if s.c == ch or s.c == '.': nxt.add(s.out)
+        states = eps(nxt)
+    return nfa.accept in states
+prec = {'*':3, '.':2, '|':1}
+def postfix(re):
+    out, stk, i, p = [], [], 0, ''
+    while i < len(re):
+        c = re[i]
+        if c == '(':
+            if p and p not in '(|': stk.append('.')
+            stk.append(c)
+        elif c == ')':
+            while stk and stk[-1] != '(': out.append(stk.pop())
+            stk.pop()
+        elif c in '*|':
+            if c == '|' and out and out[-1] in '(|': out.append('')
+            while stk and stk[-1] != '(' and prec.get(stk[-1],0) >= prec.get(c,0):
+                out.append(stk.pop())
+            stk.append(c)
+        else:
+            if p and p not in '(|*': stk.append('.')
+            out.append(c)
+        p = c; i += 1
+    while stk: out.append(stk.pop())
+    return ''.join(out)
+re = sys.stdin.readline().strip()
+print(1 if match(to_nfa(postfix(re)), sys.stdin.readline().strip()) else 0)`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// Regex 매칭 (백트래킹, 문자/./*/|/()/연결)
+import java.io.*;
+public class Main {
+    static boolean match(String s, int si, String p, int pi) {
+        if (pi == p.length()) return si == s.length();
+        boolean star = pi+1 < p.length() && p.charAt(pi+1) == '*';
+        if (star) {
+            if (match(s, si, p, pi+2)) return true;
+            while (si < s.length() && (p.charAt(pi)=='.' || s.charAt(si)==p.charAt(pi))) {
+                if (match(s, si+1, p, pi+2)) return true;
+                si++;
+            }
+            return false;
+        }
+        if (si < s.length() && (p.charAt(pi)=='.' || s.charAt(si)==p.charAt(pi)))
+            return match(s, si+1, p, pi+1);
+        return false;
+    }
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        System.out.println(match(br.readLine(), 0, br.readLine(), 0) ? 1 : 0);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      "label": "매칭 성공",
+      "input": `ab*c
+ac`,
+      "output": `1`,
+    },
+    {
+      "label": "와일드카드",
+      "input": `a.c
+abc`,
+      "output": `1`,
+    },
+    {
+      "label": "매칭 실패",
+      "input": `a.c
+ac`,
+      "output": `0`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **RE to NFA (Thompson)** | O(|R|) 시간, O(|R|) 공간 |
+| **NFA simulation (전체)** | O(N x |R|) |
+| **NFA to DFA** | O(2^|R|) 최악, 일반적 O(|R|) |
+| **DFA 매칭** | O(N) |
+
+## 변형 / 활용
+
+- POSIX vs Perl 호환: ERE 는 `+`, `?`, `{m,n}`. PCRE 는 역참조, lookahead/lookbehind 포함 (정규 언어 초과).
+- DFA vs 백트래킹: RE2/grep = DFA (선형). PCRE/Python `re` = 백트래킹 (지수 가능).
+- Lex/Flex: 정규식을 DFA 로 컴파일해 tokenizer 생성.
+- Kleene 정리: 정규 언어는 합집합, 연결, Kleene star 에 닫힘. DFA = 정규 표현식.
+
+## 함정
+
+1. **지수적 백트래킹**: `(a|a)*b` 에서 `"aaaa...ac"` 매칭 시 지수 시간. DFA 엔진은 선형.
+2. **빈 문자열 epsilon**: `a*` 0회 반복 케이스 누락 시 `"ac"` 가 `a*c` 에 매칭 안 됨.
+3. **앵커 / 우선순위**: `ab|c` = `(ab)|c`. 연결 > 선택. 명시적 괄호로 제어.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 1013 | Contact | 26.3% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1013) |
+| BOJ 2870 | 수학숙제 | 40.1% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2800-2899/2870) |
+| BOJ 9342 | 염색체 | 43.8% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9300-9399/9342) |
+| BOJ 2671 | 잠수함 식별 | 28.5% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2600-2699/2671) |
+
+## 참고
+
+- [[String|문자열 기본]]
+- [[Parsing|파싱 기본]] (Lexer = regex)
+- [[KMP|KMP 문자열 매칭]]
+- [solved.ac, regex](https://solved.ac/problems/tags/regex)

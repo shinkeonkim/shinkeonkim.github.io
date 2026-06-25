@@ -1,0 +1,282 @@
+---
+title: "헝가리안 알고리즘 (Hungarian Algorithm)"
+aliases: ["hungarian", "헝가리안", "assignment problem", "Kuhn-Munkres", "Kuhn-Munkres algorithm", "O(n^3) weighted matching"]
+tags: [algorithm, graph, hungarian, weighted-matching, assignment, flow]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, hungarian"
+    url: "https://solved.ac/problems/tags/hungarian"
+    author: "solved.ac"
+  - title: "Kuhn, The Hungarian method for the assignment problem"
+    url: "https://link.springer.com/article/10.1007/BF02286390"
+    author: "Harold Kuhn"
+  - title: "Munkres, Algorithms for the Assignment and Transportation Problems"
+    url: "https://epubs.siam.org/doi/10.1137/0105003"
+    author: "James Munkres"
+---
+
+## 정의
+
+**헝가리안 알고리즘 (Hungarian Algorithm)** 은 **완전 이분 그래프 K_{n,n}** 에서 **최대 (또는 최소) 가중치 완전 매칭** 을 O(n^3) 에 찾는 알고리즘.
+
+- Assignment problem: n 명의 작업자를 n 개의 작업에 배정. 각 작업자 i 가 작업 j 를 할 때 비용 a[i][j]. 총 비용 최소화 (또는 이익 최대화).
+- Kuhn (1955) 가 고안, Munkres (1957) 가 O(n^4) -> O(n^3) 개선. 헝가리 수학자 König 와 Egervary 의 정리에 기반.
+- **Primal-Dual** 방법론의 대표적 예시.
+
+## 문제 상황과 동기
+
+n 명의 사람, n 개의 작업, 각 배정의 비용이 주어짐. 모두에게 하나씩 배정하면서 총 비용 최소화.
+
+- naive: n! 가지 배정 전수 탐색 -> n=10 이면 3.6M, n=20 이면 2.4e18.
+- greedy: 매번 최소 비용 간선 선택 -> 최적 보장 없음.
+- 최대 유량 (min-cost max-flow): O(n^3) 가능하지만 Hungarian 이 더 간단하고 빠름.
+
+핵심 통찰: **아무 배정이나 잡고, dual 변수를 조정해 "equality graph" 에서 augmenting path 를 찾는다.** Primal-dual 관점에서 최적성 조건을 만족할 때까지 반복.
+
+PS 응용: 할 일 배정, 팀 구성, 자원 배분, 반도체 테스트 스케줄링.
+
+## 시각화
+
+```anim:hungarian
+{}
+```
+
+## 핵심 아이디어
+
+### Dual feasible labeling
+
+각 행 i 에 label u[i], 각 열 j 에 label v[j] 를 할당. 조건:
+
+u[i] + v[j] <= cost[i][j] (최소화의 경우)
+
+Equality graph: u[i] + v[j] == cost[i][j] 인 간선만 모은 부분 그래프.
+
+### Kuhn-Munkres 알고리즘 (O(n^3))
+
+1. u[i] = 0, v[j] = 0 으로 초기화.
+2. 각 행 i = 1..n 에 대해:
+   a. **augment**: 행 i 에서 equality graph 를 따라 DFS/BFS 로 매칭 증가 경로 탐색.
+   b. **dual adjust**: 경로가 없으면 u, v 를 갱신 (delta 만큼)하여 equality graph 확장.
+   c. 매칭이 증가할 때까지 반복.
+3. 모든 행이 매칭되면 종료. 최소 비용 = -v[0].
+
+**증명 스케치**: 각 iteration 에서 dual feasibility 유지, 매 matching 증가 시 마다 최적성 조건인 "complementary slackness" 가 점진적으로 충족.
+
+## 알고리즘
+
+```text
+hungarian(cost[1..n][1..n]):
+    u[1..n] = 0, v[1..n] = 0
+    p[1..n] = 0   // column j -> matched row
+    for i = 1..n:
+        p[0] = i, j0 = 0
+        minv[1..n] = INF
+        used[0..n] = false
+        repeat:
+            used[j0] = true
+            i0 = p[j0], delta = INF
+            for j = 1..n:
+                if !used[j]:
+                    cur = cost[i0][j] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur, way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j], j1 = j
+            for j = 0..n:
+                if used[j]:
+                    u[p[j]] += delta, v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+        until p[j0] == 0
+        // augment matching
+        repeat:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+        until j0 == 0
+    return -v[0], assignment p
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Hungarian algorithm O(n^3) for minimum assignment
+#include <bits/stdc++.h>
+using namespace std;
+using ll = long long;
+const ll INF = 1e18;
+
+int main() {
+    int n; cin >> n;
+    vector<vector<ll>> a(n, vector<ll>(n));
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            cin >> a[i][j];
+
+    vector<ll> u(n + 1), v(n + 1), p(n + 1), way(n + 1);
+    for (int i = 1; i <= n; i++) {
+        p[0] = i;
+        int j0 = 0;
+        vector<ll> minv(n + 1, INF);
+        vector<char> used(n + 1, false);
+        do {
+            used[j0] = true;
+            int i0 = p[j0];
+            ll delta = INF;
+            int j1 = 0;
+            for (int j = 1; j <= n; j++) {
+                if (used[j]) continue;
+                ll cur = a[i0 - 1][j - 1] - u[i0] - v[j];
+                if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+            }
+            for (int j = 0; j <= n; j++) {
+                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+                else minv[j] -= delta;
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+
+        do {
+            int j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0);
+    }
+
+    cout << -v[0] << "\\n";
+    for (int j = 1; j <= n; j++)
+        if (p[j] > 0) cout << p[j] << " " << j << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Hungarian algorithm O(n^3) for minimum assignment
+import sys
+input = sys.stdin.readline
+
+def hungarian(a):
+    n = len(a)
+    u = [0] * (n + 1)
+    v = [0] * (n + 1)
+    p = [0] * (n + 1)
+    way = [0] * (n + 1)
+
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [10**18] * (n + 1)
+        used = [False] * (n + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = 10**18
+            j1 = 0
+            for j in range(1, n + 1):
+                if not used[j]:
+                    cur = a[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(n + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+
+    return -v[0], p[1:]
+
+n = int(input())
+a = [list(map(int, input().split())) for _ in range(n)]
+cost, assign = hungarian(a)
+print(cost)
+for j, row in enumerate(assign, 1):
+    if row > 0:
+        print(row, j)`,
+    },
+  ]}
+  cases={[
+    {
+      label: "3x3 최소 배정",
+      input: `3
+4 8 7
+6 5 3
+2 9 1`,
+      output: `10
+1 1
+2 2
+3 3`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **시간 (최선)** | O(n^2) (첫 시도에 완전 매칭) |
+| **시간 (평균)** | O(n^3) |
+| **시간 (최악)** | O(n^3) |
+| **공간** | O(n^2) |
+
+## 변형 / 활용
+
+1. **최대 가중치 매칭**: cost[i][j] 대신 -cost[i][j] 또는 (max_val - cost[i][j]) 입력.
+2. **Unbalanced assignment**: n != m. 더미 행/열을 0 또는 INF 로 채워 정사각형으로 만든 후 처리.
+3. **Min-cost max-flow 대체**: Hungarian 은 assignment problem 에서 min-cost flow 보다 간단.
+4. **다중 할당 (한 사람이 여러 작업)**: 일반 assignment 로 변환 불가 -> MCMF 필요.
+5. **운용 과학 (OR)**: 물류 최적화, 작업 스케줄링, 승무원 배치.
+
+## 함정
+
+### 1. INF 값 선택
+
+cost 합이 최대 n * max(cost) 이므로 INF = 1e18 (long long) 또는 Python 의 큰 수 사용.
+
+### 2. 정사각형 행렬 필요
+
+반드시 n x n. n != m 이면 n = max(n,m) 으로 확장, 빈 칸은 0 (max cost) 또는 INF (min cost) 처리.
+
+### 3. 최소/최대 방향
+
+최소 비용이 기본. 최대 이익 문제는 cost = max_cost - original_cost 로 변환.
+
+### 4. Index 혼동
+
+p[j] 는 "column j 에 매칭된 row 번호". 출력 시 j (column) 를 기준으로 row 를 찾음.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 14216 | 할 일 정하기 1 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14200-14299/14216) |
+| BOJ 14217 | 할 일 정하기 2 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14200-14299/14217) |
+| BOJ 1574 | 룩 어택 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1500-1599/1574) |
+
+## 참고
+
+- [[Bipartite Matching|이분 매칭]] (가중치 없는 matching)
+- [[Minimum Cost Flow|최소 비용 유량]] (일반화된 assignment)
+- [[Maximum Flow|최대 유량]]
+- [Kuhn, The Hungarian method (1955)](https://link.springer.com/article/10.1007/BF02286390)
+- [Munkres, O(n^3) variant (1957)](https://epubs.siam.org/doi/10.1137/0105003)

@@ -1,0 +1,283 @@
+---
+title: "로프 (Rope)"
+aliases: ["rope", "로프", "문자열 트리", "rope data structure"]
+tags: [algorithm, data-structure, rope, string, treap]
+updated: 2026-06-24
+references:
+  - title: "Ropes: an Alternative to Strings (Hans-J. Boehm et al., 1995)"
+    url: "https://citeseer.ist.psu.edu/viewdoc/summary?doi=10.1.1.14.9450"
+    author: "Hans-J. Boehm, Russ Atkinson, Michael Plass"
+  - title: "solved.ac, rope"
+    url: "https://solved.ac/problems/tags/rope"
+    author: "solved.ac"
+---
+
+## 정의
+
+**로프 (Rope)** 는 문자열을 이진 트리로 표현해 split (분할), concat (연결) 을 O(log N) 에 처리하는 자료구조. 각 리프는 짧은 문자열 조각, 내부 노드는 서브트리의 **총 길이** 를 메타데이터로 저장.
+
+1995년 Xerox PARC 의 Hans-J. Boehm, Russ Atkinson, Michael Plass 가 대용량 텍스트 편집기를 위해 고안. C++ SGI STL `rope<char>`, Java `StringBuilder` 일부 구현, 텍스트 에디터 (VS Code, Sublime) 내부에서 사용.
+
+일반 문자열 (배열) 은 중간 삽입/삭제가 O(N) 이지만 Rope 는 균형 트리 (주로 [[Treap]]) 로 O(log N) 보장.
+
+## 문제 상황과 동기
+
+길이 N=10^6 문자열 "abcd...xyz" 의 k 번째 위치에 "insert" 를 삽입하려면:
+
+- **naive (array)**: k 이후를 모두 밀어내고 복사. O(N). 10^6 글자면 초당 60fps 편집 불가능.
+- **rope**: 트리 높이 log N (약 20) 깊이만 순회. split(k) -> concat(left, "insert", right). O(log N).
+
+핵심 통찰: *문자열 = 연속 메모리* 가정을 버리고 *트리 = 조각의 계층 연결* 로 바꾸면 랜덤 액세스는 느려지지만 편집은 극적으로 빨라진다. **Implicit Treap** (key 없이 크기만 유지) 응용.
+
+PS 에서는 "쿼리 Q 번 중간 삽입/삭제" 문제에서 [[Splay Tree]] 또는 Rope 로 해결.
+
+## 시각화
+
+```anim:rope
+{}
+```
+
+## 핵심 아이디어
+
+### Invariant
+
+각 노드는 **왼쪽 서브트리의 총 길이** `left_size` 를 저장. k 번째 문자 접근:
+
+```text
+find(k, node):
+    if k < node.left_size:
+        return find(k, node.left)
+    else if k < node.left_size + node.str.length:
+        return node.str[k - node.left_size]
+    else:
+        return find(k - node.left_size - node.str.length, node.right)
+```
+
+O(log N) 깊이 순회.
+
+### Split / Concat
+
+**split(k)**: k 번째 위치에서 문자열을 두 트리로 분할.
+**concat(A, B)**: 두 트리를 연결해 하나의 트리로.
+
+균형 트리 (Treap, [[Red-Black Tree]], [[AVL Tree]]) 에서 split/concat 는 O(log N). Implicit Treap 가 가장 간결 (random priority 로 균형).
+
+### 실무 최적화
+
+- **Leaf chunking**: 리프에 8~64 글자씩 묶어 저장. 트리 높이 줄이고 캐시 효율 상승.
+- **Lazy propagation**: concat 후 즉시 균형 잡지 않고 일정 깊이 초과 시만 재조정.
+- **UTF-8 인코딩**: 바이트 단위가 아닌 문자 단위 인덱싱 지원.
+
+## 알고리즘
+
+### Implicit Treap 기반 Rope
+
+```text
+struct Node:
+    str: string            # 이 노드의 문자열 조각
+    left_size: int         # 왼쪽 서브트리 총 길이
+    priority: int          # Treap 우선순위
+    left, right: Node*
+
+split(node, k) -> (L, R):
+    if node == null:
+        return (null, null)
+    if k <= node.left_size:
+        (L', R') = split(node.left, k)
+        node.left = R'
+        node.left_size = node.left_size - k
+        return (L', node)
+    else:
+        (L', R') = split(node.right, k - node.left_size - len(node.str))
+        node.right = L'
+        return (node, R')
+
+merge(L, R) -> Node:
+    if L == null: return R
+    if R == null: return L
+    if L.priority > R.priority:
+        L.right = merge(L.right, R)
+        return L
+    else:
+        R.left = merge(L, R.left)
+        R.left_size += size(L)
+        return R
+
+insert(root, k, str):
+    (L, R) = split(root, k)
+    return merge(merge(L, new_node(str)), R)
+```
+
+Treap 의 priority 로 기대 O(log N) 균형.
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Implicit Treap 기반 간략 Rope (삽입/출력만)
+#include <iostream>
+#include <string>
+#include <cstdlib>
+using namespace std;
+struct Node {
+    string s; int sz, pri; Node *l, *r;
+    Node(string _s): s(_s), sz(_s.size()), pri(rand()), l(0), r(0) {}
+};
+int size(Node* n) { return n ? n->sz : 0; }
+void upd(Node* n) { if (n) n->sz = size(n->l) + (int)n->s.size() + size(n->r); }
+pair<Node*, Node*> split(Node* n, int k) {
+    if (!n) return {0, 0};
+    int lsz = size(n->l);
+    if (k <= lsz) {
+        auto [L, R] = split(n->l, k);
+        n->l = R; upd(n); return {L, n};
+    } else if (k < lsz + (int)n->s.size()) {
+        Node *L = new Node(n->s.substr(0, k - lsz));
+        Node *R = new Node(n->s.substr(k - lsz));
+        L->l = n->l; L->r = 0; upd(L);
+        R->l = 0; R->r = n->r; upd(R);
+        return {L, R};
+    } else {
+        auto [L, R] = split(n->r, k - lsz - (int)n->s.size());
+        n->r = L; upd(n); return {n, R};
+    }
+}
+Node* merge(Node* L, Node* R) {
+    if (!L) return R; if (!R) return L;
+    if (L->pri > R->pri) { L->r = merge(L->r, R); upd(L); return L; }
+    else { R->l = merge(L, R->l); upd(R); return R; }
+}
+Node* insert(Node* root, int k, string s) {
+    auto [L, R] = split(root, k);
+    return merge(merge(L, new Node(s)), R);
+}
+void print(Node* n) {
+    if (n) { print(n->l); cout << n->s; print(n->r); }
+}
+int main() {
+    string base; int q; cin >> base >> q;
+    Node* root = new Node(base);
+    while (q--) {
+        int k; string s; cin >> k >> s;
+        root = insert(root, k, s);
+    }
+    print(root); cout << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Implicit Treap Rope (삽입/출력)
+import random
+class Node:
+    def __init__(self, s):
+        self.s, self.sz, self.pri = s, len(s), random.randint(1, 10**9)
+        self.l, self.r = None, None
+def size(n): return n.sz if n else 0
+def upd(n):
+    if n: n.sz = size(n.l) + len(n.s) + size(n.r)
+def split(n, k):
+    if not n: return None, None
+    lsz = size(n.l)
+    if k <= lsz:
+        L, R = split(n.l, k)
+        n.l = R; upd(n); return L, n
+    elif k < lsz + len(n.s):
+        L, R = Node(n.s[:k - lsz]), Node(n.s[k - lsz:])
+        L.l, L.r = n.l, None; upd(L)
+        R.l, R.r = None, n.r; upd(R)
+        return L, R
+    else:
+        L, R = split(n.r, k - lsz - len(n.s))
+        n.r = L; upd(n); return n, R
+def merge(L, R):
+    if not L: return R
+    if not R: return L
+    if L.pri > R.pri: L.r = merge(L.r, R); upd(L); return L
+    else: R.l = merge(L, R.l); upd(R); return R
+def insert(root, k, s):
+    L, R = split(root, k)
+    return merge(merge(L, Node(s)), R)
+def to_str(n):
+    if not n: return ""
+    return to_str(n.l) + n.s + to_str(n.r)
+
+base, q = input().split(); q = int(q)
+root = Node(base)
+for _ in range(q):
+    k, s = input().split(); k = int(k)
+    root = insert(root, k, s)
+print(to_str(root))`,
+    },
+  ]}
+  cases={[
+    {
+      label: "중간 삽입",
+      input: `abc 2
+3 XY
+1 Z`,
+      output: `aZbcXY`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **랜덤 액세스 (k번째)** | O(log N) |
+| **split (k 위치 분할)** | O(log N) |
+| **concat (연결)** | O(log N) |
+| **insert / delete** | O(log N) - split + merge |
+| **공간** | O(N) + O(log N) 트리 오버헤드 |
+
+일반 string 대비:
+- 랜덤 액세스: O(1) -> O(log N) (느려짐)
+- 중간 삽입: O(N) -> O(log N) (빨라짐)
+
+## 변형 / 활용
+
+| 변형 | 설명 |
+|:---|:---|
+| **SGI STL rope** | C++ `rope<char>`, deprecated but historical. split/concat 지원 |
+| **Persistent Rope** | 각 버전의 문자열을 보존. 편집 이력 (undo/redo) 지원 |
+| **Implicit Treap** | Rope 의 일반화. 배열 연산 (reverse, rotate, insert) O(log N) |
+| **Gap Buffer** | 텍스트 에디터의 경량 대안. 커서 근처만 O(1), 멀리 이동 O(N) |
+| **Piece Table** | VS Code / Emacs 의 실제 사용. 원본 버퍼 불변, 편집은 조각 리스트로 |
+
+## 함정
+
+### 1. 랜덤 액세스 느림
+
+배열 O(1) 대비 트리 O(log N) 은 캐릭터 단위 루프가 잦은 코드에서 큰 손실. Rope 는 **큰 조각 단위 편집** 이 많을 때만 유리.
+
+### 2. left_size 갱신 실수
+
+split / merge 시 left_size (또는 sz) 를 upd() 안 하면 k 번째 계산이 틀린다. Treap 구현에서 가장 흔한 버그.
+
+### 3. 메모리 파편화
+
+작은 조각 노드가 많이 생기면 메모리 오버헤드 (32~64 byte/node) 가 크다. 리프 chunking 으로 완화.
+
+### 4. Persistent 버전 복잡도
+
+path copying 으로 immutable rope 를 만들면 각 편집이 O(log N) 노드 복사. 메모리 증가 주의.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 13159 | 배열 | 8.7% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13100-13199/13159) |
+| BOJ 14245 | XOR | 23.1% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14200-14299/14245) |
+| BOJ 5446 | 용량 부족 | 18.5% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/5400-5499/5446) |
+
+## 참고
+
+- [[Treap]]
+- [[Splay Tree]]
+- [[Implicit Treap]]
+- [[Segment Tree|세그먼트 트리]] (구간 연산)
+- [Ropes: an Alternative to Strings (1995)](https://citeseer.ist.psu.edu/viewdoc/summary?doi=10.1.1.14.9450)

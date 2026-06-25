@@ -1,0 +1,301 @@
+---
+title: "최대 유량 최소 컷 정리 (Max-Flow Min-Cut Theorem)"
+aliases: ["max-flow min-cut theorem", "mfmc", "최대 유량 최소 컷", "min-cut"]
+tags: [algorithm, graph, mfmc, max-flow, min-cut]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, maxflow"
+    url: "https://solved.ac/problems/tags/maxflow"
+    author: "solved.ac"
+  - title: "Max-flow min-cut theorem - Wikipedia"
+    url: "https://en.wikipedia.org/wiki/Max-flow_min-cut_theorem"
+    author: "Wikipedia"
+---
+
+## 정의
+
+**최대 유량 최소 컷 정리 (Max-Flow Min-Cut Theorem)** 는 네트워크 유량 그래프 G = (V, E) 에서 source s 에서 sink t 로의 최대 유량이 s와 t를 분리하는 최소 컷의 용량과 같음을 보장하는 정리. 1956년 Ford와 Fulkerson이 증명.
+
+## 문제 상황과 동기
+
+파이프 네트워크의 최대 수송량은 가장 병목인 지점(minimum cut)의 용량과 같다.
+
+- **naive**: 모든 s-t 컷 열거 O(2^V). 불가능.
+- **max flow min cut**: 먼저 max flow로 최대 유량 계산 후, residual graph에서 s가 도달 가능한 정점 집합 S를 구하면 (S, V\S)가 최소 컷.
+
+핵심 통찰: residual graph에 s->t 경로가 없으면, |f| = capacity(S, T)인 s-t 컷이 존재한다. 즉 max flow = min cut.
+
+## 시각화
+
+```anim:mfmc
+{}
+```
+
+## 핵심 아이디어
+
+### Weak duality
+
+임의 유량 f와 임의 s-t 컷 (S, T)에 대해 |f| <= capacity(S, T).
+
+증명: |f| = f_out(S) - f_in(S) <= f_out(S) <= sum_{u in S, v in T} c(u, v) = capacity(S, T).
+
+### Strong duality (max flow = min cut)
+
+최대 유량 f* 달성 시 residual graph G_f에 s에서 t로 가는 경로가 없다. S = {s에서 G_f로 도달 가능한 정점}, T = V\S.
+
+- 모든 u in S, v in T: f(u, v) = c(u, v) (forward saturated), f(v, u) = 0.
+- 따라서 |f*| = capacity(S, T).
+
+이것이 최대 유량 알고리즘의 정당성이며 최소 컷 복원 방법.
+
+## 알고리즘
+
+```text
+maxFlowMinCut(G, s, t):
+    dinic = Dinic(G)
+    maxFlow = dinic.maxFlow(s, t)
+    S = dinic.reachable(s)      // residual graph BFS
+    T = V\S
+    minCutEdges = {(u, v) | u in S, v in T, original c(u, v) > 0}
+    return maxFlow, minCutEdges
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Dinic max flow + min cut
+#include <bits/stdc++.h>
+using namespace std;
+using ll = long long;
+const ll INF = 1e18;
+
+struct Dinic {
+    int n;
+    struct Edge { int v, rev; ll cap; };
+    vector<vector<Edge>> g;
+    vector<int> lv, ptr;
+    Dinic(int n) : n(n), g(n), lv(n), ptr(n) {}
+    void addEdge(int u, int v, ll cap) {
+        g[u].push_back({v, (int)g[v].size(), cap});
+        g[v].push_back({u, (int)g[u].size() - 1, 0});
+    }
+    bool bfs(int s, int t) {
+        fill(lv.begin(), lv.end(), -1);
+        queue<int> q; q.push(s); lv[s] = 0;
+        while (!q.empty()) {
+            int u = q.front(); q.pop();
+            for (auto& e : g[u])
+                if (e.cap > 0 && lv[e.v] < 0)
+                    lv[e.v] = lv[u] + 1, q.push(e.v);
+        }
+        return lv[t] >= 0;
+    }
+    ll dfs(int u, int t, ll f) {
+        if (u == t) return f;
+        for (int& i = ptr[u]; i < (int)g[u].size(); i++) {
+            auto& e = g[u][i];
+            if (e.cap > 0 && lv[u] + 1 == lv[e.v]) {
+                ll pushed = dfs(e.v, t, min(f, e.cap));
+                if (pushed) {
+                    e.cap -= pushed;
+                    g[e.v][e.rev].cap += pushed;
+                    return pushed;
+                }
+            }
+        }
+        return 0;
+    }
+    ll maxFlow(int s, int t) {
+        ll flow = 0;
+        while (bfs(s, t)) {
+            fill(ptr.begin(), ptr.end(), 0);
+            while (ll pushed = dfs(s, t, INF))
+                flow += pushed;
+        }
+        return flow;
+    }
+    vector<bool> minCut(int s) {
+        vector<bool> vis(n, false);
+        queue<int> q; q.push(s); vis[s] = true;
+        while (!q.empty()) {
+            int u = q.front(); q.pop();
+            for (auto& e : g[u])
+                if (e.cap > 0 && !vis[e.v])
+                    vis[e.v] = true, q.push(e.v);
+        }
+        return vis;
+    }
+};
+
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    int n, m, s, t; cin >> n >> m >> s >> t;
+    Dinic dinic(n);
+    for (int i = 0; i < m; i++) {
+        int u, v, c; cin >> u >> v >> c;
+        dinic.addEdge(u, v, c);
+    }
+    ll flow = dinic.maxFlow(s, t);
+    auto cut = dinic.minCut(s);
+    cout << flow << "\\n";
+    for (int u = 0; u < n; u++)
+        for (auto& e : dinic.g[u])
+            if (cut[u] && !cut[e.v] && dinic.g[e.v][e.rev].cap > 0)
+                cout << u << " " << e.v << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Dinic + min cut
+from collections import deque
+import sys
+input = sys.stdin.readline
+
+class Dinic:
+    def __init__(self, n):
+        self.n = n
+        self.g = [[] for _ in range(n)]
+
+    def add_edge(self, u, v, cap):
+        self.g[u].append([v, cap, len(self.g[v])])
+        self.g[v].append([u, 0, len(self.g[u]) - 1])
+
+    def bfs(self, s, t):
+        self.lv = [-1] * self.n
+        q = deque([s])
+        self.lv[s] = 0
+        while q:
+            u = q.popleft()
+            for v, cap, rev in self.g[u]:
+                if cap > 0 and self.lv[v] < 0:
+                    self.lv[v] = self.lv[u] + 1
+                    q.append(v)
+        return self.lv[t] >= 0
+
+    def dfs(self, u, t, f):
+        if u == t: return f
+        for i in range(self.it[u], len(self.g[u])):
+            self.it[u] = i
+            v, cap, rev = self.g[u][i]
+            if cap > 0 and self.lv[u] + 1 == self.lv[v]:
+                ret = self.dfs(v, t, min(f, cap))
+                if ret:
+                    self.g[u][i][1] -= ret
+                    self.g[v][rev][1] += ret
+                    return ret
+        return 0
+
+    def max_flow(self, s, t):
+        flow = 0
+        INF = 10**18
+        while self.bfs(s, t):
+            self.it = [0] * self.n
+            while True:
+                pushed = self.dfs(s, t, INF)
+                if not pushed: break
+                flow += pushed
+        return flow
+
+    def min_cut(self, s):
+        vis = [False] * self.n
+        q = deque([s])
+        vis[s] = True
+        while q:
+            u = q.popleft()
+            for v, cap, rev in self.g[u]:
+                if cap > 0 and not vis[v]:
+                    vis[v] = True
+                    q.append(v)
+        return vis
+
+n, m, s, t = map(int, input().split())
+dinic = Dinic(n)
+for _ in range(m):
+    u, v, c = map(int, input().split())
+    dinic.add_edge(u, v, c)
+flow = dinic.max_flow(s, t)
+cut = dinic.min_cut(s)
+print(flow)
+for u in range(n):
+    for v, cap, rev in dinic.g[u]:
+        if cut[u] and not cut[v] and dinic.g[v][rev][1] > 0:
+            print(u, v)`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본",
+      input: `6 7 0 5
+0 1 3
+0 2 2
+1 3 3
+2 3 2
+2 4 2
+3 5 4
+4 5 3`,
+      output: `5
+3 5
+4 5`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **최대 유량 (Dinic)** | O(V^2 E) |
+| **최소 컷 복원 (BFS)** | O(V + E) |
+| **공간** | O(V^2) |
+
+## 변형 / 활용
+
+### 1. 정점 분리 (Vertex Cut)
+
+각 정점 v를 v_in -> v_out (용량 = 정점 비용)으로 분할하여 최소 정점 컷 계산.
+
+### 2. Project Selection Problem
+
+이익이 있는 project 간 선행 관계 (u -> v: "u를 하려면 v 필요"). max flow min cut으로 최대 이익 계산.
+
+### 3. Density of Subgraph
+
+부분 그래프 밀도(간선 수 / 정점 수) 최대화. Parametric search + min cut.
+
+## 함정
+
+### 1. 무방향 간선
+
+무방향 간선은 양방향으로 동일 cap 추가해야 min cut 정확.
+
+### 2. capacity 0 간선
+
+residual cap > 0인 간선만 BFS. 용량 0 간선은 컷에 포함되지 않음.
+
+### 3. 다중 최소 컷
+
+여러 최소 컷 존재 가능. 위 BFS는 source 측(S)이 가장 작은 최소 컷 반환.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 6086 | 최대 유량 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/6000-6099/6086) |
+| BOJ 14286 | 간선 끊어가며 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14200-14299/14286) |
+| BOJ 17412 | 도시 왕복하기 1 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17412) |
+| BOJ 2367 | 파티 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2300-2399/2367) |
+
+## 참고
+
+- [[Flow|네트워크 유량]]
+- [[Dinic|디닉 알고리즘]]
+- [[Edmonds-Karp|에드몬즈-카프]]
+- [[Bipartite Matching|이분 매칭]]
+- [[MCMF|최소 비용 최대 유량]]
+- [solved.ac, maxflow](https://solved.ac/problems/tags/maxflow)

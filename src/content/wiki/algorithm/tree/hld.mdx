@@ -1,0 +1,316 @@
+---
+title: "Heavy-Light Decomposition"
+aliases: ["hld", "heavy-light decomposition", "무거운-가벼운 분해", "HLD"]
+tags: [algorithm, tree, hld, decomposition]
+updated: 2026-06-24
+references:
+  - title: "An Optimal Real-Time Algorithm for Planar Convex Hulls (D. Harel, R.E. Tarjan, 1984)"
+    url: "https://epubs.siam.org/doi/10.1137/0213018"
+    author: "Daniel D. Sleator, Robert Endre Tarjan"
+  - title: "solved.ac, hld"
+    url: "https://solved.ac/problems/tags/hld"
+    author: "solved.ac"
+---
+
+## 정의
+
+**Heavy-Light Decomposition (HLD)** 는 트리를 **O(log N) 개의 경로 (chain)** 로 분해해 임의 경로 쿼리 (u-v 경로의 합/최대/최소) 를 O(log^2 N) 에 처리하는 정형. 각 체인을 [[Segment Tree|세그먼트 트리]] 로 관리.
+
+1984년 Sleator 와 Tarjan 이 dynamic tree (Link-Cut Tree) 분석 중 고안. PS 에서 "트리 경로 쿼리" 문제의 표준 해법.
+
+핵심: 각 노드에서 **가장 무거운 자식 (subtree 크기 최대)** 으로 이어지는 간선을 heavy edge, 나머지는 light edge 로 분류. 루트에서 임의 노드까지 light edge 는 최대 O(log N) 개.
+
+## 문제 상황과 동기
+
+트리 (N=10^5 노드) 에서 Q=10^5 쿼리:
+- u-v 경로의 합 / 최댓값 / 갱신
+
+- **naive**: 매 쿼리마다 경로 순회 O(N). 총 O(N · Q) = 10^10, TLE.
+- **LCA + prefix sum**: LCA O(log N) 로 경로 찾지만 갱신 시 재계산 O(N).
+- **HLD + Segtree**: 경로를 O(log N) 개 체인으로 쪼개고 각 체인은 segtree O(log N) 쿼리. 총 O(log^2 N) per query.
+
+핵심 통찰: *트리 = 깊이 우선 순서로 번호 매기면 각 체인은 연속 구간*. heavy path 를 우선 배치하면 모든 경로는 최대 O(log N) 체인 교차.
+
+## 시각화
+
+```anim:hld
+{}
+```
+
+## 핵심 아이디어
+
+### Heavy-Light 분류
+
+```text
+size[v] = 1 + Σ size[child]   (DFS postorder 계산)
+
+heavy_child[v] = argmax_{child} size[child]
+
+간선 (v, child):
+    heavy edge  if child == heavy_child[v]
+    light edge  otherwise
+```
+
+### Invariant
+
+루트에서 임의 노드 v 까지의 경로에서 **light edge 는 최대 O(log N) 개**.
+
+증명: light edge 를 타고 내려갈 때마다 서브트리 크기가 절반 이하로 줄어든다 (heavy child 가 최대 크기였으므로).
+
+### DFS 번호 (chain 번호)
+
+```text
+dfs(v):
+    chain_id[v] = current_chain
+    in[v] = dfs_order++
+    if heavy_child[v] exists:
+        dfs(heavy_child[v])   # 같은 chain 유지
+    for child in light_children:
+        current_chain++
+        dfs(child)            # 새 chain 시작
+    out[v] = dfs_order
+```
+
+각 체인의 노드는 `in[]` 번호가 연속 -> segtree 로 구간 쿼리 가능.
+
+### 경로 쿼리
+
+```text
+path_query(u, v):
+    res = identity
+    while chain_id[u] != chain_id[v]:
+        if depth[top[chain_id[u]]] < depth[top[chain_id[v]]]:
+            swap(u, v)
+        # u 의 체인 top 까지 쿼리
+        res = combine(res, segtree_query(in[top[u]], in[u]))
+        u = parent[top[u]]   # 다음 체인으로 점프
+    # 같은 체인 내 u-v
+    res = combine(res, segtree_query(min(in[u], in[v]), max(in[u], in[v])))
+    return res
+```
+
+while 루프는 최대 O(log N) 회전 (light edge 개수 bound). 각 루프에서 segtree O(log N). 총 O(log^2 N).
+
+## 알고리즘
+
+```text
+// 전처리
+1. DFS 로 size[], parent[], depth[] 계산
+2. DFS 로 heavy_child[] 결정
+3. DFS 로 chain_id[], in[], out[] 할당 (heavy path 우선)
+4. 각 체인마다 segtree 구축 (또는 전역 하나에 모두 넣기)
+
+// 경로 쿼리 (u-v)
+while chain[u] != chain[v]:
+    if depth[top[chain[u]]] < depth[top[chain[v]]]: swap(u, v)
+    ans = combine(ans, query_chain(chain[u], in[u], in[top[u]]))
+    u = parent[top[chain[u]]]
+ans = combine(ans, query_chain(chain[u], in[u], in[v]))
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// HLD + Segtree (경로 합 쿼리)
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 1e5 + 5;
+vector<int> g[MX];
+int sz[MX], dep[MX], par[MX], hv[MX], ch[MX], in[MX], top[MX], timer;
+long long val[MX], tree[4 * MX];
+void dfs_sz(int v, int p) {
+    sz[v] = 1; par[v] = p; hv[v] = -1;
+    for (int u : g[v]) if (u != p) {
+        dep[u] = dep[v] + 1; dfs_sz(u, v); sz[v] += sz[u];
+        if (hv[v] == -1 || sz[u] > sz[hv[v]]) hv[v] = u;
+    }
+}
+void dfs_hld(int v, int p, int c) {
+    ch[v] = c; in[v] = ++timer;
+    if (hv[v] != -1) dfs_hld(hv[v], v, c);
+    for (int u : g[v]) if (u != p && u != hv[v]) dfs_hld(u, v, u);
+}
+void build(int n, int s, int e) {
+    if (s == e) { tree[n] = val[s]; return; }
+    int m = (s + e) / 2;
+    build(2*n, s, m); build(2*n+1, m+1, e);
+    tree[n] = tree[2*n] + tree[2*n+1];
+}
+long long query(int n, int s, int e, int l, int r) {
+    if (r < s || e < l) return 0;
+    if (l <= s && e <= r) return tree[n];
+    int m = (s + e) / 2;
+    return query(2*n, s, m, l, r) + query(2*n+1, m+1, e, l, r);
+}
+long long path(int u, int v, int n) {
+    long long res = 0;
+    while (ch[u] != ch[v]) {
+        if (dep[ch[u]] < dep[ch[v]]) swap(u, v);
+        res += query(1, 1, n, in[ch[u]], in[u]);
+        u = par[ch[u]];
+    }
+    if (dep[u] > dep[v]) swap(u, v);
+    res += query(1, 1, n, in[u], in[v]);
+    return res;
+}
+int main() {
+    int n, q; cin >> n >> q;
+    for (int i = 1; i <= n; i++) cin >> val[i];
+    for (int i = 0; i < n - 1; i++) {
+        int a, b; cin >> a >> b;
+        g[a].push_back(b); g[b].push_back(a);
+    }
+    dfs_sz(1, 0); dfs_hld(1, 0, 1);
+    for (int i = 1; i <= n; i++) val[in[i]] = val[i];  // remap
+    build(1, 1, n);
+    while (q--) {
+        int u, v; cin >> u >> v;
+        cout << path(u, v, n) << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# HLD (경로 합 쿼리, 간략)
+import sys; input = sys.stdin.readline; sys.setrecursionlimit(200000)
+MX = 10**5 + 5
+g = [[] for _ in range(MX)]
+sz, dep, par, hv, ch, tin, top = [0]*MX, [0]*MX, [0]*MX, [-1]*MX, [0]*MX, [0]*MX, [0]*MX
+val = [0] * MX
+timer = 0
+
+def dfs_sz(v, p):
+    global sz, dep, par, hv
+    sz[v], par[v], hv[v] = 1, p, -1
+    for u in g[v]:
+        if u != p:
+            dep[u] = dep[v] + 1; dfs_sz(u, v); sz[v] += sz[u]
+            if hv[v] == -1 or sz[u] > sz[hv[v]]: hv[v] = u
+
+def dfs_hld(v, p, c):
+    global timer, ch, tin
+    ch[v], timer = c, timer + 1; tin[v] = timer
+    if hv[v] != -1: dfs_hld(hv[v], v, c)
+    for u in g[v]:
+        if u != p and u != hv[v]: dfs_hld(u, v, u)
+
+class Segtree:
+    def __init__(self, n):
+        self.n, self.tree = n, [0] * (4 * n)
+    def build(self, a, n, s, e):
+        if s == e: self.tree[n] = a[s]; return
+        m = (s + e) // 2
+        self.build(a, 2*n, s, m); self.build(a, 2*n+1, m+1, e)
+        self.tree[n] = self.tree[2*n] + self.tree[2*n+1]
+    def query(self, n, s, e, l, r):
+        if r < s or e < l: return 0
+        if l <= s <= e <= r: return self.tree[n]
+        m = (s + e) // 2
+        return self.query(2*n, s, m, l, r) + self.query(2*n+1, m+1, e, l, r)
+
+def path_query(u, v, seg):
+    res = 0
+    while ch[u] != ch[v]:
+        if dep[ch[u]] < dep[ch[v]]: u, v = v, u
+        res += seg.query(1, 1, seg.n, tin[ch[u]], tin[u])
+        u = par[ch[u]]
+    if dep[u] > dep[v]: u, v = v, u
+    res += seg.query(1, 1, seg.n, tin[u], tin[v])
+    return res
+
+n, q = map(int, input().split())
+orig_val = [0] + list(map(int, input().split()))
+for _ in range(n - 1):
+    a, b = map(int, input().split())
+    g[a].append(b); g[b].append(a)
+
+dfs_sz(1, 0); dfs_hld(1, 0, 1)
+remap = [0] * (n + 1)
+for i in range(1, n + 1): remap[tin[i]] = orig_val[i]
+
+seg = Segtree(n)
+seg.build(remap, 1, 1, n)
+
+for _ in range(q):
+    u, v = map(int, input().split())
+    print(path_query(u, v, seg))`,
+    },
+  ]}
+  cases={[
+    {
+      label: "트리 경로 합",
+      input: `5 3
+1 2 3 4 5
+1 2
+1 3
+2 4
+2 5
+1 4
+3 5
+4 5`,
+      output: `7
+11
+14`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **전처리** | O(N) - DFS 3회 + segtree 구축 |
+| **경로 쿼리** | O(log^2 N) - O(log N) 체인 × O(log N) segtree |
+| **점 갱신** | O(log N) - segtree 갱신 |
+| **공간** | O(N) - segtree + 배열들 |
+
+[[LCA]] + naive 경로 순회 O(N) 대비 극적 개선. [[Centroid Decomposition]] 과 비슷한 복잡도지만 HLD 가 구현 간결.
+
+## 변형 / 활용
+
+| 변형 | 설명 |
+|:---|:---|
+| **HLD + Lazy Segtree** | 경로 구간 갱신 O(log^2 N). "경로에 +k" 쿼리 |
+| **Vertex / Edge 쿼리** | 간선 값은 하위 노드에 저장. LCA 처리 주의 |
+| **Subtree 쿼리** | `in[v]..out[v]` 가 서브트리 구간. O(log N) |
+| **LCA 부산물** | HLD 중 depth, top 으로 LCA O(log N) 가능 |
+| **Dynamic Tree (LCT)** | Link-Cut Tree 는 HLD 의 online 버전. 간선 추가/삭제 가능 |
+
+## 함정
+
+### 1. top[] 배열 설정
+
+각 체인의 top 노드를 따로 저장해야 while 루프에서 점프 가능. `top[ch[v]]` 를 안 두면 구현 복잡.
+
+### 2. in[] 번호 remap
+
+원래 노드 값 `val[v]` 를 segtree 에 넣을 때 `val[in[v]]` 로 재배치. 안 하면 쿼리 결과 틀림.
+
+### 3. LCA 계산 실수
+
+경로 쿼리 마지막에 u-v (같은 체인) 를 쿼리할 때 `min(in[u], in[v])` ~ `max(in[u], in[v])` 로 해야 함. depth 비교 빼먹으면 WA.
+
+### 4. 간선 값 문제
+
+간선 (u, v) 의 값을 처리할 때 깊이가 더 깊은 노드에 값을 할당. LCA 포함 여부 주의.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 13510 | 트리와 쿼리 1 | 22.8% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13510) |
+| BOJ 13511 | 트리와 쿼리 2 | 18.5% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13511) |
+| BOJ 17429 | 국제 메시징 회사 | 12.3% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17429) |
+
+## 참고
+
+- [[LCA|최소 공통 조상]]
+- [[Segment Tree|세그먼트 트리]]
+- [[Centroid Decomposition|센트로이드 분해]]
+- [[Link-Cut Tree]]
+- [An Optimal Real-Time Algorithm (Sleator, Tarjan, 1984)](https://epubs.siam.org/doi/10.1137/0213018)

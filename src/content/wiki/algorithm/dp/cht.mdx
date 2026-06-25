@@ -1,0 +1,269 @@
+---
+title: "CHT (Convex Hull Trick)"
+aliases: ["Convex Hull Trick", "CHT", "볼록 껍질 트릭"]
+tags: [algorithm, dp, optimization, convex-hull]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, cht"
+    url: "https://solved.ac/problems/tags/cht"
+    author: "solved.ac"
+---
+
+## 정의
+
+**Convex Hull Trick (CHT)** 은 DP 전이 `dp[i] = min_j (a_j · x_i + b_j)` 같이 *선형식들의 lower envelope (또는 upper envelope)* 에서 한 점 `x_i` 값을 평가하는 패턴을, **직선들의 볼록 껍질** 로 압축해 O(log N) 또는 O(1) 에 평가하는 DP 최적화.
+
+기울기 `a` 와 쿼리 `x` 의 단조성 조건에 따라 `O(N log N) → O(N)` 까지 가속.
+
+[[Monotone Queue Optimization]] 의 *선형식 전용 + 기하 구조* 변형. [[Li-Chao Tree]] 는 CHT 의 임의 쿼리 지원 일반화.
+
+## 문제 상황과 동기
+
+DP 가 다음 형태라고 하자.
+
+```text
+dp[i] = min_{j < i} (a_j · x_i + b_j) + g(i)
+```
+
+여기서 `a_j`, `b_j` 는 `j` 만의 함수, `x_i` 는 `i` 만의 함수.
+
+- **naive**: 매 `i` 마다 모든 `j < i` 평가. O(N²).
+- **CHT**: 각 j 를 *직선 `y = a_j · x + b_j`* 로 보고, lower envelope 만 유지. 쿼리 `x_i` 평가가 *envelope 위 한 점*.
+  - **기울기 단조 + 쿼리 단조**: O(N)
+  - **기울기 단조 + 쿼리 임의**: O(N log N) (이분 탐색)
+  - **기울기 임의 + 쿼리 임의**: [[Li-Chao Tree|Li-Chao]] 또는 sorted set
+
+핵심 통찰: *어떤 j 가 envelope 에서 영구히 가려진다* 면 *다시 등장 안 함*. amortized O(N).
+
+## 시각화
+
+```anim:cht
+{}
+```
+
+## 핵심 아이디어
+
+envelope 위 직선들이 어떻게 추가 / 제거되는지가 관건.
+
+```text
+직선 추가 (기울기 단조 증가 가정):
+  while envelope 의 마지막 직선이 새 직선에 의해 *완전히 가려지면*: pop
+  push 새 직선
+
+쿼리 x (쿼리 단조 증가 가정):
+  while envelope.front() 와 envelope[front+1] 의 교차점 ≤ x: front++
+  return envelope.front() 평가
+```
+
+각 직선이 한 번 push, 한 번 pop. 쿼리도 front 가 단조 증가. 총 O(N).
+
+## 알고리즘
+
+### 변형 1: 기울기 단조 + 쿼리 단조 (가장 단순)
+
+```text
+deque 의 lines: 기울기 a_1 < a_2 < ... 단조 증가, 그리고 envelope 위
+queries x: x_1 < x_2 < ... 단조 증가
+
+add_line(a, b):
+    while size ≥ 2 and 마지막 두 직선의 교차 x ≥ 새 직선과 마지막의 교차 x:
+        pop_back()
+    push_back((a, b))
+
+query(x):
+    while size ≥ 2 and 첫 두 직선의 교차 x ≤ x:
+        pop_front()
+    return a_front · x + b_front
+```
+
+### 교차점 계산
+
+직선 `y = a_1 x + b_1`, `y = a_2 x + b_2` 의 교차 x:
+
+```text
+x = (b_2 - b_1) / (a_1 - a_2)
+```
+
+정수에서는 *분수 비교* 로 두 교차점의 대소만 (`cross product` 정렬과 동일 정신).
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// 기울기 단조 증가 + 쿼리 단조 증가, O(N)
+// dp[i] = min_{j < i} (a[j] * x[i] + b[j])
+#include <bits/stdc++.h>
+using namespace std;
+struct Line { long long a, b; long long eval(long long x){ return a*x + b; } };
+double inter(Line p, Line q) { return double(q.b - p.b) / (p.a - q.a); }
+int main() {
+    int n; cin >> n;
+    vector<long long> a(n), b(n), x(n);
+    for (auto& v : a) cin >> v;
+    for (auto& v : b) cin >> v;
+    for (auto& v : x) cin >> v;
+    deque<Line> dq;
+    for (int i = 0; i < n; i++) {
+        Line ln{a[i], b[i]};
+        while (dq.size() >= 2 && inter(dq[dq.size()-2], dq.back()) >= inter(dq.back(), ln))
+            dq.pop_back();
+        dq.push_back(ln);
+    }
+    for (long long xi : x) {
+        while (dq.size() >= 2 && inter(dq[0], dq[1]) <= xi) dq.pop_front();
+        cout << dq.front().eval(xi) << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# 기울기 단조 + 쿼리 단조, O(N)
+from collections import deque
+import sys
+input = sys.stdin.readline
+
+def inter(p, q):
+    return (q[1] - p[1]) / (p[0] - q[0])
+
+n = int(input())
+a = list(map(int, input().split()))
+b = list(map(int, input().split()))
+x = list(map(int, input().split()))
+dq = deque()
+for i in range(n):
+    ln = (a[i], b[i])
+    while len(dq) >= 2 and inter(dq[-2], dq[-1]) >= inter(dq[-1], ln):
+        dq.pop()
+    dq.append(ln)
+out = []
+for xi in x:
+    while len(dq) >= 2 and inter(dq[0], dq[1]) <= xi:
+        dq.popleft()
+    out.append(str(dq[0][0] * xi + dq[0][1]))
+print("\\n".join(out))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// 기울기 단조 + 쿼리 단조 CHT
+import java.util.*;
+import java.io.*;
+public class Main {
+    static double inter(long[] p, long[] q) {
+        return (q[1] - p[1]) / (double)(p[0] - q[0]);
+    }
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        int n = Integer.parseInt(br.readLine().trim());
+        long[] a = Arrays.stream(br.readLine().split(" ")).mapToLong(Long::parseLong).toArray();
+        long[] b = Arrays.stream(br.readLine().split(" ")).mapToLong(Long::parseLong).toArray();
+        long[] x = Arrays.stream(br.readLine().split(" ")).mapToLong(Long::parseLong).toArray();
+        Deque<long[]> dq = new ArrayDeque<>();
+        for (int i = 0; i < n; i++) {
+            long[] ln = {a[i], b[i]};
+            while (dq.size() >= 2) {
+                long[] back = dq.pollLast();
+                long[] back2 = dq.peekLast();
+                if (inter(back2, back) >= inter(back, ln)) {
+                    /* discard back */
+                } else { dq.addLast(back); break; }
+            }
+            dq.addLast(ln);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (long xi : x) {
+            while (dq.size() >= 2) {
+                long[] f1 = dq.pollFirst();
+                long[] f2 = dq.peekFirst();
+                if (inter(f1, f2) <= xi) {
+                    /* discard f1 */
+                } else { dq.addFirst(f1); break; }
+            }
+            long[] ln = dq.peekFirst();
+            sb.append(ln[0] * xi + ln[1]).append('\\n');
+        }
+        System.out.print(sb);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본 (3 직선)",
+      input: `3
+-2 -1 1
+4 2 -1
+0 1 3`,
+      output: `4
+2
+2`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 변형 | 시간 |
+|:---|:---|
+| 기울기 단조 + 쿼리 단조 | O(N) |
+| 기울기 단조 + 쿼리 임의 | O(N log N) (envelope 이분 탐색) |
+| 기울기 임의 + 쿼리 임의 | O(N log² N) sorted set 또는 [[Li-Chao Tree]] O(N log V) |
+| 공간 | O(N) (envelope) |
+
+## 활용
+
+| 응용 | 설명 |
+|:---|:---|
+| **Aliens DP** | DP 가 `i² · x_i` 같은 다항식 - CHT 변환 후 |
+| **Wireless / 통신 비용** | 합이 a · x + b 꼴 |
+| **공장 / 배차 비용** | 시작 시간 + 회수 시간 trade-off |
+| **Slope Trick 의 부분 케이스** | 항이 두 직선의 max/min |
+
+## [[Monotone Queue Optimization]] 와의 비교
+
+| 항목 | Monotone Queue | CHT |
+|:---|:---|:---|
+| 후보 형태 | 일반 dp 값 | 선형식 a·x + b |
+| 추가 구조 | 단조 deque | 볼록 envelope |
+| 쿼리 형태 | 윈도우 내 max/min | 한 점 x 에서의 평가 |
+| 일반화 | sliding window | 단조 envelope |
+
+## 함정
+
+### 1. min vs max
+
+min CHT 는 *lower envelope*, max 는 *upper envelope*. 부등호 방향 헷갈리기 쉬움.
+
+### 2. 같은 기울기
+
+같은 a 의 두 직선은 b 작은 (min CHT) / 큰 (max CHT) 것만 남김. add_line 의 첫 비교에서 분기.
+
+### 3. 정밀도
+
+`inter` 의 double 계산은 큰 입력에서 정밀도 손실. 정수만 가능한 비교 (`(q.b - p.b) * (p.a - r.a) vs (r.b - p.b) * (p.a - q.a)`) 사용.
+
+### 4. 동적 추가의 일반화
+
+기울기가 단조가 아니면 envelope 위치가 매번 달라지므로 *sorted set* 또는 [[Li-Chao Tree]] 가 필요. 기본 CHT 는 단조 가정 필수.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 13263 | 나무 자르기 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13200-13299/13263) |
+| BOJ 5257 | timeismoney | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/5200-5299/5257) |
+| BOJ 5419 | 북서풍 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/5400-5499/5419) |
+
+## 참고
+
+- [[Monotone Queue Optimization]]
+- [[Li-Chao Tree]]
+- [[Slope Trick]]
+- [[Aliens Trick]]
+- [[Knuth|크누스 최적화]]
+- [[Divide and Conquer Optimization|DnC DP 최적화]]
+- [solved.ac, cht](https://solved.ac/problems/tags/cht)

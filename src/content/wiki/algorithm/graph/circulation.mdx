@@ -1,0 +1,289 @@
+---
+title: "서큘레이션 (Circulation)"
+aliases: ["circulation", "서큘레이션", "feasible flow", "하한 유량", "flow with lower bounds"]
+tags: [algorithm, graph, circulation, flow, network-flow]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, circulation"
+    url: "https://solved.ac/problems/tags/circulation"
+    author: "solved.ac"
+  - title: "Introduction to Algorithms (CLRS), 4th ed, Chapter 26"
+    url: "https://mitpress.mit.edu/9780262046305/introduction-to-algorithms/"
+    author: "Cormen, Leiserson, Rivest, Stein"
+---
+
+## 정의
+
+**서큘레이션 (Circulation)** 은 방향 그래프 G = (V, E) 에서 모든 간선에 **하한 l(u,v)** 과 **상한 c(u,v)** 이 주어질 때, **모든 정점에서 유량 보존 (in-flow = out-flow)** 을 만족하는 유량 f: E -> R 을 찾는 문제.
+
+- l(u,v) <= f(u,v) <= c(u,v) (용량 제약)
+- 모든 v in V: sum_{(u,v) in E} f(u,v) = sum_{(v,w) in E} f(v,w) (유량 보존)
+
+최대 유량의 일반화: 하한이 0 이면 일반 max-flow 와 동일. source/sink 대신 **모든 정점이 보존**되어야 함.
+
+## 문제 상황과 동기
+
+실제 흐름 문제는 "이 파이프에 최소 X 만큼은 흘러야 한다" 는 하한 조건이 자주 붙음.
+
+- naive: 하한을 무시하고 max-flow 를 돌린 뒤 보정 -> 불가능한 경우가 많음.
+- **표준 변환**: 하한을 먼저 보낸 뒤, 각 정점의 surplus/deficit 을 super-source/sink 로 연결 -> 일반 max-flow 로 환원.
+
+핵심 통찰: *하한을 만족시키는 최소 유량을 가상의 source/sink 로 조정*하면 일반 max-flow 문제가 됨.
+
+PS 응용: 파이프 최소 유량, 작업 최소 배정량, 교통망 최소 통행량, 화학 공정 흐름.
+
+## 시각화
+
+```anim:circulation
+{}
+```
+
+## 핵심 아이디어
+
+### Max-flow 로의 환원
+
+1. 모든 간선 (u,v) 에 하한 l(u,v) 만큼 미리 흘려보낸다.
+2. 각 정점 v 의 순 유입량 b(v) = sum l(u,v) - sum l(v,w) 를 계산.
+3. b(v) > 0 이면 (공급 과잉) super-source S -> v 로 용량 b(v) 의 간선 추가.
+4. b(v) < 0 이면 (공급 부족) v -> super-sink T 로 용량 -b(v) 의 간선 추가.
+5. 원래 간선의 잔여 용량 = c(u,v) - l(u,v).
+6. S -> T max-flow 실행.
+7. **S 에서 나가는 모든 간선이 포화** (flow = sum_{b(v)>0} b(v)) -> feasible circulation 존재.
+
+### 정당성
+
+b(v) 의 총합은 항상 0 (모든 l(u,v) 가 b(u) 에서 -1 배, b(v) 에서 +1 배로 정확히 한 번씩 더해지므로). S -> T flow 가 모든 surplus 를 sink 로 전달하면, 남은 간선으로 하한 이상의 유량이 보존 조건을 만족하며 흐를 수 있음.
+
+## 알고리즘
+
+```text
+feasible_circulation(G, l, c):
+    G' = copy of G, remove all edges
+    add super-source S, super-sink T
+    for each (u,v) in E:
+        add edge u->v with cap c[u][v] - l[u][v]
+        b[u] -= l[u][v]
+        b[v] += l[u][v]
+    for each node v:
+        if b[v] > 0: add edge S->v with cap b[v]
+        if b[v] < 0: add edge v->T with cap -b[v]
+    flow = max_flow(G', S, T)
+    if flow == sum(b[v] for b[v] > 0): return "YES"
+    else: return "NO"
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Circulation with lower bounds, reduction to Dinic max flow
+#include <bits/stdc++.h>
+using namespace std;
+using ll = long long;
+
+struct Edge { int to, rev; ll cap; };
+
+class Dinic {
+public:
+    vector<vector<Edge>> g;
+    vector<int> level, it;
+    Dinic(int n) : g(n), level(n), it(n) {}
+    void add_edge(int u, int v, ll cap) {
+        g[u].push_back({v, (int)g[v].size(), cap});
+        g[v].push_back({u, (int)g[u].size() - 1, 0});
+    }
+    bool bfs(int s, int t) {
+        fill(level.begin(), level.end(), -1);
+        queue<int> q; q.push(s); level[s] = 0;
+        while (!q.empty()) {
+            int u = q.front(); q.pop();
+            for (auto& e : g[u])
+                if (e.cap > 0 && level[e.to] < 0) {
+                    level[e.to] = level[u] + 1; q.push(e.to);
+                }
+        }
+        return level[t] >= 0;
+    }
+    ll dfs(int u, int t, ll f) {
+        if (u == t) return f;
+        for (int &i = it[u]; i < (int)g[u].size(); i++) {
+            Edge& e = g[u][i];
+            if (e.cap > 0 && level[u] < level[e.to]) {
+                ll ret = dfs(e.to, t, min(f, e.cap));
+                if (ret > 0) {
+                    e.cap -= ret;
+                    g[e.to][e.rev].cap += ret;
+                    return ret;
+                }
+            }
+        }
+        return 0;
+    }
+    ll max_flow(int s, int t) {
+        ll flow = 0, INF = 1e18;
+        while (bfs(s, t)) {
+            fill(it.begin(), it.end(), 0);
+            while (ll f = dfs(s, t, INF)) flow += f;
+        }
+        return flow;
+    }
+};
+
+int main() {
+    int n, m; cin >> n >> m;
+    Dinic dinic(n + 2);
+    int S = n, T = n + 1;
+    vector<ll> b(n, 0);
+    for (int i = 0; i < m; i++) {
+        int u, v; ll l, c; cin >> u >> v >> l >> c;
+        u--; v--;
+        dinic.add_edge(u, v, c - l);
+        b[u] -= l;
+        b[v] += l;
+    }
+    ll sum_pos = 0;
+    for (int i = 0; i < n; i++) {
+        if (b[i] > 0) { dinic.add_edge(S, i, b[i]); sum_pos += b[i]; }
+        else if (b[i] < 0) dinic.add_edge(i, T, -b[i]);
+    }
+    ll flow = dinic.max_flow(S, T);
+    cout << (flow == sum_pos ? "YES\\n" : "NO\\n");
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Circulation with lower bounds, using Dinic max flow
+import sys
+sys.setrecursionlimit(10**6)
+input = sys.stdin.readline
+
+class Dinic:
+    def __init__(self, n):
+        self.n = n
+        self.g = [[] for _ in range(n)]
+    def add_edge(self, u, v, cap):
+        self.g[u].append([v, cap, len(self.g[v])])
+        self.g[v].append([u, 0, len(self.g[u]) - 1])
+    def bfs(self, s, t):
+        self.level = [-1] * self.n
+        q = [s]; self.level[s] = 0
+        for u in q:
+            for v, cap, rev in self.g[u]:
+                if cap > 0 and self.level[v] < 0:
+                    self.level[v] = self.level[u] + 1
+                    q.append(v)
+        return self.level[t] >= 0
+    def dfs(self, u, t, f):
+        if u == t: return f
+        for i in range(self.it[u], len(self.g[u])):
+            self.it[u] = i
+            v, cap, rev = self.g[u][i]
+            if cap > 0 and self.level[u] < self.level[v]:
+                ret = self.dfs(v, t, min(f, cap))
+                if ret > 0:
+                    self.g[u][i][1] -= ret
+                    self.g[v][rev][1] += ret
+                    return ret
+        return 0
+    def max_flow(self, s, t):
+        flow = 0; INF = 10**18
+        while self.bfs(s, t):
+            self.it = [0] * self.n
+            while True:
+                f = self.dfs(s, t, INF)
+                if not f: break
+                flow += f
+        return flow
+
+n, m = map(int, input().split())
+dinic = Dinic(n + 2)
+S, T = n, n + 1
+b = [0] * n
+for _ in range(m):
+    u, v, l, c = map(int, input().split())
+    u -= 1; v -= 1
+    dinic.add_edge(u, v, c - l)
+    b[u] -= l; b[v] += l
+sum_pos = 0
+for i in range(n):
+    if b[i] > 0:
+        dinic.add_edge(S, i, b[i]); sum_pos += b[i]
+    elif b[i] < 0:
+        dinic.add_edge(i, T, -b[i])
+flow = dinic.max_flow(S, T)
+print("YES" if flow == sum_pos else "NO")`,
+    },
+  ]}
+  cases={[
+    {
+      label: "순환 그래프",
+      input: `4 4
+1 2 2 5
+2 3 1 4
+3 4 1 5
+4 1 2 6`,
+      output: `YES`,
+    },
+    {
+      label: "불가능",
+      input: `3 2
+1 2 3 5
+2 3 0 2`,
+      output: `NO`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **변환** | O(E) |
+| **Max-flow (Dinic)** | O(V^2 E) 일반 그래프 |
+| **Max-flow (Push-Relabel)** | O(V^3) |
+| **공간** | O(V+E) |
+
+## 변형 / 활용
+
+1. **Minimum cost circulation**: 각 간선에 비용이 있을 때, 하한을 만족하는 최소 비용 circulation. Successive Shortest Augmenting Path 등으로 해결.
+2. **Feasibility with demands**: source/sink 가 있는 flow 에 하한 추가 -> demand node 개념.
+3. **Upper/lower bound flow decomposition**: circulation = cycle basis 의 합.
+4. **Dual of max flow**: min-cut 과 circulation 정리로 연결.
+5. **냉난방 공조, 화학 물질 흐름** 등 연속 시스템 모델링.
+
+## 함정
+
+### 1. 정수 overflow
+
+b(v) 의 합이 int 범위를 넘을 수 있음. long long 사용.
+
+### 2. 하한이 상한보다 큰 경우
+
+l > c 인 간선이 입력되면 바로 infeasible. 전처리 필요.
+
+### 3. 그래프가 연결되지 않은 경우
+
+각 컴포넌트의 b(v) 합이 0 이어야 함. 컴포넌트 별로 독립적으로 검증.
+
+### 4. MAX FLOW 값 == sum_pos 만 체크
+
+flow > sum_pos 는 불가능 (S 의 나가는 간선 총합 = sum_pos). flow = sum_pos 면 모든 surplus 가 T 로 전달됨.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 2316 | 도시 왕복하기 2 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2300-2399/2316) |
+| BOJ 12918 | 정리정돈 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/12900-12999/12918) |
+| BOJ 1031 | 스타 대결 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1031) |
+
+## 참고
+
+- [[Maximum Flow|최대 유량]] (max-flow, Dinic, Edmonds-Karp)
+- [[Minimum Cost Flow|최소 비용 유량]]
+- [[Bipartite Matching|이분 매칭]] (서큘레이션의 특수 case)
+- [solved.ac, circulation](https://solved.ac/problems/tags/circulation)

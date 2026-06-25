@@ -1,0 +1,463 @@
+---
+title: "퍼시스턴트 세그먼트 트리 (Persistent Segment Tree)"
+aliases: ["persistent segment tree", "PST", "퍼시스턴트 세그트리", "버전별 세그트리"]
+tags: [algorithm, data-structure, segment-tree, persistent]
+updated: 2026-06-24
+references:
+  - title: "cp-algorithms, Persistent Segment Tree"
+    url: "https://cp-algorithms.com/data_structures/segment_tree.html#toc-tgt-11"
+    author: "cp-algorithms"
+  - title: "Codeforces, Persistent Segment Tree Tutorial"
+    url: "https://codeforces.com/blog/entry/15890"
+    author: "Al.Cash"
+---
+
+## 정의
+
+**퍼시스턴트 세그먼트 트리 (Persistent Segment Tree, PST)** 는 **버전별 배열 상태를 모두 유지** 하면서, 각 버전마다 O(log N) 시간에 쿼리/갱신 가능한 자료구조. **Copy-on-Write** 기법으로 메모리 O(M log N) (M = 갱신 횟수).
+
+대표 활용:
+- **k번째 수 쿼리**: 구간 [l, r] 내 k번째 작은 값, O(log^2 N).
+- **Offline 2D 쿼리**: x축 정렬 + y축 PST, [[Multi Segtree|다차원 세그트리]] 참고.
+- **시간 여행 (time travel)**: 임의 과거 버전 쿼리.
+
+## 문제 상황과 동기
+
+배열 a[0..N-1], Q개 갱신 + 쿼리. 각 쿼리는 **특정 버전** (과거 상태) 에 대해 묻는다.
+
+- **naive**: 매 갱신마다 배열 전체 복사, O(N) 메모리 × Q 버전 = O(NQ). N=Q=10^5 면 10^10, 불가능.
+- **일반 세그트리**: 현재 상태만 유지, 과거 버전 쿼리 불가.
+- **PST**: 갱신마다 **변경된 경로 (루트 ~ 리프) 만 복사**, O(log N) 노드. 메모리 O(Q log N).
+
+핵심 통찰: *세그트리의 대부분 노드는 불변*. 갱신 시 **경로 상 노드만 새 버전 생성**, 나머지는 이전 버전 포인터 재사용. Functional programming 의 persistent data structure 와 동일.
+
+## 시각화
+
+```anim:pst
+{}
+```
+
+## 핵심 아이디어
+
+### 1. Copy-on-Write (CoW)
+
+일반 세그트리: 노드 배열 `tree[4*N]`, 업데이트 시 제자리 수정.
+
+PST: 각 버전마다 **루트 포인터** 유지. 갱신 시:
+1. 루트 ~ 리프 경로 (O(log N) 개) 만 새 노드 생성.
+2. 형제 노드는 이전 버전 포인터 그대로.
+3. 새 루트 = 새 버전.
+
+예: N=8, 인덱스 5 갱신.
+```
+버전 1 root → 노드 [0,7]
+                ├─ [0,3] (재사용)
+                └─ [4,7] (새)
+                    ├─ [4,5] (새)
+                    │   ├─ [4,4] (재사용)
+                    │   └─ [5,5] (새, 값 변경)
+                    └─ [6,7] (재사용)
+```
+
+메모리: 버전 M 개, 각 O(log N) → 총 O(M log N).
+
+### 2. k번째 수 쿼리
+
+문제: 배열 a[0..N-1], 쿼리 (l, r, k) = 구간 [l, r] 내 k번째 작은 값.
+
+전략: **누적 버전** + **이진 탐색**.
+
+1. **빌드**: 각 인덱스 i 마다 a[0..i] 의 값 빈도를 PST 로 관리 (값 범위 [0, MAX] 를 세그트리로).
+2. **쿼리 (l, r, k)**: PST[r] - PST[l-1] 의 차이 = [l, r] 구간 빈도. 세그트리 이진 탐색으로 k번째 찾기.
+
+복잡도: 빌드 O(N log MAX), 쿼리 O(log MAX).
+
+좌표 압축: MAX=10^9 → 유니크 값 N개로 압축, log N.
+
+### 3. 시간 여행
+
+버전별 루트 배열 `root[0..M]`. 쿼리 "버전 t 의 구간 [l, r] 합" → `query(root[t], l, r)`.
+
+응용: 함수형 프로그래밍, 되돌리기 (undo), 병렬 버전 관리.
+
+## 알고리즘
+
+### PST 빌드 + 갱신
+
+```text
+struct Node:
+    left, right: pointer to Node
+    sum: value (or min, max, etc.)
+
+build(node, l, r, arr):
+    if l == r:
+        node.sum = arr[l]
+        return node
+    mid = (l + r) / 2
+    node.left = build(new Node, l, mid, arr)
+    node.right = build(new Node, mid+1, r, arr)
+    node.sum = node.left.sum + node.right.sum
+    return node
+
+update(prev_node, l, r, pos, val):
+    new_node = clone(prev_node)
+    if l == r:
+        new_node.sum = val
+        return new_node
+    mid = (l + r) / 2
+    if pos <= mid:
+        new_node.left = update(prev_node.left, l, mid, pos, val)
+        new_node.right = prev_node.right  # 재사용
+    else:
+        new_node.left = prev_node.left    # 재사용
+        new_node.right = update(prev_node.right, mid+1, r, pos, val)
+    new_node.sum = new_node.left.sum + new_node.right.sum
+    return new_node
+
+query(node, l, r, ql, qr):
+    if qr < l or r < ql:
+        return 0
+    if ql <= l and r <= qr:
+        return node.sum
+    mid = (l + r) / 2
+    return query(node.left, l, mid, ql, qr) + query(node.right, mid+1, r, ql, qr)
+```
+
+### k번째 수 (누적 PST + 이진 탐색)
+
+```text
+build_persistent(a):
+    root[0] = empty tree (모든 값 빈도 0)
+    for i = 1..N:
+        root[i] = update(root[i-1], a[i], +1)
+
+kth_smallest(left_root, right_root, node_l, node_r, k):
+    # PST[r] - PST[l-1] 차이로 구간 [l, r] 빈도
+    if node_l == node_r:
+        return node_l  # 값
+    mid = (node_l + node_r) / 2
+    left_cnt = right_root.left.sum - left_root.left.sum
+    if k <= left_cnt:
+        return kth_smallest(left_root.left, right_root.left, node_l, mid, k)
+    else:
+        return kth_smallest(left_root.right, right_root.right, mid+1, node_r, k - left_cnt)
+
+query(l, r, k):
+    return kth_smallest(root[l-1], root[r], 0, MAX-1, k)
+```
+
+## 구현
+
+PST 로 k번째 수 쿼리 (좌표 압축 포함).
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Persistent Segment Tree: k번째 수 쿼리
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Node {
+    int sum;
+    Node *left, *right;
+    Node() : sum(0), left(nullptr), right(nullptr) {}
+    Node(Node* l, Node* r) : left(l), right(r), sum(0) {
+        if (l) sum += l->sum;
+        if (r) sum += r->sum;
+    }
+};
+
+Node* build(int l, int r) {
+    if (l == r) return new Node();
+    int mid = (l + r) / 2;
+    return new Node(build(l, mid), build(mid+1, r));
+}
+
+Node* update(Node* prev, int l, int r, int pos) {
+    if (l == r) {
+        Node* cur = new Node();
+        cur->sum = prev->sum + 1;
+        return cur;
+    }
+    int mid = (l + r) / 2;
+    if (pos <= mid)
+        return new Node(update(prev->left, l, mid, pos), prev->right);
+    else
+        return new Node(prev->left, update(prev->right, mid+1, r, pos));
+}
+
+int kth(Node* u, Node* v, int l, int r, int k) {
+    if (l == r) return l;
+    int mid = (l + r) / 2;
+    int cnt = v->left->sum - u->left->sum;
+    if (k <= cnt)
+        return kth(u->left, v->left, l, mid, k);
+    else
+        return kth(u->right, v->right, mid+1, r, k - cnt);
+}
+
+int main() {
+    int n, q; cin >> n >> q;
+    vector<int> a(n+1);
+    for (int i = 1; i <= n; i++) cin >> a[i];
+    
+    // 좌표 압축
+    vector<int> vals = a;
+    sort(vals.begin(), vals.end());
+    vals.erase(unique(vals.begin(), vals.end()), vals.end());
+    map<int, int> comp;
+    for (int i = 0; i < vals.size(); i++) comp[vals[i]] = i;
+    
+    // PST 빌드
+    int m = vals.size();
+    vector<Node*> root(n+1);
+    root[0] = build(0, m-1);
+    for (int i = 1; i <= n; i++)
+        root[i] = update(root[i-1], 0, m-1, comp[a[i]]);
+    
+    while (q--) {
+        int l, r, k; cin >> l >> r >> k;
+        int idx = kth(root[l-1], root[r], 0, m-1, k);
+        cout << vals[idx] << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# PST 는 포인터 기반 자료구조, Python 은 메모리/속도 이슈
+# 교육용 간략화 버전 (실전 C++ 권장)
+import sys
+input = sys.stdin.readline
+
+class Node:
+    def __init__(self, left=None, right=None, val=0):
+        self.left = left
+        self.right = right
+        self.val = val
+        if left and right:
+            self.val = left.val + right.val
+
+def build(l, r):
+    if l == r:
+        return Node(val=0)
+    mid = (l + r) // 2
+    return Node(build(l, mid), build(mid+1, r))
+
+def update(prev, l, r, pos):
+    if l == r:
+        node = Node()
+        node.val = prev.val + 1
+        return node
+    mid = (l + r) // 2
+    if pos <= mid:
+        return Node(update(prev.left, l, mid, pos), prev.right)
+    else:
+        return Node(prev.left, update(prev.right, mid+1, r, pos))
+
+def kth(u, v, l, r, k):
+    if l == r:
+        return l
+    mid = (l + r) // 2
+    cnt = v.left.val - u.left.val
+    if k <= cnt:
+        return kth(u.left, v.left, l, mid, k)
+    else:
+        return kth(u.right, v.right, mid+1, r, k - cnt)
+
+n, q = map(int, input().split())
+a = [0] + list(map(int, input().split()))
+
+# 좌표 압축
+vals = sorted(set(a))
+comp = {v: i for i, v in enumerate(vals)}
+m = len(vals)
+
+# PST 빌드
+root = [None] * (n+1)
+root[0] = build(0, m-1)
+for i in range(1, n+1):
+    root[i] = update(root[i-1], 0, m-1, comp[a[i]])
+
+out = []
+for _ in range(q):
+    l, r, k = map(int, input().split())
+    idx = kth(root[l-1], root[r], 0, m-1, k)
+    out.append(str(vals[idx]))
+print("\\n".join(out))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// PST k번째 수 (Java)
+import java.util.*;
+import java.io.*;
+
+class Node {
+    int sum;
+    Node left, right;
+    Node() { sum = 0; }
+    Node(Node l, Node r) {
+        left = l; right = r;
+        sum = (l != null ? l.sum : 0) + (r != null ? r.sum : 0);
+    }
+}
+
+public class Main {
+    static Node build(int l, int r) {
+        if (l == r) return new Node();
+        int mid = (l + r) / 2;
+        return new Node(build(l, mid), build(mid+1, r));
+    }
+    
+    static Node update(Node prev, int l, int r, int pos) {
+        if (l == r) {
+            Node cur = new Node();
+            cur.sum = prev.sum + 1;
+            return cur;
+        }
+        int mid = (l + r) / 2;
+        if (pos <= mid)
+            return new Node(update(prev.left, l, mid, pos), prev.right);
+        else
+            return new Node(prev.left, update(prev.right, mid+1, r, pos));
+    }
+    
+    static int kth(Node u, Node v, int l, int r, int k) {
+        if (l == r) return l;
+        int mid = (l + r) / 2;
+        int cnt = v.left.sum - u.left.sum;
+        if (k <= cnt)
+            return kth(u.left, v.left, l, mid, k);
+        else
+            return kth(u.right, v.right, mid+1, r, k - cnt);
+    }
+    
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        StringTokenizer st = new StringTokenizer(br.readLine());
+        int n = Integer.parseInt(st.nextToken());
+        int q = Integer.parseInt(st.nextToken());
+        int[] a = new int[n+1];
+        st = new StringTokenizer(br.readLine());
+        for (int i = 1; i <= n; i++) a[i] = Integer.parseInt(st.nextToken());
+        
+        // 좌표 압축
+        TreeSet<Integer> set = new TreeSet<>();
+        for (int v : a) set.add(v);
+        List<Integer> vals = new ArrayList<>(set);
+        Map<Integer, Integer> comp = new HashMap<>();
+        for (int i = 0; i < vals.size(); i++) comp.put(vals.get(i), i);
+        
+        // PST 빌드
+        int m = vals.size();
+        Node[] root = new Node[n+1];
+        root[0] = build(0, m-1);
+        for (int i = 1; i <= n; i++)
+            root[i] = update(root[i-1], 0, m-1, comp.get(a[i]));
+        
+        StringBuilder sb = new StringBuilder();
+        while (q-- > 0) {
+            st = new StringTokenizer(br.readLine());
+            int l = Integer.parseInt(st.nextToken());
+            int r = Integer.parseInt(st.nextToken());
+            int k = Integer.parseInt(st.nextToken());
+            int idx = kth(root[l-1], root[r], 0, m-1, k);
+            sb.append(vals.get(idx)).append('\\n');
+        }
+        System.out.print(sb);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "k번째 수",
+      input: `5 3
+7 5 3 1 9
+1 3 2
+2 5 3
+1 5 4`,
+      output: `5
+5
+7`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **빌드** | O(N log N) (초기 트리 + N번 갱신) |
+| **갱신** | O(log N) 시간, O(log N) 추가 메모리 |
+| **쿼리** | O(log N) |
+| **전체 메모리** | O(N log N + M log N) (M = 갱신 횟수) |
+| **k번째 수** | O(log N) (세그트리 이진 탐색) |
+
+## 변형
+
+### 1. 2D PST (Offline 2D Range Query)
+
+x축 정렬 + y축 PST. "직사각형 내 k번째 수" 쿼리 O(log^2 N). [[Multi Segtree|다차원 세그트리]] 참고.
+
+### 2. Persistent Fenwick Tree
+
+펜윅도 persistent 가능. 메모리 O(M log N), 구현 간단. 단, 역원 필요.
+
+### 3. Persistent Treap
+
+Treap (랜덤 우선순위 BST) 도 persistent 가능. split/merge 로 구간 연산. 메모리 O(M log N).
+
+### 4. Functional Data Structure
+
+Haskell, OCaml 같은 함수형 언어의 persistent list, map, tree 와 동일 원리. 불변성 + 구조 공유.
+
+## 함정
+
+### 1. 메모리 누수
+
+C++ 에서 `new Node()` 남발, 삭제 없으면 메모리 누수. 전역 배열 풀 (pool allocator) 추천.
+
+```cpp
+Node pool[20000000];
+int pool_idx = 0;
+Node* newNode() { return &pool[pool_idx++]; }
+```
+
+### 2. 좌표 압축 범위
+
+k번째 수는 값 범위 MAX 가 10^9 면 세그트리 불가. **좌표 압축 필수**. 중복 제거 `unique()` 조심.
+
+### 3. 포인터 NULL 체크
+
+`node->left` 접근 전 nullptr 확인. 세그먼테이션 폴트 다발.
+
+### 4. 버전 관리
+
+root 배열 인덱스 실수. l-1, r 헷갈림. 1-indexed / 0-indexed 일관성.
+
+### 5. Lazy Propagation PST
+
+PST 에 lazy 는 **구현 극난**. 각 버전마다 lazy 도 복사 필요. 실전 거의 안 씀.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 2042 | 구간 합 구하기 (일반 세그트리) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2000-2099/2042) |
+| BOJ 7469 | k번째 수 (PST) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/7400-7499/7469) |
+| BOJ 13537 | 수열과 쿼리 1 (merge sort tree, PST 응용) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13537) |
+| BOJ 11012 | Egg (2D PST) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11000-11099/11012) |
+| BOJ 16978 | 수열과 쿼리 22 (offline PST) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16900-16999/16978) |
+
+## 참고
+
+- [[Segtree|세그먼트 트리]]
+- [[Multi Segtree|다차원 세그먼트 트리]]
+- [[Fenwick Tree|펜윅 트리]]
+- [[Treap|트립]]
+- [cp-algorithms, Persistent Segment Tree](https://cp-algorithms.com/data_structures/segment_tree.html#toc-tgt-11)
+- [Codeforces, Persistent Segment Tree Tutorial](https://codeforces.com/blog/entry/15890)

@@ -1,0 +1,303 @@
+---
+title: "최소 비용 최대 유량 (Min-Cost Max-Flow, MCMF)"
+aliases: ["mcmf", "min-cost max-flow", "최소 비용 최대 유량", "SSP", "successive shortest augmenting path"]
+tags: [algorithm, graph, mcmf, min-cost-flow, ssp, spfa]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, mcmf"
+    url: "https://solved.ac/problems/tags/mcmf"
+    author: "solved.ac"
+  - title: "Min-cost flow problem - Wikipedia"
+    url: "https://en.wikipedia.org/wiki/Minimum-cost_flow_problem"
+    author: "Wikipedia"
+---
+
+## 정의
+
+**최소 비용 최대 유량 (Min-Cost Max-Flow, MCMF)** 은 각 간선에 용량(capacity)과 단위 비용(cost)이 주어질 때, 최대 유량을 달성하는 여러 방법 중 **총 비용이 최소**인 흐름을 구하는 문제.
+
+가장 보편적인 알고리즘: **Successive Shortest Augmenting Path (SSP)**. 각 단계에서 residual graph의 **최소 비용 경로**를 찾아 유량을 증가시킨다.
+
+## 문제 상황과 동기
+
+"최소 비용으로 최대 물량 수송", "최소 비용으로 작업 배정", "자원 할당 최적화".
+
+- **naive**: 가능한 모든 흐름 열거. 지수.
+- **SSP**: 각 augmentation에서 SPFA/Bellman-Ford로 최소 비용 경로 탐색. O(F * E * V) (F = max flow).
+
+핵심 통찰: 각 augmentation에서 항상 **현재 residual graph의 최소 비용 경로**를 선택하면, 최종 흐름이 전체 최소 비용. 이 greedy가 성립하는 이유는 비용이 선형이고 음수 사이클이 없기 때문.
+
+## 시각화
+
+```anim:mcmf
+{}
+```
+
+## 핵심 아이디어
+
+### Residual graph with cost
+
+원래 간선 (u, v)에 용량 c, 비용 w가 있을 때 residual graph:
+
+- **forward edge**: 용량 c - f, **비용 w**.
+- **backward edge**: 용량 f, **비용 -w** (되돌릴 때 비용 회수).
+
+### Successive Shortest Augmenting Path (SSP)
+
+```
+flow = 0, cost = 0
+while there is s->t path in residual graph:
+    find min-cost path (SPFA / Dijkstra with potentials)
+    if no path: break
+    augment min(bottleneck) units along path
+    update flow, cost, residual graph
+return flow, cost
+```
+
+초기 비용이 음수 없으면 각 augmentation이 최소 비용 경로를 선택하도록 보장.
+
+### SPFA (Shortest Path Faster Algorithm)
+
+음수 가중치 허용. backward edge의 비용이 -w이므로 음수 간선 존재 가능. Bellman-Ford 기반이지만 queue로 최적화.
+
+## 알고리즘
+
+```text
+MCMF_SSP(G, s, t):
+    for each edge (u, v):
+        f[u][v] = 0
+    totalFlow = 0, totalCost = 0
+    while true:
+        dist, parent = SPFA(G_f, s)
+        if dist[t] == INF: break
+        bottleneck = min residual along path
+        totalFlow += bottleneck
+        totalCost += bottleneck * dist[t]
+        update f and residual along path
+    return totalFlow, totalCost
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// MCMF: SSP with SPFA
+#include <bits/stdc++.h>
+using namespace std;
+using ll = long long;
+const ll INF = 1e18;
+
+struct MCMF {
+    int n;
+    struct Edge { int v, rev; ll cap, cost; };
+    vector<vector<Edge>> g;
+    vector<ll> dist;
+    vector<int> pv, pe;
+
+    MCMF(int n) : n(n), g(n), dist(n), pv(n), pe(n) {}
+
+    void addEdge(int u, int v, ll cap, ll cost) {
+        g[u].push_back({v, (int)g[v].size(), cap, cost});
+        g[v].push_back({u, (int)g[u].size() - 1, 0, -cost});
+    }
+
+    bool spfa(int s, int t) {
+        fill(dist.begin(), dist.end(), INF);
+        fill(pv.begin(), pv.end(), -1);
+        fill(pe.begin(), pe.end(), -1);
+        vector<bool> inq(n, false);
+        queue<int> q; q.push(s);
+        dist[s] = 0; inq[s] = true;
+        while (!q.empty()) {
+            int u = q.front(); q.pop(); inq[u] = false;
+            for (int i = 0; i < (int)g[u].size(); i++) {
+                auto& e = g[u][i];
+                if (e.cap > 0 && dist[e.v] > dist[u] + e.cost) {
+                    dist[e.v] = dist[u] + e.cost;
+                    pv[e.v] = u; pe[e.v] = i;
+                    if (!inq[e.v]) { q.push(e.v); inq[e.v] = true; }
+                }
+            }
+        }
+        return dist[t] < INF;
+    }
+
+    pair<ll, ll> flow(int s, int t) {
+        ll flow = 0, cost = 0;
+        while (spfa(s, t)) {
+            ll pushed = INF;
+            for (int v = t; v != s; v = pv[v])
+                pushed = min(pushed, g[pv[v]][pe[v]].cap);
+            for (int v = t; v != s; v = pv[v]) {
+                auto& e = g[pv[v]][pe[v]];
+                e.cap -= pushed;
+                g[v][e.rev].cap += pushed;
+            }
+            flow += pushed;
+            cost += pushed * dist[t];
+        }
+        return {flow, cost};
+    }
+};
+
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    int n, m, s, t; cin >> n >> m >> s >> t;
+    MCMF mcmf(n);
+    for (int i = 0; i < m; i++) {
+        int u, v; ll cap, cost;
+        cin >> u >> v >> cap >> cost;
+        mcmf.addEdge(u, v, cap, cost);
+    }
+    auto [flow, cost] = mcmf.flow(s, t);
+    cout << flow << " " << cost << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# MCMF: SSP with SPFA
+from collections import deque
+import sys
+input = sys.stdin.readline
+
+class MCMF:
+    def __init__(self, n):
+        self.n = n
+        self.g = [[] for _ in range(n)]
+
+    def add_edge(self, u, v, cap, cost):
+        self.g[u].append([v, cap, cost, len(self.g[v])])
+        self.g[v].append([u, 0, -cost, len(self.g[u]) - 1])
+
+    def spfa(self, s, t):
+        INF = 10**18
+        self.dist = [INF] * self.n
+        self.pv = [-1] * self.n
+        self.pe = [-1] * self.n
+        inq = [False] * self.n
+        q = deque([s])
+        self.dist[s] = 0
+        inq[s] = True
+        while q:
+            u = q.popleft()
+            inq[u] = False
+            for i, (v, cap, cost, rev) in enumerate(self.g[u]):
+                if cap > 0 and self.dist[v] > self.dist[u] + cost:
+                    self.dist[v] = self.dist[u] + cost
+                    self.pv[v] = u
+                    self.pe[v] = i
+                    if not inq[v]:
+                        q.append(v)
+                        inq[v] = True
+        return self.dist[t] < INF
+
+    def flow(self, s, t):
+        flow = 0
+        cost = 0
+        while self.spfa(s, t):
+            pushed = 10**18
+            v = t
+            while v != s:
+                u = self.pv[v]
+                ei = self.pe[v]
+                pushed = min(pushed, self.g[u][ei][1])
+                v = u
+            v = t
+            while v != s:
+                u = self.pv[v]
+                ei = self.pe[v]
+                self.g[u][ei][1] -= pushed
+                rev = self.g[u][ei][3]
+                self.g[v][rev][1] += pushed
+                v = u
+            flow += pushed
+            cost += pushed * self.dist[t]
+        return flow, cost
+
+n, m, s, t = map(int, input().split())
+mcmf = MCMF(n)
+for _ in range(m):
+    u, v, c, w = map(int, input().split())
+    mcmf.add_edge(u, v, c, w)
+f, c = mcmf.flow(s, t)
+print(f, c)`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본",
+      input: `4 5 0 3
+0 1 2 1
+0 2 3 2
+1 2 1 3
+1 3 3 4
+2 3 4 1`,
+      output: `5 19`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **시간 (SSP + SPFA)** | O(F * V * E) (F = max flow) |
+| **시간 (SSP + Dijkstra + potential)** | O(F * (E log V)) |
+| **공간** | O(V + E) |
+
+SPFA는 음수 비용 backward edge 처리 가능. Dijkstra는 Johnson potential 필요.
+
+## 변형 / 활용
+
+### 1. 최소 비용 최대 유량 vs 최소 비용 유량
+
+MCMF는 최대 유량을 전제. 특정 유량 f0를 목표로 하려면 sink 직전 edge의 용량을 f0로 제한.
+
+### 2. 이분 매칭 + 비용
+
+왼쪽 L, 오른쪽 R. s->L (1, 0), L->R (1, cost), R->t (1, 0). 최대 매칭 중 최소 비용.
+
+### 3. 음수 사이클 제거 (Cancel-and-Tighten)
+
+초기 유량이 최적이 아니면 residual graph에 음수 사이클 존재. 사이클 제거로 최적화.
+
+### 4. Circulation with demands
+
+각 정점에 supply/demand. MCMF로 feasible circulation + 최소 비용.
+
+## 함정
+
+### 1. SPFA 무한 루프
+
+음수 사이클이 있으면 SPFA가 무한 루프. 초기 입력에 음수 사이클 없거나, 최대 V번 iteration 제한.
+
+### 2. 비용 오버플로우
+
+cost * flow가 int 범위를 넘을 수 있음. long long 사용.
+
+### 3. Dijkstra + potential 초기화
+
+Johnson potential h[v] = shortest distance from s. 각 augmentation 후 h[v] += dist[v]로 갱신. SPFA가 더 간단.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 11405 | 책 구매하기 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11400-11499/11405) |
+| BOJ 11408 | 열혈강호 5 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11400-11499/11408) |
+| BOJ 2311 | 왕복 여행 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2300-2399/2311) |
+| BOJ 11406 | 책 구매하기 2 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11400-11499/11406) |
+
+## 참고
+
+- [[Flow|네트워크 유량]]
+- [[Bellman-Ford|벨만-포드]]
+- [[SPFA|SPFA]]
+- [[MFMC|최대 유량 최소 컷 정리]]
+- [[Hungarian|헝가리안 알고리즘]]
+- [solved.ac, mcmf](https://solved.ac/problems/tags/mcmf)

@@ -1,0 +1,346 @@
+---
+title: "재귀 트리 DP / Rerooting"
+aliases: ["rerooting", "all root dp", "트리 재귀 DP", "전체 루트 DP"]
+tags: [algorithm, tree, dp, rerooting]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, rerooting"
+    url: "https://solved.ac/problems/tags/rerooting"
+    author: "solved.ac"
+---
+
+## 정의
+
+**Rerooting (재귀 트리 DP)** 은 **모든 정점을 루트로 하는 트리 DP 결과를 O(N)** 에 구하는 기법. 두 번의 DFS 로 "루트 v 에서 서브트리 DP" → "루트 v 에서 전체 트리 DP" 를 모든 v 에 대해 계산.
+
+대표 응용: "정점 v 를 루트로 한 트리의 높이", "v 에서 모든 정점까지 거리 합", "v 를 루트로 한 서브트리 개수" 등을 모든 v 에 대해 O(N) 에 계산.
+
+## 문제 상황과 동기
+
+"모든 정점을 루트로 했을 때의 트리 DP 값" 을 구하려면:
+
+- **naive**: 각 정점마다 루트로 DFS → O(N^2) → N=10^5 면 불가능.
+- **rerooting**: DFS 두 번 → O(N). 첫 DFS 로 아래방향 (자식), 두 번째 DFS 로 위방향 (부모) 정보 갱신.
+
+핵심 통찰: *첫 DFS 에서 자식 방향 DP, 두 번째 DFS 에서 부모 정보를 자식에게 전달*. 각 정점은 "부모쪽 서브트리" 를 포함한 전체 트리 정보를 받음.
+
+PS / 실무 위치: BOJ 골드~플래티넘 (트리 DP), 네트워크 분석 (모든 노드 중심 메트릭).
+
+## 시각화
+
+```anim:rerooting
+{}
+```
+
+## 핵심 아이디어
+
+invariant:
+
+1. **DFS 1 (down)**: 정점 u 의 "아래방향" DP 값 계산. `dp_down[u] = f(dp_down[child1], dp_down[child2], ...)`.
+2. **DFS 2 (up)**: 정점 u 의 "위방향" DP 값 = 부모의 전체 DP 에서 u 서브트리를 제외한 값. `dp_up[u] = g(dp_up[parent], dp_down[siblings])`.
+3. **최종 답**: `answer[u] = combine(dp_down[u], dp_up[u])`.
+
+알고리즘 흐름:
+
+```text
+rerooting(root):
+    dfs_down(root, -1)    # 자식 방향 DP
+    dfs_up(root, -1, 0)   # 부모 방향 DP
+    for u in 1..N:
+        answer[u] = combine(dp_down[u], dp_up[u])
+```
+
+## 알고리즘
+
+```text
+dfs_down(u, parent):
+    dp_down[u] = base_value
+    for v in children(u):
+        dfs_down(v, u)
+        dp_down[u] = merge(dp_down[u], dp_down[v])
+
+dfs_up(u, parent, parent_contribution):
+    dp_up[u] = parent_contribution
+    
+    # 자식 v 에게 전달할 "형제들 + 부모" 기여도 계산
+    prefix = [base], suffix = [base]
+    children = [v for v in adj[u] if v != parent]
+    
+    for i in range(len(children)):
+        prefix[i+1] = merge(prefix[i], dp_down[children[i]])
+    for i in range(len(children)-1, -1, -1):
+        suffix[i] = merge(suffix[i+1], dp_down[children[i]])
+    
+    for i, v in enumerate(children):
+        contribution = merge(dp_up[u], merge(prefix[i], suffix[i+1]))
+        dfs_up(v, u, contribution)
+```
+
+prefix/suffix 로 "v 를 제외한 형제들" 의 DP 값을 O(1) 에 계산.
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Rerooting: 모든 루트에 대한 트리 높이, O(N)
+#include <bits/stdc++.h>
+using namespace std;
+
+vector<int> adj[100005];
+int dp_down[100005], dp_up[100005], ans[100005];
+
+void dfs_down(int u, int p) {
+    dp_down[u] = 0;
+    for (int v : adj[u]) {
+        if (v == p) continue;
+        dfs_down(v, u);
+        dp_down[u] = max(dp_down[u], dp_down[v] + 1);
+    }
+}
+
+void dfs_up(int u, int p, int parent_val) {
+    dp_up[u] = parent_val;
+    ans[u] = max(dp_down[u], dp_up[u]);
+    
+    vector<int> children;
+    for (int v : adj[u]) {
+        if (v != p) children.push_back(v);
+    }
+    
+    int k = children.size();
+    vector<int> prefix(k + 1, 0), suffix(k + 1, 0);
+    for (int i = 0; i < k; i++)
+        prefix[i+1] = max(prefix[i], dp_down[children[i]] + 1);
+    for (int i = k - 1; i >= 0; i--)
+        suffix[i] = max(suffix[i+1], dp_down[children[i]] + 1);
+    
+    for (int i = 0; i < k; i++) {
+        int v = children[i];
+        int contribution = max({dp_up[u] + 1, prefix[i] + 1, suffix[i+1] + 1});
+        dfs_up(v, u, contribution);
+    }
+}
+
+int main() {
+    int n; cin >> n;
+    for (int i = 0; i < n - 1; i++) {
+        int u, v; cin >> u >> v;
+        adj[u].push_back(v);
+        adj[v].push_back(u);
+    }
+    
+    dfs_down(1, 0);
+    dfs_up(1, 0, 0);
+    
+    for (int i = 1; i <= n; i++)
+        cout << "ans[" << i << "] = " << ans[i] << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Rerooting: 모든 루트 트리 높이
+import sys
+sys.setrecursionlimit(300000)
+
+N = int(input())
+adj = [[] for _ in range(N + 1)]
+for _ in range(N - 1):
+    u, v = map(int, input().split())
+    adj[u].append(v)
+    adj[v].append(u)
+
+dp_down = [0] * (N + 1)
+dp_up = [0] * (N + 1)
+ans = [0] * (N + 1)
+
+def dfs_down(u, p):
+    dp_down[u] = 0
+    for v in adj[u]:
+        if v == p:
+            continue
+        dfs_down(v, u)
+        dp_down[u] = max(dp_down[u], dp_down[v] + 1)
+
+def dfs_up(u, p, parent_val):
+    dp_up[u] = parent_val
+    ans[u] = max(dp_down[u], dp_up[u])
+    
+    children = [v for v in adj[u] if v != p]
+    k = len(children)
+    prefix = [0] * (k + 1)
+    suffix = [0] * (k + 1)
+    
+    for i in range(k):
+        prefix[i+1] = max(prefix[i], dp_down[children[i]] + 1)
+    for i in range(k - 1, -1, -1):
+        suffix[i] = max(suffix[i+1], dp_down[children[i]] + 1)
+    
+    for i, v in enumerate(children):
+        contribution = max(dp_up[u] + 1, prefix[i] + 1, suffix[i+1] + 1)
+        dfs_up(v, u, contribution)
+
+dfs_down(1, 0)
+dfs_up(1, 0, 0)
+
+for i in range(1, N + 1):
+    print(f"ans[{i}] = {ans[i]}")`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// Java Rerooting
+import java.util.*;
+import java.io.*;
+
+public class Main {
+    static List<Integer>[] adj;
+    static int[] dpDown, dpUp, ans;
+    static int N;
+    
+    static void dfsDown(int u, int p) {
+        dpDown[u] = 0;
+        for (int v : adj[u]) {
+            if (v == p) continue;
+            dfsDown(v, u);
+            dpDown[u] = Math.max(dpDown[u], dpDown[v] + 1);
+        }
+    }
+    
+    static void dfsUp(int u, int p, int parentVal) {
+        dpUp[u] = parentVal;
+        ans[u] = Math.max(dpDown[u], dpUp[u]);
+        
+        List<Integer> children = new ArrayList<>();
+        for (int v : adj[u]) {
+            if (v != p) children.add(v);
+        }
+        
+        int k = children.size();
+        int[] prefix = new int[k + 1];
+        int[] suffix = new int[k + 1];
+        
+        for (int i = 0; i < k; i++)
+            prefix[i+1] = Math.max(prefix[i], dpDown[children.get(i)] + 1);
+        for (int i = k - 1; i >= 0; i--)
+            suffix[i] = Math.max(suffix[i+1], dpDown[children.get(i)] + 1);
+        
+        for (int i = 0; i < k; i++) {
+            int v = children.get(i);
+            int contribution = Math.max(Math.max(dpUp[u] + 1, prefix[i] + 1), suffix[i+1] + 1);
+            dfsUp(v, u, contribution);
+        }
+    }
+    
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        N = Integer.parseInt(br.readLine());
+        adj = new ArrayList[N + 1];
+        for (int i = 0; i <= N; i++) adj[i] = new ArrayList<>();
+        dpDown = new int[N + 1];
+        dpUp = new int[N + 1];
+        ans = new int[N + 1];
+        
+        for (int i = 0; i < N - 1; i++) {
+            StringTokenizer st = new StringTokenizer(br.readLine());
+            int u = Integer.parseInt(st.nextToken());
+            int v = Integer.parseInt(st.nextToken());
+            adj[u].add(v);
+            adj[v].add(u);
+        }
+        
+        dfsDown(1, 0);
+        dfsUp(1, 0, 0);
+        
+        for (int i = 1; i <= N; i++)
+            System.out.println("ans[" + i + "] = " + ans[i]);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "5개 정점 트리",
+      input: `5
+1 2
+1 3
+2 4
+2 5`,
+      output: `ans[1] = 2
+ans[2] = 2
+ans[3] = 3
+ans[4] = 3
+ans[5] = 3`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **시간** | O(N) |
+| **공간** | O(N) |
+| **DFS 횟수** | 2회 |
+
+## 응용 패턴
+
+### 1. 트리의 지름 (모든 루트)
+
+각 정점 v 를 루트로 한 트리의 지름 = max(자식쪽 최대 2개 경로 합, 부모쪽 + 자식쪽 최대 경로).
+
+### 2. 거리 합
+
+정점 v 에서 모든 정점까지 거리 합. DFS 1 에서 자식 서브트리 거리 합, DFS 2 에서 부모쪽 거리 합 전달.
+
+### 3. 서브트리 개수
+
+v 를 루트로 한 트리에서 크기 k 이하 서브트리 개수. DFS 1 에서 자식 서브트리 카운팅, DFS 2 에서 부모쪽 서브트리 포함.
+
+## 변형
+
+### Weighted Rerooting
+
+간선 가중치가 있을 때도 동일. DP 값에 가중치 반영.
+
+### Multiple DP Values
+
+정점마다 여러 DP 값 (예: 최대, 최소, 합) 을 동시에 계산 가능. prefix/suffix 를 DP 값마다 분리.
+
+## 함정
+
+### 1. prefix/suffix 배열 크기
+
+자식이 k 개면 prefix/suffix 는 k+1 크기. 초기값 주의.
+
+### 2. base value
+
+DP 의 초기값 (merge 의 항등원) 을 정확히 설정. 예: max → 0 또는 -∞, sum → 0.
+
+### 3. contribution 계산
+
+자식 v 에게 전달할 "형제들 + 부모" 기여도는 `merge(dp_up[u], merge(prefix[i], suffix[i+1]))`. v 자신을 제외.
+
+### 4. parent 체크
+
+DFS 2 에서 부모를 자식으로 착각하지 않도록 `v != p` 체크 필수.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 15681 | 트리와 쿼리 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/15600-15699/15681) |
+| BOJ 1167 | 트리의 지름 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1100-1199/1167) |
+| BOJ 2213 | 트리의 독립집합 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2200-2299/2213) |
+| BOJ 1693 | 트리 색칠하기 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1600-1699/1693) |
+
+## 참고
+
+- [[Tree DP|트리 DP]]
+- [[LCA|최소 공통 조상]]
+- [[Centroid Decomposition|중심 분해]]
+- [[Heavy-Light Decomposition|헤비-라이트 분해]]
+- [solved.ac, rerooting](https://solved.ac/problems/tags/rerooting)

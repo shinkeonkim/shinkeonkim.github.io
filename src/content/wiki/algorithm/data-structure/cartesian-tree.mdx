@@ -1,0 +1,353 @@
+---
+title: "카테시안 트리 (Cartesian Tree)"
+aliases: ["cartesian tree", "카테시안 트리", "Treap (배열)"]
+tags: [algorithm, data-structure, cartesian-tree, tree, rmq]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, cartesian_tree"
+    url: "https://solved.ac/problems/tags/cartesian_tree"
+    author: "solved.ac"
+  - title: "CP-Algorithms, Cartesian Tree"
+    url: "https://cp-algorithms.com/data_structures/cartesian_tree.html"
+    author: "cp-algorithms.com"
+---
+
+## 정의
+
+**카테시안 트리 (Cartesian Tree)** 는 배열 a[0..N-1] 로부터 만드는 이진 트리로, 다음 두 성질을 동시에 만족:
+
+1. **In-order 순회 = 원래 배열 순서** (BST의 key 순서)
+2. **Heap 성질**: 각 노드의 값이 그 서브트리 내 최소(또는 최대)
+
+결과적으로 루트는 배열의 전역 최솟값, 각 서브트리의 루트는 해당 구간의 최솟값. **RMQ (Range Minimum Query)** 를 **LCA (Lowest Common Ancestor)** 로 변환하거나, 구간 DP / 분할 정복의 재귀 구조를 트리로 시각화할 때 사용.
+
+1980년대 Jean Vuillemin이 정의, PS에서는 RMQ-LCA 등가성과 함께 2000년대 중반부터 활용.
+
+## 문제 상황과 동기
+
+배열 a[]가 주어졌을 때:
+
+- **RMQ 쿼리** "구간 [l, r]의 최솟값"을 O(log N)으로 처리하고 싶다.
+- **naive**: Sparse Table O(N log N) 전처리 + O(1) 쿼리 또는 세그트리 O(N) + O(log N).
+- **Cartesian Tree**: O(N) 빌드 + LCA O(log N) 또는 Sparse Table on LCA O(1).
+
+핵심 통찰: *배열을 트리로 변환하면 RMQ(l, r) = a[LCA(l, r)]*. LCA는 이미 O(log N) 알고리즘이 많으므로 재사용 가능.
+
+추가 응용: 히스토그램에서 최대 직사각형 (분할 정복 구조), 괄호 시퀀스 매칭, 배열의 재귀적 분할 정복 시각화.
+
+## 시각화
+
+```anim:cartesian-tree
+{}
+```
+
+## 핵심 아이디어
+
+invariant: *루트 = 구간 최솟값, 왼쪽 서브트리 = 루트 왼쪽 원소들, 오른쪽 = 오른쪽 원소들*. 재귀 분할.
+
+```text
+build(l, r):
+    if l > r: return null
+    m = argmin(a[l..r])   # 구간 최솟값 인덱스
+    node = new Node(a[m])
+    node.left = build(l, m-1)
+    node.right = build(m+1, r)
+    return node
+```
+
+naive O(N^2), **스택 최적화** 로 O(N):
+
+```text
+stack = []
+for i = 0..N-1:
+    last = null
+    while stack not empty and a[stack.top] >= a[i]:
+        last = stack.pop()
+    if stack not empty:
+        stack.top.right = node(i)
+    if last:
+        node(i).left = last
+    stack.push(node(i))
+root = stack.bottom
+```
+
+RMQ(l, r) = a[LCA(노드_l, 노드_r)]. LCA는 Binary Lifting / Sparse Table 로 O(log N) 또는 O(1).
+
+## 알고리즘
+
+```text
+# O(N) 빌드 (스택)
+build_cartesian(a):
+    stack = []
+    for i in 0..N-1:
+        last = null
+        while stack not empty and a[stack.top.idx] >= a[i]:
+            last = stack.pop()
+        node = Node(i, a[i])
+        if stack:
+            stack.top.right = node
+        if last:
+            node.left = last
+        stack.push(node)
+    return stack[0]   # 루트
+
+# RMQ via LCA
+RMQ(l, r):
+    return a[LCA(node_l, node_r).idx]
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Cartesian Tree: O(N) 빌드, RMQ via naive LCA O(log N)
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Node {
+    int idx, val;
+    Node *left = nullptr, *right = nullptr;
+    Node(int i, int v) : idx(i), val(v) {}
+};
+
+Node* buildCartesian(const vector<int>& a) {
+    stack<Node*> st;
+    for (int i = 0; i < (int)a.size(); i++) {
+        Node* last = nullptr;
+        while (!st.empty() && a[st.top()->idx] >= a[i]) {
+            last = st.top(); st.pop();
+        }
+        Node* node = new Node(i, a[i]);
+        if (!st.empty()) st.top()->right = node;
+        if (last) node->left = last;
+        st.push(node);
+    }
+    // 루트는 스택 맨 아래
+    while (st.size() > 1) st.pop();
+    return st.empty() ? nullptr : st.top();
+}
+
+// naive LCA (부모 포인터 없이 재귀)
+Node* LCA(Node* root, int l, int r) {
+    if (!root || root->idx < l || root->idx > r) return nullptr;
+    if (l <= root->idx && root->idx <= r) return root;
+    Node* left_lca = LCA(root->left, l, r);
+    Node* right_lca = LCA(root->right, l, r);
+    if (left_lca && right_lca) return root;
+    return left_lca ? left_lca : right_lca;
+}
+
+int RMQ(Node* root, int l, int r) {
+    Node* lca = LCA(root, l, r);
+    return lca ? lca->val : INT_MAX;
+}
+
+int main() {
+    int n, q; cin >> n >> q;
+    vector<int> a(n);
+    for (auto& v : a) cin >> v;
+    Node* root = buildCartesian(a);
+    while (q--) {
+        int l, r; cin >> l >> r;
+        cout << RMQ(root, l - 1, r - 1) << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Cartesian Tree: 스택 빌드 O(N), RMQ via LCA
+import sys
+input = sys.stdin.readline
+
+class Node:
+    def __init__(self, idx, val):
+        self.idx = idx
+        self.val = val
+        self.left = None
+        self.right = None
+
+def build_cartesian(a):
+    stack = []
+    for i, v in enumerate(a):
+        last = None
+        while stack and a[stack[-1].idx] >= v:
+            last = stack.pop()
+        node = Node(i, v)
+        if stack:
+            stack[-1].right = node
+        if last:
+            node.left = last
+        stack.append(node)
+    return stack[0] if stack else None
+
+def LCA(root, l, r):
+    if not root or root.idx < l or root.idx > r:
+        return None
+    if l <= root.idx <= r:
+        return root
+    left_lca = LCA(root.left, l, r)
+    right_lca = LCA(root.right, l, r)
+    if left_lca and right_lca:
+        return root
+    return left_lca if left_lca else right_lca
+
+def RMQ(root, l, r):
+    lca = LCA(root, l, r)
+    return lca.val if lca else float('inf')
+
+n, q = map(int, input().split())
+a = list(map(int, input().split()))
+root = build_cartesian(a)
+out = []
+for _ in range(q):
+    l, r = map(int, input().split())
+    out.append(str(RMQ(root, l - 1, r - 1)))
+print("\\n".join(out))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// Cartesian Tree: Stack 빌드 O(N), RMQ via LCA
+import java.util.*;
+import java.io.*;
+public class Main {
+    static class Node {
+        int idx, val;
+        Node left = null, right = null;
+        Node(int i, int v) { idx = i; val = v; }
+    }
+
+    static Node buildCartesian(int[] a) {
+        Stack<Node> st = new Stack<>();
+        for (int i = 0; i < a.length; i++) {
+            Node last = null;
+            while (!st.isEmpty() && a[st.peek().idx] >= a[i]) {
+                last = st.pop();
+            }
+            Node node = new Node(i, a[i]);
+            if (!st.isEmpty()) st.peek().right = node;
+            if (last != null) node.left = last;
+            st.push(node);
+        }
+        while (st.size() > 1) st.pop();
+        return st.isEmpty() ? null : st.peek();
+    }
+
+    static Node LCA(Node root, int l, int r) {
+        if (root == null || root.idx < l || root.idx > r) return null;
+        if (l <= root.idx && root.idx <= r) return root;
+        Node left_lca = LCA(root.left, l, r);
+        Node right_lca = LCA(root.right, l, r);
+        if (left_lca != null && right_lca != null) return root;
+        return left_lca != null ? left_lca : right_lca;
+    }
+
+    static int RMQ(Node root, int l, int r) {
+        Node lca = LCA(root, l, r);
+        return lca != null ? lca.val : Integer.MAX_VALUE;
+    }
+
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        StringTokenizer st = new StringTokenizer(br.readLine());
+        int n = Integer.parseInt(st.nextToken());
+        int q = Integer.parseInt(st.nextToken());
+        int[] a = new int[n];
+        st = new StringTokenizer(br.readLine());
+        for (int i = 0; i < n; i++) a[i] = Integer.parseInt(st.nextToken());
+        Node root = buildCartesian(a);
+        StringBuilder sb = new StringBuilder();
+        while (q-- > 0) {
+            st = new StringTokenizer(br.readLine());
+            int l = Integer.parseInt(st.nextToken()) - 1;
+            int r = Integer.parseInt(st.nextToken()) - 1;
+            sb.append(RMQ(root, l, r)).append('\\n');
+        }
+        System.out.print(sb);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본",
+      input: `5 3
+3 1 4 2 5
+1 3
+2 5
+1 5`,
+      output: `1
+1
+1`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **빌드 (스택)** | O(N) 시간, O(N) 공간 |
+| **빌드 (naive 재귀)** | O(N^2) 최악 (정렬 배열) |
+| **RMQ (naive LCA)** | O(N) 최악 |
+| **RMQ (Binary Lifting LCA)** | O(log N) |
+| **RMQ (Sparse Table LCA)** | O(1) after O(N log N) 전처리 |
+
+스택 빌드는 각 원소 push/pop 1회씩, 총 O(N). RMQ는 LCA 방법에 따라 달라짐.
+
+## 변형 / 활용
+
+### 1. RMQ-LCA 등가
+
+RMQ(l, r) = a[LCA(l, r)]. LCA 문제를 RMQ로 변환 (Euler Tour + Sparse Table) 또는 그 역.
+
+### 2. 히스토그램 최대 직사각형
+
+분할 정복: 최솟값을 기준으로 좌우 분할. Cartesian Tree로 재귀 구조 명시.
+
+### 3. Treap (랜덤 우선순위)
+
+배열 대신 삽입 순서 + 랜덤 우선순위로 Cartesian Tree. BST + Heap.
+
+### 4. 괄호 시퀀스
+
+올바른 괄호는 Cartesian Tree와 bijection. 트리 ↔ 괄호 변환.
+
+## 함정
+
+### 1. 중복 최솟값
+
+a[i] = a[j] 인 경우 "≥" 연산자로 왼쪽 우선 또는 오른쪽 우선 일관성 필요. 구현에서 `>=` vs `>` 선택.
+
+### 2. 1-indexed vs 0-indexed
+
+노드 idx는 0-indexed, 쿼리 입력은 1-indexed. 변환 필수.
+
+### 3. LCA 최적화 미비
+
+naive LCA O(N)이면 RMQ O(N)이 되어 의미 없음. Binary Lifting / Sparse Table 필수.
+
+### 4. 스택 빌드 역순 연결
+
+스택 맨 아래가 루트. `stack[0]` 리턴 전에 스택 정리 필요.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 1738 | 골목길 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1700-1799/1738) |
+| BOJ 6549 | 히스토그램에서 가장 큰 직사각형 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/6500-6599/6549) |
+| BOJ 1289 | 트리의 가중치 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1200-1299/1289) |
+
+## 참고
+
+- [[RMQ|Range Minimum Query]]
+- [[LCA|Lowest Common Ancestor]]
+- [[Sparse Table|희소 배열]]
+- [[Segtree|세그먼트 트리]]
+- [[Treap]] (Cartesian Tree의 확률적 변형)
+- [solved.ac, cartesian_tree](https://solved.ac/problems/tags/cartesian_tree)
