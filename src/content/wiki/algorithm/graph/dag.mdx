@@ -1,0 +1,338 @@
+---
+title: "방향 비순환 그래프 (DAG)"
+aliases: ["dag", "directed acyclic graph", "DAG", "방향 비순환 그래프"]
+tags: [algorithm, graph, dag, topological-sorting]
+updated: 2026-06-24
+references:
+  - title: "CLRS, Introduction to Algorithms (3rd ed.), Ch 22"
+    url: "https://mitpress.mit.edu/9780262033848/introduction-to-algorithms/"
+    author: "Cormen, Leiserson, Rivest, Stein"
+  - title: "solved.ac, dag"
+    url: "https://solved.ac/problems/tags/dag"
+    author: "solved.ac"
+---
+
+## 정의
+
+**방향 비순환 그래프 (Directed Acyclic Graph, DAG)** 는 사이클이 없는 방향 그래프. 어떤 정점에서 출발해도 자기 자신으로 돌아오는 경로가 없다.
+
+DAG 는 위상 정렬이 가능하며, DP, 일정 관리, 의존성 해결 등 광범위하게 쓰인다.
+
+## 문제 상황과 동기
+
+선수 과목, 빌드 의존성, 프로젝트 작업 순서, 상속 관계, Git commit 히스토리 등 **일방향 의존** 이 있고 **순환하면 안 되는** 구조.
+
+- **naive**: 그래프를 순회하며 사이클 체크. O(V + E) 이지만 구조적 속성 미활용.
+- **DAG 인식**: 위상 정렬, DP, condensation 등 알고리즘이 O(V + E) 에 작동.
+
+핵심 통찰: **DAG 는 partial order** 를 나타내며, 위상 순서는 그 total order extension. DP 는 의존성 순서로 자연스럽게 전개.
+
+## 시각화
+
+```anim:dag
+{}
+```
+
+## 핵심 아이디어
+
+### 속성
+
+1. **위상 정렬 존재**: 모든 간선 u → v 에서 u 가 v 보다 앞에 오는 순서.
+2. **사이클 없음**: DFS 로 back edge 가 없음을 확인.
+3. **DP 적용 가능**: 위상 순서로 dp[v] 를 채우면 의존성 만족.
+4. **condensation**: 임의 방향 그래프의 SCC 를 축약하면 DAG.
+
+### 판별
+
+DFS 중 **back edge** (재귀 스택에 있는 정점으로 가는 간선) 가 있으면 사이클, 없으면 DAG.
+
+또는 위상 정렬 시도 시 결과 개수가 V 미만이면 사이클 존재.
+
+## 알고리즘
+
+### DAG 판별 (DFS)
+
+```text
+is_dag(G):
+    visited = [false] × V
+    rec_stack = [false] × V
+    for v in V:
+        if not visited[v]:
+            if has_cycle_dfs(v):
+                return false
+    return true
+
+has_cycle_dfs(v):
+    visited[v] = true
+    rec_stack[v] = true
+    for u in neighbors[v]:
+        if rec_stack[u]:
+            return true          # back edge
+        if not visited[u]:
+            if has_cycle_dfs(u):
+                return true
+    rec_stack[v] = false
+    return false
+```
+
+### DP on DAG (최장 경로)
+
+```text
+longest_path_dag(G, start):
+    topo = topological_sort(G)
+    dp[v] = -∞ for all v
+    dp[start] = 0
+    for v in topo:
+        if dp[v] = -∞: continue
+        for (v, u, w) in edges:
+            dp[u] = max(dp[u], dp[v] + w)
+    return max(dp)
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++ (DAG 판별)",
+      code: `// DFS back edge 체크로 DAG 판별
+#include <bits/stdc++.h>
+using namespace std;
+vector<vector<int>> adj;
+vector<bool> vis, rec;
+bool has_cycle(int u) {
+    vis[u] = rec[u] = true;
+    for (int v : adj[u]) {
+        if (rec[v]) return true;       // back edge
+        if (!vis[v] && has_cycle(v)) return true;
+    }
+    rec[u] = false;
+    return false;
+}
+int main() {
+    int v, e; cin >> v >> e;
+    adj.resize(v + 1);
+    vis.assign(v + 1, false);
+    rec.assign(v + 1, false);
+    for (int i = 0; i < e; i++) {
+        int a, b; cin >> a >> b;
+        adj[a].push_back(b);
+    }
+    bool cycle = false;
+    for (int i = 1; i <= v; i++)
+        if (!vis[i] && has_cycle(i)) { cycle = true; break; }
+    cout << (cycle ? "CYCLE" : "DAG") << "\\n";
+}`,
+    },
+    {
+      language: "cpp",
+      label: "C++ (DP 최장 경로)",
+      code: `// DAG 에서 가중치 최장 경로 (위상 정렬 + DP)
+#include <bits/stdc++.h>
+using namespace std;
+int main() {
+    int v, e; cin >> v >> e;
+    vector<vector<pair<int, int>>> adj(v + 1);
+    vector<int> indeg(v + 1, 0);
+    for (int i = 0; i < e; i++) {
+        int a, b, w; cin >> a >> b >> w;
+        adj[a].push_back({b, w});
+        indeg[b]++;
+    }
+    queue<int> Q;
+    for (int i = 1; i <= v; i++)
+        if (!indeg[i]) Q.push(i);
+    vector<int> topo;
+    while (!Q.empty()) {
+        int u = Q.front(); Q.pop();
+        topo.push_back(u);
+        for (auto [w, _] : adj[u])
+            if (--indeg[w] == 0) Q.push(w);
+    }
+    vector<long long> dp(v + 1, LLONG_MIN);
+    dp[1] = 0;    // start from 1
+    for (int u : topo) {
+        if (dp[u] == LLONG_MIN) continue;
+        for (auto [w, c] : adj[u])
+            dp[w] = max(dp[w], dp[u] + c);
+    }
+    long long ans = *max_element(dp.begin(), dp.end());
+    cout << (ans == LLONG_MIN ? -1 : ans) << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python (DAG 판별)",
+      code: `# DFS back edge 체크
+import sys
+sys.setrecursionlimit(200005)
+input = sys.stdin.readline
+
+v, e = map(int, input().split())
+adj = [[] for _ in range(v + 1)]
+for _ in range(e):
+    a, b = map(int, input().split())
+    adj[a].append(b)
+
+vis = [False] * (v + 1)
+rec = [False] * (v + 1)
+cycle = False
+
+def dfs(u):
+    global cycle
+    vis[u] = rec[u] = True
+    for w in adj[u]:
+        if rec[w]:
+            cycle = True
+            return
+        if not vis[w]:
+            dfs(w)
+    rec[u] = False
+
+for i in range(1, v + 1):
+    if not vis[i]:
+        dfs(i)
+        if cycle:
+            break
+
+print("CYCLE" if cycle else "DAG")`,
+    },
+    {
+      language: "java",
+      label: "Java (DAG 판별)",
+      code: `// DFS back edge 로 DAG 판별
+import java.util.*;
+import java.io.*;
+public class Main {
+    static List<List<Integer>> adj;
+    static boolean[] vis, rec;
+    static boolean hasCycle(int u) {
+        vis[u] = rec[u] = true;
+        for (int v : adj.get(u)) {
+            if (rec[v]) return true;
+            if (!vis[v] && hasCycle(v)) return true;
+        }
+        rec[u] = false;
+        return false;
+    }
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        StringTokenizer st = new StringTokenizer(br.readLine());
+        int v = Integer.parseInt(st.nextToken());
+        int e = Integer.parseInt(st.nextToken());
+        adj = new ArrayList<>();
+        for (int i = 0; i <= v; i++) adj.add(new ArrayList<>());
+        vis = new boolean[v + 1];
+        rec = new boolean[v + 1];
+        for (int i = 0; i < e; i++) {
+            st = new StringTokenizer(br.readLine());
+            int a = Integer.parseInt(st.nextToken());
+            int b = Integer.parseInt(st.nextToken());
+            adj.get(a).add(b);
+        }
+        boolean cycle = false;
+        for (int i = 1; i <= v; i++) {
+            if (!vis[i] && hasCycle(i)) {
+                cycle = true;
+                break;
+            }
+        }
+        System.out.println(cycle ? "CYCLE" : "DAG");
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "DAG",
+      input: `4 4
+1 2
+1 3
+2 4
+3 4`,
+      output: `DAG`,
+    },
+    {
+      label: "사이클",
+      input: `3 3
+1 2
+2 3
+3 1`,
+      output: `CYCLE`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **DAG 판별 (DFS)** | O(V + E) |
+| **위상 정렬** | O(V + E) |
+| **DP on DAG** | O(V + E) |
+| **공간** | O(V + E) |
+
+## 변형 / 활용
+
+### 1. 최단/최장 경로
+
+일반 그래프는 Dijkstra / Bellman-Ford 가 필요하지만, DAG 는 위상 순서로 O(V + E) DP 가능.
+
+음수 간선도 허용 (사이클이 없으므로).
+
+### 2. 경로 개수
+
+```
+dp[v] = Σ dp[u] for all u → v
+```
+
+시작점 dp[start] = 1, 끝점까지 경로 개수.
+
+### 3. Critical Path Method (CPM)
+
+작업 일정 그래프. 최장 경로가 프로젝트 최소 완료 시간, 그 경로가 critical path.
+
+### 4. Condensation DAG
+
+임의 방향 그래프 G 의 SCC 를 하나로 축약하면 DAG. SCC 간 의존 관계 분석.
+
+### 5. Reachability / Transitive Closure
+
+DAG 에서 u → v 경로 존재 여부. 위상 순서로 DP. O(V + E) ~ O(V²) (간선 밀도).
+
+## 함정
+
+### 1. 사이클 미감지
+
+DAG 임을 가정하고 위상 정렬만 돌리면 사이클 있을 때 잘못된 결과. 반드시 사이클 체크.
+
+### 2. disconnected DAG
+
+여러 컴포넌트가 있으면 모든 컴포넌트 순회. DFS / 위상 정렬 시작점 모두 체크.
+
+### 3. DP 초기화
+
+`dp[v] = -∞` 로 초기화 후 reachable 한 정점만 갱신. unreachable 은 제외.
+
+### 4. 음수 간선
+
+DAG 는 음수 간선 허용 (사이클 없음). 최장 경로는 음수 간선에서 min 으로 뒤집힌다는 점 주의.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 2252 | 줄 세우기 | 49.8% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2200-2299/2252) |
+| BOJ 1516 | 게임 개발 | 43.7% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1500-1599/1516) |
+| BOJ 1005 | ACM Craft | 33.2% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1005) |
+| BOJ 9470 | Strahler 순서 | 31.5% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9400-9499/9470) |
+
+## 참고
+
+- [[Topological Sorting|위상 정렬]]
+- [[SCC|강한 연결 요소]]
+- [[DFS|깊이 우선 탐색]]
+- [[DP|동적 계획법]]
+- [CLRS, Ch 22](https://mitpress.mit.edu/9780262033848/introduction-to-algorithms/)
+- [solved.ac, dag](https://solved.ac/problems/tags/dag)

@@ -1,0 +1,318 @@
+---
+title: "2-SAT (2-Satisfiability)"
+aliases: ["2-sat", "2-CNF", "투 샛", "two sat"]
+tags: [algorithm, graph, scc, 2-sat]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, 2_sat"
+    url: "https://solved.ac/problems/tags/2_sat"
+    author: "solved.ac"
+  - title: "Aspvall, Plass, Tarjan (1979), A Linear-Time Algorithm for Testing the Truth of Certain Quantified Boolean Formulas"
+    url: "https://doi.org/10.1016/S0019-9958(79)90002-4"
+    author: "Bengt Aspvall, Michael F. Plass, Robert E. Tarjan"
+---
+
+## 정의
+
+**2-SAT (2-Satisfiability)** 는 각 절(clause)이 정확히 두 리터럴(literal)의 OR 로 이루어진 CNF (Conjunctive Normal Form) 불 식의 만족 가능성을 판별하고, 해를 찾는 문제. Aspvall, Plass, Tarjan (1979) 이 **O(V + E) 선형 시간** SCC 기반 알고리즘을 제시.
+
+**입력 형태**: `(a OR b) AND (c OR d) AND ...` (각 절 2개 리터럴, 리터럴은 변수 또는 NOT 변수).
+
+3-SAT 은 NP-완전이지만, 2-SAT 은 P.
+
+## 문제 상황과 동기
+
+N 개 불 변수 `x1, x2, ..., xN` 과 M 개의 절 `(xi OR xj)` 형태가 주어진다. 모든 절을 참으로 만들 수 있는가? (AND 연결)
+
+- **naive**: 2^N 가지 전수 조사, N=10^5 면 불가능.
+- **2-SAT**: implication graph 구축 + SCC 로 O(N + M) 에 판별 + 해 구성.
+
+핵심 통찰: *`(A OR B)` = `(NOT A → B)` + `(NOT B → A)`*. 즉, OR 절을 **방향 그래프의 함의(implication)** 로 변환. xi 와 NOT xi 가 같은 SCC 에 있으면 모순.
+
+PS 에서 "조건 x 와 y 중 하나는 반드시 참" / "둘 다 참이면 안 됨" 같은 문제는 대부분 2-SAT 로 모델링 가능.
+
+## 시각화
+
+```anim:2-sat
+{}
+```
+
+## 핵심 아이디어
+
+### implication graph
+
+각 변수 xi 에 대해 **두 정점 xi 와 NOT xi** 를 만든다.
+
+절 `(A OR B)` 를 두 간선으로 변환:
+- `NOT A → B`
+- `NOT B → A`
+
+이유: A 가 거짓이면 B 는 반드시 참이어야 절이 성립. (B 거짓이면 A 참).
+
+### 모순 판별
+
+**정리 (Aspvall, Plass, Tarjan)**: implication graph 에서 어떤 xi 에 대해 `xi` 와 `NOT xi` 가 **같은 SCC** 에 있으면 해가 없다. 그렇지 않으면 해가 존재.
+
+이유: 같은 SCC 면 `xi → NOT xi` 경로와 `NOT xi → xi` 경로가 동시 존재. xi = true 면 NOT xi = true 모순, xi = false 도 모순.
+
+### 해 구성
+
+SCC 를 Tarjan / Kosaraju 로 위상 정렬. SCC 번호를 `scc[u]` 로 부른다. (위상 역순으로 번호가 매겨진다고 가정: 즉, SCC 번호 작을수록 위상적으로 뒤쪽).
+
+각 xi 에 대해:
+- `scc[xi] < scc[NOT xi]` 이면 xi = true
+- `scc[xi] > scc[NOT xi]` 이면 xi = false
+
+이 배정은 모든 함의를 만족시킨다.
+
+## 알고리즘
+
+```text
+Input: N 변수, M 절 (a_i OR b_i)
+Output: 만족 배정 또는 IMPOSSIBLE
+
+1. 그래프 G 에 정점 2N 개 (xi 와 NOT xi)
+2. 각 절 (A OR B) 에 대해
+     간선 NOT A → B
+     간선 NOT B → A
+3. G 에서 SCC 구하기 (Tarjan / Kosaraju)
+4. for i = 1..N:
+     if scc[xi] == scc[NOT xi]:
+         return IMPOSSIBLE
+5. for i = 1..N:
+     xi = (scc[xi] < scc[NOT xi])
+6. return assignment
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// 2-SAT with Tarjan SCC, O(N + M)
+// 정점 2*N: [0..N-1] = xi, [N..2N-1] = NOT xi
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TwoSAT {
+    int N;
+    vector<vector<int>> gr, grt;
+    vector<int> comp, order;
+    vector<bool> vis;
+    
+    TwoSAT(int n) : N(n), gr(2*n), grt(2*n), comp(2*n, -1), vis(2*n) {}
+    
+    // 변수 x 의 not 정점
+    int neg(int x) { return x >= N ? x - N : x + N; }
+    
+    // 절 (a OR b) 추가
+    void add_clause(int a, int b) {
+        gr[neg(a)].push_back(b);
+        gr[neg(b)].push_back(a);
+        grt[b].push_back(neg(a));
+        grt[a].push_back(neg(b));
+    }
+    
+    void dfs1(int u) {
+        vis[u] = true;
+        for (int v : gr[u]) if (!vis[v]) dfs1(v);
+        order.push_back(u);
+    }
+    
+    void dfs2(int u, int c) {
+        comp[u] = c;
+        for (int v : grt[u]) if (comp[v] == -1) dfs2(v, c);
+    }
+    
+    // 해 존재 여부 판별 + 배정 (true/false)
+    vector<int> solve() {
+        for (int i = 0; i < 2*N; i++) if (!vis[i]) dfs1(i);
+        reverse(order.begin(), order.end());
+        int c = 0;
+        for (int u : order) if (comp[u] == -1) dfs2(u, c++);
+        vector<int> ans(N);
+        for (int i = 0; i < N; i++) {
+            if (comp[i] == comp[neg(i)]) return {};
+            ans[i] = comp[i] > comp[neg(i)];
+        }
+        return ans;
+    }
+};
+
+int main() {
+    ios::sync_with_stdio(0); cin.tie(0);
+    int n, m; cin >> n >> m;
+    TwoSAT sat(n);
+    for (int i = 0; i < m; i++) {
+        int a, b; cin >> a >> b;
+        // 1-indexed, 음수면 NOT
+        int u = abs(a) - 1, v = abs(b) - 1;
+        if (a < 0) u += n;
+        if (b < 0) v += n;
+        sat.add_clause(u, v);
+    }
+    auto ans = sat.solve();
+    if (ans.empty()) cout << "IMPOSSIBLE\\n";
+    else {
+        for (int i = 0; i < n; i++) cout << ans[i] << " ";
+        cout << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# 2-SAT with Kosaraju SCC
+import sys
+sys.setrecursionlimit(500_000)
+input = sys.stdin.readline
+
+def two_sat_solve(N, clauses):
+    gr = [[] for _ in range(2*N)]
+    grt = [[] for _ in range(2*N)]
+    
+    def neg(x):
+        return x + N if x < N else x - N
+    
+    for a, b in clauses:
+        gr[neg(a)].append(b)
+        gr[neg(b)].append(a)
+        grt[b].append(neg(a))
+        grt[a].append(neg(b))
+    
+    vis = [False] * (2*N)
+    order = []
+    def dfs1(u):
+        vis[u] = True
+        for v in gr[u]:
+            if not vis[v]: dfs1(v)
+        order.append(u)
+    
+    for i in range(2*N):
+        if not vis[i]: dfs1(i)
+    
+    comp = [-1] * (2*N)
+    c = 0
+    def dfs2(u, cid):
+        comp[u] = cid
+        for v in grt[u]:
+            if comp[v] == -1: dfs2(v, cid)
+    
+    for u in reversed(order):
+        if comp[u] == -1:
+            dfs2(u, c)
+            c += 1
+    
+    ans = []
+    for i in range(N):
+        if comp[i] == comp[neg(i)]:
+            return None
+        ans.append(1 if comp[i] > comp[neg(i)] else 0)
+    return ans
+
+n, m = map(int, input().split())
+clauses = []
+for _ in range(m):
+    a, b = map(int, input().split())
+    # 1-indexed, 음수 = NOT
+    u = abs(a) - 1 if a > 0 else abs(a) - 1 + n
+    v = abs(b) - 1 if b > 0 else abs(b) - 1 + n
+    clauses.append((u, v))
+
+ans = two_sat_solve(n, clauses)
+if ans is None:
+    print("IMPOSSIBLE")
+else:
+    print(" ".join(map(str, ans)))`,
+    },
+  ]}
+  cases={[
+    {
+      label: "해 존재",
+      input: `3 4
+1 2
+-1 3
+-2 -3
+2 3`,
+      output: `1 1 1 `,
+    },
+    {
+      label: "해 없음",
+      input: `2 4
+1 2
+1 -2
+-1 2
+-1 -2`,
+      output: `IMPOSSIBLE`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **전처리 (그래프 구축)** | O(M) |
+| **SCC 계산** | O(N + M) |
+| **해 구성** | O(N) |
+| **전체** | O(N + M) |
+| **공간** | O(N + M) |
+
+3-SAT 은 NP-완전이지만, 2-SAT 은 **P**.
+
+## 변형 / 활용
+
+### XOR 절
+
+`xi XOR xj` = `(xi OR xj) AND (NOT xi OR NOT xj)` 형태로 2개 절로 분해.
+
+### 최소 참 개수
+
+해가 여러 개일 때 참인 변수 개수를 최소화: SCC 역순으로 변수를 false 우선 배정.
+
+### 의존성 / 우선순위
+
+특정 변수가 반드시 참이어야 한다면 `(xi OR xi)` 추가. 절 하나로 xi = true 강제.
+
+### PS 패턴
+
+- "N 명이 각자 둘 중 하나 선택, 조건 충돌" → 2-SAT
+- "간선 선택 중 하나는 반드시" → OR 절
+- "둘 다 선택하면 안 됨" → `(NOT a OR NOT b)`
+
+## 함정
+
+### 1. NOT 인덱싱
+
+xi 와 NOT xi 를 어떻게 인덱싱할지 일관성 필요. `[0..N-1]` = 변수, `[N..2N-1]` = NOT 로 통일하면 실수 줄어듬.
+
+### 2. SCC 번호 방향
+
+Tarjan / Kosaraju 의 SCC 번호 순서가 다를 수 있음. 위상 역순 (작은 번호 = 후순) 가정 필요. Kosaraju 는 역순으로 dfs2 를 돌리면 자동으로 맞음.
+
+### 3. 1-indexed 입력
+
+BOJ 문제는 1-indexed + 음수 = NOT. 변환 실수 주의.
+
+### 4. 해가 여러 개
+
+위 알고리즘은 *한 가지 해* 를 찾는다. 다른 해는 SCC 동치류 내에서 조정 가능. 최소/최대 참 개수 같은 부가 조건은 별도 로직.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 11280 | 2-SAT, 3 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11200-11299/11280) |
+| BOJ 11281 | 2-SAT, 4 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11200-11299/11281) |
+| BOJ 3648 | 아이돌 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/3600-3699/3648) |
+| BOJ 1739 | 도로 정비하기 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1700-1799/1739) |
+
+## 참고
+
+- [[SCC|강한 연결 요소]]
+- [[Tarjan SCC|타잔 SCC]]
+- [[Graph|그래프]]
+- [Aspvall, Plass, Tarjan (1979)](https://doi.org/10.1016/S0019-9958(79)90002-4)
+- [solved.ac, 2_sat](https://solved.ac/problems/tags/2_sat)

@@ -1,0 +1,281 @@
+---
+title: "오일러 투어 테크닉 (Euler Tour Technique)"
+aliases: ["euler tour", "오일러 투어", "ETT", "Euler Tour Technique"]
+tags: [algorithm, tree, euler-tour, flattening, range-query]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, euler_tour_technique"
+    url: "https://solved.ac/problems/tags/euler_tour_technique"
+    author: "solved.ac"
+---
+
+## 정의
+
+**오일러 투어 테크닉 (ETT, Euler Tour Technique)** 은 트리를 DFS 방문 순서로 펼쳐 **서브트리 쿼리를 구간 쿼리로 변환**하는 정형. 각 노드 u 의 in-time `tin[u]`, out-time `tout[u]` 를 기록하면, **u 의 서브트리 = 구간 `[tin[u], tout[u]]`** 로 표현되어 [[Segtree|세그먼트 트리]], [[Fenwick|펜윅 트리]] 등 구간 자료구조에서 O(log N) 쿼리.
+
+## 문제 상황과 동기
+
+트리에서 "u 의 서브트리에 속한 모든 노드의 합 / 최댓값 / 개수" 를 Q 번 묻는다.
+
+- **naive**: 매 쿼리마다 서브트리 전체 DFS. O(N · Q). N=Q=10^5 면 10^10.
+- **ETT + Segtree**: O(N) 전처리 + O(log N) 쿼리. 총 O(N + Q log N).
+
+핵심 통찰: *트리의 서브트리는 DFS 방문 순서에서 연속 구간*. 따라서 트리 문제를 배열 문제로 환원.
+
+## 시각화
+
+```anim:euler-tour-technique
+{}
+```
+
+## 핵심 아이디어
+
+invariant: DFS 방문 순서대로 노드를 나열하면, *u 의 서브트리 = [tin[u], tout[u]]*.
+
+```text
+tin[u] = DFS 진입 시각
+tout[u] = DFS 퇴각 시각
+
+is_ancestor(u, v) = tin[u] <= tin[v] && tout[v] <= tout[u]
+subtree_range(u) = [tin[u], tout[u]]
+```
+
+확장:
+
+- **서브트리 갱신**: 구간 갱신 (lazy propagation).
+- **경로 쿼리 + HLD**: [[Heavy-Light Decomposition|HLD]] 와 결합하면 경로도 O(log^2 N).
+- **LCA + RMQ**: 오일러 투어 순서 위에 depth 배열로 [[LCA|LCA]] 를 O(1) RMQ 로.
+
+## 알고리즘
+
+```text
+dfs(u, parent):
+    tin[u] = timer++
+    euler[timer - 1] = u             # in-time 에 노드 기록
+    for v in adj[u]:
+        if v != parent:
+            dfs(v, u)
+    tout[u] = timer++
+    euler[timer - 1] = u             # out-time 에 노드 기록 (선택)
+
+build_euler_tour(root):
+    timer = 0
+    dfs(root, -1)
+
+subtree_query(u):
+    # u 의 서브트리 노드들은 euler[tin[u]..tout[u]] 에 모두 포함
+    return range_query(segtree, tin[u], tout[u])
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Euler Tour + 서브트리 합 쿼리 (Fenwick)
+#include <bits/stdc++.h>
+using namespace std;
+const int MAXN = 1e5;
+vector<int> adj[MAXN];
+int tin[MAXN], tout[MAXN], timer = 0;
+long long val[MAXN], fenwick[MAXN * 2 + 5];
+int N;
+
+void update(int i, long long delta) {
+    for (; i <= 2 * N; i += i & -i) fenwick[i] += delta;
+}
+
+long long query(int i) {
+    long long res = 0;
+    for (; i > 0; i -= i & -i) res += fenwick[i];
+    return res;
+}
+
+void dfs(int u, int p) {
+    tin[u] = ++timer;
+    update(tin[u], val[u]);
+    for (int v : adj[u]) if (v != p) dfs(v, u);
+    tout[u] = timer;
+}
+
+int main() {
+    int Q; cin >> N >> Q;
+    for (int i = 0; i < N; i++) cin >> val[i];
+    for (int i = 0; i < N - 1; i++) {
+        int a, b; cin >> a >> b; a--; b--;
+        adj[a].push_back(b); adj[b].push_back(a);
+    }
+    dfs(0, -1);
+    while (Q--) {
+        int u; cin >> u; u--;
+        cout << query(tout[u]) - query(tin[u] - 1) << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Euler Tour + 서브트리 합
+import sys
+sys.setrecursionlimit(200000)
+input = sys.stdin.readline
+
+N, Q = map(int, input().split())
+val = list(map(int, input().split()))
+adj = [[] for _ in range(N)]
+for _ in range(N - 1):
+    a, b = map(int, input().split())
+    a -= 1; b -= 1
+    adj[a].append(b); adj[b].append(a)
+
+tin = [0] * N
+tout = [0] * N
+timer = [0]
+
+def dfs(u, p):
+    timer[0] += 1
+    tin[u] = timer[0]
+    for v in adj[u]:
+        if v != p:
+            dfs(v, u)
+    tout[u] = timer[0]
+
+dfs(0, -1)
+
+# 서브트리 합 = val[tin[u]..tout[u]] 구간 합
+# prefix sum 으로 구현
+prefix = [0] * (2 * N + 5)
+for i in range(N):
+    prefix[tin[i]] += val[i]
+for i in range(1, 2 * N + 1):
+    prefix[i] += prefix[i - 1]
+
+out = []
+for _ in range(Q):
+    u = int(input()) - 1
+    out.append(str(prefix[tout[u]] - prefix[tin[u] - 1]))
+print("\\n".join(out))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// Euler Tour + 서브트리 합
+import java.util.*;
+import java.io.*;
+public class Main {
+    static List<Integer>[] adj;
+    static int[] tin, tout, val;
+    static long[] prefix;
+    static int timer = 0, N;
+
+    static void dfs(int u, int p) {
+        tin[u] = ++timer;
+        for (int v : adj[u]) if (v != p) dfs(v, u);
+        tout[u] = timer;
+    }
+
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        StringTokenizer st = new StringTokenizer(br.readLine());
+        N = Integer.parseInt(st.nextToken());
+        int Q = Integer.parseInt(st.nextToken());
+        val = new int[N];
+        st = new StringTokenizer(br.readLine());
+        for (int i = 0; i < N; i++) val[i] = Integer.parseInt(st.nextToken());
+        adj = new ArrayList[N];
+        for (int i = 0; i < N; i++) adj[i] = new ArrayList<>();
+        for (int i = 0; i < N - 1; i++) {
+            st = new StringTokenizer(br.readLine());
+            int a = Integer.parseInt(st.nextToken()) - 1;
+            int b = Integer.parseInt(st.nextToken()) - 1;
+            adj[a].add(b); adj[b].add(a);
+        }
+        tin = new int[N];
+        tout = new int[N];
+        dfs(0, -1);
+        prefix = new long[2 * N + 5];
+        for (int i = 0; i < N; i++) prefix[tin[i]] += val[i];
+        for (int i = 1; i <= 2 * N; i++) prefix[i] += prefix[i - 1];
+        StringBuilder sb = new StringBuilder();
+        while (Q-- > 0) {
+            int u = Integer.parseInt(br.readLine()) - 1;
+            sb.append(prefix[tout[u]] - prefix[tin[u] - 1]).append('\\n');
+        }
+        System.out.print(sb);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "서브트리 합",
+      input: `5 3
+1 2 3 4 5
+1 2
+1 3
+2 4
+2 5
+1
+2
+3`,
+      output: `15
+11
+3`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **전처리 (DFS)** | O(N) 시간, O(N) 공간 |
+| **쿼리 (Segtree/Fenwick)** | O(log N) 시간 |
+| **전체** | O(N + Q log N) |
+
+## 변형 / 활용
+
+| 응용 | 설명 |
+|:---|:---|
+| **서브트리 갱신** | 구간 갱신 (lazy propagation) |
+| **LCA via RMQ** | 오일러 투어 순서에 depth 배열 → [[Sparse Table\|희소 배열]] O(1) RMQ |
+| **경로 쿼리 + HLD** | [[Heavy-Light Decomposition\|HLD]] 와 결합 → 경로도 O(log^2 N) |
+| **동적 트리** | [[Link-Cut Tree\|링크컷 트리]] 는 ETT 의 동적 버전 |
+| **재귀 없는 DFS** | 스택으로 in/out 시각 기록 가능 |
+
+## 함정
+
+### 1. in-time / out-time 혼동
+
+`tin[u]` 는 DFS 진입, `tout[u]` 는 퇴각. 서브트리 구간은 `[tin[u], tout[u]]` (inclusive).
+
+### 2. 0-indexed vs 1-indexed
+
+Fenwick / Segtree 가 1-indexed 면 `tin`, `tout` 도 1-indexed 로 맞춰야. Python 은 0-indexed 가 자연스러움.
+
+### 3. 서브트리만 가능, 경로는 HLD 필요
+
+ETT 단독으로는 *서브트리* 쿼리만 O(log N). *경로* 쿼리는 [[Heavy-Light Decomposition|HLD]] 필요.
+
+### 4. out-time 에 노드 중복 기록?
+
+구현에 따라 `euler` 배열에 노드를 in/out 두 번 넣거나, in 만 넣거나. 서브트리 크기 계산 시 주의.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 13511 | 트리와 쿼리 2 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13511) |
+| BOJ 15681 | 트리와 쿼리 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/15600-15699/15681) |
+| BOJ 17435 | 합성함수와 쿼리 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17435) |
+| BOJ 3745 | 오름세 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/3700-3799/3745) |
+
+## 참고
+
+- [[LCA|최소 공통 조상]]
+- [[Segtree|세그먼트 트리]]
+- [[Heavy-Light Decomposition|HLD]]
+- [[Sparse Table|희소 배열]]
+- [solved.ac, euler_tour_technique](https://solved.ac/problems/tags/euler_tour_technique)

@@ -1,0 +1,494 @@
+---
+title: "레이지 프로파게이션 (Lazy Propagation)"
+aliases: ["lazy propagation", "레이지 프로파게이션", "느긋한 전파", "구간 갱신", "range update"]
+tags: [algorithm, data-structure, tree, lazy-propagation]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, lazyprop"
+    url: "https://solved.ac/problems/tags/lazyprop"
+    author: "solved.ac"
+---
+
+## 정의
+
+**레이지 프로파게이션 (Lazy Propagation)** 은 [[Segtree|세그먼트 트리]]의 확장으로, **구간 갱신 (range update)** 와 **구간 쿼리 (range query)** 를 모두 **O(log N)** 에 처리.
+
+"lazy" 의 핵심: *갱신을 즉시 자식에게 전파하지 않고, 필요할 때만 (쿼리/갱신 시)* 전파. 각 노드에 **lazy 배열** (pending update) 을 두어 "아직 자식에게 전달 안 한 갱신" 을 캐싱.
+
+기본 세그먼트 트리는 점 갱신 O(log N), 구간 갱신은 O(N log N). 레이지 프로파게이션으로 구간 갱신도 O(log N) 로 단축.
+
+## 문제 상황과 동기
+
+길이 N 배열에서:
+- **구간 갱신**: `a[l..r] += k` (또는 `= k`)
+- **구간 쿼리**: `sum(l, r)`, `min(l, r)`, `max(l, r)` 등
+
+| 방식 | 구간 갱신 | 구간 쿼리 | 비고 |
+|:---|:---:|:---:|:---|
+| naive | O(N) | O(N) | 직접 순회 |
+| [[Segtree\|Segtree]] (점 갱신) | O(N log N) | O(log N) | 구간 갱신 = N 번 점 갱신 |
+| **Lazy Propagation** | O(log N) | O(log N) | 균형 |
+
+핵심 통찰: *구간 [l, r] 을 덮는 O(log N) 개 노드에만 표시*. 자식은 나중에 필요할 때 계산 (lazy).
+
+PS에서 "구간에 +k / 구간 합" 같은 갱신+쿼리 동시 요구 → 레이지 프로파게이션 필수.
+
+## 시각화
+
+```anim:lazyprop
+{}
+```
+
+## 핵심 아이디어
+
+invariant: *노드 값 = 현재까지 전파된 갱신의 결과, lazy[node] = 아직 자식에게 안 보낸 갱신*.
+
+**Lazy 배열**:
+```
+lazy[node] = 이 노드 관할 구간에 적용할 pending 값
+```
+
+**전파 (propagate)**:
+```
+if lazy[node] ≠ 0:
+    tree[node] += lazy[node] * (구간 길이)
+    if 리프 아님:
+        lazy[2*node] += lazy[node]
+        lazy[2*node+1] += lazy[node]
+    lazy[node] = 0
+```
+
+**구간 갱신 [L, R] += val**:
+- 현재 노드 [l, r] 이 [L, R] 에 완전히 포함 → lazy[node] 에만 표시하고 종료.
+- 겹치지 않으면 스킵.
+- 부분 겹침 → 전파 후 왼쪽/오른쪽 재귀.
+
+**구간 쿼리 [L, R]**:
+- 현재 노드 접근 전 lazy 전파.
+- 나머지는 기본 세그먼트 트리와 동일.
+
+## 알고리즘
+
+### 전파
+
+```text
+propagate(node, l, r):
+    if lazy[node] = 0: return
+    tree[node] += lazy[node] * (r - l + 1)
+    if l ≠ r:
+        lazy[2*node] += lazy[node]
+        lazy[2*node+1] += lazy[node]
+    lazy[node] = 0
+```
+
+### 구간 갱신
+
+```text
+range_update(node, l, r, L, R, val):
+    propagate(node, l, r)
+    if r < L or R < l: return
+    if L ≤ l and r ≤ R:
+        lazy[node] += val
+        propagate(node, l, r)
+        return
+    mid = (l + r) / 2
+    range_update(2*node, l, mid, L, R, val)
+    range_update(2*node+1, mid+1, r, L, R, val)
+    tree[node] = tree[2*node] + tree[2*node+1]
+```
+
+### 구간 쿼리
+
+```text
+range_query(node, l, r, L, R):
+    if r < L or R < l: return 0
+    propagate(node, l, r)
+    if L ≤ l and r ≤ R:
+        return tree[node]
+    mid = (l + r) / 2
+    left = range_query(2*node, l, mid, L, R)
+    right = range_query(2*node+1, mid+1, r, L, R)
+    return left + right
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// 구간 합 + 구간 갱신 레이지 프로파게이션
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+
+class LazySegTree {
+    vector<ll> tree, lazy;
+    int n;
+    
+    void propagate(int node, int l, int r) {
+        if (lazy[node] == 0) return;
+        tree[node] += lazy[node] * (r - l + 1);
+        if (l != r) {
+            lazy[2*node] += lazy[node];
+            lazy[2*node+1] += lazy[node];
+        }
+        lazy[node] = 0;
+    }
+    
+    void build(vector<ll>& a, int node, int l, int r) {
+        if (l == r) {
+            tree[node] = a[l];
+        } else {
+            int mid = (l + r) / 2;
+            build(a, 2*node, l, mid);
+            build(a, 2*node+1, mid+1, r);
+            tree[node] = tree[2*node] + tree[2*node+1];
+        }
+    }
+    
+    void update(int node, int l, int r, int L, int R, ll val) {
+        propagate(node, l, r);
+        if (r < L || R < l) return;
+        if (L <= l && r <= R) {
+            lazy[node] += val;
+            propagate(node, l, r);
+            return;
+        }
+        int mid = (l + r) / 2;
+        update(2*node, l, mid, L, R, val);
+        update(2*node+1, mid+1, r, L, R, val);
+        tree[node] = tree[2*node] + tree[2*node+1];
+    }
+    
+    ll query(int node, int l, int r, int L, int R) {
+        if (r < L || R < l) return 0;
+        propagate(node, l, r);
+        if (L <= l && r <= R) return tree[node];
+        int mid = (l + r) / 2;
+        return query(2*node, l, mid, L, R) + query(2*node+1, mid+1, r, L, R);
+    }
+    
+public:
+    LazySegTree(vector<ll>& a) : n(a.size() - 1), tree(4 * n), lazy(4 * n) {
+        if (n > 0) build(a, 1, 1, n);
+    }
+    
+    void update(int l, int r, ll val) { update(1, 1, n, l, r, val); }
+    ll query(int l, int r) { return query(1, 1, n, l, r); }
+};
+
+int main() {
+    ios::sync_with_stdio(0); cin.tie(0);
+    int n, q; cin >> n >> q;
+    vector<ll> a(n + 1);
+    for (int i = 1; i <= n; i++) cin >> a[i];
+    
+    LazySegTree seg(a);
+    while (q--) {
+        int t; cin >> t;
+        if (t == 1) {
+            int l, r; ll val; cin >> l >> r >> val;
+            seg.update(l, r, val);
+        } else {
+            int l, r; cin >> l >> r;
+            cout << seg.query(l, r) << "\\n";
+        }
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# 구간 합 + 구간 갱신 레이지 프로파게이션
+import sys
+input = sys.stdin.readline
+
+class LazySegTree:
+    def __init__(self, a):
+        self.n = len(a) - 1
+        self.tree = [0] * (4 * self.n)
+        self.lazy = [0] * (4 * self.n)
+        if self.n > 0:
+            self._build(a, 1, 1, self.n)
+    
+    def _propagate(self, node, l, r):
+        if self.lazy[node] == 0:
+            return
+        self.tree[node] += self.lazy[node] * (r - l + 1)
+        if l != r:
+            self.lazy[2*node] += self.lazy[node]
+            self.lazy[2*node+1] += self.lazy[node]
+        self.lazy[node] = 0
+    
+    def _build(self, a, node, l, r):
+        if l == r:
+            self.tree[node] = a[l]
+        else:
+            mid = (l + r) // 2
+            self._build(a, 2*node, l, mid)
+            self._build(a, 2*node+1, mid+1, r)
+            self.tree[node] = self.tree[2*node] + self.tree[2*node+1]
+    
+    def update(self, L, R, val):
+        self._update(1, 1, self.n, L, R, val)
+    
+    def _update(self, node, l, r, L, R, val):
+        self._propagate(node, l, r)
+        if r < L or R < l:
+            return
+        if L <= l and r <= R:
+            self.lazy[node] += val
+            self._propagate(node, l, r)
+            return
+        mid = (l + r) // 2
+        self._update(2*node, l, mid, L, R, val)
+        self._update(2*node+1, mid+1, r, L, R, val)
+        self.tree[node] = self.tree[2*node] + self.tree[2*node+1]
+    
+    def query(self, L, R):
+        return self._query(1, 1, self.n, L, R)
+    
+    def _query(self, node, l, r, L, R):
+        if r < L or R < l:
+            return 0
+        self._propagate(node, l, r)
+        if L <= l and r <= R:
+            return self.tree[node]
+        mid = (l + r) // 2
+        return self._query(2*node, l, mid, L, R) + self._query(2*node+1, mid+1, r, L, R)
+
+n, q = map(int, input().split())
+a = [0] + list(map(int, input().split()))
+seg = LazySegTree(a)
+
+out = []
+for _ in range(q):
+    parts = list(map(int, input().split()))
+    if parts[0] == 1:
+        l, r, val = parts[1], parts[2], parts[3]
+        seg.update(l, r, val)
+    else:
+        l, r = parts[1], parts[2]
+        out.append(str(seg.query(l, r)))
+print("\\n".join(out))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// 구간 합 + 구간 갱신 레이지 프로파게이션
+import java.util.*;
+import java.io.*;
+
+class LazySegTree {
+    long[] tree, lazy;
+    int n;
+    
+    LazySegTree(long[] a) {
+        n = a.length - 1;
+        tree = new long[4 * n];
+        lazy = new long[4 * n];
+        if (n > 0) build(a, 1, 1, n);
+    }
+    
+    void propagate(int node, int l, int r) {
+        if (lazy[node] == 0) return;
+        tree[node] += lazy[node] * (r - l + 1);
+        if (l != r) {
+            lazy[2*node] += lazy[node];
+            lazy[2*node+1] += lazy[node];
+        }
+        lazy[node] = 0;
+    }
+    
+    void build(long[] a, int node, int l, int r) {
+        if (l == r) {
+            tree[node] = a[l];
+        } else {
+            int mid = (l + r) / 2;
+            build(a, 2*node, l, mid);
+            build(a, 2*node+1, mid+1, r);
+            tree[node] = tree[2*node] + tree[2*node+1];
+        }
+    }
+    
+    void update(int L, int R, long val) {
+        update(1, 1, n, L, R, val);
+    }
+    
+    void update(int node, int l, int r, int L, int R, long val) {
+        propagate(node, l, r);
+        if (r < L || R < l) return;
+        if (L <= l && r <= R) {
+            lazy[node] += val;
+            propagate(node, l, r);
+            return;
+        }
+        int mid = (l + r) / 2;
+        update(2*node, l, mid, L, R, val);
+        update(2*node+1, mid+1, r, L, R, val);
+        tree[node] = tree[2*node] + tree[2*node+1];
+    }
+    
+    long query(int L, int R) {
+        return query(1, 1, n, L, R);
+    }
+    
+    long query(int node, int l, int r, int L, int R) {
+        if (r < L || R < l) return 0;
+        propagate(node, l, r);
+        if (L <= l && r <= R) return tree[node];
+        int mid = (l + r) / 2;
+        return query(2*node, l, mid, L, R) + query(2*node+1, mid+1, r, L, R);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        StringTokenizer st = new StringTokenizer(br.readLine());
+        int n = Integer.parseInt(st.nextToken());
+        int q = Integer.parseInt(st.nextToken());
+        
+        long[] a = new long[n + 1];
+        st = new StringTokenizer(br.readLine());
+        for (int i = 1; i <= n; i++)
+            a[i] = Long.parseLong(st.nextToken());
+        
+        LazySegTree seg = new LazySegTree(a);
+        StringBuilder sb = new StringBuilder();
+        
+        while (q-- > 0) {
+            st = new StringTokenizer(br.readLine());
+            int t = Integer.parseInt(st.nextToken());
+            if (t == 1) {
+                int l = Integer.parseInt(st.nextToken());
+                int r = Integer.parseInt(st.nextToken());
+                long val = Long.parseLong(st.nextToken());
+                seg.update(l, r, val);
+            } else {
+                int l = Integer.parseInt(st.nextToken());
+                int r = Integer.parseInt(st.nextToken());
+                sb.append(seg.query(l, r)).append('\\n');
+            }
+        }
+        System.out.print(sb);
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본",
+      input: `5 5
+1 2 3 4 5
+2 1 3
+1 2 4 3
+2 1 3
+2 2 5
+1 1 5 -1`,
+      output: `6
+15
+21`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **빌드** | O(N) |
+| **구간 쿼리** | O(log N) |
+| **구간 갱신** | O(log N) |
+| **공간** | O(N), 실제 4N tree + 4N lazy |
+
+각 연산이 O(log N) 개 노드만 방문. lazy 덕분에 구간 갱신도 log 시간.
+
+## 변형 / 활용
+
+### 1. 구간 대입 (range set)
+
+`a[l..r] = k` (덮어쓰기).
+
+```cpp
+// lazy 의미: "이 노드 구간 전부를 k 로"
+propagate(node, l, r):
+    if lazy[node] == -1: return  // -1 = no pending
+    tree[node] = lazy[node] * (r - l + 1)
+    if l ≠ r:
+        lazy[2*node] = lazy[node]
+        lazy[2*node+1] = lazy[node]
+    lazy[node] = -1
+```
+
+초기 lazy = -1 (또는 flag).
+
+### 2. Min / Max 구간 갱신
+
+`a[l..r] += k` 후 구간 최솟값.
+
+```cpp
+tree[node] = min(tree[2*node], tree[2*node+1]);
+propagate:
+    tree[node] += lazy[node];
+    // min 이므로 +k 는 단순 shift
+```
+
+### 3. 2D 레이지 프로파게이션
+
+2D 세그먼트 트리 + lazy. 구간 사각형 갱신/쿼리 O(log² N).
+
+### 4. 구간 곱셈 + 구간 덧셈
+
+두 종류 갱신 (곱 / 덧셈) 을 동시에. lazy 두 개 (mul, add).
+
+```cpp
+propagate:
+    tree[node] = tree[node] * lazy_mul + lazy_add * (r - l + 1)
+    if l ≠ r:
+        lazy_mul[2*node] *= lazy_mul[node]
+        lazy_add[2*node] = lazy_add[2*node] * lazy_mul[node] + lazy_add[node]
+        // 오른쪽도 동일
+```
+
+갱신 순서 주의: *먼저 곱, 나중에 덧셈*.
+
+## 함정
+
+### 1. 전파 순서
+
+`range_update` / `range_query` 진입 시 *반드시 propagate 먼저*. 안 하면 lazy 가 쌓여서 틀린 답.
+
+### 2. 리프 여부
+
+`if (l != r)` 로 자식 존재 확인. 리프에서는 자식 갱신 금지.
+
+### 3. lazy 초기값
+
+구간 덧셈: 0, 구간 대입: -1 또는 flag. 잘못 초기화하면 첫 쿼리부터 오답.
+
+### 4. long long 범위
+
+N=10^5, val=10^9, Q=10^5 구간 갱신 → 합이 매우 큼. C++ 에서 `long long` 필수.
+
+### 5. 갱신 타입 혼용
+
+덧셈 / 대입 / 곱셈을 동시에 쓸 때 lazy 구조 설계 복잡. 각 연산의 결합 법칙 / 교환 법칙 확인 필수.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 10999 | 구간 합 구하기 2 | 27.5% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/10900-10999/10999) |
+| BOJ 12844 | XOR | 30.8% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/12800-12899/12844) |
+| BOJ 16975 | 수열과 쿼리 21 | 36.2% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16900-16999/16975) |
+| BOJ 14427 | 수열과 쿼리 15 | 32.1% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/14400-14499/14427) |
+
+## 참고
+
+- [[Segtree|세그먼트 트리]]
+- [[Fenwick Tree|펜윅 트리 (BIT)]]
+- [[Difference Array|차분 배열]]
+- [solved.ac, lazyprop](https://solved.ac/problems/tags/lazyprop)

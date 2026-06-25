@@ -1,0 +1,328 @@
+---
+title: "KMP 문자열 매칭 (Knuth-Morris-Pratt)"
+aliases: ["kmp", "KMP", "Knuth-Morris-Pratt", "KMP 알고리즘"]
+tags: [algorithm, string, kmp, pattern-matching]
+updated: 2026-06-24
+references:
+  - title: "solved.ac, kmp"
+    url: "https://solved.ac/problems/tags/kmp"
+    author: "solved.ac"
+  - title: "Knuth-Morris-Pratt Algorithm"
+    url: "https://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm"
+    author: "Wikipedia"
+---
+
+## 정의
+
+**KMP (Knuth-Morris-Pratt)** 는 Donald Knuth, James H. Morris, Vaughan Pratt 가 1977년 고안한 **선형 시간 문자열 매칭 알고리즘**. 텍스트 T 에서 패턴 P 의 모든 출현을 **O(N+M)** 에 찾는다.
+
+핵심은 **failure function π** 를 전처리(O(M))하여, mismatch 시 *이미 매치된 접두사를 재사용*해 불필요한 비교를 건너뛰는 것.
+
+## 문제 상황과 동기
+
+텍스트 T (길이 N), 패턴 P (길이 M). P 가 T 에 출현하는 모든 위치를 찾는다.
+
+- **naive**: T 의 각 위치에서 P 를 처음부터 비교. worst-case O(N×M). N=M=10^5 면 10^10 → TLE.
+- **KMP**: failure function π 를 활용해 mismatch 시 텍스트 포인터 `i` 를 되돌리지 않고 패턴 포인터 `j` 만 조정. 각 문자 최대 1회 비교 → O(N+M).
+
+핵심 통찰: *패턴의 접두사와 접미사가 겹치는 부분을 미리 계산*하면, mismatch 시 "이미 확인한 부분"을 재사용 가능.
+
+자주 등장하는 위치: 로그 파싱, DNA 서열 분석, 텍스트 에디터의 find, 압축 알고리즘 (LZ77).
+
+## 시각화
+
+```anim:kmp
+{}
+```
+
+## 핵심 아이디어
+
+**failure function π[i]**: 패턴 `P[0..i]` 의 *proper prefix* 이면서 동시에 *suffix* 인 최대 길이.
+
+```text
+P = "ABABC"
+π = [0, 0, 1, 2, 0]
+
+π[3] = 2 의미: P[0..3] = "ABAB" 의 최장 proper prefix-suffix = "AB" (길이 2)
+```
+
+**매칭 과정**:
+
+1. 텍스트 포인터 `i`, 패턴 포인터 `j` 모두 0 에서 시작.
+2. `T[i] == P[j]` 이면 둘 다 증가.
+3. `T[i] != P[j]` 이면:
+   - `j > 0` → `j ← π[j-1]` (패턴을 π 만큼 시프트)
+   - `j = 0` → `i++` (텍스트만 진행)
+4. `j = M` 이면 매치 발견 (시작 위치 = `i - M`). 계속 찾으려면 `j ← π[j-1]`.
+
+**invariant**: `i` 는 절대 감소하지 않음 (각 문자 최대 1회 읽기). `j` 는 π 를 따라 감소하지만, π 의 총합이 O(M) 이므로 amortized O(1).
+
+## 알고리즘
+
+### failure function 계산
+
+```text
+compute_failure(P):
+    M = len(P)
+    π[0] = 0
+    j = 0
+    for i = 1 .. M-1:
+        while j > 0 and P[i] != P[j]:
+            j = π[j-1]
+        if P[i] == P[j]:
+            j++
+        π[i] = j
+    return π
+```
+
+**복잡도**: O(M). while 루프는 amortized O(1) (j 는 최대 M 번만 증가).
+
+### KMP 매칭
+
+```text
+kmp_search(T, P):
+    N = len(T), M = len(P)
+    π = compute_failure(P)
+    j = 0
+    matches = []
+    for i = 0 .. N-1:
+        while j > 0 and T[i] != P[j]:
+            j = π[j-1]
+        if T[i] == P[j]:
+            j++
+        if j == M:
+            matches.append(i - M + 1)
+            j = π[j-1]
+    return matches
+```
+
+**복잡도**: O(N+M). while 루프도 amortized O(1).
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// KMP 문자열 매칭, O(N+M) - failure function π 기반
+#include <bits/stdc++.h>
+using namespace std;
+
+// π[i] = P[0..i] 의 최장 proper prefix-suffix 길이
+vector<int> compute_failure(const string& P) {
+    int M = P.size();
+    vector<int> pi(M, 0);
+    int j = 0;
+    for (int i = 1; i < M; i++) {
+        while (j > 0 && P[i] != P[j]) j = pi[j-1];
+        if (P[i] == P[j]) j++;
+        pi[i] = j;
+    }
+    return pi;
+}
+
+vector<int> kmp_search(const string& T, const string& P) {
+    int N = T.size(), M = P.size();
+    vector<int> pi = compute_failure(P);
+    vector<int> matches;
+    int j = 0;
+    for (int i = 0; i < N; i++) {
+        while (j > 0 && T[i] != P[j]) j = pi[j-1];
+        if (T[i] == P[j]) j++;
+        if (j == M) {
+            matches.push_back(i - M + 1);  // 0-indexed 시작 위치
+            j = pi[j-1];
+        }
+    }
+    return matches;
+}
+
+int main() {
+    string T, P;
+    getline(cin, T);
+    getline(cin, P);
+    auto matches = kmp_search(T, P);
+    cout << matches.size() << "\\n";
+    for (int pos : matches) cout << pos << " ";
+    if (!matches.empty()) cout << "\\n";
+    return 0;
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# KMP 문자열 매칭, O(N+M) - failure function π 기반
+def compute_failure(P):
+    M = len(P)
+    pi = [0] * M
+    j = 0
+    for i in range(1, M):
+        while j > 0 and P[i] != P[j]:
+            j = pi[j-1]
+        if P[i] == P[j]:
+            j += 1
+        pi[i] = j
+    return pi
+
+def kmp_search(T, P):
+    N, M = len(T), len(P)
+    pi = compute_failure(P)
+    matches = []
+    j = 0
+    for i in range(N):
+        while j > 0 and T[i] != P[j]:
+            j = pi[j-1]
+        if T[i] == P[j]:
+            j += 1
+        if j == M:
+            matches.append(i - M + 1)
+            j = pi[j-1]
+    return matches
+
+T = input()
+P = input()
+matches = kmp_search(T, P)
+print(len(matches))
+if matches:
+    print(' '.join(map(str, matches)))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// KMP 문자열 매칭, O(N+M) - failure function π 기반
+import java.util.*;
+import java.io.*;
+public class Main {
+    static int[] computeFailure(String P) {
+        int M = P.length();
+        int[] pi = new int[M];
+        int j = 0;
+        for (int i = 1; i < M; i++) {
+            while (j > 0 && P.charAt(i) != P.charAt(j)) j = pi[j-1];
+            if (P.charAt(i) == P.charAt(j)) j++;
+            pi[i] = j;
+        }
+        return pi;
+    }
+    
+    static List<Integer> kmpSearch(String T, String P) {
+        int N = T.length(), M = P.length();
+        int[] pi = computeFailure(P);
+        List<Integer> matches = new ArrayList<>();
+        int j = 0;
+        for (int i = 0; i < N; i++) {
+            while (j > 0 && T.charAt(i) != P.charAt(j)) j = pi[j-1];
+            if (T.charAt(i) == P.charAt(j)) j++;
+            if (j == M) {
+                matches.add(i - M + 1);
+                j = pi[j-1];
+            }
+        }
+        return matches;
+    }
+    
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        String T = br.readLine();
+        String P = br.readLine();
+        List<Integer> matches = kmpSearch(T, P);
+        System.out.println(matches.size());
+        for (int pos : matches) System.out.print(pos + " ");
+        if (!matches.isEmpty()) System.out.println();
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      "label": "기본 예제",
+      "input": `ABABDABACDABABCABAB
+ABABC`,
+      "output": `1
+10`,
+    },
+    {
+      "label": "중복 매칭",
+      "input": `AABAACAADAABAABA
+AABA`,
+      "output": `3
+0 9 12`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **failure function 전처리** | O(M) 시간, O(M) 공간 |
+| **매칭** | O(N) 시간, O(1) 공간 (π 는 전처리 포함) |
+| **전체** | O(N + M) |
+| **공간** | O(M) (π 배열) |
+
+**증명 (amortized)**:
+
+- `i` 는 0 → N-1 로 정확히 N 번 증가.
+- `j` 는 최대 M 번 증가 (failure 에서 감소하지만, `j++` 총합 ≤ M).
+- while 루프 (`j = π[j-1]`) 는 `j` 를 감소시키지만, `j` 의 총 증가량이 M 이므로 총 감소도 ≤ M.
+- 따라서 총 연산 = O(N + M).
+
+## 변형 / 활용
+
+### 1. 다중 패턴 매칭
+
+여러 패턴을 찾으려면 [[Aho-Corasick|Aho-Corasick]] (KMP + [[Trie|Trie]]).
+
+### 2. 순환 문자열 매칭
+
+문자열 S 가 순환 문자열인지 판단: `S + S` 에서 S 를 KMP 로 찾기. 출현 위치 < N 이면 순환.
+
+### 3. 주기 찾기
+
+`len - π[len-1]` 이 문자열의 최소 주기. 예: "ABCABCABC", π[8]=6 → 주기 = 9-6 = 3 ("ABC").
+
+### 4. 회문 (Palindrome) 판별
+
+KMP 를 역방향으로 적용하거나 [[Manacher|Manacher]] 사용.
+
+## 함정
+
+### 1. π[0] 초기화
+
+π[0] 은 항상 0. proper prefix 는 자기 자신을 제외.
+
+### 2. j 범위 체크
+
+while 루프 조건 `j > 0` 필수. `j = 0` 일 때 `π[-1]` 접근하면 segfault.
+
+### 3. 매칭 후 j 조정
+
+매치 발견 후 `j ← π[j-1]` 로 reset 필요. 안 하면 다음 매치를 놓침.
+
+### 4. 1-indexed vs 0-indexed
+
+출력 위치가 1-indexed 면 `i - M + 2` 또는 별도 처리.
+
+### 5. 빈 패턴
+
+M = 0 이면 모든 위치가 매칭. 별도 예외 처리 필요.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 1786 | 찾기 | 31.2% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1700-1799/1786) |
+| BOJ 4354 | 문자열 제곱 | 28.5% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/4300-4399/4354) |
+| BOJ 1305 | 광고 | 22.1% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1300-1399/1305) |
+| BOJ 16916 | 부분 문자열 | 34.7% | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16900-16999/16916) |
+
+## 참고
+
+- [[String|문자열 기본]]
+- [[Trie|트라이]]
+- [[Aho-Corasick]]
+- [[Z-algorithm]]
+- [[Rabin-Karp]]
+- [solved.ac, kmp](https://solved.ac/problems/tags/kmp)
+- [KMP Algorithm - Wikipedia](https://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm)
