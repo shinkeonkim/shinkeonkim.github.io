@@ -1,0 +1,216 @@
+---
+title: "Dial's Algorithm (버킷 기반 다익스트라)"
+aliases: ["dial", "Dial", "Dial's algorithm", "버킷 다익스트라", "bucket dijkstra", "dial algorithm"]
+tags: [algorithm, search, shortest-path, dial]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, dial"
+    url: "https://solved.ac/problems/tags/dial"
+    author: "solved.ac"
+  - title: "Ahuja, Magnanti & Orlin, Network Flows (1993)"
+    author: "Ahuja et al."
+---
+
+## 정의
+
+**Dial's Algorithm** 은 가중치가 **작은 정수** 일 때 우선순위 큐 대신 **버킷 배열** 을 사용해 Dijkstra 를 O(V + E + W) 로 최적화한 알고리즘. W는 최대 가중치.
+
+1979년 Robert Dial이 제안. 간선 가중치가 0~C 의 작은 정수일 때만 적용 가능.
+
+## 문제 상황과 동기
+
+Dijkstra에서 priority_queue 의 `extract-min` 은 O(log V). 작은 정수 가중치(W ≤ 1000 정도) 그래프가 매우 많다.
+
+- **Dijkstra (heap)**: O((V+E) log V)
+- **Dial**: 버킷 배열로 extract-min 을 O(1) amortized 로 떨어뜨림. 총 O(V + E + W)
+
+핵심 통찰: *거리 차가 최대 W 이므로, 현재 거리에서 W 이내 범위만 버킷에 존재.* 원형 버킷 배열로 공간 O(W).
+
+## 시각화
+
+```anim:dial
+{}
+```
+
+## 핵심 아이디어
+
+거리 dist[v] 를 버킷 인덱스로 사용. `bucket[t mod (W+1)]` 에 정점을 저장.
+
+```text
+W = max edge weight
+버킷 크기 = W + 1
+i = 0..W-1 (현재 확장 위치)
+
+dist[s] = 0, bucket[0] = {s}
+
+while 처리 안 한 버킷 있음:
+    while bucket[i] not empty:
+        v = bucket[i]에서 하나 꺼냄
+        for each u in adj[v]:
+            w = weight(v, u)
+            if dist[v] + w < dist[u]:
+                old = dist[u], dist[u] = dist[v] + w
+                bucket[old % (W+1)] 에서 제거
+                bucket[dist[u] % (W+1)] 에 추가
+    i = (i + 1) % (W + 1)
+```
+
+dist[v] 의 범위: 현 시점 최소 dist 부터 최대 dist+W 까지만 유효. 따라서 원형 버킷 배열이면 충분.
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Dial: O(V + E + W), 가중치 0..C 정수
+#include <bits/stdc++.h>
+using namespace std;
+const int INF = 1e9;
+
+int dial(vector<vector<pair<int,int>>>& adj, int s, int t, int W) {
+    int n = adj.size();
+    vector<int> dist(n, INF);
+    dist[s] = 0;
+
+    int bucket_size = W + 1;
+    vector<list<int>> buckets(bucket_size);
+    vector<list<int>::iterator> pos(n, buckets[0].end());
+
+    buckets[0].push_back(s);
+    pos[s] = buckets[0].begin();
+
+    int cur = 0, processed = 0;
+    while (processed < n) {
+        while (buckets[cur % bucket_size].empty()) {
+            cur++;
+            if (cur - dist[s] > W * n) return -1; // 도달 불가
+        }
+        int v = buckets[cur % bucket_size].front();
+        buckets[cur % bucket_size].pop_front();
+        processed++;
+
+        if (dist[v] != cur) continue; // stale entry
+
+        for (auto [u, w] : adj[v]) {
+            int nd = dist[v] + w;
+            if (nd < dist[u]) {
+                if (dist[u] != INF)
+                    buckets[dist[u] % bucket_size].erase(pos[u]);
+                dist[u] = nd;
+                int bid = nd % bucket_size;
+                buckets[bid].push_back(u);
+                pos[u] = prev(buckets[bid].end());
+            }
+        }
+    }
+    return dist[t];
+}
+
+int main() {
+    // V=4, s=0 -> t=3, W=5
+    vector<vector<pair<int,int>>> adj(4);
+    adj[0].push_back({1,2});
+    adj[0].push_back({2,3});
+    adj[1].push_back({3,1});
+    adj[2].push_back({3,4});
+
+    cout << dial(adj, 0, 3, 5);
+    return 0;
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Dial: bucket array, O(V + E + W)
+from collections import deque, defaultdict
+
+def dial(adj, s, t, W):
+    n = len(adj)
+    INF = 10**9
+    dist = [INF] * n
+    dist[s] = 0
+    buckets = [deque() for _ in range(W + 1)]
+    buckets[0].append(s)
+    cur = 0
+    processed = 0
+
+    while processed < n:
+        while not buckets[cur % (W + 1)]:
+            cur += 1
+            if cur - dist[s] > W * n:
+                return -1
+        v = buckets[cur % (W + 1)].popleft()
+        processed += 1
+        if dist[v] != cur:
+            continue
+        for u, w in adj[v]:
+            nd = dist[v] + w
+            if nd < dist[u]:
+                if dist[u] != INF:
+                    buckets[dist[u] % (W + 1)].remove(u)
+                dist[u] = nd
+                buckets[nd % (W + 1)].append(u)
+    return dist[t]
+
+adj = [[] for _ in range(4)]
+adj[0] = [(1,2), (2,3)]
+adj[1] = [(3,1)]
+adj[2] = [(3,4)]
+print(dial(adj, 0, 3, 5))`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본",
+      input: `4 nodes, s=0 t=3, maxW=5`,
+      output: `3`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **시간 (최선)** | O(V + E) - 가중치 0 일 때 |
+| **시간 (평균)** | O(V + E + W) |
+| **시간 (최악)** | O(V + E + W) |
+| **공간** | O(V + W) |
+| **제약** | 가중치 0 이상 정수, W 가 작아야 효율적 |
+
+## 변형 / 활용
+
+- **Denardo-Fox (1979)**: 버킷 크기를 동적 조정.
+- **R-Heaps (Ahuja)**: 버킷 범위를 dial 보다 더 넓게.
+- **작은 W 그래프**: 교통망 (도로 속도 제한), 네트워크 패킷(hop count bounded).
+- **E=V+1000, W=1000** 이면 O(E + W) 가 O(E log V) 보다 빠름.
+
+## 함정
+
+### 1. W 가 크면 오히려 느림
+
+W = 10^9 면 버킷 크기 10^9 필요. 그땐 heap Dijkstra.
+
+### 2. 음수 가중치 불가
+
+Dial은 non-negative 전제. 음수는 Bellman-Ford.
+
+### 3. 버킷 관리 오버헤드
+
+remove(u) 에서 O(1) 이 보장되어야 함. C++ list+iterator 또는 Python list+index 관리 필요.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 1753 | 최단경로 (Dijkstra 연습) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1700-1799/1753) |
+| BOJ 1916 | 최소비용 구하기 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1900-1999/1916) |
+| BOJ 4485 | 녹색 옷 입은 애가 젤다지? | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/4400-4499/4485) |
+
+## 참고
+
+- [[Dijkstra|다익스트라]] (heap 기반)
+- [[Bellman-Ford|벨만 포드]] (음수 가중치)
+- [[BFS|BFS]] (무가중 그래프, W=1 의 Dial)

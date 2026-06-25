@@ -1,0 +1,241 @@
+---
+title: "비트셋 LCS (Bitset LCS)"
+aliases: ["bitset LCS", "비트셋 LCS", "bitset-lcs", "Hyyro LCS", "Allison-Dix LCS"]
+tags: [algorithm, dp, lcs, string, bitset-optimization]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, bitset_lcs"
+    url: "https://solved.ac/problems/tags/bitset_lcs"
+    author: "solved.ac"
+  - title: "Allison and Dix, A bit-string longest-common-subsequence algorithm (1986)"
+    url: "https://doi.org/10.1016/0020-0190(86)90044-2"
+    author: "Allison, Dix"
+  - title: "Hyyro, Bit-parallel LCS and related algorithms (2004)"
+    url: "https://www.researchgate.net/publication/228967650"
+    author: "Hyyro"
+---
+
+## 정의
+
+**Bitset LCS** 는 두 문자열 A, B 의 최장 공통 부분 수열 (LCS) 길이를 **O(NM/w)** 시간에 구하는 기법. 표준 LCS DP 의 O(NM) 를 **비트 병렬 (bit-parallel)** 로 w=64 배 가속.
+
+w = CPU word size (64). `std::bitset` 또는 64-bit 정수로 DP 행을 표현해, 한 번에 64 개 DP 전이를 처리.
+
+## 문제 상황과 동기
+
+표준 LCS DP 는 O(NM) 시간. N = M = 10^5 이면 10^10 연산으로 불가.
+
+- **naive DP**: 2차원 테이블 채우기. O(NM), N=M=10^4 에서 10^8 로 간당간당.
+- **bitset LCS**: PyPy 에서 bitset 을 정수로 구현, O(NM/64). N=M=10^5 도 1.5 초 내.
+
+핵심 통찰: *LCS 점화식의 `if A[i-1] == B[j-1]` 부분은 **비트 AND + shift** 로 한 번에 처리. `max(prev, curr-1)` 은 **비트 OR + mask** 로 표현.*
+
+### Allison-Dix 공식
+
+`S[i]` = A[0..i] 와 B 의 전체 LCS 길이가 증가하는 위치 집합. 이를 비트셋 `M[i]` 로 관리.
+
+```text
+// 각 문자 c 에 대한 비트마스크 prec[c] = B 에서 c 의 위치들
+// DP 는 bitset 연산으로:
+for i in 1..N:
+    x = prec[A[i-1]] | M[i-1]
+    M[i] = M[i-1] | (x - ((x - M[i-1]) & ~x)의 MSB 조작)
+```
+
+실제 구현은 더 간단:
+
+```text
+u = M[i-1] | prec[A[i-1]]
+v = M[i-1] << 1 | 1
+M[i] = M[i-1] | ((u - v) & ~u)
+```
+
+결과 LCS 길이 = `popcount(M[N])`.
+
+## 알고리즘
+
+```text
+bitset_lcs(A, B):
+    N = len(A), M = len(B)
+    prec[0..MAX_CHAR] = 0  // 각 문자의 B 내 위치 비트셋
+    for j in 0..M-1:
+        prec[B[j]] |= (1 << j)
+
+    bitset cur = 0
+    for i in 0..N-1:
+        u = cur | prec[A[i]]
+        v = (cur << 1) | 1
+        cur |= ((u - v) & ~u)
+
+    return popcount(cur)  // LCS 길이
+```
+
+핵심 트릭: `(u - v) & ~u` 는 `u` 와 `v` 의 LCS 전이를 한 연산에 계산. 자세한 증명은 Allison-Dix (1986) 참고.
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Bitset LCS O(NM/64), Hyyro/Allison-Dix
+#include <bits/stdc++.h>
+using namespace std;
+using ull = unsigned long long;
+
+int lcs_bitset(const string& a, const string& b) {
+    int n = a.size(), m = b.size();
+    vector<ull> prec(26, 0);
+    for (int j = 0; j < m; j++)
+        prec[b[j]-'A'] |= (1ULL << j);
+
+    ull cur = 0;
+    for (int i = 0; i < n; i++) {
+        ull u = cur | prec[a[i]-'A'];
+        ull v = (cur << 1) | 1;
+        cur |= ( (u - v) & ~u );
+    }
+    return __builtin_popcountll(cur);
+}
+
+int main() {
+    string a, b;
+    cin >> a >> b;
+    cout << lcs_bitset(a, b) << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Bitset LCS using Python int as bitset
+def lcs_bitset(a: str, b: str) -> int:
+    n, m = len(a), len(b)
+    # prec[char] = bitmask of positions in b
+    prec = [0] * 26
+    for j, ch in enumerate(b):
+        prec[ord(ch) - 65] |= 1 << j
+
+    cur = 0
+    for i in range(n):
+        u = cur | prec[ord(a[i]) - 65]
+        v = (cur << 1) | 1
+        cur |= ( (u - v) & ~u )
+    return cur.bit_count()
+
+a = input().strip()
+b = input().strip()
+print(lcs_bitset(a, b))`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// Bitset LCS - Java long[] bitset for longer strings
+import java.util.*;
+import java.io.*;
+public class Main {
+    static int lcsBitset(String a, String b) {
+        int n = a.length(), m = b.length();
+        long[] prec = new long[26];
+        for (int j = 0; j < m; j++)
+            prec[b.charAt(j)-'A'] |= (1L << j);
+
+        long cur = 0;
+        for (int i = 0; i < n; i++) {
+            long u = cur | prec[a.charAt(i)-'A'];
+            long v = (cur << 1) | 1;
+            cur |= ( (u - v) & ~u );
+        }
+        return Long.bitCount(cur);
+    }
+
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        String a = br.readLine();
+        String b = br.readLine();
+        System.out.println(lcsBitset(a, b));
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본 LCS",
+      input: `ABCBDAB
+BDCAB`,
+      output: `4`,
+    },
+    {
+      label: "긴 문자열 (알파벳 26 종)",
+      input: `ABCDEFGHIJKLMNOPQRSTUVWXYZ
+ZYXWVUTSRQPONMLKJIHGFEDCBA`,
+      output: `1`,
+    },
+    {
+      label: "같은 문자열",
+      input: `HELLOWORLD
+HELLOWORLD`,
+      output: `10`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **시간 (최선)** | O(NM/w) |
+| **시간 (평균)** | O(NM/w) |
+| **시간 (최악)** | O(NM/w) |
+| **공간** | O(Σ + M/w) (알파벳 개수 + 결과 bitset) |
+| **w** | CPU word size (64) |
+
+표준 DP O(NM) 대비 약 64 배 빠름. N=M=10^5 에서 10^10 -> 1.5x10^8 연산으로 실용적.
+
+## 변형
+
+### w-bit 한계 돌파
+
+M > 64 이면 `unsigned long long[]` 배열로 bitset 확장. `(256-bit, 512-bit)` 벡터 명령어 (SIMD) 로 더 가속 가능.
+
+### Longest Common Substring
+
+bitset 기법은 substring (연속) 에도 적용 가능. shift + AND 로 공통 부분 문자열 탐색.
+
+### Edit Distance
+
+비슷한 bit-parallel 기법 (`myers_diff`) 으로 edit distance O(NM/w) 계산.
+
+## 함정
+
+### 1. 알파벳 크기
+
+prec 배열은 알파벳 (또는 문자 집합) 만큼. 대문자 26 개면 충분하지만, 아스키 전체면 더 큰 배열 필요.
+
+### 2. shift overflow
+
+`cur << 1` 이 64 비트 넘으면 상위 비트 손실. M=64 이면 `(cur << 1)` 에서 MSB 가 carry out 되지 않도록 M < 64 로 제한하거나 bitset 배열 사용.
+
+### 3. traceback 불가
+
+bitset LCS 는 길이만 O(1) 에 구함. 수열 복원 필요시 [[Hirschberg|Hirschberg]] 또는 표준 DP traceback.
+
+### 4. `(u - v) & ~u` 의미
+
+이 수식이 한 번에 LCS 전이를 표현함. 직관적이지 않으므로 필요시 논문 참고. 틀리면 계산이 훨씬 더 빨라지거나 (의미 없는 값) 느려짐.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 9251 | LCS | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9200-9299/9251) |
+| BOJ 9252 | LCS 2 (traceback) | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9200-9299/9252) |
+| BOJ 1958 | LCS 3 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1900-1999/1958) |
+
+## 참고
+
+- [[LCS|최장 공통 부분 수열 (LCS)]]
+- [[Hirschberg|Hirschberg (O(N) 메모리 LCS)]]
+- [[Bitset Optimization|비트셋 최적화]]
+- [solved.ac, bitset_lcs](https://solved.ac/problems/tags/bitset_lcs)
+- Allison & Dix, A bit-string longest-common-subsequence algorithm (1986)

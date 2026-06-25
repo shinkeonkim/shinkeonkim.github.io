@@ -1,0 +1,334 @@
+---
+title: "춤추는 링크 (Dancing Links, DLX)"
+aliases: ["dancing links", "DLX", "춤추는 링크", "dancing-links", "toroidal linked list"]
+tags: [algorithm, search, dancing-links, backtracking, exact-cover]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, dancing_links"
+    url: "https://solved.ac/problems/tags/dancing_links"
+    author: "solved.ac"
+  - title: "Donald Knuth, Dancing Links (2000)"
+    url: "https://arxiv.org/abs/cs/0011047"
+    author: "Donald E. Knuth"
+---
+
+## 정의
+
+**Dancing Links (DLX)** 는 0-1 행렬을 **doubly linked toroidal list** 로 표현하는 자료구조. 각 1 을 하나의 노드로 두고, 노드들이 좌/우/상/하로 연결된 원형 연결 리스트. Knuth X (exact cover backtracking) 에서 행/열 제거와 복원을 **O(1)** 에 하는 것이 목적.
+
+DLX 라는 이름은 노드 제거/복원 시 포인터가 "춤추는" 모양에서 유래.
+
+## 문제 상황과 동기
+
+Exact Cover: 0-1 행렬에서 **모든 열이 정확히 한 번** 포함되도록 행을 선택.
+
+- **naive backtracking**: 행렬 복사 O(NM) per recursion. N, M 이 수백만이면 불가.
+- **DLX**: linked list 로 행렬 유지. 행/열 제거는 O(1) (포인터 4 개 변경). 복원도 O(1) (역연산). 메모리도 1 의 개수만 사용.
+
+핵심 통찰: *Doubly linked list 에서 `L->R = R, R->L = L` 로 제거하고, `L->R = N, R->L = N` 으로 복원하는 두 연산이 정확히 역관계. 행렬을 복사/해제할 필요가 없음.*
+
+## 시각화
+
+```anim:dancing-links
+{}
+```
+
+## 핵심 아이디어
+
+### Toroidal Doubly Linked List
+
+행렬의 각 **1** 을 Node 로. 각 노드는 4 개 포인터:
+
+```text
+L, R: 같은 행의 다음/이전 1
+U, D: 같은 열의 다음/이전 1
+```
+
+header 노드는 각 열을 대표. `head` 는 모든 열 header 의 header. 모든 리스트는 원형 (toroidal).
+
+### Cover (열 제거)
+
+```text
+cover(c):
+    c->R->L = c->L; c->L->R = c->R    // 열 header 제거
+    for each row i in column c (i = c->D; i != c; i = i->D):
+        for each node j in row i (j = i->R; j != i; j = j->R):
+            j->D->U = j->U
+            j->U->D = j->D              // 행의 모든 노드 제거
+            j->col->cnt--
+```
+
+### Uncover (열 복원, 정확히 역순)
+
+```text
+uncover(c):
+    for each row i in column c (i = c->U; i != c; i = i->U):
+        for each node j in row i (j = i->L; j != i; j = j->L):
+            j->col->cnt++
+            j->D->U = j
+            j->U->D = j
+    c->R->L = c; c->L->R = c
+```
+
+cover 와 uncover 는 **포인터 배정문만 다르고 구조가 동일**. 역순으로 복원해야 링크가 정확히 복구됨.
+
+## 알고리즘
+
+```text
+DLX_search():
+    if head.R == head: return 성공 (해 찾음)
+    c = 열 중 1 의 개수가 가장 적은 열 (MRV heuristic)
+    cover(c)
+    for each row r in column c:
+        정답에 r 추가
+        for each column j in row r: cover(j)
+        DLX_search()
+        for each column j in row r (역순): uncover(j)
+        정답에서 r 제거
+    uncover(c)
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Dancing Links - cover/uncover 연산 중심
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Node {
+    Node *L, *R, *U, *D, *col;
+    int row, cnt;
+};
+
+struct DLX {
+    vector<Node> nodes;
+    Node *head;
+    vector<int> ans;
+
+    DLX(int cols) {
+        nodes.resize(cols + 1);
+        head = &nodes[0];
+        head->L = head->R = head->U = head->D = head;
+        head->col = head;
+        for (int i = 1; i <= cols; i++) {
+            auto* c = &nodes[i];
+            c->L = head; c->R = head->R;
+            head->R->L = c; head->R = c;
+            c->U = c->D = c; c->col = c; c->cnt = 0;
+        }
+    }
+
+    void add_row(int r, const vector<int>& cols) {
+        Node* first = nullptr;
+        for (int c : cols) {
+            nodes.emplace_back();
+            auto* n = &nodes.back();
+            n->row = r; n->col = &nodes[c]; n->col->cnt++;
+            if (first) {
+                n->L = first->L; n->R = first;
+                first->L->R = n; first->L = n;
+            } else { first = n; n->L = n->R = n; }
+            n->U = n->col->U; n->D = n->col;
+            n->col->U->D = n; n->col->U = n;
+        }
+    }
+
+    void cover(Node* c) {
+        c->R->L = c->L; c->L->R = c->R;
+        for (auto* i = c->D; i != c; i = i->D)
+            for (auto* j = i->R; j != i; j = j->R) {
+                j->D->U = j->U; j->U->D = j->D;
+                j->col->cnt--;
+            }
+    }
+
+    void uncover(Node* c) {
+        for (auto* i = c->U; i != c; i = i->U)
+            for (auto* j = i->L; j != i; j = j->L) {
+                j->col->cnt++;
+                j->D->U = j; j->U->D = j;
+            }
+        c->R->L = c; c->L->R = c;
+    }
+
+    bool search() {
+        if (head->R == head) return true;
+        Node* c = head->R;
+        for (auto* p = head->R; p != head; p = p->R)
+            if (p->cnt < c->cnt) c = p;
+        cover(c);
+        for (auto* r = c->D; r != c; r = r->D) {
+            ans.push_back(r->row);
+            for (auto* j = r->R; j != r; j = j->R) cover(j->col);
+            if (search()) return true;
+            for (auto* j = r->L; j != r; j = j->L) uncover(j->col);
+            ans.pop_back();
+        }
+        uncover(c);
+        return false;
+    }
+};
+
+int main() {
+    int N, M; cin >> N >> M;
+    DLX dlx(M);
+    for (int i = 1; i <= N; i++) {
+        vector<int> cols;
+        for (int j = 1; j <= M; j++) {
+            int x; cin >> x;
+            if (x) cols.push_back(j);
+        }
+        if (!cols.empty()) dlx.add_row(i, cols);
+    }
+    if (dlx.search())
+        for (int r : dlx.ans) cout << r << " ";
+    else cout << "No solution";
+}
+`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# DLX cover/uncover + search
+class Node:
+    __slots__ = ('L','R','U','D','col','row','cnt')
+    def __init__(self):
+        self.L=self.R=self.U=self.D=self.col=self
+        self.row=-1; self.cnt=0
+
+def cover(c):
+    c.R.L=c.L; c.L.R=c.R
+    i=c.D
+    while i!=c:
+        j=i.R
+        while j!=i:
+            j.D.U=j.U; j.U.D=j.D; j.col.cnt-=1; j=j.R
+        i=i.D
+
+def uncover(c):
+    i=c.U
+    while i!=c:
+        j=i.L
+        while j!=i:
+            j.col.cnt+=1; j.D.U=j; j.U.D=j; j=j.L
+        i=i.U
+    c.R.L=c; c.L.R=c
+
+def solve(M, rows):
+    head=Node()
+    col_list=[head]
+    for _ in range(M):
+        c=Node(); c.L=head; c.R=head.R
+        head.R.L=c; head.R=c; c.U=c.D=c
+        c.col=c; c.cnt=0; col_list.append(c)
+    def add_row(r, cols):
+        first=None
+        for ci in cols:
+            n=Node(); n.row=r; n.col=col_list[ci]; n.col.cnt+=1
+            if first:
+                n.L=first.L; n.R=first
+                first.L.R=n; first.L=n
+            else: first=n; n.L=n.R=n
+            n.U=n.col.U; n.D=n.col
+            n.col.U.D=n; n.col.U=n
+    for i,row in enumerate(rows):
+        cs=[j for j,v in enumerate(row,1) if v]
+        if cs: add_row(i,cs)
+    ans=[]
+    def dfs():
+        if head.R==head: return True
+        c=head.R; p=head.R
+        while p!=head:
+            if p.cnt<c.cnt: c=p
+            p=p.R
+        cover(c); r=c.D
+        while r!=c:
+            ans.append(r.row); j=r.R
+            while j!=r: cover(j.col); j=j.R
+            if dfs(): return True
+            j=r.L
+            while j!=r: uncover(j.col); j=j.L
+            ans.pop(); r=r.D
+        uncover(c); return False
+    return ans if dfs() else None
+
+N,M=map(int,input().split())
+rows=[list(map(int,input().split())) for _ in range(N)]
+r=solve(M,rows)
+print(" ".join(map(str,r)) if r else "No solution")`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본 exact cover",
+      input: `4 4
+1 1 0 1
+0 1 1 0
+0 0 1 1
+1 0 0 0`,
+      output: `1 2`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **cover** | O(1) per node (포인터 4 개 변경) |
+| **uncover** | O(1) per node (완전 역연산) |
+| **공간** | O(K) (K = 1 의 개수) |
+| **탐색 (최악)** | O(2^N) (backtracking) |
+| **탐색 (MRV 사용)** | 대부분 문제에서 다항식 시간 |
+
+## 변형 / 활용
+
+### 스도쿠 (Sudoku)
+
+9x9 스도쿠를 exact cover 로 변환: 729 행 (칸 81개 x 숫자 9개) x 324 열 (4 가지 제약: 칸/행/열/블록). DLX 로 가장 빠르게 풀리는 방법.
+
+### N-Queens
+
+NxN 체스판에 N 개 퀸을 서로 공격하지 않게 배치. 행/열/대각선 제약을 열로, 각 퀸 배치를 행으로 모델링.
+
+### Pentomino / 타일링
+
+직사각형을 폴리오미노 조각으로 채우는 문제. 각 조각 배치를 행, 각 칸 점유를 열로.
+
+## 함정
+
+### 1. uncover 는 정확히 역순
+
+cover 가 천장→바닥, 왼→오 순서면 uncover 는 바닥→천장, 오→왼 순서여야 함. 순서 꼬이면 링크 복원 실패.
+
+### 2. MRV heuristic 필수
+
+1 의 개수가 가장 적은 열을 먼저 선택하지 않으면 탐색 공간이 폭발. 16x16 스도쿠에서 MRV 유무가 수 초 vs 수 시간 차이.
+
+### 3. 연결 포기
+
+DLX 는 linked list 가 main data. 배열 복사가 없으므로 실수로 포인터 하나 잘못 조작하면 디버깅이 극히 어려움. cover/uncover 는 반드시 단위 테스트.
+
+### 4. 행이 전혀 없는 열
+
+초기화 시점에 어떤 열에도 1 이 없는 행이 있으면 미리 cover 해도 됨 (불가능한 열).
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 2580 | 스도쿠 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/2500-2599/2580) |
+| BOJ 9663 | N-Queen | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/9600-9699/9663) |
+| BOJ 15312 | Exact Cover | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/15300-15399/15312) |
+| BOJ 22965 | k-Dilation | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/22900-22999/22965) |
+
+## 참고
+
+- [[Knuth X|Knuth X (Exact Cover)]]
+- [[Backtracking|백트래킹]]
+- [solved.ac, dancing_links](https://solved.ac/problems/tags/dancing_links)
+- D. E. Knuth, Dancing Links (2000)

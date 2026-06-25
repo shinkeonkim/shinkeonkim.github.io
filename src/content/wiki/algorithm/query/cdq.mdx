@@ -1,0 +1,291 @@
+---
+title: "CDQ 분할 정복 (CDQ Divide and Conquer)"
+aliases: ["CDQ", "CDQ 분할 정복", "cdq divide and conquer", "offline 3D partial order"]
+tags: [algorithm, query, cdq]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, cdq"
+    url: "https://solved.ac/problems/tags/cdq"
+    author: "solved.ac"
+---
+
+## 정의
+
+**CDQ 분할 정복** 은 오프라인에서 3차원 이상의 부분 순서 (partial order) 문제를 O(N log² N) 에 해결하는 기법. 한 축으로 분할하고, 다른 축을 2D Fenwick / merge 로 처리.
+
+2004 년 중국 IOI 대표단 CDQ (Chen Danqi) 가 제안.
+
+## 문제 상황과 동기
+
+3차원 점 (x, y, z) 에 대해, 각 점보다 모든 축이 작거나 같은 점의 개수를 세야 한다 (3D partial order counting).
+
+- **naive**: 모든 쌍 비교 O(N²).
+- **2D BIT + 1D sort**: x 로 정렬 후 y, z 를 2D BIT 에 넣으려면 O(N log² N) 이지만, BIT 가 2차원이면 메모리 O(N²).
+- **CDQ**: *y 축을 merge sort 로 처리*, z 축만 Fenwick. O(N log² N) 시간, O(N) 메모리.
+
+핵심 통찰: *분할 정복으로 한 차원을 제거* 하고, 나머지 차원을 자료구조로.
+
+## 시각화
+
+```anim:cdq
+{}
+```
+
+## 핵심 아이디어
+
+invariant: *분할 후 왼쪽 점의 y가 오른쪽 점의 y보다 작거나 같으면, 왼쪽의 점이 오른쪽 점에 기여할 수 있음*.
+
+```text
+CDQ(l, r):
+    if l == r: return
+    mid = (l + r) / 2
+    CDQ(l, mid)
+    CDQ(mid+1, r)
+
+    // 왼쪽 절반의 점이 오른쪽 절반의 점에 기여
+    // y 기준으로 merge 하면서 z 를 Fenwick 에 add/query
+    sort by y within [l, r]
+    for each point in merged order:
+        if point belongs to left half:
+            fenwick.add(point.z, 1)
+        else:
+            ans[point.idx] += fenwick.sum(point.z)
+    // Fenwick 초기화 (rollback)
+    for each point in left half (restore order):
+        fenwick.add(point.z, -1)
+
+    // 원래 x 순서 복원
+```
+
+## 알고리즘
+
+```text
+sort points by x
+
+CDQ(l, r):
+    if l >= r: return
+    mid = (l + r) / 2
+    CDQ(l, mid)
+    CDQ(mid+1, r)
+    i = l, j = mid+1, k = l
+    while i <= mid and j <= r:
+        if a[i].y <= a[j].y:
+            fenwick.add(a[i].z, cnt[a[i].z])
+            temp[k++] = a[i++]
+        else:
+            ans[a[j].idx] += fenwick.sum(a[j].z)
+            temp[k++] = a[j++]
+    while i <= mid: temp[k++] = a[i++]
+    while j <= r:
+        ans[a[j].idx] += fenwick.sum(a[j].z)
+        temp[k++] = a[j++]
+    for i in l..mid: fenwick.add(a[i].z, -cnt[a[i].z])
+    for i in l..r: a[i] = temp[i]
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// CDQ divide and conquer, 3D partial order counting
+#include <bits/stdc++.h>
+using namespace std;
+
+struct Pt { int x, y, z, idx, cnt; };
+vector<Pt> a;
+vector<int> ans;
+
+struct Fenwick {
+    int n; vector<int> t;
+    Fenwick(int n): n(n), t(n+1, 0) {}
+    void add(int i, int v) { for (; i <= n; i += i & -i) t[i] += v; }
+    int sum(int i) { int s = 0; for (; i > 0; i -= i & -i) s += t[i]; return s; }
+};
+
+void cdq(int l, int r, Fenwick& bit) {
+    if (l >= r) return;
+    int mid = (l + r) / 2;
+    cdq(l, mid, bit);
+    cdq(mid + 1, r, bit);
+    vector<Pt> tmp;
+    int i = l, j = mid + 1;
+    while (i <= mid && j <= r) {
+        if (a[i].y <= a[j].y) {
+            bit.add(a[i].z, a[i].cnt);
+            tmp.push_back(a[i++]);
+        } else {
+            ans[a[j].idx] += bit.sum(a[j].z);
+            tmp.push_back(a[j++]);
+        }
+    }
+    while (i <= mid) tmp.push_back(a[i++]);
+    while (j <= r) {
+        ans[a[j].idx] += bit.sum(a[j].z);
+        tmp.push_back(a[j++]);
+    }
+    for (i = l; i <= mid; i++) bit.add(a[i].z, -a[i].cnt);
+    for (i = l; i <= r; i++) a[i] = tmp[i - l];
+}
+
+int main() {
+    ios_base::sync_with_stdio(false); cin.tie(nullptr);
+    int n; cin >> n;
+    a.resize(n);
+    int maxZ = 0;
+    for (int i = 0; i < n; i++) {
+        cin >> a[i].x >> a[i].y >> a[i].z;
+        a[i].idx = i; a[i].cnt = 1;
+        maxZ = max(maxZ, a[i].z);
+    }
+    sort(a.begin(), a.end(), [](auto& p, auto& q) {
+        if (p.x != q.x) return p.x < q.x;
+        if (p.y != q.y) return p.y < q.y;
+        return p.z < q.z;
+    });
+    // deduplicate
+    vector<Pt> dedup;
+    for (int i = 0; i < n; i++) {
+        if (!dedup.empty() && a[i].x == dedup.back().x
+            && a[i].y == dedup.back().y && a[i].z == dedup.back().z)
+            dedup.back().cnt++;
+        else dedup.push_back(a[i]);
+    }
+    a = dedup;
+    Fenwick bit(maxZ);
+    ans.assign(n, 0);
+    cdq(0, (int)a.size() - 1, bit);
+    for (int i = 0; i < n; i++) cout << ans[i] << "\\n";
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `import sys
+input = sys.stdin.readline
+
+class Fenwick:
+    def __init__(self, n):
+        self.n = n
+        self.t = [0] * (n + 1)
+    def add(self, i, v):
+        while i <= self.n:
+            self.t[i] += v
+            i += i & -i
+    def sum(self, i):
+        s = 0
+        while i > 0:
+            s += self.t[i]
+            i -= i & -i
+        return s
+
+def cdq(l, r):
+    if l >= r: return
+    mid = (l + r) // 2
+    cdq(l, mid)
+    cdq(mid + 1, r)
+    tmp = []
+    i, j = l, mid + 1
+    while i <= mid and j <= r:
+        if arr[i][1] <= arr[j][1]:
+            bit.add(arr[i][2], arr[i][4])
+            tmp.append(arr[i]); i += 1
+        else:
+            ans[arr[j][3]] += bit.sum(arr[j][2])
+            tmp.append(arr[j]); j += 1
+    while i <= mid:
+        tmp.append(arr[i]); i += 1
+    while j <= r:
+        ans[arr[j][3]] += bit.sum(arr[j][2])
+        tmp.append(arr[j]); j += 1
+    for i in range(l, mid + 1):
+        bit.add(arr[i][2], -arr[i][4])
+    arr[l:r+1] = tmp
+
+n = int(input())
+pts = [tuple(map(int, input().split())) for _ in range(n)]
+# x, y, z, idx, cnt
+arr = [(x, y, z, i, 1) for i, (x, y, z) in enumerate(pts)]
+arr.sort(key=lambda p: (p[0], p[1], p[2]))
+dedup = []
+for p in arr:
+    if dedup and p[:3] == dedup[-1][:3]:
+        dedup[-1] = (dedup[-1][0], dedup[-1][1], dedup[-1][2], dedup[-1][3], dedup[-1][4] + 1)
+    else:
+        dedup.append(p)
+arr = dedup
+maxZ = max(p[2] for p in arr)
+bit = Fenwick(maxZ)
+ans = [0] * n
+cdq(0, len(arr) - 1)
+print("\\n".join(map(str, ans)))`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본",
+      input: `5
+1 2 3
+2 3 1
+1 1 1
+3 2 2
+2 1 2`,
+      output: `1
+2
+0
+4
+1`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **시간 (최선)** | O(N log² N) |
+| **시간 (평균)** | O(N log² N) |
+| **시간 (최악)** | O(N log² N) |
+| **공간** | O(N) |
+| **안정성** | N/A (오프라인) |
+
+## 변형 / 활용
+
+| 변형 | 설명 |
+|:---|:---|
+| **CDQ + Convex Hull** | DP 최적화 (divide and conquer DP) 에 CDQ 적용. |
+| **4D partial order** | CDQ 내부에 CDQ 중첩. O(N log³ N). |
+| **CDQ on tree** | tree DP 에서 divide and conquer on tree. |
+| **동적 역전쌍** | 삽입/삭제가 있는 역전쌍 counting, 시간축 추가 3D. |
+
+## 함정
+
+### 1. 중복 점 처리
+
+x, y, z 가 모두 같은 점은 deduplicate 하고 cnt 로 관리. cnt 가 여러 개면 Fenwick 에 cnt 를 add.
+
+### 2. Fenwick 초기화
+
+분할 정복 한 레벨이 끝나면 Fenwick 을 깨끗이 초기화. `memset` 대신 rollback (같은 add 로 -).
+
+### 3. 좌표 압축
+
+z 범위가 크면 Fenwick 에 넣기 전 좌표 압축 필요.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 16993 | 연속합과 쿼리 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16900-16999/16993) |
+| BOJ 11781 | 소수 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11700-11799/11781) |
+| BOJ 16367 | TV Show Genome | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/16300-16399/16367) |
+
+## 참고
+
+- [[Fenwick Tree|펜윅 트리 (Fenwick Tree)]]
+- [[Mo's Algorithm|Mo's 알고리즘]]
+- [[Divide and Conquer|분할 정복]]
+- [[Segtree|세그먼트 트리]]
+- [solved.ac, cdq](https://solved.ac/problems/tags/cdq)

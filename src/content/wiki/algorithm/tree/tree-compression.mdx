@@ -1,0 +1,283 @@
+---
+title: "트리 압축 (Tree Compression / Virtual Tree)"
+aliases: ["tree compression", "virtual tree", "트리 압축", "가상 트리", "tree-compression"]
+tags: [algorithm, tree, tree-compression, lca, euler-tour]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, tree_compression"
+    url: "https://solved.ac/problems/tags/tree_compression"
+    author: "solved.ac"
+---
+
+## 정의
+
+**트리 압축 (Tree Compression / Virtual Tree)** 은 원본 트리에서 **주어진 정점 부분 집합 S** 만으로 *원래 조상 관계를 보존하는* 작은 트리를 구성하는 기법. LCA 와 DFS order 를 이용해 |S| 개 노드의 virtual tree 를 O(|S| log |S|) 에 만든다.
+
+## 문제 상황과 동기
+
+트리 DP 나 쿼리에서 **전체 노드가 아니라 일부 정점 S (K개)** 만 관심 대상일 때가 많다.
+
+- **naive**: S 의 각 노드 쌍에 대해 LCA 를 O(K^2) 번 구하거나 원본 트리에서 DP. N=10^5, K=10^5 면 O(NK) 불가능.
+- **virtual tree**: S 의 노드 + S 노드들의 pairwise LCA 들만 추출해 **최대 2K 개 노드** 의 작은 트리를 만든다. 이후 DP/쿼리를 이 작은 트리에서 O(K) 에 처리.
+
+핵심 통찰: *DFS order 로 정렬한 뒤 인접한 노드의 LCA 만 추가하면 모든 필요한 LCA 가 커버된다*.
+
+## 시각화
+
+```anim:tree-compression
+{}
+```
+
+## 핵심 아이디어
+
+invariant: `tin[u]` (DFS in-time) 기준 정렬 시, S 의 모든 쌍 간 LCA 는 **인접 노드 쌍의 LCA 만**으로 커버된다.
+
+```text
+build_virtual_tree(S):
+    sort S by tin[S]
+    for i = 1..|S|-1:
+        S ← S ∪ { LCA(S[i-1], S[i]) }
+    sort unique S by tin[S]
+    stack = []
+    for u in S:
+        while stack is not empty and not ancestor(stack.top(), u):
+            stack.pop()
+        if stack is not empty: add edge stack.top() → u
+        stack.push(u)
+    return edges
+```
+
+결과: 원본 트리의 조상 관계를 보존하는 **최대 2|S| - 1 개 노드** 의 작은 트리.
+
+## 알고리즘
+
+```text
+1. Euler Tour (DFS) 로 tin[u], tout[u] 전처리 (LCA binary lifting 포함)
+2. S 에 root 노드 (보통 1) 추가
+3. S 를 tin[] 오름차순 정렬
+4. 인접 쌍 (S[i-1], S[i]) 의 LCA 를 구해 S 에 추가 (중복 제거)
+5. 최종 S 를 tin[] 기준 정렬
+6. 스택을 이용한 monotonic stack 으로 virtual tree 간선 구성:
+   - stack.top() 이 u 의 조상이면 stack.top() → u 간선 추가
+   - 아니면 pop 반복
+7. 필요한 DP / 연산을 virtual tree 에서 수행
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// Virtual Tree builder, O(K log N + K log K)
+#include <bits/stdc++.h>
+using namespace std;
+const int MAXN = 1e5 + 5, LOG = 17;
+vector<int> adj[MAXN];
+int tin[MAXN], tout[MAXN], timer;
+int up[MAXN][LOG], depth[MAXN];
+
+void dfs(int u, int p) {
+    tin[u] = ++timer; up[u][0] = p; depth[u] = depth[p] + 1;
+    for (int k = 1; k < LOG; k++)
+        up[u][k] = up[up[u][k-1]][k-1];
+    for (int v : adj[u]) if (v != p) dfs(v, u);
+    tout[u] = timer;
+}
+
+bool is_ancestor(int a, int b) {
+    return tin[a] <= tin[b] && tout[b] <= tout[a];
+}
+
+int lca(int u, int v) {
+    if (is_ancestor(u, v)) return u;
+    if (is_ancestor(v, u)) return v;
+    for (int k = LOG - 1; k >= 0; k--)
+        if (!is_ancestor(up[u][k], v))
+            u = up[u][k];
+    return up[u][0];
+}
+
+vector<pair<int,int>> build_vtree(vector<int>& nodes) {
+    sort(nodes.begin(), nodes.end(),
+         [](int a, int b) { return tin[a] < tin[b]; });
+    int k = nodes.size();
+    for (int i = 1; i < k; i++)
+        nodes.push_back(lca(nodes[i-1], nodes[i]));
+    sort(nodes.begin(), nodes.end(),
+         [](int a, int b) { return tin[a] < tin[b]; });
+    nodes.erase(unique(nodes.begin(), nodes.end()), nodes.end());
+    vector<pair<int,int>> edges;
+    stack<int> st; st.push(nodes[0]);
+    for (int i = 1; i < (int)nodes.size(); i++) {
+        int u = nodes[i];
+        while (!is_ancestor(st.top(), u)) st.pop();
+        edges.push_back({st.top(), u});
+        st.push(u);
+    }
+    return edges;
+}
+
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    int N, Q; cin >> N >> Q;
+    for (int i = 1; i < N; i++) {
+        int a, b; cin >> a >> b;
+        adj[a].push_back(b); adj[b].push_back(a);
+    }
+    dfs(1, 0);
+    while (Q--) {
+        int k; cin >> k;
+        vector<int> nodes(k);
+        for (int i = 0; i < k; i++) cin >> nodes[i];
+        auto edges = build_vtree(nodes);
+        cout << edges.size() << "\\n";
+        for (auto [u, v] : edges) cout << u << " " << v << "\\n";
+    }
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# Virtual Tree builder
+import sys
+sys.setrecursionlimit(1 << 20)
+input = sys.stdin.readline
+
+N, Q = map(int, input().split())
+adj = [[] for _ in range(N + 1)]
+for _ in range(N - 1):
+    a, b = map(int, input().split())
+    adj[a].append(b); adj[b].append(a)
+
+LOG = 17
+tin = [0] * (N + 1); tout = [0] * (N + 1)
+up = [[0] * LOG for _ in range(N + 1)]
+depth = [0] * (N + 1)
+timer = 0
+
+def dfs(u, p):
+    global timer
+    timer += 1; tin[u] = timer
+    up[u][0] = p; depth[u] = depth[p] + 1
+    for k in range(1, LOG):
+        up[u][k] = up[up[u][k-1]][k-1]
+    for v in adj[u]:
+        if v != p: dfs(v, u)
+    tout[u] = timer
+
+def is_anc(a, b):
+    return tin[a] <= tin[b] and tout[b] <= tout[a]
+
+def lca(u, v):
+    if is_anc(u, v): return u
+    if is_anc(v, u): return v
+    for k in range(LOG - 1, -1, -1):
+        if not is_anc(up[u][k], v):
+            u = up[u][k]
+    return up[u][0]
+
+def build_vtree(nodes):
+    nodes.sort(key=lambda x: tin[x])
+    k = len(nodes)
+    for i in range(1, k):
+        nodes.append(lca(nodes[i-1], nodes[i]))
+    nodes = sorted(set(nodes), key=lambda x: tin[x])
+    edges = []
+    st = [nodes[0]]
+    for u in nodes[1:]:
+        while not is_anc(st[-1], u):
+            st.pop()
+        edges.append((st[-1], u))
+        st.append(u)
+    return edges
+
+dfs(1, 0)
+for _ in range(Q):
+    k = int(input())
+    nodes = list(map(int, input().split()))
+    edges = build_vtree(nodes)
+    print(len(edges))
+    for u, v in edges:
+        print(u, v)`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본 K=3",
+      input: `7 2
+1 2
+1 3
+2 4
+2 5
+3 6
+3 7
+3
+4 5 7
+2
+6 7`,
+      output: `2
+1 4
+1 5
+2
+1 3
+1 6
+3 7`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **LCA 전처리** | O(N log N) 시간, O(N log N) 공간 |
+| **virtual tree 구성** | O(K log K) 정렬 + O(K) monotonic stack |
+| **virtual tree 노드 수** | 최대 2K - 1 |
+| **전체 (Q 회 쿼리)** | O((N log N) + Σ K_i log K_i) |
+
+## 변형 / 활용
+
+### 트리 DP on Virtual Tree
+
+virtual tree 에서 DP 로 **S 만의 문제** (독립 집합, 커버, 거리 합 등) 를 O(K) 에 해결.
+
+### 동적 쿼리
+
+S 가 매 쿼리마다 바뀌면 매번 build. ΣK_i ≤ 10^5 이면 매우 효율적.
+
+### Heavy-Light + Virtual Tree
+
+HLD 위에서 virtual tree 를 구성하면 heavy path 의 구간 쿼리까지 결합 가능.
+
+## 함정
+
+### 1. root 포함 필수
+
+`build_vtree` 에 root (보통 1) 를 S 에 포함하지 않으면 virtual tree 가 여러 컴포넌트로 나뉠 수 있다.
+
+### 2. is_ancestor 조건
+
+`tin[a] <= tin[b] && tout[b] <= tout[a]` 를 반드시 `<=` 로. 등호 없으면 자기 자신이 조상인 경우 누락.
+
+### 3. LCA 에서 up 범위
+
+LOG 값이 충분히 커야 (N ≤ 10^5 면 LOG = 17 이면 충분. N ≤ 2×10^5 면 LOG = 19).
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 17469 | Travel | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/17400-17499/17469) |
+| BOJ 13514 | 숨바꼭질 5 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/13500-13599/13514) |
+| BOJ 23634 | Baby's First Virtual Tree | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/23600-23699/23634) |
+| BOJ 1688 | 지뢰찾기 | - | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1600-1699/1688) |
+
+## 참고
+
+- [[LCA|최소 공통 조상]]
+- [[Euler Tour Technique|오일러 투어 테크닉]]
+- [[HLD|Heavy-Light Decomposition]]
+- [solved.ac, tree_compression](https://solved.ac/problems/tags/tree_compression)

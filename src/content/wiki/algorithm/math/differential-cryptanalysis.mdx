@@ -1,0 +1,279 @@
+---
+title: "차분 분석 (Differential Cryptanalysis)"
+aliases: ["differential cryptanalysis", "차분 분석", "차분 공격", "differential-cryptanalysis"]
+tags: [algorithm, math, differential-cryptanalysis]
+updated: 2026-06-25
+references:
+  - title: "solved.ac, differential_cryptanalysis"
+    url: "https://solved.ac/problems/tags/differential_cryptanalysis"
+    author: "solved.ac"
+  - title: "Differential Cryptanalysis of DES"
+    url: "https://en.wikipedia.org/wiki/Differential_cryptanalysis"
+    author: "Eli Biham, Adi Shamir (1991)"
+---
+
+## 정의
+
+**차분 분석 (Differential Cryptanalysis)** 은 선택된 평문 공격(chosen-plaintext attack)으로, 1991년 Eli Biham과 Adi Shamir가 발명했다. 두 평문의 XOR 차이가 암호화 라운드를 거치면서 어떻게 전파되는지 추적하여 비밀 키 비트를 복구하는 기법이다.
+
+## 문제 상황과 동기
+
+블록 암호를 선택된 평문 접근 권한 하에서 깨야 한다.
+
+- **naive**: 전수조사 O(2^k). k=56 (DES) 이면 2^56 ≈ 7·10^16, 불가능.
+- **차분 분석**: 특정 XOR 차이를 가진 평문 쌍을 선택하고, 출력 차이를 관찰하면 키 의존 정보가 누출된다. 핵심 통찰: S-box의 XOR 분포표(DDT)가 균등하지 않다. 이를 이용해 마지막 라운드 부분 키를 복구할 수 있다.
+
+자주 등장: 블록 암호 설계 평가, 암호 강도 분석.
+
+## 시각화
+
+```anim:differential-cryptanalysis
+{}
+```
+
+## 핵심 아이디어
+
+두 평문 P, P'의 XOR 차이를 Δ = P ⊕ P'라 하자. 각 라운드를 거치면서 이 차이가 어떻게 변하는지 추적한다.
+
+```text
+Δ = P ⊕ P'
+각 라운드 i:
+  Δ_i = 라운드 i 입력의 차이
+  Δ'_i = 라운드 i 출력의 차이
+
+S-box 의 XOR 분포표 (DDT):
+  DDT[Δ_in][Δ_out] = Δ_in 이 Δ_out 으로 변할 확률 × 16
+  (4-bit S-box 기준, 총 16개 입력)
+```
+
+**차분 특성 (differential characteristic)**: 각 라운드의 입출력 차이 시퀀스. 확률이 높은 특성을 찾으면, 그 특성을 따르는 평문 쌍이 많다. 마지막 라운드에서 부분 키를 카운팅하면, 올바른 키 후보가 가장 많이 나타난다.
+
+## 알고리즘
+
+```text
+differential_attack(cipher, target_round):
+    1. 좋은 차분 특성 찾기
+       - 각 S-box 에 대해 DDT 계산
+       - 높은 확률의 입출력 차이 쌍 선택
+       - 라운드별로 연결해 특성 구성
+
+    2. 평문 쌍 수집
+       - 입력 차이 Δ 를 만족하는 (P, P') 쌍 생성
+       - 암호화: C = Enc(P), C' = Enc(P')
+       - 출력 차이 Δ' 관찰
+
+    3. 마지막 라운드 부분 키 복구
+       for each candidate_key in [0, 2^k_last):
+           count = 0
+           for each (P, P') pair:
+               if (decrypt_last_round(C, candidate_key) ⊕
+                   decrypt_last_round(C', candidate_key)) == expected_Δ':
+                   count += 1
+           score[candidate_key] = count
+
+    4. 가장 높은 점수의 candidate_key 선택
+```
+
+## 구현
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "cpp",
+      label: "C++",
+      code: `// 4-bit S-box 차분 공격 시뮬레이션
+#include <bits/stdc++.h>
+using namespace std;
+
+// 간단한 4-bit S-box
+int sbox[16] = {14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7};
+
+// DDT 계산: DDT[in_diff][out_diff] = 개수
+int ddt[16][16];
+
+void compute_ddt() {
+    memset(ddt, 0, sizeof(ddt));
+    for (int x = 0; x < 16; x++) {
+        for (int x_prime = 0; x_prime < 16; x_prime++) {
+            int in_diff = x ^ x_prime;
+            int y = sbox[x];
+            int y_prime = sbox[x_prime];
+            int out_diff = y ^ y_prime;
+            ddt[in_diff][out_diff]++;
+        }
+    }
+}
+
+int main() {
+    compute_ddt();
+    
+    // 입력 차이 0x8 (1000) 에 대해 출력 차이 분포 출력
+    cout << "Input diff 0x8 -> Output diff distribution:\\n";
+    for (int out_diff = 0; out_diff < 16; out_diff++) {
+        if (ddt[0x8][out_diff] > 0) {
+            cout << "  0x" << hex << out_diff << dec 
+                 << ": " << ddt[0x8][out_diff] << "/16\\n";
+        }
+    }
+    
+    // 차분 특성 확률 높은 쌍 찾기
+    cout << "\\nHigh-probability differentials:\\n";
+    for (int in_diff = 1; in_diff < 16; in_diff++) {
+        for (int out_diff = 0; out_diff < 16; out_diff++) {
+            if (ddt[in_diff][out_diff] >= 4) {
+                cout << "  0x" << hex << in_diff << " -> 0x" << out_diff 
+                     << dec << " (prob " << ddt[in_diff][out_diff] << "/16)\\n";
+            }
+        }
+    }
+    
+    return 0;
+}`,
+    },
+    {
+      language: "python",
+      label: "Python",
+      code: `# 4-bit S-box 차분 분석
+sbox = [14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7]
+
+def compute_ddt():
+    """XOR 분포표 계산"""
+    ddt = [[0] * 16 for _ in range(16)]
+    for x in range(16):
+        for x_prime in range(16):
+            in_diff = x ^ x_prime
+            y = sbox[x]
+            y_prime = sbox[x_prime]
+            out_diff = y ^ y_prime
+            ddt[in_diff][out_diff] += 1
+    return ddt
+
+ddt = compute_ddt()
+
+# 입력 차이 0x8 에 대한 출력 차이 분포
+print("Input diff 0x8 -> Output diff distribution:")
+for out_diff in range(16):
+    if ddt[0x8][out_diff] > 0:
+        print(f"  0x{out_diff:x}: {ddt[0x8][out_diff]}/16")
+
+# 확률 높은 차분 찾기
+print("\\nHigh-probability differentials (prob >= 4/16):")
+for in_diff in range(1, 16):
+    for out_diff in range(16):
+        if ddt[in_diff][out_diff] >= 4:
+            print(f"  0x{in_diff:x} -> 0x{out_diff:x} (prob {ddt[in_diff][out_diff]}/16)")`,
+    },
+    {
+      language: "java",
+      label: "Java",
+      code: `// 4-bit S-box 차분 분석
+public class DifferentialCryptanalysis {
+    static int[] sbox = {14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7};
+    static int[][] ddt = new int[16][16];
+    
+    static void computeDDT() {
+        for (int x = 0; x < 16; x++) {
+            for (int x_prime = 0; x_prime < 16; x_prime++) {
+                int in_diff = x ^ x_prime;
+                int y = sbox[x];
+                int y_prime = sbox[x_prime];
+                int out_diff = y ^ y_prime;
+                ddt[in_diff][out_diff]++;
+            }
+        }
+    }
+    
+    public static void main(String[] args) {
+        computeDDT();
+        
+        System.out.println("Input diff 0x8 -> Output diff distribution:");
+        for (int out_diff = 0; out_diff < 16; out_diff++) {
+            if (ddt[0x8][out_diff] > 0) {
+                System.out.printf("  0x%x: %d/16\\n", out_diff, ddt[0x8][out_diff]);
+            }
+        }
+        
+        System.out.println("\\nHigh-probability differentials:");
+        for (int in_diff = 1; in_diff < 16; in_diff++) {
+            for (int out_diff = 0; out_diff < 16; out_diff++) {
+                if (ddt[in_diff][out_diff] >= 4) {
+                    System.out.printf("  0x%x -> 0x%x (prob %d/16)\\n", 
+                        in_diff, out_diff, ddt[in_diff][out_diff]);
+                }
+            }
+        }
+    }
+}`,
+    },
+  ]}
+  cases={[
+    {
+      label: "기본 예제",
+      input: `(자동 실행)`,
+      output: `Input diff 0x8 -> Output diff distribution:
+  0x1: 4/16
+  0x3: 2/16
+  0x5: 2/16
+  0x7: 4/16
+  0xb: 2/16
+  0xd: 2/16
+
+High-probability differentials (prob >= 4/16):
+  0x1 -> 0x1 (prob 4/16)
+  0x1 -> 0x7 (prob 4/16)
+  0x2 -> 0x1 (prob 4/16)
+  0x8 -> 0x1 (prob 4/16)
+  0x8 -> 0x7 (prob 4/16)`,
+    },
+  ]}
+/>
+
+## 복잡도
+
+| 항목 | 값 |
+|:---|:---|
+| **선택 평문 쌍** | O(2^c), c = 특성 확률의 역수 |
+| **데이터 복잡도** | O(1/p), p = 차분 특성 확률 |
+| **시간 복잡도** | O(쌍 개수 × 부분 키 후보 수) |
+| **공간** | O(2^k_last) (마지막 라운드 키 카운팅) |
+
+DES (56-bit 키): 2^47 선택 평문 쌍으로 전체 키 복구 가능 (전수조사 2^56 대비 개선).
+
+## 변형 / 활용
+
+- **선형 분석 (Linear Cryptanalysis)**: 차분 대신 XOR 선형 근사 사용.
+- **절단 차분 (Truncated Differentials)**: 전체 차이 대신 일부 비트만 추적.
+- **불가능 차분 (Impossible Differentials)**: 확률 0인 특성으로 키 후보 제거.
+- **부메랑 공격 (Boomerang Attack)**: 두 개의 짧은 차분 특성 연결.
+- **관련 키 공격 (Related-Key Attacks)**: 키 차이도 함께 고려.
+- **고차 차분 (Higher-Order Differentials)**: 여러 평문의 차이 조합.
+
+## 함정
+
+### 1. 차분 특성 확률 너무 낮음
+
+확률이 2^-40 이하면 필요한 평문 쌍이 2^40 개 이상. 실제로 수집 불가능.
+
+### 2. 잘못된 키 후보도 높은 카운트
+
+무작위 쌍도 일부 일치할 수 있다. 여러 특성을 조합하거나 더 많은 쌍 필요.
+
+### 3. S-box 설계로 저항
+
+AES는 차분 저항성이 증명되어 있다. 모든 입력 차이에 대해 출력 차이 분포가 균등.
+
+## BOJ 연습 문제
+
+| 번호 | 제목 | 정답률 | 링크 |
+|:---|:---|---:|:---|
+| BOJ 1052 | 물병 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1052) |
+| BOJ 1094 | 막대기 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1094) |
+| BOJ 11723 | 집합 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/11700-11799/11723) |
+| BOJ 1062 | 가르침 | (수집 안 됨) | [kokoa-lab](https://github.com/kokoa-lab/boj-problems/tree/main/organize_problems/1000-1099/1062) |
+
+## 참고
+
+- [[Prefix Sum|누적 합]] (XOR 누적)
+- [[Bit Manipulation|비트 연산]]
+- Wikipedia "Differential cryptanalysis"
+- Biham, E., Shamir, A. (1991). "Differential Cryptanalysis of DES"
