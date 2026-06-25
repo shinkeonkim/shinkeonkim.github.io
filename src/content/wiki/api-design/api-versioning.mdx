@@ -1,0 +1,162 @@
+---
+title: "[API Design] API Versioning: URL / Header / Date 비교"
+aliases: ["API versioning", "API breaking change", "Stripe API version", "deprecation policy", "semver API"]
+tags: [api, versioning, backend, design]
+category: api-design
+updated: 2026-06-25
+references:
+  - title: "Stripe API Versioning"
+    url: "https://stripe.com/docs/api/versioning"
+  - title: "GitHub: REST API versions"
+    url: "https://docs.github.com/en/rest/overview/api-versions"
+---
+
+## 정의
+
+**API Versioning** 은 *breaking change 를 클라이언트에 강요 없이* 호환성을 유지하는 전략. 잘못 잡으면 *모든 클라이언트 동시 마이그레이션 강요*.
+
+## 무엇이 Breaking Change?
+
+| Breaking | Non-breaking |
+|---|---|
+| 필드 제거 / 이름 변경 | 새 필드 추가 (옵션) |
+| 필드 타입 변경 | 새 endpoint 추가 |
+| 필수 필드 추가 | 새 enum 값 추가 (옵션 일 때만) |
+| Enum 값 제거 | 새 query param (옵션) |
+| Endpoint 삭제 | 새 응답 헤더 |
+| 응답 status code 변경 | rate limit 조정 |
+| Auth 방식 변경 | 에러 메시지 개선 (코드 유지) |
+
+## 4가지 버전 전략
+
+```mermaid
+flowchart TD
+    Q{버전 표시 방법}
+    Q --> URL["URL 버전<br/>/v1/users"]
+    Q --> Header["Accept 헤더<br/>application/vnd.api+json;version=2"]
+    Q --> Custom["커스텀 헤더<br/>X-API-Version: 2"]
+    Q --> Date["날짜 버전<br/>Stripe-Version: 2023-10-16"]
+```
+
+### 1. URL 버전 (`/v1/...`)
+
+```
+GET /v1/users/42
+GET /v2/users/42
+```
+
+**장점**: 명시적, 브라우저 친화, 캐시 가능, debugging 쉬움.
+**단점**: URL 영구 변경. 자원이 *같은데 URL 다름*.
+
+> 가장 흔한 방식. *시작점으로 권장*.
+
+### 2. Accept 헤더
+
+```http
+GET /users/42
+Accept: application/vnd.example+json;version=2
+```
+
+**장점**: URL 유지.
+**단점**: 디버깅 어려움 (`curl` 시 헤더 잊음), 캐싱 복잡.
+
+### 3. 커스텀 헤더
+
+```http
+GET /users/42
+X-API-Version: 2
+```
+
+**장점**: 단순.
+**단점**: 표준 아님.
+
+### 4. 날짜 기반 (Stripe 방식)
+
+```http
+GET /users/42
+Stripe-Version: 2023-10-16
+```
+
+> *Stripe* 는 *모든 변경에 발표 날짜*. 클라이언트는 *고정 날짜로 pin*. 새 버전으로 *명시적 upgrade*.
+
+```mermaid
+flowchart LR
+    A[2023-10-16<br/>(고객 1 pin)] --> Implementation
+    B[2024-04-10] --> Implementation
+    C[2025-01-15] --> Implementation
+    D[2026-06-25<br/>(최신)] --> Implementation
+    Implementation[서버<br/>다중 버전 동시 지원]
+```
+
+| 방식 | 권장 사용처 |
+|---|---|
+| URL | 일반 SaaS API |
+| Accept | RESTful 엄격 + 캐시 인프라 신뢰 |
+| 커스텀 헤더 | 내부 / 단순 |
+| 날짜 (Stripe 식) | 결제 / 큰 SDK 생태계 / 세밀한 backward compat |
+
+## Deprecation Policy
+
+```mermaid
+gantt
+    title API v1 의 라이프사이클
+    dateFormat YYYY-MM-DD
+    section Active
+    v1 활성 + 지원       :a1, 2024-01-01, 2025-12-31
+    section Deprecated
+    Deprecation 경고     :crit, d1, 2025-06-01, 2026-06-01
+    section Sunset
+    Sunset 일시 차단     :s1, 2026-06-01, 2026-12-31
+    완전 종료            :milestone, m1, 2026-12-31, 0d
+```
+
+| 단계 | 의미 | 헤더 |
+|---|---|---|
+| **Active** | 정상 사용 | - |
+| **Deprecated** | 새 사용 자제 | `Sunset: <date>`, `Deprecation: <bool>` |
+| **Sunset (graceful)** | 사용 가능, 적극 경고 | 응답에 경고, 410 응답 일부 endpoint |
+| **Removed** | 410 Gone | - |
+
+> [!IMPORTANT]
+> Sunset 까지 *최소 6-12개월* 예고가 정통. *고객사가 단순 라이브러리만 따라잡으면 되도록*.
+
+## 호환성 카테고리
+
+```mermaid
+flowchart TD
+    Forward[Forward Compatible<br/>옛 클라이언트 → 새 응답 OK]
+    Backward[Backward Compatible<br/>새 클라이언트 → 옛 서버 OK]
+    Both[양방향 호환]
+    Tip1["새 필드 추가 (옵션) → 양방향"]
+    Tip2["필드 제거 → 양방향 깨짐"]
+    Tip3["응답에 옵션 필드 → forward compatible"]
+    Forward --> Tip1
+    Forward --> Tip3
+    Backward --> Tip1
+    Both --> Tip2
+```
+
+## 클라이언트 라이브러리 정책
+
+| 정책 | 효과 |
+|---|---|
+| *Unknown field 무시* | forward compatible. *클라이언트 라이브러리의 기본* |
+| *Unknown field 에러* | 엄격하지만 *호환성 깨짐* |
+| Optional 만 처리 | 가장 안전 |
+
+> Protobuf, JSON 모두 *unknown field 무시* 가 기본.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **버전 *없이* 시작** = breaking change 강요. 처음부터 *v1* 박기.
+> 2. **`POST` 응답에 *enum 값 추가*** = 클라이언트의 *switch case 폭발*. *unknown case* 처리 강제.
+> 3. **deprecation *없이* 종료** = 고객 폭동. 최소 6개월 전 알림.
+> 4. **버전 수 *폭증*** = 5개 동시 지원 = 코드 분기 폭발. *최대 2-3개* 동시 지원 권장.
+
+## 관련 위키
+
+- [[REST API Design]]
+- [[OpenAPI Swagger]]
+- [[Zero Downtime Deployment]]
+- [[Idempotency Keys]]

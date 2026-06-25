@@ -1,0 +1,153 @@
+---
+title: "[Auth] JWT: 구조, 서명, 만료, refresh token"
+aliases: ["JWT", "JSON Web Token", "JWS", "JWE", "JWA", "Bearer token", "Refresh token", "Access token", "RS256", "HS256"]
+tags: [jwt, auth, security, backend]
+category: auth-security
+updated: 2026-06-25
+references:
+  - title: "RFC 7519 (JWT)"
+    url: "https://datatracker.ietf.org/doc/html/rfc7519"
+  - title: "jwt.io"
+    url: "https://jwt.io/"
+  - title: "OWASP: JSON Web Token Cheat Sheet"
+    url: "https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html"
+---
+
+## 정의
+
+**JWT (JSON Web Token)** ([RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519)) 은 *base64url 인코딩된 JSON + 서명* 형태의 *self-contained token*. 서버가 *세션 저장 없이 클레임 검증* 가능.
+
+## 구조: 3 부분
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsIm5hbWUiOiJrb2EiLCJleHAiOjE3MjAxMjM0NTZ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+↑ header                                  ↑ payload                                            ↑ signature
+```
+
+| 부분 | 형식 |
+|---|---|
+| **Header** | `{ "alg": "HS256", "typ": "JWT" }` |
+| **Payload** | `{ "sub": "42", "name": "koa", "exp": 1720123456 }` |
+| **Signature** | HMAC-SHA256(base64(header) + "." + base64(payload), secret) |
+
+## 표준 클레임
+
+| 클레임 | 의미 |
+|---|---|
+| `iss` | issuer |
+| `sub` | subject (user ID) |
+| `aud` | audience |
+| `exp` | 만료 시각 (Unix epoch) |
+| `nbf` | not before |
+| `iat` | issued at |
+| `jti` | JWT ID (unique, replay 방지) |
+
+## 서명 알고리즘
+
+| Alg | 종류 | 비고 |
+|---|---|---|
+| `HS256/384/512` | HMAC (대칭) | 양측이 같은 secret. 내부 |
+| `RS256/384/512` | RSA (비대칭) | private 으로 sign, public 으로 verify |
+| `ES256/384/512` | ECDSA | 짧고 빠름 |
+| `EdDSA` | Ed25519 | 가장 빠름, 안전 |
+| `none` | *서명 없음* | **사용 금지** (취약점 다수) |
+
+> [!WARNING]
+> *`alg: none`* 을 받는 라이브러리는 *치명적 취약점*. 항상 *허용 alg 화이트리스트*.
+
+## 흐름
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant Auth as Auth Server
+    participant API as API Server
+
+    C->>Auth: POST /login (id, password)
+    Auth->>Auth: 검증 + JWT 생성
+    Auth-->>C: { access_token, refresh_token }
+    C->>API: GET /me<br/>Authorization: Bearer <jwt>
+    API->>API: JWT 검증 (서명 + exp)
+    API-->>C: 200 OK
+    Note over C: 만료 임박
+    C->>Auth: POST /refresh (refresh_token)
+    Auth-->>C: 새 access_token
+```
+
+## Access Token vs Refresh Token
+
+| 항목 | Access Token | Refresh Token |
+|---|---|---|
+| 수명 | *짧음* (5분 ~ 1시간) | *길음* (7일 ~ 30일) |
+| 저장 | 메모리 (브라우저 SPA) | HttpOnly cookie 또는 안전한 저장 |
+| 매 요청 전송 | *예* | 갱신 시만 |
+| 탈취 영향 | 짧은 시간 피해 | 큰 피해, *반드시 HttpOnly* |
+| Revoke | 만료까지 어려움 | DB 에 저장 + revoke 가능 |
+
+> [!IMPORTANT]
+> *Access token 을 localStorage 에 저장* 하면 XSS 시 즉시 탈취. *메모리 + 새로고침 시 refresh* 패턴이 정통.
+
+## Stateless vs Stateful
+
+```anim:stateless-vs-stateful
+{}
+```
+
+| | Session (stateful) | JWT (stateless) |
+|---|---|---|
+| 서버 저장소 | 필수 | 불필요 |
+| Revoke | 즉시 | 만료까지 어려움 |
+| 스케일 | sticky session 필요 | *수평 확장 자유* |
+| 페이로드 | session ID 만 (작음) | *전체 클레임* (큼) |
+| 갱신 | 서버 갱신 | 새 JWT 발급 |
+
+> [!CAUTION]
+> *"JWT 가 항상 더 좋다"* 는 미신. *작은 monolith* 에서는 *session 이 더 단순 + 즉시 revoke 가능*. JWT 는 *분산 + 마이크로서비스 + 모바일 SDK* 에서 진가.
+
+## Revoke 전략 (Stateless 의 단점 보완)
+
+```mermaid
+flowchart TD
+    Q{revoke 필요}
+    Q --> A[짧은 exp + refresh<br/>대부분의 경우]
+    Q --> B[Blacklist (Redis)<br/>jti 등록]
+    Q --> C[Versioning<br/>user.token_version<br/>JWT 안에 version]
+    A --> Best[추천]
+    B --> Heavy[캐시 부담]
+    C --> Sync[DB 한 번 조회 필요]
+```
+
+## XSS / CSRF 와의 관계
+
+```mermaid
+flowchart TD
+    Store{저장 위치}
+    Store --> A[localStorage] -->|XSS 시 탈취| Bad1[X]
+    Store --> B[메모리 + HttpOnly cookie refresh] -->|XSS 영향 적음| Good[O]
+    Store --> C[HttpOnly cookie + SameSite=Strict] -->|CSRF 안전 + XSS 안전| Best[권장]
+```
+
+> [!IMPORTANT]
+> *Cookie 기반* 이면 *CSRF 방어* 필요 (SameSite=Strict 또는 CSRF token). *Bearer header* 면 *XSS 방어* 가 중요.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`alg: none` 허용 라이브러리** = 옛 라이브러리 일부. 즉시 업데이트.
+> 2. **HS256 vs RS256 혼동** = 공개키를 secret 으로 *오해해 서명* 받으면 *모든 토큰 위조 가능* (CVE 다수).
+> 3. **만료 너무 김** = 탈취 시 피해 큼. 15분 ~ 1시간 권장.
+> 4. **secret 이 짧음** = `secret` 같이 무차별 공격 가능한 키. *32+ 바이트 랜덤*.
+> 5. **민감 정보 페이로드** = JWT 는 *암호화 아님* (base64 인코딩). password / 카드 번호 *절대 금지*.
+
+## JWE (암호화 변형)
+
+JWT 가 *서명만* 이면 *내용 노출*. **JWE** 는 *암호화* 까지. 그러나 *느리고 복잡*. 대부분의 경우 *민감 정보를 페이로드에 안 넣고 JWS (서명만) 만으로 충분*.
+
+## 관련 위키
+
+- [[OAuth2]]
+- [[OpenID Connect]]
+- [[Session Cookie]]
+- [[CORS]]
+- [[CSRF]]

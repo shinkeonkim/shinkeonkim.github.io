@@ -1,0 +1,162 @@
+---
+title: "[Auth] OAuth 2.0 / 2.1: Authorization Code + PKCE"
+aliases: ["OAuth 2.0", "OAuth 2.1", "Authorization Code", "PKCE", "Client Credentials", "Implicit flow", "Device flow"]
+tags: [oauth, auth, security, backend]
+category: auth-security
+updated: 2026-06-25
+references:
+  - title: "RFC 6749 (OAuth 2.0)"
+    url: "https://datatracker.ietf.org/doc/html/rfc6749"
+  - title: "OAuth 2.1 draft"
+    url: "https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1"
+  - title: "OAuth.net (Aaron Parecki)"
+    url: "https://oauth.net/2/"
+---
+
+## 정의
+
+**OAuth 2.0** ([RFC 6749](https://datatracker.ietf.org/doc/html/rfc6749), 2012) 은 *제3자 앱이 사용자 동의로 자원에 접근* 하게 하는 *권한 위임 프레임워크*. *인증 (authentication)* 이 아니라 *인가 (authorization)*.
+
+**OAuth 2.1** 은 진행 중인 draft. 옛 flow 정리 + PKCE 의무화.
+
+## 핵심 4 역할
+
+```mermaid
+flowchart LR
+    User[Resource Owner<br/>사용자] -->|동의| Auth[Authorization Server<br/>예: Google]
+    Client[Client App<br/>예: 우리 앱] -->|토큰 요청| Auth
+    Auth -->|access_token| Client
+    Client -->|토큰 + 요청| Resource[Resource Server<br/>예: Google Drive API]
+```
+
+## Authorization Code Flow + PKCE (표준)
+
+가장 일반적이고 OAuth 2.1 에서 *유일하게 권장* 되는 사용자 흐름.
+
+```anim:oauth-flow
+{}
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant C as Client
+    participant Auth as Auth Server
+    participant API as Resource Server
+
+    C->>C: code_verifier (랜덤 43-128자) 생성
+    C->>C: code_challenge = SHA256(verifier) → base64url
+    C->>U: 브라우저 → Auth 로 redirect<br/>?response_type=code&client_id=...<br/>&code_challenge=...&code_challenge_method=S256
+    U->>Auth: 로그인 + 동의
+    Auth-->>U: redirect to Client<br/>?code=ABC
+    U-->>C: code=ABC 전달
+    C->>Auth: POST /token<br/>code=ABC&code_verifier=<원본>&client_id=...
+    Auth->>Auth: SHA256(verifier) == challenge?
+    Auth-->>C: { access_token, refresh_token }
+    C->>API: Authorization: Bearer <token>
+    API-->>C: 자원
+```
+
+### PKCE 가 왜 필수?
+
+OAuth 2.0 의 옛날 *implicit flow* + *public client (모바일 / SPA)* 에서 *intercept 공격*. *code_verifier* 가 *동적 공유 secret* 처럼 작용.
+
+> [!IMPORTANT]
+> *모든 OAuth 클라이언트는 PKCE 필수*. 옛 라이브러리도 *반드시 최신 버전*.
+
+## 다른 Flow
+
+| Flow | 사용 | 상태 |
+|---|---|---|
+| **Authorization Code + PKCE** | 사용자 로그인 (웹/모바일) | *권장* |
+| **Client Credentials** | 서버 ↔ 서버 (사용자 없음) | 권장 |
+| **Device Authorization** | TV / CLI / 헤드리스 | 권장 |
+| **Refresh Token** | access_token 갱신 | 권장 |
+| **Implicit** | (옛 SPA) | *폐기 (OAuth 2.1)* |
+| **Resource Owner Password** | password 직접 전달 | *폐기 (OAuth 2.1)* |
+
+### Client Credentials (서버끼리)
+
+```mermaid
+sequenceDiagram
+    Service A->>Auth: POST /token<br/>client_id + client_secret<br/>grant_type=client_credentials
+    Auth-->>Service A: { access_token, expires_in }
+    Service A->>Service B: Bearer <token>
+    Service B-->>Service A: 자원
+```
+
+### Device Flow
+
+```mermaid
+sequenceDiagram
+    Device->>Auth: POST /device/code
+    Auth-->>Device: { device_code, user_code, verification_uri }
+    Device->>User: "다른 기기로 https://x.com/code 가서 ABC123 입력"
+    User->>Auth: 브라우저에서 ABC123 입력 + 동의
+    loop poll
+        Device->>Auth: POST /token (device_code)
+        Auth-->>Device: 200 (성공) 또는 authorization_pending
+    end
+```
+
+> *Apple TV, Roku, GitHub CLI (`gh auth login`)* 같은 *키보드 없는 기기*.
+
+## OAuth 2.0 vs OAuth 2.1
+
+| 항목 | 2.0 | 2.1 |
+|---|---|---|
+| Implicit flow | 허용 | *제거* |
+| Resource owner password | 허용 | *제거* |
+| PKCE | 권장 | *필수* |
+| Bearer token in URL | 허용 (?token=) | *제거* |
+| Refresh token rotation | 옵션 | *권장* |
+| HTTPS | 권장 | *필수* |
+
+## Scope
+
+`scope=read:files write:profile` 같이 *권한 범위 명시*. Auth Server 가 사용자 동의 화면에 표시.
+
+```
+scope=openid profile email     ← OpenID Connect
+scope=read:items write:orders   ← 자원 권한
+```
+
+## State Parameter (CSRF 방어)
+
+```
+GET /authorize?...&state=<random>
+```
+
+Auth 가 *같은 state 를 redirect 에 포함*. 다른 사이트가 *위조한 redirect* 를 클라이언트가 *거절*.
+
+> [!CAUTION]
+> *state 검증 누락* = CSRF 공격에 OAuth 흐름 위조 가능. 모든 클라이언트 필수.
+
+## OAuth vs OpenID Connect
+
+| | OAuth 2.0 | OIDC |
+|---|---|---|
+| 목적 | *권한 위임* (자원 접근) | *인증* (누구인지) |
+| 토큰 | access_token | + *id_token* (JWT) |
+| User info | 자원 API 로 별도 조회 | id_token 안에 |
+| 표준화 | 기본 | OAuth 2.0 위 |
+
+자세한 건 [[OpenID Connect]] 참고.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **redirect_uri 검증 부재** = open redirect 공격으로 *코드 탈취*.
+> 2. **state 미사용** = CSRF.
+> 3. **PKCE 없이 public client** = *intercept 공격*.
+> 4. **access_token 을 URL 에** = 로그 / referrer 로 노출.
+> 5. **refresh_token 영구** = 탈취 시 영구 침해. *rotation* (한 번 쓰면 새 발급 + 옛 무효화).
+
+## 관련 위키
+
+- [[JWT]]
+- [[OpenID Connect]]
+- [[SAML]]
+- [[mTLS]]
+- [[CSRF]]
