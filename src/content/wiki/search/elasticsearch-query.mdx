@@ -1,0 +1,205 @@
+---
+title: "[Search] ES Query: must / should / filter / must_not"
+aliases:
+  - "ES query"
+  - "bool query"
+  - "must"
+  - "should"
+  - "filter"
+  - "must_not"
+  - "match"
+  - "term"
+  - "range"
+  - "query DSL"
+  - "ESQL"
+tags: [elasticsearch, query, bool, search]
+category: search
+updated: 2026-06-25
+references:
+  - title: "Query DSL"
+    url: "https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl.html"
+  - title: "ESQL"
+    url: "https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"
+---
+
+## 정의
+
+ES 의 *Query DSL* = *JSON 기반 표현력 풍부한 쿼리 언어*. *bool query* + *leaf query* 의 조합.
+
+## bool query: 4가지 절
+
+```mermaid
+flowchart LR
+    Bool[bool query]
+    Bool --> Must["must<br/>(AND, score 계산)"]
+    Bool --> Should["should<br/>(OR, score 가산)"]
+    Bool --> Filter["filter<br/>(AND, score 없음)"]
+    Bool --> MustNot["must_not<br/>(NOT, score 없음)"]
+```
+
+| 절 | AND/OR | Score | Cache |
+|---|---|---|---|
+| `must` | AND | *예* | 안됨 |
+| `should` | OR | 예 (가산) | 안됨 |
+| `filter` | AND | *없음* | *예 (빠름!)* |
+| `must_not` | NOT | 없음 | 예 |
+
+> [!IMPORTANT]
+> *Score 가 필요 없으면 항상 `filter`*. `must` + 동일 조건보다 *압도적으로 빠름* (cache + scoring 생략).
+
+## 종합 예시
+
+```json
+GET /products/_search
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "title": "mechanical keyboard" } }
+      ],
+      "should": [
+        { "match": { "tags": "rgb" } },
+        { "match": { "tags": "wireless" } }
+      ],
+      "filter": [
+        { "term": { "category": "input-device" } },
+        { "range": { "price": { "gte": 50, "lte": 200 } } },
+        { "term": { "in_stock": true } }
+      ],
+      "must_not": [
+        { "term": { "brand": "Brand-X" } }
+      ],
+      "minimum_should_match": 1
+    }
+  }
+}
+```
+
+해석:
+
+1. `title` 에 *"mechanical keyboard"* 매칭 (필수, score 계산)
+2. `tags` 에 *"rgb" 또는 "wireless"* 있으면 가산 (`minimum_should_match: 1` 적용)
+3. *category, 가격 50-200, 재고 있음* (필터, 빠름)
+4. *Brand-X 제외*
+
+## leaf query 카테고리
+
+```mermaid
+flowchart TB
+    Q[Leaf Queries]
+    Q --> FullText[Full Text]
+    Q --> TermLevel[Term Level]
+    Q --> Range[Range]
+    Q --> Geo[Geo]
+    Q --> Vector[Vector / Semantic]
+    Q --> Compound[Compound]
+    FullText --> M1[match, match_phrase, multi_match, match_phrase_prefix, query_string, simple_query_string]
+    TermLevel --> T1[term, terms, exists, prefix, wildcard, regexp, fuzzy, ids]
+    Range --> R1[range]
+    Geo --> G1[geo_distance, geo_bounding_box, geo_polygon]
+    Vector --> V1[knn, sparse_vector, text_expansion]
+    Compound --> C1[bool, dis_max, constant_score, function_score]
+```
+
+## match vs term
+
+```json
+// match: 분석기 적용 → tokenized 비교
+{ "match": { "title": "Mechanical Keyboard" } }
+// → tokens: ["mechanical", "keyboard"]
+// → 둘 중 하나라도 매칭 (operator=or 기본)
+
+// term: 분석 없이 *exact* (keyword 필드용)
+{ "term": { "status": "active" } }
+```
+
+> [!CAUTION]
+> *`text` 필드에 `term` 쿼리* = *원본 토큰 못 찾음* (분석기가 lowercase 등 했기 때문). `text` 는 `match`, `keyword` 는 `term`.
+
+## match_phrase + slop
+
+```json
+{ "match_phrase": { "title": { "query": "mechanical keyboard", "slop": 1 } } }
+```
+
+- *연속된 토큰* 매칭.
+- `slop`: *얼마나 떨어져도 OK* (단어 거리).
+
+## multi_match
+
+```json
+{
+  "multi_match": {
+    "query": "rabbit hat",
+    "fields": ["title^3", "description", "tags"]
+  }
+}
+```
+
+- 여러 필드 *동시 검색*.
+- `field^N`: *가중치*.
+- type: `best_fields`, `most_fields`, `cross_fields`, `phrase`.
+
+## function_score (커스텀 ranking)
+
+```json
+{
+  "query": {
+    "function_score": {
+      "query": { "match": { "title": "keyboard" } },
+      "functions": [
+        { "filter": { "term": { "premium": true } }, "weight": 2.0 },
+        { "field_value_factor": { "field": "popularity", "modifier": "log1p" } },
+        { "gauss": { "created_at": { "origin": "now", "scale": "30d", "decay": 0.5 } } }
+      ],
+      "boost_mode": "multiply"
+    }
+  }
+}
+```
+
+| function | 의미 |
+|---|---|
+| `weight` | 상수 곱 |
+| `field_value_factor` | 필드값 기반 (popularity 등) |
+| `gauss` / `linear` / `exp` | 거리 기반 감쇠 (시간, 위치) |
+| `script_score` | Painless 스크립트 |
+| `random_score` | 무작위 (A/B) |
+
+## ESQL (2024 GA)
+
+SQL 같은 *파이프 표기*:
+
+```sql
+FROM logs-*
+| WHERE @timestamp > NOW() - 7 days AND status_code >= 500
+| STATS error_count = COUNT(*) BY service.name, host.name
+| SORT error_count DESC
+| LIMIT 20
+```
+
+> [!TIP]
+> *DSL 의 복잡함 회피*. 2026 시점 *대시보드 / ad-hoc 쿼리* 에서 *ESQL 이 표준*. Kibana 의 default 쿼리도 ESQL 전환 중.
+
+## 동작 흐름
+
+```anim:browser-google-search
+{}
+```
+
+> 일반 검색 직관. ES 도 같은 *query → ranking → top-K* 흐름.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`text` 에 `term`** = 매칭 0. `keyword` field 사용 또는 `match`.
+> 2. **`should` 만 사용** = `minimum_should_match` 누락 → *0개 일치 OK*. 명시 권장.
+> 3. **score 불필요한데 `must`** = *cache 못 씀*. filter 로.
+> 4. **`wildcard`, `regexp`, `prefix` 남용** = *느림*. *분석기 변경 + edge_ngram* 으로 대체.
+
+## 관련 위키
+
+- [[elasticsearch-mapping]] (text vs keyword)
+- [[elasticsearch-relevance-scoring]] (BM25)
+- [[elasticsearch-vector-search]] (kNN + bool 결합)
+- [[elasticsearch-aggregations]] (query 결과의 집계)

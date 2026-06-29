@@ -1,0 +1,205 @@
+---
+title: "[Search] ES 인프라: cluster, shard, replica, ELK"
+aliases:
+  - "ES cluster"
+  - "ES shard"
+  - "ES replica"
+  - "node role"
+  - "ILM"
+  - "ELK Stack"
+  - "Elastic Stack"
+  - "Beats"
+  - "Elastic Agent"
+  - "Fleet"
+  - "Logstash"
+  - "Kibana"
+tags: [elasticsearch, cluster, shard, infrastructure, elk]
+category: search
+updated: 2026-06-25
+references:
+  - title: "Cluster + ILM"
+    url: "https://www.elastic.co/guide/en/elasticsearch/reference/current/ilm-policy-definition.html"
+---
+
+## 정의
+
+ES 는 *분산 시스템*. *cluster + multiple nodes + shards + replicas + Elastic Stack 보조 도구*.
+
+## Cluster 구조
+
+```mermaid
+flowchart TB
+    subgraph Cluster["Elasticsearch Cluster"]
+        N1[Node 1 (master + data)]
+        N2[Node 2 (data + ingest)]
+        N3[Node 3 (data)]
+        N4[Node 4 (master eligible)]
+        N5[Node 5 (coord only)]
+    end
+    Client --> N5
+    N5 --> N1 & N2 & N3
+    N1 -.gossip.-> N4
+```
+
+## Node Role
+
+| Role | 의미 |
+|---|---|
+| **master** | cluster state 관리 |
+| **master_eligible** | master 후보 |
+| **data** | shard 보관 + 쿼리 |
+| **data_hot** / **data_warm** / **data_cold** / **data_frozen** | tier 별 |
+| **ingest** | ingest pipeline 실행 |
+| **coordinating_only** | 라우팅 + 합치기만 |
+| **ml** | ML 전용 |
+| **remote_cluster_client** | cross-cluster search |
+| **transform** | continuous transform |
+
+> [!IMPORTANT]
+> *production = 분리된 dedicated master 3노드* + *data nodes* + *coordinating-only* (큰 환경). 작은 환경은 master+data 결합 OK.
+
+## Shard + Replica
+
+```mermaid
+flowchart TB
+    Idx["Index: products<br/>(3 primary shards, 1 replica)"]
+    Idx --> S0["Shard 0 (primary, Node 1)"]
+    Idx --> S1["Shard 1 (primary, Node 2)"]
+    Idx --> S2["Shard 2 (primary, Node 3)"]
+    S0 -.replica.-> R0["Shard 0 (replica, Node 2)"]
+    S1 -.replica.-> R1["Shard 1 (replica, Node 3)"]
+    S2 -.replica.-> R2["Shard 2 (replica, Node 1)"]
+```
+
+| 개념 | 의미 |
+|---|---|
+| Primary shard | write 의 주체 |
+| Replica shard | *읽기 분산 + HA* |
+| Routing | `hash(routing) % primary_shards` |
+| primary 다운 | replica → primary 자동 승격 |
+
+### Shard 수 결정
+
+```mermaid
+flowchart TD
+    Q1{인덱스 크기}
+    Q1 -->|< 50GB| Small[1-3 primary shard]
+    Q1 -->|50-500GB| Med[3-10]
+    Q1 -->|500GB+| Big[10+, 시계열 분할]
+    Note["권장: 1 shard 당 20-50GB"]
+```
+
+> *너무 많음* = cluster state 비대 + 리밸런싱 비용. *너무 적음* = 노드 추가해도 분산 안 됨.
+
+## ILM (Index Lifecycle Management)
+
+```mermaid
+flowchart LR
+    Hot["HOT<br/>(SSD, 활발한 write/read)"] --> Warm["WARM<br/>(읽기 위주, 적은 replica)"]
+    Warm --> Cold["COLD<br/>(searchable snapshot, 가끔 검색)"]
+    Cold --> Frozen["FROZEN<br/>(객체 스토리지, 거의 검색 X)"]
+    Frozen --> Delete["DELETE"]
+```
+
+```json
+PUT _ilm/policy/logs-policy
+{
+  "policy": {
+    "phases": {
+      "hot":    { "actions": { "rollover": { "max_size": "50gb", "max_age": "1d" } } },
+      "warm":   { "min_age": "7d",  "actions": { "shrink": { "number_of_shards": 1 }, "forcemerge": { "max_num_segments": 1 } } },
+      "cold":   { "min_age": "30d", "actions": { "searchable_snapshot": { "snapshot_repository": "s3-repo" } } },
+      "frozen": { "min_age": "90d", "actions": { "searchable_snapshot": { "snapshot_repository": "s3-repo" } } },
+      "delete": { "min_age": "365d", "actions": { "delete": {} } }
+    }
+  }
+}
+```
+
+> *로그 / 메트릭 / APM 의 표준*. *비용 차감 + 성능 유지* 의 핵심.
+
+## Elastic Stack (옛 ELK)
+
+```mermaid
+flowchart LR
+    Source[Apps / Servers / Containers] --> Agent[Elastic Agent<br/>(또는 Beats)]
+    Agent --> Fleet[Fleet Server<br/>(중앙 관리)]
+    Agent --> ES[(ElasticSearch)]
+    Source --> LS[Logstash<br/>(복잡 변환)]
+    LS --> ES
+    ES --> Kibana[Kibana<br/>(UI, alert, ML)]
+```
+
+| 컴포넌트 | 의미 |
+|---|---|
+| **Elastic Agent** | 통합 shipper (옛 Beats 통합) |
+| **Beats** (Filebeat, Metricbeat, Packetbeat, ...) | 가벼운 단일 목적 shipper |
+| **Logstash** | 강력 변환, *Elastic Agent + Ingest pipeline 으로 대부분 대체 진행 중* |
+| **Fleet** | Elastic Agent 의 중앙 관리 + policy 배포 |
+| **Kibana** | 시각화 + dev tools + alerting + ML UI |
+
+> 2026 시점: *Elastic Agent + Fleet 이 표준*. Beats 는 *legacy* (지원 계속).
+
+## Snapshot / Restore
+
+```bash
+# Repository 등록 (S3)
+PUT _snapshot/my_s3_repo
+{
+  "type": "s3",
+  "settings": { "bucket": "es-snapshots", "region": "us-east-1" }
+}
+
+# Snapshot
+PUT _snapshot/my_s3_repo/snap-2026-06-25?wait_for_completion=true
+{
+  "indices": "products,logs-*",
+  "include_global_state": false
+}
+
+# Restore
+POST _snapshot/my_s3_repo/snap-2026-06-25/_restore
+{
+  "indices": "products",
+  "rename_pattern": "(.+)",
+  "rename_replacement": "restored-$1"
+}
+```
+
+## Searchable Snapshot
+
+```
+ILM 의 cold / frozen tier 에서 사용.
+S3 의 snapshot 을 *직접 검색* (로컬 복원 없이).
+```
+
+> 비용 *대폭 절감*. cold 는 *부분 mount*, frozen 은 *완전 S3 기반 + small local cache*.
+
+## Cross-Cluster Search / Replication
+
+```mermaid
+flowchart LR
+    EU[EU Cluster] -.CCR.-> US[US Cluster]
+    Search[Search Query] -->|CCS| EU
+    Search -->|CCS| US
+```
+
+- **CCR** (Cross-Cluster Replication): leader → follower 비동기 복제.
+- **CCS** (Cross-Cluster Search): 동시에 여러 cluster 검색.
+- DR / 글로벌 분석.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Master node 분리 안 함 + 데이터 폭증** = master 가 GC pause → split brain.
+> 2. **Shard 수 *영구 고정*** = 만들 때 결정. *늘리려면 reindex*.
+> 3. **ILM 없는 로그** = *수 TB 누적 → cluster 다운*. ILM 필수.
+> 4. **Replica 0 in production** = 노드 다운 시 *데이터 손실*. 최소 1.
+
+## 관련 위키
+
+- [[elasticsearch]]
+- [[elasticsearch-basics]]
+- [[Zero Downtime Deployment]] (alias swap)
+- [[aws-s3]] (snapshot)
+- [[prometheus]] / [[opentelemetry]] (대안 / 통합)
