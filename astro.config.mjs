@@ -5,7 +5,6 @@ import mdx from '@astrojs/mdx';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
 import { EnumChangefreq } from 'sitemap';
-import pagefind from 'astro-pagefind';
 import tailwindcss from '@tailwindcss/vite';
 import { remarkAlert } from 'remark-github-blockquote-alert';
 import remarkMath from 'remark-math';
@@ -208,7 +207,6 @@ export default defineConfig({
         return item;
       },
     }),
-    pagefind(),
     devEditor(),
     modulepreload(),
   ],
