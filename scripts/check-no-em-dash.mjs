@@ -40,6 +40,7 @@ const EXCLUDE_DIRS = new Set([
   '.playwright-mcp', 'coverage', '.next', '.turbo',
   '_posts', '_tabs', 'assets',
   'manual-docs',
+  '.private', '.sisyphus',
 ]);
 
 const EXCLUDE_FILES = new Set([

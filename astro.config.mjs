@@ -21,6 +21,7 @@ import remarkAnimation from './src/plugins/remark-animation.mjs';
 import rehypeLazyImages from './src/plugins/rehype-lazy-images.mjs';
 import devEditor from './src/dev-only/integration.mjs';
 import modulepreload from './src/shared/lib/modulepreload-integration.mjs';
+import mdxBodyEscapeIntegration from './src/plugins/integration-mdx-body-escape.mjs';
 import { buildImageMap } from './src/shared/lib/seo/sitemap-images.mjs';
 import { buildLastmodMap, resolveLastmod } from './src/shared/lib/seo/sitemap-lastmod.mjs';
 
@@ -112,6 +113,9 @@ export default defineConfig({
     layout: 'constrained',
   },
   integrations: [
+    // MUST run before mdx(): rewrites body-text `<`/`{` hazards so the MDX
+    // compiler does not see them as JSX. Source files on disk stay intact.
+    mdxBodyEscapeIntegration(),
     // MUST be listed BEFORE mdx(), astro-auto-import injects import
     // statements into MDX files at compile time so writers can use
     // <CodeWithOutput .../> without a per-file import line.

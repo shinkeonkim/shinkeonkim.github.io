@@ -7,12 +7,31 @@ let mermaidPromise: Promise<MermaidApi> | null = null;
 
 function loadMermaid(): Promise<MermaidApi> {
   if (!mermaidPromise) {
-    const cdnUrl = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    const cdnUrl = 'https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.esm.min.mjs';
     mermaidPromise = import(/* @vite-ignore */ cdnUrl).then(
       (m: { default: MermaidApi }) => m.default,
     );
   }
   return mermaidPromise;
+}
+
+function renderInlineError(el: HTMLElement, source: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  el.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'mermaid-error';
+  wrap.setAttribute('role', 'alert');
+  const heading = document.createElement('p');
+  heading.className = 'mermaid-error-heading';
+  heading.textContent = '다이어그램 렌더 실패';
+  const detail = document.createElement('pre');
+  detail.className = 'mermaid-error-detail';
+  detail.textContent = msg;
+  const sourceBlock = document.createElement('pre');
+  sourceBlock.className = 'mermaid-error-source';
+  sourceBlock.textContent = source;
+  wrap.append(heading, detail, sourceBlock);
+  el.append(wrap);
 }
 
 let renderToken = 0;
@@ -55,17 +74,20 @@ export async function renderNodes(
     el.classList.add('is-loading');
   }
 
-  try {
-    await mermaid.run({ nodes });
-    for (const el of nodes) {
+  for (const el of nodes) {
+    const source = el.getAttribute('data-mermaid-original') || el.textContent || '';
+    try {
+      await mermaid.run({ nodes: [el] });
       el.setAttribute('data-mermaid-rendered', '1');
       el.classList.remove('is-loading');
+    } catch (err) {
+      console.error('[mermaid] render failed:', err);
+      el.classList.remove('is-loading');
+      el.setAttribute('data-mermaid-rendered', 'error');
+      renderInlineError(el, source, err);
     }
-    onRendered();
-  } catch (err) {
-    console.error('[mermaid] render failed:', err);
-    for (const el of nodes) el.classList.remove('is-loading');
   }
+  onRendered();
 }
 
 let viewportObserver: IntersectionObserver | null = null;
