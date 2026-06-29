@@ -1,0 +1,297 @@
+---
+title: "[Spring Validation] Custom Validator: ConstraintValidator, Groups, cross-field"
+aliases:
+  - "ConstraintValidator"
+  - "Custom @Valid annotation"
+  - "Validation Groups"
+  - "cross-field validation"
+  - "@AssertTrue"
+  - "@GroupSequence"
+  - "ConstraintValidatorContext"
+tags: [spring, validation, bean-validation, constraint, jakarta]
+category: spring
+updated: 2026-06-25
+references:
+  - title: "Jakarta Bean Validation"
+    url: "https://beanvalidation.org/3.0/"
+  - title: "Hibernate Validator: Custom"
+    url: "https://docs.jboss.org/hibernate/validator/8.0/reference/en-US/html_single/#section-constraint-composition"
+---
+
+## 정의
+
+기본 `@NotBlank`, `@Size` 등으로 부족한 *도메인 검증* 을 **`ConstraintValidator` 인터페이스** 로 구현. *재사용 가능한 어노테이션* 형태.
+
+기본 validation 의 일반은 [[spring-validation]].
+
+## 패턴 3가지
+
+```mermaid
+flowchart TB
+    Q[Custom Validation]
+    Q --> A1[1. Constraint Composition<br/>(기존 어노테이션 조합)]
+    Q --> A2[2. ConstraintValidator<br/>(완전 새 로직)]
+    Q --> A3[3. @AssertTrue<br/>(객체 메서드)]
+```
+
+## 1. Constraint Composition
+
+기존 어노테이션 *조합* 으로 새 어노테이션:
+
+```java
+@Target({ FIELD, PARAMETER, METHOD })
+@Retention(RUNTIME)
+@NotBlank(message = "이메일을 입력하세요")
+@Email(message = "올바른 이메일 형식이 아닙니다")
+@Size(max = 100)
+@ReportAsSingleViolation
+@Constraint(validatedBy = {})
+public @interface ValidEmail {
+    String message() default "";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+```
+
+> 다른 *Bean Validation 어노테이션* 의 조합. *별도 ConstraintValidator 불필요*.
+
+## 2. ConstraintValidator (완전 새 로직)
+
+```java
+@Target({ FIELD, PARAMETER })
+@Retention(RUNTIME)
+@Constraint(validatedBy = PhoneNumberValidator.class)
+public @interface PhoneNumber {
+    String message() default "올바른 휴대폰 번호가 아닙니다";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+
+    String country() default "KR";   // 어노테이션 옵션
+}
+
+public class PhoneNumberValidator implements ConstraintValidator<PhoneNumber, String> {
+
+    private String country;
+
+    @Override
+    public void initialize(PhoneNumber annotation) {
+        this.country = annotation.country();
+    }
+
+    @Override
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        if (value == null) return true;   // null 은 @NotNull 의 책임
+
+        return switch (country) {
+            case "KR" -> value.matches("^01[016789]-?\\d{3,4}-?\\d{4}$");
+            case "US" -> value.matches("^\\+1[0-9]{10}$");
+            default   -> false;
+        };
+    }
+}
+
+// 사용
+public record SignupForm(
+    @NotBlank @PhoneNumber String phone
+) { }
+```
+
+## 동적 메시지 (ConstraintValidatorContext)
+
+```java
+@Override
+public boolean isValid(String value, ConstraintValidatorContext context) {
+    if (value == null) return true;
+
+    if (value.length() < 10) {
+        context.disableDefaultConstraintViolation();
+        context.buildConstraintViolationWithTemplate("최소 10자 이상이어야 합니다 (현재: " + value.length() + ")")
+            .addConstraintViolation();
+        return false;
+    }
+    return true;
+}
+```
+
+## 3. @AssertTrue (객체 메서드)
+
+```java
+public record PasswordChangeForm(
+    @NotBlank String oldPassword,
+    @NotBlank @Size(min = 8) String newPassword,
+    @NotBlank String confirmPassword
+) {
+    @AssertTrue(message = "새 비밀번호와 확인이 일치해야 합니다")
+    public boolean isPasswordConfirmed() {
+        return newPassword != null && newPassword.equals(confirmPassword);
+    }
+
+    @AssertTrue(message = "새 비밀번호는 기존 비밀번호와 달라야 합니다")
+    public boolean isPasswordDifferent() {
+        return !newPassword.equals(oldPassword);
+    }
+}
+```
+
+> 가장 *간단* 한 cross-field validation. 단 *에러가 객체 단위* (필드 매핑 불명확).
+
+## 4. Class-level @Constraint
+
+```java
+@Target({ TYPE })
+@Retention(RUNTIME)
+@Constraint(validatedBy = PasswordMatchValidator.class)
+public @interface PasswordMatch {
+    String message() default "비밀번호가 일치하지 않습니다";
+    String passwordField() default "password";
+    String confirmField() default "confirmPassword";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+
+public class PasswordMatchValidator implements ConstraintValidator<PasswordMatch, Object> {
+
+    private String passwordField;
+    private String confirmField;
+
+    @Override
+    public void initialize(PasswordMatch ann) {
+        this.passwordField = ann.passwordField();
+        this.confirmField = ann.confirmField();
+    }
+
+    @Override
+    public boolean isValid(Object obj, ConstraintValidatorContext context) {
+        BeanWrapper bw = new BeanWrapperImpl(obj);
+        Object p1 = bw.getPropertyValue(passwordField);
+        Object p2 = bw.getPropertyValue(confirmField);
+
+        boolean valid = Objects.equals(p1, p2);
+        if (!valid) {
+            context.disableDefaultConstraintViolation();
+            context.buildConstraintViolationWithTemplate(context.getDefaultConstraintMessageTemplate())
+                .addPropertyNode(confirmField)
+                .addConstraintViolation();
+        }
+        return valid;
+    }
+}
+
+@PasswordMatch
+public record SignupForm(
+    @NotBlank String email,
+    @NotBlank @Size(min = 8) String password,
+    @NotBlank String confirmPassword
+) { }
+```
+
+> Cross-field 검증의 *재사용 가능* 한 형태.
+
+## Validation Groups
+
+```java
+public interface OnCreate { }
+public interface OnUpdate { }
+
+public record UserForm(
+    @Null(groups = OnCreate.class)
+    @NotNull(groups = OnUpdate.class)
+    Long id,
+
+    @NotBlank(groups = { OnCreate.class, OnUpdate.class })
+    String name,
+
+    @NotBlank(groups = OnCreate.class)   // 생성 시만 필수
+    String password
+) { }
+
+@PostMapping
+public User create(@RequestBody @Validated(OnCreate.class) UserForm form) {
+    return service.create(form);
+}
+
+@PutMapping("/{id}")
+public User update(@RequestBody @Validated(OnUpdate.class) UserForm form) {
+    return service.update(form);
+}
+```
+
+> [!IMPORTANT]
+> `@Valid` 는 *Default 그룹만* 적용. **Groups 사용 시 `@Validated`** (Spring 어노테이션) 로.
+
+## @GroupSequence (순서 보장)
+
+```java
+public interface First { }
+public interface Second { }
+
+@GroupSequence({ First.class, Second.class, Default.class })
+public interface OrderedChecks { }
+
+public record SignupForm(
+    @NotBlank(groups = First.class)
+    @Email(groups = Second.class)
+    String email,
+
+    @NotBlank(groups = First.class)
+    @Size(min = 8, groups = Second.class)
+    @PasswordStrength(groups = Default.class)
+    String password
+) { }
+
+@PostMapping
+public String signup(@Validated(OrderedChecks.class) SignupForm form, BindingResult result) { ... }
+```
+
+> *First 그룹 통과 → Second 그룹 → Default*. 한 그룹 실패 시 *다음 그룹 평가 안 함*. 무거운 검증 (DB 조회 등) 을 *뒤로* 미루는 패턴.
+
+## ConstraintValidator + Spring DI
+
+```java
+public class UniqueEmailValidator implements ConstraintValidator<UniqueEmail, String> {
+
+    private final UserRepository userRepository;   // ← Spring bean injection
+
+    public UniqueEmailValidator(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    @Override
+    public boolean isValid(String email, ConstraintValidatorContext ctx) {
+        if (email == null) return true;
+        return !userRepository.existsByEmail(email);
+    }
+}
+```
+
+> ConstraintValidator 도 *Spring bean*. *DI 가능*. 단 *static 한 검증* 만 어노테이션으로 표현하는 게 정통.
+
+> [!CAUTION]
+> *DB 조회 validation* 은 *N+1 같은 성능 함정* + *트랜잭션 외부 호출* 위험. *service layer 에서 검증* 이 더 안전한 경우 많다.
+
+## Hibernate Validator 확장
+
+| 어노테이션 | 의미 |
+|---|---|
+| `@URL` | URL 형식 |
+| `@Length(min, max)` | String 길이 (Size 와 비슷) |
+| `@Range(min, max)` | 숫자 범위 |
+| `@CreditCardNumber` | 신용카드 |
+| `@SafeHtml` (deprecated) | XSS 방어 |
+| `@ScriptAssert` | Java Script (SpEL) |
+| `@CodePointLength` | 코드포인트 단위 길이 |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`null` 검증을 ConstraintValidator 안에서** = `@NotNull` 의 책임. *null 이면 true 반환*.
+> 2. **`@Valid` 와 Groups 함께** = `@Valid` 는 Default 만. *`@Validated`* 사용.
+> 3. **무거운 검증 (DB)** = 매 요청 *연쇄 호출* → service layer 권장.
+> 4. **`@GroupSequence` 의 순환** = 컴파일은 OK 인데 런타임 무한 루프. 검토.
+
+## 관련 위키
+
+- [[spring-validation]]
+- [[spring-mvc-model-bindingresult]]
+- [[spring-mvc-form-handling]]
+- [[spring-mvc-exception-handler]]
