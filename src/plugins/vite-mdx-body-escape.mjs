@@ -92,7 +92,38 @@ function maskInlineCode(line) {
   return line.replace(/`[^`\n]*`/g, (m) => '\x00'.repeat(m.length));
 }
 
+function escapeTablePipesInBackticks(line) {
+  const trimmed = line.trimStart();
+  if (!trimmed.startsWith('|')) return line;
+  let out = '';
+  let i = 0;
+  let inTick = false;
+  while (i < line.length) {
+    const c = line[i];
+    if (c === '\\' && line[i + 1] !== undefined) {
+      out += c + line[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === '`') {
+      inTick = !inTick;
+      out += c;
+      i++;
+      continue;
+    }
+    if (c === '|' && inTick) {
+      out += '\\|';
+      i++;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 function escapeBodyLine(line) {
+  line = escapeTablePipesInBackticks(line);
   const masked = maskInlineCode(line);
   let out = '';
   let i = 0;
@@ -145,6 +176,14 @@ function escapeBodyLine(line) {
         continue;
       }
       if (next && /[A-Z]/.test(next)) {
+        let j = i + 1;
+        while (j < line.length && /[A-Za-z0-9_-]/.test(line[j])) j++;
+        const tagLen = j - i - 1;
+        if (tagLen <= 2) {
+          out += '\\<';
+          i++;
+          continue;
+        }
         out += line[i];
         i++;
         continue;
@@ -181,12 +220,15 @@ function escapeBodyLine(line) {
         } else if (c === '.' && line[j + 1] === '.' && line[j + 2] === '.') {
           hasContent = true;
           hasHazard = true;
+        } else if (c === '|' || c === ',' || c === ';') {
+          hasContent = true;
+          hasHazard = true;
         } else if (c !== ' ' && c !== '\t') {
           hasContent = true;
         }
         if (depth > 0) j++;
       }
-      if (depth === 0 && hasHazard && hasContent) {
+      if (depth === 0 && (hasHazard || (!hasContent && j === i + 1))) {
         const inner = line.slice(i + 1, j);
         out += '\\{' + inner + '\\}';
         i = j + 1;
@@ -211,17 +253,24 @@ function processSource(source) {
   let inCode = false;
   let inJsx = false;
   let jsxDepth = 0;
-  let jsxOpenLine = null;
+  let inTemplateLiteral = false;
 
   const updateJsxDepth = (line) => {
     let depth = 0;
     let i = 0;
     while (i < line.length) {
       const c = line[i];
+      if (c === '\\' && line[i + 1] !== undefined) {
+        i += 2;
+        continue;
+      }
       if (c === '`') {
-        const end = line.indexOf('`', i + 1);
-        if (end === -1) return depth;
-        i = end + 1;
+        inTemplateLiteral = !inTemplateLiteral;
+        i++;
+        continue;
+      }
+      if (inTemplateLiteral) {
+        i++;
         continue;
       }
       if (c === '<') {
@@ -259,9 +308,8 @@ function processSource(source) {
 
       if (!inJsx && isJsxLineStart(line)) {
         inJsx = true;
-        jsxOpenLine = idx;
         jsxDepth = updateJsxDepth(line);
-        if (jsxDepth <= 0) {
+        if (jsxDepth <= 0 && !inTemplateLiteral) {
           inJsx = false;
           jsxDepth = 0;
         }
@@ -270,11 +318,10 @@ function processSource(source) {
 
       if (inJsx) {
         jsxDepth += updateJsxDepth(line);
-        if (jsxDepth <= 0) {
+        if (jsxDepth <= 0 && !inTemplateLiteral) {
           inJsx = false;
           jsxDepth = 0;
         }
-        void jsxOpenLine;
         return line;
       }
 
