@@ -317,10 +317,15 @@ function processSource(source) {
       }
 
       if (inJsx) {
+        const startedInTemplate = inTemplateLiteral;
         jsxDepth += updateJsxDepth(line);
+        const stillInTemplateAfter = inTemplateLiteral;
         if (jsxDepth <= 0 && !inTemplateLiteral) {
           inJsx = false;
           jsxDepth = 0;
+        }
+        if (startedInTemplate && stillInTemplateAfter && line === '') {
+          return '\u200B';
         }
         return line;
       }
