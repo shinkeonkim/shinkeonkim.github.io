@@ -1,0 +1,242 @@
+---
+title: "[DB Internals] B-Tree 내부: split, merge, search 알고리즘"
+aliases:
+  - "B-Tree"
+  - "B-Tree split"
+  - "B-Tree merge"
+  - "B-Tree balancing"
+  - "B-Tree algorithm"
+  - "B-Tree order"
+  - "Knuth B-Tree"
+tags: [btree, database, index, algorithm, tree]
+category: database-internals
+updated: 2026-06-25
+references:
+  - title: "Knuth: TAOCP Vol. 3, 6.2.4"
+    note: "B-Tree 원논문 정리."
+  - title: "Bayer & McCreight (1972)"
+    url: "https://infolab.usc.edu/csci585/Spring2010/den_ar/indexing.pdf"
+    note: "B-Tree 최초 논문."
+---
+
+## 정의
+
+**B-Tree** (Bayer & McCreight, 1972) = *디스크 I/O 최적화된 balanced multi-way search tree*. *모든 leaf 깊이 동일* + *노드당 큰 fan-out*.
+
+기존 개요는 [[btree-indexing]] 참고. 본 페이지는 *내부 알고리즘* 에 집중.
+
+## 왜 B-Tree?
+
+```mermaid
+flowchart TB
+    Q{"인덱스 자료구조"}
+    Q -->|"BST"| BST["Binary Search Tree<br/>깊이 log N, disk I/O 큼"]
+    Q -->|"Red-Black"| RB["균형이지만 여전히 log₂ N<br/>메모리 자료구조"]
+    Q -->|"B-Tree"| BT["log_m N 깊이 (m=fan-out)<br/>disk I/O 최소"]
+    BST --> BAD["N=10^9 → 30 depth = 30 disk read"]
+    BT --> GOOD["N=10^9 + m=100 → 5 depth = 5 disk read"]
+```
+
+**핵심**: *한 노드 = 한 disk page (8-16KB)*. Fan-out 이 크면 *깊이가 얕음* → I/O 최소.
+
+## 정의 (Knuth)
+
+*Order m* 인 B-Tree 는:
+
+1. 모든 leaf 는 같은 깊이.
+2. 각 노드 (root 제외) 는 *⌈m/2⌉-1 ~ m-1 keys*.
+3. Root 는 *1 ~ m-1 keys*.
+4. 각 internal node 는 *k+1 children* (k = keys).
+5. 노드 내 keys 정렬됨.
+
+## 구조 (Order 4 예)
+
+```mermaid
+flowchart TB
+    Root["[30 | 60]"]
+    Root --> A["[10 | 20]"]
+    Root --> B["[40 | 50]"]
+    Root --> C["[70 | 80 | 90]"]
+    A --> LA1["[5]"]
+    A --> LA2["[15]"]
+    A --> LA3["[25]"]
+    B --> LB1["[35]"]
+    B --> LB2["[45]"]
+    B --> LB3["[55]"]
+    C --> LC1["[65]"]
+    C --> LC2["[75]"]
+    C --> LC3["[85]"]
+    C --> LC4["[95]"]
+```
+
+## Search: O(log_m N)
+
+```
+search(root, key):
+  node = root
+  while node is not null:
+    i = 0
+    while i < node.n and key > node.keys[i]:
+      i++
+    if i < node.n and key == node.keys[i]:
+      return node.values[i]   # HIT
+    if node.is_leaf:
+      return null              # MISS
+    node = node.children[i]
+```
+
+각 노드에서 *binary search* (또는 linear if 노드 작음).
+
+## Insertion + Split
+
+새 key 삽입 → *leaf full 이면 split*:
+
+```mermaid
+flowchart TB
+    Before["[10 | 20 | 30 | 40] (full, m=4)"]
+    Before --> Insert["Insert 25"]
+    Insert --> Split
+    subgraph Split["Split"]
+        Mid["25 up to parent"]
+        Left["[10 | 20]"]
+        Right["[30 | 40]"]
+    end
+```
+
+```
+insert(node, key):
+  if node.is_leaf:
+    insert_in_order(node.keys, key)
+    if node.n > m-1:
+      split(node)
+  else:
+    child = find_child(node, key)
+    insert(child, key)
+```
+
+### Split (leaf full)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    Note over Leaf: [10, 20, 30, 40, 50] (5 keys, m=4)
+    Leaf->>Leaf: median = 30
+    Leaf->>NewLeft: [10, 20]
+    Leaf->>NewRight: [40, 50]
+    Leaf->>Parent: push 30 up
+    Parent->>Parent: 30 삽입
+    alt parent full
+        Parent->>Parent: recursive split
+    end
+```
+
+*중간값을 parent 로 push*. Root split 시 *tree 깊이 +1*.
+
+## Deletion + Merge
+
+Key 삭제 → *leaf 가 minimum (⌈m/2⌉-1) 미만* → *sibling 에서 빌리거나 merge*:
+
+```mermaid
+flowchart TD
+    Q{"Leaf underflow"}
+    Q -->|"sibling 이 여유 있음"| Borrow["Rotate: sibling 에서 key 이동"]
+    Q -->|"sibling 도 minimum"| Merge["Merge with sibling + parent key 내림"]
+    Merge -->|"parent underflow"| Recurse["Recursive underflow up"]
+```
+
+```
+delete(node, key):
+  if node.is_leaf:
+    node.keys.remove(key)
+    if node.n < ⌈m/2⌉ - 1:
+      rebalance(node)
+  else:
+    # Internal: 후속자 (in-order successor) 로 교체 후 삭제
+    successor = min_of_right_subtree(node, key)
+    node.replace(key, successor)
+    delete(right_child, successor)
+```
+
+## Rotation (borrow from sibling)
+
+```mermaid
+flowchart LR
+    Before["parent[30]<br/>left[10,20] right[40,50,60]"]
+    Before -->|"underflow left"| Rot
+    Rot["parent[40]<br/>left[10,20,30] right[50,60]"]
+```
+
+## Merge
+
+```mermaid
+flowchart LR
+    Before["parent[30]<br/>left[10] right[40] (둘 다 min)"]
+    Before -->|"merge"| After["parent[]<br/>merged[10,30,40]"]
+    After -->|"parent underflow"| Cascade["Cascade up"]
+```
+
+## Height 분석
+
+```
+N keys, fan-out m
+Height h:
+  minimum: m^h - 1 keys
+  → h = log_m(N)
+
+N = 10^9, m = 100 → h ≈ 4.5 = 최대 5 disk read
+```
+
+## Cache-friendly 구현
+
+```mermaid
+flowchart LR
+    Node["Node (8KB page)"] --> Header["Header (n, is_leaf)"]
+    Node --> Keys["Keys array (정렬)"]
+    Node --> Children["Children pointers 또는 values"]
+    Note["Binary search on keys array<br/>모두 sequential memory access"]
+```
+
+*페이지 내부 = 배열 + binary search*. Cache miss 최소.
+
+## 동시성 (Concurrency)
+
+```mermaid
+flowchart TB
+    Q["Multi-writer"]
+    Q --> Lock1["Latch coupling / Crabbing"]
+    Q --> Lock2["Optimistic latch coupling (OLC)"]
+    Q --> Lock3["Bw-Tree (lock-free)"]
+    Q --> Lock4["Blink-tree"]
+```
+
+| 기법 | 의미 |
+|---|---|
+| **Latch coupling** | Parent lock 잡고 child lock, parent 해제. Deadlock 없음 |
+| **Optimistic (OLC)** | Version 기반, 낙관적. 실패 시 재시도 |
+| **Bw-Tree** (Microsoft) | Lock-free, delta record + consolidation |
+| **Blink-tree** | Right-link pointer, split 중 lookup 가능 |
+
+## PostgreSQL 특화
+
+| 기법 | 의미 |
+|---|---|
+| **Nbtree** | PG 의 B-Tree (nbtree.c) |
+| **HOT** (Heap Only Tuple) | 인덱스 update 안 하는 tuple 최적화 |
+| **Duplicate deduplication** (PG 13+) | 중복 key 압축 저장 |
+| **Bottom-up index deletion** (PG 14+) | HOT 실패 시 인덱스 정리 |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **Random insert 순서** = split 폭증. Sequential insert (auto-increment) 가 최적.
+> 2. **UUID v4 primary key + B-Tree** = *random* → 페이지 분할 극심. ULID / UUID v7 (정렬 가능) 권장.
+> 3. **Bloat** = MVCC 로 dead tuple 누적. `REINDEX CONCURRENTLY` 정기.
+> 4. **Fan-out 계산** = column 폭 큰 index = 노드당 key 수 적음 = 트리 깊음. *포함할 컬럼 최소*.
+
+## 관련 위키
+
+- [[btree-indexing]] (개요)
+- [[b-plus-tree-internals]]
+- [[r-tree]]
+- [[gin-index-deep]]
+- [[postgresql]]
