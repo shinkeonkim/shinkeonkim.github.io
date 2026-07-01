@@ -1,0 +1,265 @@
+---
+title: "[Django] Shortcuts + Decorators: render, redirect, get_object_or_404"
+aliases:
+  - "django shortcuts"
+  - "render"
+  - "redirect"
+  - "get_object_or_404"
+  - "get_list_or_404"
+  - "require_http_methods"
+  - "login_required"
+  - "permission_required"
+tags: [django, shortcuts, decorators, views]
+category: django
+updated: 2026-06-25
+references:
+  - title: "Django 6.0 shortcuts"
+    url: "https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/"
+  - title: "Django 6.0 decorators"
+    url: "https://docs.djangoproject.com/en/6.0/topics/http/decorators/"
+---
+
+## 정의
+
+Django 의 *View 작성을 간결하게* 하는 shortcut 함수들 + view 에 공통 기능을 붙이는 decorator 들.
+
+## Shortcuts (django.shortcuts)
+
+### `render(request, template, context, status=200)`
+
+가장 흔한 view helper.
+
+```python
+from django.shortcuts import render
+
+def article_detail(request, pk):
+    article = Article.objects.get(pk=pk)
+    return render(request, 'articles/detail.html', {
+        'article': article,
+        'related': article.related.all()[:5],
+    })
+```
+
+= `HttpResponse(template.render(context, request))` 의 축약.
+
+### `redirect(to, *args, **kwargs)`
+
+리다이렉트 응답 생성:
+
+```python
+from django.shortcuts import redirect
+
+# URL 이름
+return redirect('article_detail', pk=42)
+
+# URL 문자열
+return redirect('/articles/42/')
+
+# 외부 URL
+return redirect('https://external.com/')
+
+# 모델 인스턴스 (get_absolute_url 사용)
+article = Article.objects.get(pk=42)
+return redirect(article)   # → article.get_absolute_url()
+```
+
+Permanent redirect (301):
+
+```python
+return redirect('new_url', permanent=True)
+```
+
+### `get_object_or_404(model, **kwargs)`
+
+없으면 404:
+
+```python
+from django.shortcuts import get_object_or_404
+
+def article_detail(request, pk):
+    article = get_object_or_404(Article, pk=pk, published=True)
+    # 여러 조건 가능
+    return render(request, 'detail.html', {'article': article})
+```
+
+= `try: Article.objects.get(pk=pk) except Article.DoesNotExist: raise Http404`.
+
+### `get_list_or_404(model, **kwargs)`
+
+빈 결과 시 404:
+
+```python
+def articles_by_tag(request, tag):
+    articles = get_list_or_404(Article, tags__name=tag, published=True)
+    return render(request, 'list.html', {'articles': articles})
+```
+
+## Decorators (django.views.decorators)
+
+### `@require_http_methods` / `@require_POST` / `@require_GET`
+
+```python
+from django.views.decorators.http import require_http_methods, require_POST
+
+@require_http_methods(['GET', 'POST'])
+def article_form(request, pk=None):
+    if request.method == 'POST':
+        ...
+    else:
+        ...
+
+@require_POST
+def delete_article(request, pk):
+    Article.objects.filter(pk=pk).delete()
+    return redirect('article_list')
+```
+
+허용 안 된 method = *405 Method Not Allowed* 자동 응답.
+
+### `@login_required`
+
+```python
+from django.contrib.auth.decorators import login_required
+
+@login_required
+def profile(request):
+    return render(request, 'profile.html', {'user': request.user})
+
+@login_required(login_url='/signin/', redirect_field_name='next')
+def dashboard(request): ...
+```
+
+미인증 시 `LOGIN_URL` (기본 `/accounts/login/`) 로 리다이렉트 + `?next=/dashboard/` 자동 첨부.
+
+### `@permission_required`
+
+```python
+from django.contrib.auth.decorators import permission_required
+
+@permission_required('polls.can_vote', raise_exception=True)
+def vote(request, question_id): ...
+```
+
+`raise_exception=True` = 403 Forbidden.
+
+### `@user_passes_test`
+
+```python
+from django.contrib.auth.decorators import user_passes_test
+
+@user_passes_test(lambda u: u.is_staff)
+def staff_only(request): ...
+
+def is_over_18(user):
+    return user.is_authenticated and user.profile.age >= 18
+
+@user_passes_test(is_over_18, login_url='/login/')
+def adult_content(request): ...
+```
+
+### `@cache_page`, `@cache_control`
+
+```python
+from django.views.decorators.cache import cache_page, cache_control
+
+@cache_page(60 * 15)   # 15분 캐시
+def articles(request): ...
+
+@cache_control(max_age=3600, public=True)
+def static_ish(request): ...
+```
+
+자세한 건 [[django-cache]].
+
+### `@csrf_exempt`
+
+```python
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+def webhook(request):
+    # 외부 서비스 웹훅 (CSRF token 없음)
+    ...
+```
+
+> [!WARNING]
+> 남용 금지. 외부 API 는 별도 signature 검증 필수.
+
+### `@method_decorator` (Class-Based View)
+
+```python
+from django.utils.decorators import method_decorator
+from django.views.generic import ListView
+
+@method_decorator(login_required, name='dispatch')
+class ArticleListView(ListView):
+    model = Article
+
+# 또는 개별 method
+class MyView(View):
+    @method_decorator(cache_page(60*15))
+    def get(self, request): ...
+```
+
+## Class-Based View 대안 (Mixin)
+
+```python
+from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
+
+class ProfileView(LoginRequiredMixin, DetailView):
+    model = User
+    login_url = '/signin/'
+
+class StaffView(LoginRequiredMixin, PermissionRequiredMixin, ListView):
+    permission_required = 'polls.can_vote'
+    raise_exception = True
+```
+
+자세한 mixin 은 [[django-mixins]].
+
+## Custom Decorator
+
+```python
+from functools import wraps
+
+def track_time(view_func):
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        import time
+        start = time.time()
+        response = view_func(request, *args, **kwargs)
+        elapsed = time.time() - start
+        response['X-Response-Time'] = f'{elapsed:.3f}'
+        logger.info(f'{request.path} took {elapsed:.3f}s')
+        return response
+    return wrapper
+
+@track_time
+def slow_view(request): ...
+```
+
+## 다른 프레임워크
+
+| Framework | shortcuts / decorators |
+|---|---|
+| **Django** | `render, redirect, get_object_or_404`, `@login_required` |
+| **Rails** | `render, redirect_to`, `before_action` |
+| **Spring** | `ResponseEntity`, `@PreAuthorize` |
+| **FastAPI** | `Depends`, `Response` |
+| **Express** | middleware chain |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`get_object_or_404` 로 auth 확인** = 로그인 안 한 사용자에게 *존재/부재 leak*. `@login_required` 조합.
+> 2. **`@csrf_exempt` 남발** = CSRF 방어 무력화.
+> 3. **`redirect(url)` 의 open redirect** = `?next=` 값 검증 없이 redirect → phishing. `is_safe_url` 사용.
+> 4. **Decorator 순서** = `@login_required` `@require_POST` 순서 중요. `@wraps` 로 name 보존.
+
+## 관련 위키
+
+- [[django-views]]
+- [[django-mixins]]
+- [[django-auth]]
+- [[django-cache]]
+- [[django-security]]

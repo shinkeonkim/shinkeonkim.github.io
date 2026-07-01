@@ -1,0 +1,304 @@
+---
+title: "[Django] Q / F / Case / When / Database Functions"
+aliases:
+  - "Django Q object"
+  - "F expression"
+  - "Case When"
+  - "Conditional expressions"
+  - "database functions"
+  - "Coalesce"
+  - "Concat"
+  - "Lower"
+  - "Cast"
+tags: [django, orm, queryset, expressions, django-6]
+category: django
+updated: 2026-06-25
+references:
+  - title: "Django 6.0 Query Expressions"
+    url: "https://docs.djangoproject.com/en/6.0/ref/models/expressions/"
+  - title: "Django 6.0 Conditional Expressions"
+    url: "https://docs.djangoproject.com/en/6.0/ref/models/conditional-expressions/"
+  - title: "Database Functions"
+    url: "https://docs.djangoproject.com/en/6.0/ref/models/database-functions/"
+---
+
+## 정의
+
+Django ORM 의 *고급 표현식*. Python 에서 짜지만 *SQL 로 컴파일* 되어 DB 에서 실행. Raw SQL 없이 복잡한 쿼리.
+
+일반 ORM 은 [[django-queryset]], [[django-orm-advanced]] 참고.
+
+## 1. Q Object (OR / AND / NOT)
+
+```python
+from django.db.models import Q
+
+# OR
+Article.objects.filter(Q(status='published') | Q(author=request.user))
+
+# NOT
+Article.objects.filter(~Q(status='draft'))
+
+# 조합
+Article.objects.filter(
+    (Q(status='published') | Q(author=request.user)) &
+    ~Q(deleted=True)
+)
+
+# XOR (Django 4.1+)
+Article.objects.filter(Q(featured=True) ^ Q(premium=True))
+```
+
+## 2. F Expression (컬럼 참조)
+
+```python
+from django.db.models import F
+
+# 컬럼 값 서로 비교
+Product.objects.filter(price__lt=F('cost'))   # 원가 이하 판매
+
+# 원자적 update
+Article.objects.filter(pk=1).update(views=F('views') + 1)
+# SQL: UPDATE ... SET views = views + 1
+
+# ✗ Race condition
+article = Article.objects.get(pk=1)
+article.views += 1
+article.save()   # 다른 요청과 경합
+```
+
+> [!IMPORTANT]
+> **`F()` = atomic**. 동시 update 시 정확. Race condition 방어.
+
+## 3. Case / When (SQL CASE)
+
+```python
+from django.db.models import Case, When, Value, IntegerField
+
+articles = Article.objects.annotate(
+    priority=Case(
+        When(status='urgent', then=Value(1)),
+        When(status='normal', then=Value(2)),
+        When(status='low', then=Value(3)),
+        default=Value(99),
+        output_field=IntegerField(),
+    )
+).order_by('priority')
+
+# 조건부 update
+User.objects.update(
+    tier=Case(
+        When(orders_count__gte=100, then=Value('platinum')),
+        When(orders_count__gte=10, then=Value('gold')),
+        default=Value('silver'),
+    )
+)
+```
+
+## 4. Aggregate + Conditional
+
+```python
+from django.db.models import Sum, Count
+
+# 매출 통계 with 조건
+Order.objects.aggregate(
+    total_revenue=Sum('amount'),
+    paid_revenue=Sum('amount', filter=Q(status='paid')),   # ← 필터 aggregate
+    refunded_count=Count('id', filter=Q(status='refunded')),
+)
+```
+
+Django 3.0+ 의 `filter=` 파라미터. `SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)` 로 컴파일.
+
+## 5. Database Functions
+
+```python
+from django.db.models.functions import (
+    Lower, Upper, Concat, Coalesce, Cast, Trunc, Round,
+    Substr, Length, Extract, Now, Least, Greatest,
+)
+from django.db.models import Value, CharField
+
+# 대소문자 무시 검색
+User.objects.annotate(name_lower=Lower('name')).filter(name_lower='koa')
+
+# 이름 합치기
+User.objects.annotate(
+    full_name=Concat('first_name', Value(' '), 'last_name'),
+)
+
+# NULL 처리
+Article.objects.annotate(
+    display_title=Coalesce('title', 'slug', Value('제목 없음')),
+)
+
+# 타입 변환
+Product.objects.annotate(
+    price_int=Cast('price', IntegerField()),
+)
+
+# 시간 자르기
+Article.objects.annotate(
+    month=Trunc('created_at', 'month'),
+).values('month').annotate(count=Count('id'))
+
+# 날짜 부분 추출
+Article.objects.annotate(
+    year=Extract('created_at', 'year'),
+    week_day=Extract('created_at', 'week_day'),
+)
+```
+
+## 문자열 함수
+
+| Function | 의미 |
+|---|---|
+| `Lower(x)` | 소문자 |
+| `Upper(x)` | 대문자 |
+| `Length(x)` | 길이 |
+| `Concat(a, b, c)` | 이어붙임 |
+| `Substr(x, pos, len)` | 부분 |
+| `Trim(x)` | 앞뒤 공백 제거 |
+| `Reverse(x)` | 뒤집기 |
+| `Replace(x, old, new)` | 치환 |
+| `MD5(x)`, `SHA1(x)`, ... | 해시 |
+
+## 숫자 함수
+
+| Function | 의미 |
+|---|---|
+| `Abs(x)` | 절대값 |
+| `Round(x, precision)` | 반올림 |
+| `Ceil(x)`, `Floor(x)` | 올림/내림 |
+| `Power(x, y)` | 거듭제곱 |
+| `Sqrt(x)`, `Exp(x)`, `Log(x)` | 수학 |
+| `Sin`, `Cos`, `Tan`, ... | 삼각 |
+| `Random()` | 무작위 |
+
+## 시간 함수
+
+```python
+from django.db.models.functions import Now, TruncDate, ExtractHour
+
+# 지금 시각
+Article.objects.filter(published_at__lte=Now())
+
+# 일별 통계
+Order.objects.annotate(day=TruncDate('created_at')).values('day').annotate(
+    count=Count('id'),
+    revenue=Sum('amount'),
+)
+
+# 시간대 별
+Order.objects.annotate(hour=ExtractHour('created_at')).values('hour').annotate(
+    count=Count('id'),
+)
+```
+
+## Window Functions (Django 2.0+)
+
+```python
+from django.db.models import Window, F
+from django.db.models.functions import Rank, RowNumber, Lag, Lead
+
+# 랭킹
+Employee.objects.annotate(
+    rank=Window(
+        expression=Rank(),
+        partition_by=[F('department')],
+        order_by=F('salary').desc(),
+    )
+).filter(rank__lte=3)   # 부서별 상위 3명
+
+# Row number
+Article.objects.annotate(
+    row=Window(expression=RowNumber(), order_by=F('created_at').desc()),
+)
+
+# 이전/다음 값
+Sales.objects.annotate(
+    prev_amount=Window(
+        expression=Lag('amount'),
+        partition_by=[F('product')],
+        order_by=F('date'),
+    ),
+    growth=F('amount') - F('prev_amount'),
+)
+```
+
+## Custom Function
+
+```python
+from django.db.models import Func, FloatField
+
+class Sin(Func):
+    function = 'SIN'
+    output_field = FloatField()
+
+Employee.objects.annotate(x=Sin('degrees'))
+```
+
+## Subquery + OuterRef
+
+```python
+from django.db.models import OuterRef, Subquery
+
+# 각 사용자의 최근 게시물 제목
+latest_article = Article.objects.filter(
+    author=OuterRef('pk')
+).order_by('-created_at').values('title')[:1]
+
+User.objects.annotate(latest_article_title=Subquery(latest_article))
+```
+
+## Exists
+
+```python
+from django.db.models import Exists, OuterRef
+
+has_articles = Article.objects.filter(author=OuterRef('pk'))
+User.objects.annotate(has_articles=Exists(has_articles)).filter(has_articles=True)
+```
+
+## PostgreSQL 특화
+
+```python
+from django.contrib.postgres.aggregates import ArrayAgg, StringAgg, JSONBAgg
+from django.contrib.postgres.expressions import ArraySubquery
+
+# 배열로 aggregate
+Author.objects.annotate(
+    book_titles=ArrayAgg('books__title'),
+    tags_str=StringAgg('tags__name', delimiter=', '),
+)
+```
+
+## Django 6.0 개선
+
+- `GeneratedField` (2024) 안정화
+- Window function 개선
+- `JSONB` 함수 강화
+
+## 다른 프레임워크
+
+| Framework | 조건부 표현식 |
+|---|---|
+| **Django** | Q, F, Case/When, Window |
+| **Rails** | `.where("...")` + Arel |
+| **SQLAlchemy** | `case`, `func`, `select` |
+| **JPA** | `CriteriaBuilder`, `@Formula` |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **F() update 후 `.refresh_from_db()`** = update 후 Python 객체는 옛 값. refresh 필요.
+> 2. **Window function + filter** = 대부분 지원 안 됨. subquery 로.
+> 3. **`.annotate()` 후 `.aggregate()` 순서** = 결과 크게 다름.
+> 4. **DB 별 지원 차이** = SQLite 는 window 제한. PostgreSQL 이 가장 풍부.
+
+## 관련 위키
+
+- [[django-queryset]]
+- [[django-orm-advanced]]
+- [[django-aggregations]]
+- [[postgresql]]

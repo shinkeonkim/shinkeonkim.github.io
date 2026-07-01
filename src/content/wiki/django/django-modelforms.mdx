@@ -1,0 +1,245 @@
+---
+title: "[Django] ModelForm: 모델 기반 폼 자동 생성"
+aliases:
+  - "Django ModelForm"
+  - "model form"
+  - "Meta.fields"
+  - "Meta.exclude"
+  - "ModelForm save"
+  - "clean_field"
+tags: [django, form, modelform, validation]
+category: django
+updated: 2026-06-25
+references:
+  - title: "Django 6.0 ModelForm"
+    url: "https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/"
+---
+
+## 정의
+
+**ModelForm** = *Model 로부터 Form 자동 생성*. 필드 반복 정의 없이 CRUD 폼 완성.
+
+일반 Form 은 [[django-forms]] 참고.
+
+## 왜 ModelForm?
+
+```python
+# ❌ 일반 Form: 필드 중복 정의
+class UserForm(forms.Form):
+    name = forms.CharField(max_length=100)
+    email = forms.EmailField()
+    age = forms.IntegerField(min_value=0)
+
+    def save(self):
+        # 직접 model 저장 코드...
+
+# ✓ ModelForm: 자동
+class UserForm(forms.ModelForm):
+    class Meta:
+        model = User
+        fields = ['name', 'email', 'age']
+
+# form.save() 자동 지원!
+```
+
+## 기본 사용
+
+```python
+from django import forms
+from .models import Article
+
+class ArticleForm(forms.ModelForm):
+    class Meta:
+        model = Article
+        fields = ['title', 'body', 'category', 'tags']
+        widgets = {
+            'body': forms.Textarea(attrs={'rows': 20}),
+        }
+        labels = {
+            'title': '제목',
+            'body': '본문',
+        }
+        help_texts = {
+            'title': '100자 이내',
+        }
+        error_messages = {
+            'title': {
+                'required': '제목은 필수입니다',
+                'max_length': '제목이 너무 길어요',
+            },
+        }
+```
+
+## `fields` vs `exclude`
+
+```python
+class Meta:
+    model = User
+    fields = ['name', 'email']          # 명시적 화이트리스트 (권장)
+    # 또는
+    fields = '__all__'                   # 모든 필드 (위험!)
+    # 또는
+    exclude = ['password', 'is_staff']   # 블랙리스트 (위험!)
+```
+
+> [!WARNING]
+> **`fields = '__all__'` 또는 `exclude`** = 새 필드 추가 시 *자동 노출* → mass assignment 취약점. *fields 화이트리스트* 권장.
+
+## View 에서 사용
+
+```python
+def create_article(request):
+    if request.method == 'POST':
+        form = ArticleForm(request.POST)
+        if form.is_valid():
+            article = form.save()   # DB 저장 후 instance 반환
+            return redirect('article_detail', pk=article.pk)
+    else:
+        form = ArticleForm()
+    return render(request, 'article_form.html', {'form': form})
+
+
+def edit_article(request, pk):
+    article = get_object_or_404(Article, pk=pk)
+    if request.method == 'POST':
+        form = ArticleForm(request.POST, instance=article)   # ← 편집!
+        if form.is_valid():
+            form.save()
+            return redirect('article_detail', pk=article.pk)
+    else:
+        form = ArticleForm(instance=article)
+    return render(request, 'article_form.html', {'form': form})
+```
+
+## `save(commit=False)`
+
+*저장 전 수정*:
+
+```python
+if form.is_valid():
+    article = form.save(commit=False)
+    article.author = request.user          # 현재 사용자 자동 지정
+    article.status = 'draft'
+    article.save()                          # 이제 DB에
+    form.save_m2m()                         # ManyToMany 별도 저장!
+```
+
+> [!IMPORTANT]
+> `commit=False` + `save_m2m()` 짝. Many-to-Many 필드가 있으면 필수.
+
+## Custom Validation
+
+```python
+class ArticleForm(forms.ModelForm):
+    class Meta:
+        model = Article
+        fields = ['title', 'body', 'publish_date']
+
+    def clean_title(self):
+        title = self.cleaned_data['title']
+        if Article.objects.filter(title=title).exclude(pk=self.instance.pk).exists():
+            raise forms.ValidationError('이미 존재하는 제목입니다')
+        return title
+
+    def clean(self):
+        cleaned_data = super().clean()
+        publish_date = cleaned_data.get('publish_date')
+        if publish_date and publish_date < timezone.now():
+            self.add_error('publish_date', '과거로 예약할 수 없습니다')
+        return cleaned_data
+```
+
+자세한 form 검증은 [[django-forms]].
+
+## Class-Based View 와 함께
+
+```python
+from django.views.generic.edit import CreateView, UpdateView
+
+class ArticleCreateView(CreateView):
+    model = Article
+    form_class = ArticleForm
+    template_name = 'article_form.html'
+    success_url = '/articles/'
+
+    def form_valid(self, form):
+        form.instance.author = self.request.user
+        return super().form_valid(form)
+
+class ArticleUpdateView(UpdateView):
+    model = Article
+    form_class = ArticleForm
+    template_name = 'article_form.html'
+```
+
+자세한 CBV 는 [[django-views]], [[django-mixins]].
+
+## Template 렌더링
+
+```html
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}                    <!-- 각 필드 <p> 로 -->
+  <button type="submit">저장</button>
+</form>
+
+<!-- 또는 필드 단위 -->
+<form method="post">
+  {% csrf_token %}
+  <div>
+    <label for="{{ form.title.id_for_label }}">제목</label>
+    {{ form.title }}
+    {{ form.title.errors }}
+  </div>
+  <button>저장</button>
+</form>
+```
+
+Django 6.0 의 새 template 문법:
+
+```html
+{{ form.as_field_group }}    <!-- 필드 그룹으로 (6.0+) -->
+```
+
+## 필드 override
+
+```python
+class ArticleForm(forms.ModelForm):
+    # 모델 필드보다 우선
+    title = forms.CharField(
+        max_length=200,
+        widget=forms.TextInput(attrs={'class': 'form-control'}),
+    )
+
+    class Meta:
+        model = Article
+        fields = ['title', 'body']
+```
+
+## Formset (여러 개 동시)
+
+자세한 건 [[django-formsets]].
+
+## 다른 프레임워크
+
+| Framework | 모델 기반 폼 |
+|---|---|
+| **Django** | `ModelForm` |
+| **Rails** | `form_with model:` (helper) |
+| **Spring** | `@ModelAttribute` + Jakarta Validation |
+| **FastAPI** | Pydantic + response_model |
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`fields = '__all__'`** = mass assignment 사고.
+> 2. **`save_m2m()` 잊음** = ManyToMany 필드 저장 안 됨.
+> 3. **`instance=obj` 안 넘김** = create 로 오해되어 *새 row 생성*.
+> 4. **user 필드 폼에 노출** = 사용자가 다른 사람 ID 조작. `exclude` 또는 view 에서 override.
+
+## 관련 위키
+
+- [[django-forms]]
+- [[django-formsets]]
+- [[django-models-fields]]
+- [[django-views]] (CBV)

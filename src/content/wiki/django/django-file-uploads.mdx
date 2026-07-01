@@ -1,0 +1,292 @@
+---
+title: "[Django] File Uploads + Storage: FileField, ImageField, S3"
+aliases:
+  - "django file upload"
+  - "FileField"
+  - "ImageField"
+  - "FILE_UPLOAD_HANDLERS"
+  - "MEDIA_ROOT"
+  - "django-storages"
+  - "S3 backend"
+tags: [django, files, upload, storage, media]
+category: django
+updated: 2026-06-25
+references:
+  - title: "Django 6.0 File uploads"
+    url: "https://docs.djangoproject.com/en/6.0/topics/http/file-uploads/"
+  - title: "Django Storage API"
+    url: "https://docs.djangoproject.com/en/6.0/ref/files/storage/"
+  - title: "django-storages"
+    url: "https://django-storages.readthedocs.io/"
+---
+
+## 정의
+
+Django 의 *파일 업로드 + 저장* 시스템. FileField/ImageField + Storage backend 로 *로컬 / S3 / GCS* 등 자유롭게.
+
+## Model 필드
+
+```python
+from django.db import models
+
+def user_avatar_path(instance, filename):
+    return f'avatars/{instance.user.id}/{filename}'
+
+class Profile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    avatar = models.ImageField(
+        upload_to=user_avatar_path,
+        blank=True,
+        null=True,
+        max_length=200,
+    )
+    resume = models.FileField(
+        upload_to='resumes/%Y/%m/',
+        blank=True,
+    )
+```
+
+> `upload_to` 는 문자열 또는 함수. 함수는 `(instance, filename) → path` 반환.
+
+## Form + View
+
+```python
+# forms.py
+class ProfileForm(forms.ModelForm):
+    class Meta:
+        model = Profile
+        fields = ['avatar', 'resume']
+
+# views.py
+def upload_profile(request):
+    if request.method == 'POST':
+        form = ProfileForm(request.POST, request.FILES, instance=request.user.profile)
+        # request.FILES 필수!
+        if form.is_valid():
+            form.save()
+            return redirect('profile')
+    else:
+        form = ProfileForm(instance=request.user.profile)
+    return render(request, 'upload.html', {'form': form})
+```
+
+## Template
+
+```html
+<!-- multipart/form-data 필수! -->
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button>업로드</button>
+</form>
+```
+
+> [!CAUTION]
+> **`enctype="multipart/form-data"` 없으면** 파일 안 올라감. 잊기 쉬움.
+
+## Settings
+
+```python
+# settings.py
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# 업로드 크기 한도
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2621440   # 2.5MB (메모리)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 2621440    # form data 전체
+FILE_UPLOAD_HANDLERS = [
+    'django.core.files.uploadhandler.MemoryFileUploadHandler',
+    'django.core.files.uploadhandler.TemporaryFileUploadHandler',
+]
+```
+
+개발 시 media 파일 serve:
+
+```python
+# urls.py
+from django.conf import settings
+from django.conf.urls.static import static
+
+urlpatterns = [
+    ...
+]
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+```
+
+> [!IMPORTANT]
+> **프로덕션은 nginx/CloudFront** 로 media serve. Django 로 serve = 매우 느림.
+
+## Storage Backend
+
+```mermaid
+flowchart LR
+    Model[FileField] --> Storage[Storage backend]
+    Storage --> Local[FileSystemStorage (기본)]
+    Storage --> S3[S3Boto3Storage]
+    Storage --> GCS[GoogleCloudStorage]
+    Storage --> Azure[AzureStorage]
+    Storage --> Custom[Custom storage]
+```
+
+## Django 6.0 의 STORAGES 설정
+
+```python
+# settings.py (Django 6.0+)
+STORAGES = {
+    'default': {
+        'BACKEND': 'storages.backends.s3.S3Storage',
+        'OPTIONS': {
+            'bucket_name': 'my-media',
+            'region_name': 'us-east-1',
+            'location': 'media',
+            'default_acl': 'private',
+            'file_overwrite': False,
+        },
+    },
+    'staticfiles': {
+        'BACKEND': 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage',
+    },
+}
+```
+
+> [!TIP]
+> `STORAGES` 는 Django 4.2+ 부터. `DEFAULT_FILE_STORAGE` 는 deprecated.
+
+## S3 예시 (django-storages)
+
+```bash
+pip install django-storages[boto3]
+```
+
+```python
+STORAGES = {
+    'default': {
+        'BACKEND': 'storages.backends.s3.S3Storage',
+        'OPTIONS': {
+            'bucket_name': env('AWS_S3_BUCKET'),
+            'region_name': env('AWS_REGION'),
+            'location': 'media',
+            'file_overwrite': False,
+            'querystring_expire': 3600,   # signed URL expiration
+        },
+    },
+}
+```
+
+S3 자세한 건 [[aws-s3]].
+
+## Custom Storage
+
+```python
+from django.core.files.storage import Storage
+
+class MyStorage(Storage):
+    def _save(self, name, content):
+        # 저장 로직
+        return saved_name
+
+    def _open(self, name, mode='rb'):
+        # 열기 로직
+        return file
+
+    def exists(self, name): ...
+    def url(self, name): ...
+    def size(self, name): ...
+```
+
+## Direct Upload (프리사인 URL)
+
+브라우저 → S3 *직접* 업로드 (서버 우회):
+
+```python
+import boto3
+
+def get_presigned_url(request):
+    filename = request.GET['filename']
+    key = f'uploads/{request.user.id}/{filename}'
+
+    s3 = boto3.client('s3')
+    url = s3.generate_presigned_post(
+        Bucket='my-bucket',
+        Key=key,
+        Conditions=[
+            ['content-length-range', 0, 10 * 1024 * 1024],
+        ],
+        ExpiresIn=3600,
+    )
+    return JsonResponse(url)
+```
+
+```javascript
+// 클라이언트
+const {url, fields} = await fetch('/presigned-url/?filename=x.jpg').then(r => r.json());
+const formData = new FormData();
+Object.entries(fields).forEach(([k, v]) => formData.append(k, v));
+formData.append('file', file);
+await fetch(url, { method: 'POST', body: formData });
+```
+
+## 이미지 처리
+
+```python
+from PIL import Image
+
+def save(self, *args, **kwargs):
+    super().save(*args, **kwargs)
+    if self.avatar:
+        img = Image.open(self.avatar.path)
+        img.thumbnail((300, 300))
+        img.save(self.avatar.path)
+```
+
+또는 `django-imagekit` / `easy-thumbnails`.
+
+## Security
+
+```python
+# 파일 형식 검증
+def validate_image(value):
+    valid_extensions = ['.jpg', '.png', '.webp']
+    ext = os.path.splitext(value.name)[1].lower()
+    if ext not in valid_extensions:
+        raise ValidationError('허용 안 된 형식')
+
+    # MIME type 확인
+    import magic
+    mime = magic.from_buffer(value.read(2048), mime=True)
+    value.seek(0)
+    if not mime.startswith('image/'):
+        raise ValidationError('이미지가 아닙니다')
+
+class Profile(models.Model):
+    avatar = models.ImageField(upload_to='avatars/', validators=[validate_image])
+```
+
+> [!CAUTION]
+> **확장자만 검증 = 위험**. `evil.exe.jpg` 통과. `python-magic` 으로 MIME sniff.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`enctype` 잊음** = 파일 안 올라감 (silent).
+> 2. **로컬 저장 → 프로덕션 배포 후 사라짐** = 컨테이너 재시작. S3 등 외부 저장.
+> 3. **크기 한도 안 정함** = 100MB 업로드 = OOM. `FILE_UPLOAD_MAX_MEMORY_SIZE`.
+> 4. **경로 traversal** = `../../etc/passwd` 같은 filename. Django 는 자동 방어하지만 커스텀 upload_to 는 주의.
+
+## 다른 프레임워크
+
+| Framework | 파일 업로드 |
+|---|---|
+| **Django** | `FileField` + `request.FILES` |
+| **Rails** | Active Storage (7+) |
+| **Spring** | `MultipartFile` |
+| **FastAPI** | `UploadFile` |
+| **Express** | multer |
+
+## 관련 위키
+
+- [[django-forms]]
+- [[django-static-media]]
+- [[aws-s3]]
+- [[django-security]]

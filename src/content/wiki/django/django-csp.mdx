@@ -1,0 +1,200 @@
+---
+title: "[Django 6.0] Content Security Policy: XSS 방어의 최종형"
+aliases:
+  - "Django CSP"
+  - "Content Security Policy"
+  - "django csp middleware"
+  - "csp-report-only"
+  - "CSP nonce"
+tags: [django, csp, security, xss, django-6]
+category: django
+updated: 2026-06-25
+references:
+  - title: "Django 6.0 CSP"
+    url: "https://docs.djangoproject.com/en/6.0/ref/csp/"
+  - title: "MDN: Content Security Policy"
+    url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"
+---
+
+## 정의
+
+**Content Security Policy (CSP)** = 브라우저에게 *어떤 스크립트/스타일/이미지 만 허용* 할지 선언. XSS 공격의 마지막 방어선.
+
+Django 6.0 부터 **CSP 지원이 내장** (옛 `django-csp` 서드파티 → Django 표준). 자세한 XSS 는 [[django-security]] 참고.
+
+## 목적 + 대안
+
+| 접근 | 의미 |
+|---|---|
+| **입력 필터링** | 사용자 입력에서 `<script>` 제거 (완벽하지 않음) |
+| **출력 escape** | `{% autoescape %}` 로 HTML escape (Django 기본) |
+| **CSP** | *브라우저에게 인라인 스크립트 실행 금지 지시* |
+
+> [!IMPORTANT]
+> **CSP 는 *다중 방어* 의 하나**. Escape + Sanitize + CSP 3중 방어가 정통.
+
+## CSP Header 구조
+
+```http
+Content-Security-Policy:
+  default-src 'self';
+  script-src 'self' https://cdn.example.com;
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data: https:;
+  connect-src 'self' https://api.example.com;
+  frame-ancestors 'none';
+  report-uri /csp-report/
+```
+
+| Directive | 의미 |
+|---|---|
+| `default-src` | 기본값 |
+| `script-src` | JavaScript 허용 원본 |
+| `style-src` | CSS |
+| `img-src` | 이미지 |
+| `connect-src` | fetch, XHR, WebSocket |
+| `font-src` | 폰트 |
+| `frame-src` / `frame-ancestors` | iframe |
+| `form-action` | form action target |
+| `report-uri` | 위반 리포트 |
+
+## Django 6.0 CSP 설정
+
+```python
+# settings.py
+MIDDLEWARE = [
+    ...
+    'django.middleware.csp.ContentSecurityPolicyMiddleware',
+]
+
+SECURE_CSP = {
+    'default-src': ["'self'"],
+    'script-src': ["'self'", 'https://cdn.example.com'],
+    'style-src': ["'self'", "'unsafe-inline'"],
+    'img-src': ["'self'", 'data:', 'https:'],
+    'connect-src': ["'self'", 'https://api.example.com'],
+    'frame-ancestors': ["'none'"],
+    'report-uri': ['/csp-report/'],
+}
+```
+
+## Report-Only 모드 (안전한 배포)
+
+```python
+# 처음 도입 시 report-only 로 시작
+SECURE_CSP_REPORT_ONLY = {
+    'default-src': ["'self'"],
+    'script-src': ["'self'"],
+    'report-uri': ['/csp-report/'],
+}
+```
+
+브라우저가 *위반 감지 시 report 만 전송, 실제 차단 안 함*. 로그 분석 후 정식 정책으로 전환.
+
+## Nonce 로 인라인 스크립트 허용
+
+```python
+# views.py
+from django.middleware.csp import get_csp_nonce
+
+def home(request):
+    return render(request, 'home.html', {
+        'csp_nonce': get_csp_nonce(request),
+    })
+```
+
+```html
+<script nonce="{{ csp_nonce }}">
+  console.log('inline script allowed');
+</script>
+```
+
+Header:
+```
+Content-Security-Policy: script-src 'self' 'nonce-xyz123abc';
+```
+
+> [!TIP]
+> *동적 인라인 스크립트* 를 안전하게. `'unsafe-inline'` 보다 훨씬 안전.
+
+## Hash (정적 인라인)
+
+```python
+SECURE_CSP = {
+    'script-src': [
+        "'self'",
+        "'sha256-B2yPHKaXnvFWtRChIbabYmUBFZdVfKKXHbWtWidDVF8='",
+    ],
+}
+```
+
+특정 인라인 스크립트 hash 계산 후 허용. Nonce 와 달리 *정적 스크립트만*.
+
+## 위반 리포트 처리
+
+```python
+# views.py
+import json
+from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+def csp_report(request):
+    if request.method == 'POST':
+        report = json.loads(request.body)
+        logger.warning('CSP violation: %s', report)
+        return HttpResponse(status=204)
+```
+
+```json
+{
+  "csp-report": {
+    "document-uri": "https://example.com/page/",
+    "referrer": "",
+    "violated-directive": "script-src 'self'",
+    "blocked-uri": "https://evil.com/xss.js",
+    "line-number": 42
+  }
+}
+```
+
+## Strict CSP (현대 권장)
+
+Google 이 권장하는 *strict CSP*:
+
+```python
+SECURE_CSP = {
+    'script-src': ["'strict-dynamic'", "'nonce-{{nonce}}'"],
+    'object-src': ["'none'"],
+    'base-uri': ["'none'"],
+}
+```
+
+- `strict-dynamic`: nonce 통과한 스크립트가 로드한 자원은 자동 허용.
+- `object-src 'none'`: Flash/plugin 완전 차단.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`unsafe-inline` 남발** = CSP 의 의미 없음. Nonce 또는 hash 사용.
+> 2. **CDN URL 하드코딩** = CDN 변경 시 앱 다운. 설정 관리.
+> 3. **report-uri 없이 시작** = 위반 파악 못함. 반드시 report 먼저.
+> 4. **`'unsafe-eval'` 필요** = React 개발 mode 등. Production 은 build 후 제거.
+
+## 다른 프레임워크
+
+| Framework | CSP 지원 |
+|---|---|
+| **Django 6.0+** | *내장* |
+| **Django 5.x 이하** | django-csp 서드파티 |
+| **Rails** | *Rails 5.2+ 내장* (`config.content_security_policy`) |
+| **Spring** | Spring Security header |
+| **Express** | helmet.js |
+| **Next.js** | `next.config.js` headers |
+
+## 관련 위키
+
+- [[django-security]]
+- [[django-middleware]]
+- [[CORS]]
+- [[CSRF]]
