@@ -166,6 +166,9 @@ export default defineConfig({
         } else if (path.startsWith('/wiki/category/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.65;
+        } else if (path.startsWith('/wiki/') && path.endsWith('/learning-path/')) {
+          item.changefreq = EnumChangefreq.MONTHLY;
+          item.priority = 0.5;
         } else if (path.startsWith('/wiki/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.7;
