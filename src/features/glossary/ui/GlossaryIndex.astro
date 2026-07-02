@@ -1,0 +1,403 @@
+---
+import { getFullGlossary, type GlossaryEntry } from '@/features/glossary/lib/build-glossary';
+import { getWikiCategoryMeta } from '@/shared/lib/content/wiki-category-meta';
+
+const entries = await getFullGlossary();
+
+const HANGUL_ORDER = [
+  '\u3131', '\u3132', '\u3134', '\u3137', '\u3138', '\u3139',
+  '\u3141', '\u3142', '\u3143', '\u3145', '\u3146', '\u3147',
+  '\u3148', '\u3149', '\u314a', '\u314b', '\u314c', '\u314d', '\u314e',
+];
+const ALPHA_ORDER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
+const byLetter = new Map<string, GlossaryEntry[]>();
+for (const e of entries) {
+  const key = e.firstChar;
+  let list = byLetter.get(key);
+  if (!list) {
+    list = [];
+    byLetter.set(key, list);
+  }
+  list.push(e);
+}
+
+const letterSections: { letter: string; entries: GlossaryEntry[] }[] = [];
+for (const letter of HANGUL_ORDER) {
+  const list = byLetter.get(letter);
+  if (list && list.length > 0) letterSections.push({ letter, entries: list });
+}
+for (const letter of ALPHA_ORDER) {
+  const list = byLetter.get(letter);
+  if (list && list.length > 0) letterSections.push({ letter, entries: list });
+}
+const otherList = byLetter.get('#');
+if (otherList && otherList.length > 0) letterSections.push({ letter: '#', entries: otherList });
+
+const byCategory = new Map<string | null, GlossaryEntry[]>();
+for (const e of entries) {
+  const key = e.category ?? null;
+  let list = byCategory.get(key);
+  if (!list) {
+    list = [];
+    byCategory.set(key, list);
+  }
+  list.push(e);
+}
+const categorySections: { slug: string | null; label: string; entries: GlossaryEntry[]; icon: string }[] =
+  [];
+for (const [slug, list] of byCategory) {
+  const label = slug ?? '기타';
+  const icon = slug ? getWikiCategoryMeta(slug).icon : '📁';
+  categorySections.push({ slug, label, entries: list, icon });
+}
+categorySections.sort((a, b) => {
+  if (a.slug === null && b.slug !== null) return 1;
+  if (a.slug !== null && b.slug === null) return -1;
+  return b.entries.length - a.entries.length || a.label.localeCompare(b.label);
+});
+
+const searchIndex = entries.map((e) => ({
+  slug: e.slug,
+  title: e.title,
+  aliases: e.aliases,
+  category: e.category ?? '',
+  summary: e.summary,
+  backlinksCount: e.backlinksCount,
+  firstChar: e.firstChar,
+}));
+const searchIndexJson = JSON.stringify(searchIndex).replace(/</g, '\\u003c');
+---
+
+<section class="glossary" data-glossary>
+  <header class="glossary-header" data-pagefind-ignore="all">
+    <label class="glossary-search-label">
+      <span class="sr-only">용어 검색</span>
+      <input
+        type="search"
+        data-glossary-search
+        placeholder="용어, 별칭, 요약으로 필터…"
+        autocomplete="off"
+        class="glossary-search-input"
+      />
+    </label>
+    <div class="glossary-view-toggle" role="tablist" aria-label="보기 방식">
+      <button
+        type="button"
+        data-glossary-view="alpha"
+        role="tab"
+        aria-selected="true"
+        class="glossary-view-btn"
+      >
+        A-Z
+      </button>
+      <button
+        type="button"
+        data-glossary-view="category"
+        role="tab"
+        aria-selected="false"
+        class="glossary-view-btn"
+      >
+        카테고리
+      </button>
+    </div>
+  </header>
+
+  <nav class="glossary-nav" data-glossary-nav aria-label="자모 이동" data-pagefind-ignore="all">
+    {letterSections.map((s) => (
+      <a href={`#letter-${encodeURIComponent(s.letter)}`} class="glossary-nav-item">
+        {s.letter}
+      </a>
+    ))}
+  </nav>
+
+  <p class="glossary-count" aria-live="polite" data-glossary-count data-pagefind-ignore="all">
+    총 {entries.length}개의 용어
+  </p>
+
+  <section data-glossary-view-panel="alpha" class="glossary-panel">
+    {letterSections.map((s) => (
+      <section class="glossary-section" data-glossary-section={`letter-${s.letter}`}>
+        <h2 id={`letter-${encodeURIComponent(s.letter)}`} class="glossary-section-title">
+          {s.letter}
+          <span class="glossary-section-count">({s.entries.length})</span>
+        </h2>
+        <dl class="glossary-list">
+          {s.entries.map((e) => (
+            <div
+              class="glossary-item"
+              data-glossary-item
+              data-title={e.title.toLowerCase()}
+              data-aliases={e.aliases.map((a) => a.toLowerCase()).join('|')}
+              data-summary={e.summary.toLowerCase()}
+              data-category={e.category ?? ''}
+              data-letter={e.firstChar}
+            >
+              <dt class="glossary-item-term">
+                <a href={e.url} class="glossary-item-link">{e.title}</a>
+                {e.category && (
+                  <span class="glossary-item-badge">{e.category}</span>
+                )}
+                {e.backlinksCount > 0 && (
+                  <span class="glossary-item-refs" title="이 용어를 참조하는 콘텐츠 수">
+                    ← {e.backlinksCount}
+                  </span>
+                )}
+              </dt>
+              {e.aliases.length > 0 && (
+                <dd class="glossary-item-aliases">
+                  별칭: {e.aliases.join(', ')}
+                </dd>
+              )}
+              {e.summary && <dd class="glossary-item-summary">{e.summary}</dd>}
+            </div>
+          ))}
+        </dl>
+      </section>
+    ))}
+  </section>
+
+  <section data-glossary-view-panel="category" class="glossary-panel" hidden data-pagefind-ignore="all">
+    {categorySections.map((cs) => (
+      <details class="glossary-category" open>
+        <summary class="glossary-category-summary">
+          <span class="glossary-category-icon" aria-hidden="true">{cs.icon}</span>
+          <span class="glossary-category-name">{cs.label}</span>
+          <span class="glossary-category-count">({cs.entries.length})</span>
+        </summary>
+        <dl class="glossary-list">
+          {cs.entries.map((e) => (
+            <div
+              class="glossary-item"
+              data-title={e.title.toLowerCase()}
+              data-aliases={e.aliases.map((a) => a.toLowerCase()).join('|')}
+              data-summary={e.summary.toLowerCase()}
+            >
+              <dt class="glossary-item-term">
+                <a href={e.url} class="glossary-item-link">{e.title}</a>
+                {e.backlinksCount > 0 && (
+                  <span class="glossary-item-refs" title="이 용어를 참조하는 콘텐츠 수">
+                    ← {e.backlinksCount}
+                  </span>
+                )}
+              </dt>
+              {e.summary && <dd class="glossary-item-summary">{e.summary}</dd>}
+            </div>
+          ))}
+        </dl>
+      </details>
+    ))}
+  </section>
+
+  <p class="glossary-empty" data-glossary-empty hidden>
+    일치하는 용어가 없습니다. 다른 검색어를 시도해보세요.
+  </p>
+
+  <script
+    is:inline
+    type="application/json"
+    id="glossary-index-data"
+    data-pagefind-ignore="all"
+    set:html={searchIndexJson}
+  />
+</section>
+
+<style>
+  .glossary {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+  .glossary-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+  }
+  .glossary-search-label {
+    flex: 1;
+    min-width: 15rem;
+  }
+  .glossary-search-input {
+    width: 100%;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-fg);
+    border-radius: 0.4rem;
+    font-size: 0.9rem;
+  }
+  .glossary-search-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+  }
+  .glossary-view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    overflow: hidden;
+  }
+  .glossary-view-btn {
+    padding: 0.5rem 0.9rem;
+    background: transparent;
+    color: var(--color-fg-muted);
+    border: none;
+    font-size: 0.85rem;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .glossary-view-btn + .glossary-view-btn {
+    border-left: 1px solid var(--color-border);
+  }
+  .glossary-view-btn[aria-selected='true'] {
+    background: var(--color-surface-elevated);
+    color: var(--color-accent);
+    font-weight: 500;
+  }
+  .glossary-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    background: var(--color-surface-elevated);
+  }
+  .glossary-nav-item {
+    display: inline-block;
+    min-width: 1.75rem;
+    padding: 0.2rem 0.4rem;
+    text-align: center;
+    color: var(--color-fg-muted);
+    text-decoration: none;
+    border-radius: 0.25rem;
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+  }
+  .glossary-nav-item:hover {
+    background: var(--color-surface);
+    color: var(--color-accent);
+  }
+  .glossary-count {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--color-fg-muted);
+  }
+  .glossary-section {
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--color-border);
+    scroll-margin-top: 5rem;
+  }
+  .glossary-section-title {
+    margin: 0 0 0.6rem;
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--color-accent);
+  }
+  .glossary-section-count {
+    margin-left: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 400;
+    color: var(--color-fg-muted);
+  }
+  .glossary-list {
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.55rem;
+  }
+  @media (min-width: 40rem) {
+    .glossary-list {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  .glossary-item {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    background: var(--color-surface);
+  }
+  .glossary-item[hidden] {
+    display: none !important;
+  }
+  .glossary-item-term {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin: 0;
+  }
+  .glossary-item-link {
+    color: var(--color-fg);
+    text-decoration: none;
+    font-weight: 500;
+    border-bottom: 1px dotted var(--color-border);
+  }
+  .glossary-item-link:hover {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+  }
+  .glossary-item-badge {
+    padding: 0.05rem 0.45rem;
+    font-size: 0.65rem;
+    font-family: var(--font-mono);
+    border-radius: 999px;
+    background-color: var(--color-code-bg);
+    color: var(--color-fg-muted);
+    text-transform: lowercase;
+  }
+  .glossary-item-refs {
+    margin-left: auto;
+    font-size: 0.7rem;
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+  }
+  .glossary-item-aliases {
+    margin: 0.2rem 0 0;
+    font-size: 0.72rem;
+    color: var(--color-fg-muted);
+    font-style: italic;
+  }
+  .glossary-item-summary {
+    margin: 0.35rem 0 0;
+    font-size: 0.8rem;
+    color: var(--color-fg-muted);
+    line-height: 1.5;
+  }
+  .glossary-category {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    background: var(--color-surface-elevated);
+  }
+  .glossary-category-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-weight: 500;
+    list-style: none;
+  }
+  .glossary-category-summary::-webkit-details-marker {
+    display: none;
+  }
+  .glossary-category-name {
+    text-transform: lowercase;
+  }
+  .glossary-category-count {
+    color: var(--color-fg-muted);
+    font-weight: 400;
+    font-size: 0.85rem;
+  }
+  .glossary-category .glossary-list {
+    margin-top: 0.7rem;
+  }
+  .glossary-empty {
+    padding: 1rem;
+    text-align: center;
+    color: var(--color-fg-muted);
+    border: 1px dashed var(--color-border);
+    border-radius: 0.4rem;
+  }
+</style>
