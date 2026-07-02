@@ -6,6 +6,7 @@ export const NAV_ITEMS = [
   { href: '/glossary/', label: '용어' },
   { href: '/animations/', label: '애니메이션' },
   { href: '/graph/', label: '그래프' },
+  { href: '/errata/', label: '정오표' },
   { href: '/about/', label: '소개' },
 ] as const;
 

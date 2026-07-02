@@ -1,0 +1,239 @@
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+import { loadErrata, type ErrataIssue } from '@/shared/lib/content/errata';
+import { SITE_LOCALE } from '@/shared/config';
+
+interface DocEntry {
+  collection: 'posts' | 'wiki' | 'notes';
+  slug: string;
+  title: string;
+  url: string;
+  closed: ErrataIssue[];
+  open: ErrataIssue[];
+}
+
+const errata = await loadErrata();
+const [posts, wiki, notes] = await Promise.all([
+  getCollection('posts'),
+  getCollection('wiki'),
+  getCollection('notes'),
+]);
+
+function titleFor(collection: string, slug: string): string | null {
+  if (collection === 'posts') {
+    const entry = posts.find((p) => p.id === slug);
+    return entry?.data.title ?? slug;
+  }
+  if (collection === 'wiki') {
+    const entry = wiki.find((w) => w.id === slug);
+    return entry?.data.title ?? slug;
+  }
+  if (collection === 'notes') {
+    const entry = notes.find((n) => n.id === slug);
+    return entry ? slug : slug;
+  }
+  return null;
+}
+
+const docs: DocEntry[] = [];
+for (const [key, issues] of Object.entries(errata)) {
+  const [collection, ...rest] = key.split(':');
+  const slug = rest.join(':');
+  if (collection !== 'posts' && collection !== 'wiki' && collection !== 'notes') continue;
+  const title = titleFor(collection, slug) ?? slug;
+  const url = `/${collection}/${slug}/`;
+  docs.push({
+    collection,
+    slug,
+    title,
+    url,
+    closed: issues.filter((i) => i.state === 'closed'),
+    open: issues.filter((i) => i.state === 'open'),
+  });
+}
+docs.sort((a, b) => {
+  if (a.collection !== b.collection) {
+    const order = { posts: 0, wiki: 1, notes: 2 } as const;
+    return order[a.collection] - order[b.collection];
+  }
+  return a.title.localeCompare(b.title);
+});
+
+const totals = {
+  docs: docs.length,
+  closed: docs.reduce((sum, d) => sum + d.closed.length, 0),
+  open: docs.reduce((sum, d) => sum + d.open.length, 0),
+};
+
+const grouped = new Map<string, DocEntry[]>();
+for (const d of docs) {
+  let list = grouped.get(d.collection);
+  if (!list) {
+    list = [];
+    grouped.set(d.collection, list);
+  }
+  list.push(d);
+}
+
+const COLLECTION_LABEL: Record<string, string> = {
+  posts: '글',
+  wiki: '위키',
+  notes: '노트',
+};
+
+const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+});
+---
+
+<BaseLayout
+  title="정오표"
+  description="독자가 알려주신 오류·개선점과 그 반영 이력. 각 항목은 GitHub Issue 로 트래킹됩니다."
+>
+  <section class="mx-auto max-w-3xl px-5">
+    <header class="mb-6">
+      <h1 class="mb-1 text-3xl font-bold tracking-tight">📌 정오표</h1>
+      <p class="text-sm text-fg-muted">
+        {docs.length === 0
+          ? '아직 접수된 정오표가 없습니다. 오류를 발견하셨다면 각 글 하단의 「오류 신고」 링크로 알려주세요.'
+          : `총 ${totals.docs}개 문서, ${totals.closed}개 반영 완료, ${totals.open}개 검토 중`}
+      </p>
+    </header>
+
+    {
+      [...grouped.entries()].map(([collection, list]) => (
+        <section class="mb-8" id={`section-${collection}`}>
+          <h2 class="mb-3 text-lg font-semibold">
+            {COLLECTION_LABEL[collection] ?? collection}
+            <span class="ml-2 text-sm font-normal text-fg-muted">({list.length})</span>
+          </h2>
+          <div class="space-y-4">
+            {list.map((d) => (
+              <article class="errata-doc" id={`${d.collection}-${d.slug.replace(/\//g, '-')}`}>
+                <header class="errata-doc-header">
+                  <a href={d.url} class="errata-doc-title">{d.title}</a>
+                  <span class="errata-doc-stats">
+                    {d.closed.length > 0 && (
+                      <span class="errata-doc-closed">✔ {d.closed.length} 반영</span>
+                    )}
+                    {d.open.length > 0 && (
+                      <span class="errata-doc-open">◐ {d.open.length} 검토 중</span>
+                    )}
+                  </span>
+                </header>
+                <ul class="errata-doc-issues">
+                  {[...d.closed, ...d.open].map((issue) => (
+                    <li class:list={['errata-issue', { 'is-open': issue.state === 'open' }]}>
+                      <span class="errata-issue-state" aria-label={issue.state}>
+                        {issue.state === 'closed' ? '✔' : '◐'}
+                      </span>
+                      <a href={issue.url} target="_blank" rel="noopener noreferrer" class="errata-issue-title">
+                        {issue.title}
+                      </a>
+                      <span class="errata-issue-meta">
+                        #{issue.number} · {fmt.format(new Date(issue.createdAt))} ·
+                        <span class="errata-issue-author"> @{issue.author}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        </section>
+      ))
+    }
+  </section>
+</BaseLayout>
+
+<style>
+  .errata-doc {
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    background-color: var(--color-surface-elevated);
+    scroll-margin-top: 5rem;
+  }
+  .errata-doc-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-bottom: 0.55rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px dashed var(--color-border);
+  }
+  .errata-doc-title {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--color-fg);
+    text-decoration: none;
+  }
+  .errata-doc-title:hover {
+    color: var(--color-accent);
+  }
+  .errata-doc-stats {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 0.55rem;
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    color: var(--color-fg-muted);
+  }
+  .errata-doc-closed {
+    color: #16a34a;
+  }
+  .errata-doc-open {
+    color: #d97706;
+  }
+  .errata-doc-issues {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .errata-issue {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 0.5rem;
+    align-items: baseline;
+    padding: 0.35rem 0.55rem;
+    background-color: var(--color-surface);
+    border-radius: 0.3rem;
+    font-size: 0.82rem;
+  }
+  .errata-issue-state {
+    color: #16a34a;
+    font-family: var(--font-mono);
+  }
+  .errata-issue.is-open .errata-issue-state {
+    color: #d97706;
+  }
+  .errata-issue-title {
+    color: var(--color-fg);
+    text-decoration: none;
+  }
+  .errata-issue-title:hover {
+    color: var(--color-accent);
+    text-decoration: underline;
+  }
+  .errata-issue-meta {
+    font-size: 0.7rem;
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  @media (max-width: 640px) {
+    .errata-issue {
+      grid-template-columns: auto 1fr;
+    }
+    .errata-issue-meta {
+      grid-column: 2 / -1;
+    }
+  }
+</style>
