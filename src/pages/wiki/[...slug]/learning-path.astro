@@ -1,0 +1,186 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import MermaidLoader from '@/features/mermaid/ui/MermaidLoader.astro';
+import {
+  canonicalId,
+  getContentGraph,
+  type ContentNode,
+} from '@/shared/lib/content/content-graph';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('wiki');
+  return entries.map((entry) => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+
+const MAX_DEPTH = 3;
+
+const { entry } = Astro.props;
+const graph = await getContentGraph();
+const rootId = canonicalId('wiki', entry.id);
+
+interface Edge {
+  from: ContentNode;
+  to: ContentNode;
+}
+
+const visitedPrereq = new Set<string>([rootId]);
+const visitedFollow = new Set<string>([rootId]);
+const prereqEdges: Edge[] = [];
+const followEdges: Edge[] = [];
+
+const rootNode = graph.nodes.find((n) => n.id === rootId);
+
+function walkPrereqs(nodeId: string, depth: number): void {
+  if (depth <= 0) return;
+  const parents = graph.learningPath.prereqs.get(nodeId) ?? [];
+  const node = graph.nodes.find((n) => n.id === nodeId);
+  if (!node) return;
+  for (const parent of parents) {
+    prereqEdges.push({ from: parent, to: node });
+    if (!visitedPrereq.has(parent.id)) {
+      visitedPrereq.add(parent.id);
+      walkPrereqs(parent.id, depth - 1);
+    }
+  }
+}
+
+function walkFollows(nodeId: string, depth: number): void {
+  if (depth <= 0) return;
+  const children = graph.learningPath.follows.get(nodeId) ?? [];
+  const node = graph.nodes.find((n) => n.id === nodeId);
+  if (!node) return;
+  for (const child of children) {
+    followEdges.push({ from: node, to: child });
+    if (!visitedFollow.has(child.id)) {
+      visitedFollow.add(child.id);
+      walkFollows(child.id, depth - 1);
+    }
+  }
+}
+
+walkPrereqs(rootId, MAX_DEPTH);
+walkFollows(rootId, MAX_DEPTH);
+
+const hasGraph = prereqEdges.length > 0 || followEdges.length > 0;
+
+const nodeMap = new Map<string, ContentNode>();
+if (rootNode) nodeMap.set(rootNode.id, rootNode);
+for (const e of [...prereqEdges, ...followEdges]) {
+  nodeMap.set(e.from.id, e.from);
+  nodeMap.set(e.to.id, e.to);
+}
+
+function nodeKey(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+function escapeMermaidLabel(text: string): string {
+  return text.replace(/"/g, '\u2033');
+}
+
+const mermaidLines: string[] = ['graph LR'];
+for (const [id, node] of nodeMap) {
+  const key = nodeKey(id);
+  const label = escapeMermaidLabel(node.title);
+  const shape = id === rootId ? `[["${label}"]]` : `["${label}"]`;
+  mermaidLines.push(`  ${key}${shape}`);
+  mermaidLines.push(`  click ${key} "${node.url}"`);
+}
+for (const e of prereqEdges) {
+  mermaidLines.push(`  ${nodeKey(e.from.id)} --> ${nodeKey(e.to.id)}`);
+}
+for (const e of followEdges) {
+  mermaidLines.push(`  ${nodeKey(e.from.id)} --> ${nodeKey(e.to.id)}`);
+}
+if (rootId) {
+  mermaidLines.push(`  classDef root fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a`);
+  mermaidLines.push(`  class ${nodeKey(rootId)} root`);
+}
+
+const mermaidSource = mermaidLines.join('\n');
+const title = entry.data.title;
+---
+
+<BaseLayout
+  title={`${title} 학습 경로`}
+  description={`${title} 를 이해하기 위해 알아야 할 개념과 이어지는 다음 주제를 그래프로 정리했습니다.`}
+>
+  <section class="mx-auto max-w-5xl px-5">
+    <nav class="mb-3 text-sm text-fg-muted">
+      <a href={`/wiki/${entry.id}/`} class="hover:text-accent">← {title}</a>
+    </nav>
+    <h1 class="mb-1 text-3xl font-bold tracking-tight">🧭 {title} 학습 경로</h1>
+    <p class="mb-6 text-sm text-fg-muted">
+      최대 {MAX_DEPTH} 단계까지의 선수·후속 개념을 그래프로 표시. 노드 클릭 시 해당 페이지로 이동합니다.
+    </p>
+
+    {
+      hasGraph ? (
+        <div class="learning-path-page-graph">
+          <pre class="mermaid not-prose" data-mermaid-source set:html={mermaidSource} />
+        </div>
+      ) : (
+        <p class="rounded-md border border-border bg-surface-elevated p-4 text-sm text-fg-muted">
+          이 페이지에는 아직 선수 / 후속 개념이 지정되어 있지 않습니다. Frontmatter 의 <code>prerequisites</code>{' '}
+          또는 <code>leadsTo</code> 를 추가하면 여기에 학습 경로가 표시됩니다.
+        </p>
+      )
+    }
+
+    <div class="mt-8 grid gap-3 sm:grid-cols-2">
+      <section class="rounded-md border border-border bg-surface-elevated p-4">
+        <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">선수 개념</h2>
+        {prereqEdges.length > 0 ? (
+          <ul class="space-y-1">
+            {[...new Set(prereqEdges.map((e) => e.from.id))].map((id) => {
+              const node = nodeMap.get(id);
+              return node ? (
+                <li>
+                  <a href={node.url} class="text-sm hover:text-accent">{node.title}</a>
+                </li>
+              ) : null;
+            })}
+          </ul>
+        ) : (
+          <p class="text-sm text-fg-muted">없음</p>
+        )}
+      </section>
+      <section class="rounded-md border border-border bg-surface-elevated p-4">
+        <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-fg-muted">후속 개념</h2>
+        {followEdges.length > 0 ? (
+          <ul class="space-y-1">
+            {[...new Set(followEdges.map((e) => e.to.id))].map((id) => {
+              const node = nodeMap.get(id);
+              return node ? (
+                <li>
+                  <a href={node.url} class="text-sm hover:text-accent">{node.title}</a>
+                </li>
+              ) : null;
+            })}
+          </ul>
+        ) : (
+          <p class="text-sm text-fg-muted">없음</p>
+        )}
+      </section>
+    </div>
+  </section>
+
+  <MermaidLoader />
+</BaseLayout>
+
+<style>
+  .learning-path-page-graph {
+    padding: 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    background-color: var(--color-surface-elevated);
+    overflow-x: auto;
+  }
+  .learning-path-page-graph :global(pre.mermaid) {
+    margin: 0;
+  }
+</style>
