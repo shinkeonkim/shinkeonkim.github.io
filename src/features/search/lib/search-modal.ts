@@ -274,19 +274,30 @@ export function setupSearchModal(): void {
     } catch {
       /* ignore */
     }
+    const glossaryHint = `
+      <a href="/glossary/" class="search-modal-hit search-modal-hit-hint" data-glossary-hint>
+        <span class="search-modal-hit-badge">📚</span>
+        <span class="search-modal-hit-body">
+          <span class="search-modal-hit-title">용어 사전 둘러보기</span>
+          <span class="search-modal-hit-excerpt">전체 위키 용어를 A-Z / 카테고리로 정리</span>
+        </span>
+      </a>
+    `;
     if (items.length === 0) {
       stats.textContent = '검색어를 입력하세요';
-      container.innerHTML = '';
-      currentItems = [];
+      container.innerHTML = glossaryHint;
+      currentItems = [{ kind: 'search', href: '/glossary/' }];
       selectedIndex = -1;
       return;
     }
     stats.textContent = `최근 본 페이지 ${items.length}개`;
     currentItems = items.map((it) => ({ kind: 'search', href: it.url }));
-    container.innerHTML = items
-      .map((it, i) => {
-        const label = SECTION_LABELS[it.kind] || it.kind;
-        return `
+    currentItems.push({ kind: 'search', href: '/glossary/' });
+    container.innerHTML =
+      items
+        .map((it, i) => {
+          const label = SECTION_LABELS[it.kind] || it.kind;
+          return `
           <a href="${escapeHtml(it.url)}" class="search-modal-hit" data-index="${i}">
             <span class="search-modal-hit-badge">${escapeHtml(label)}</span>
             <span class="search-modal-hit-body">
@@ -294,8 +305,8 @@ export function setupSearchModal(): void {
             </span>
           </a>
         `;
-      })
-      .join('');
+        })
+        .join('') + glossaryHint;
     selectedIndex = 0;
     updateSelection();
   }
