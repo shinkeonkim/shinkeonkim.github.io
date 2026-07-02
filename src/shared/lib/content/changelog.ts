@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 export interface ChangelogEntry {
   sha: string;
@@ -15,11 +15,10 @@ export interface ChangelogEntry {
 export type ChangelogMap = Record<string, ChangelogEntry[]>;
 
 // content-changelog.json is regenerated on every prebuild and is gitignored;
-// use fs.readFile (not TS-typed import) so type-check succeeds on fresh clones
-// before prebuild has produced the file.
-const CHANGELOG_PATH = fileURLToPath(
-  new URL('../../../data/content-changelog.json', import.meta.url),
-);
+// use fs.readFile off process.cwd() (not TS-typed import or import.meta.url)
+// so type-check succeeds on fresh clones AND the resolved path stays correct
+// after Astro bundles this file into .astro/*.js.
+const CHANGELOG_PATH = path.join(process.cwd(), 'src/data/content-changelog.json');
 
 let cache: Promise<ChangelogMap> | null = null;
 
