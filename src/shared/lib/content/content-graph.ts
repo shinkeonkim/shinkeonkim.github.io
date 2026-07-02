@@ -17,10 +17,22 @@ export interface ContentNode {
   category?: string;
 }
 
+export type ContentLinkKind = 'wikilink' | 'tag' | 'prereq' | 'follows';
+
 export interface ContentLink {
   source: string;
   target: string;
-  kind?: 'wikilink' | 'tag';
+  kind?: ContentLinkKind;
+}
+
+export interface UnresolvedLearningPathRef {
+  from: string;
+  kind: 'prereq' | 'follows';
+  raw: string;
+}
+
+export interface LearningPathCycle {
+  nodes: string[];
 }
 
 export interface ContentGraph {
@@ -29,6 +41,12 @@ export interface ContentGraph {
   backlinks: Map<string, ContentNode[]>;
   slugMap: Map<string, ContentNode>;
   animationBacklinks: Map<string, ContentNode[]>;
+  learningPath: {
+    prereqs: Map<string, ContentNode[]>;
+    follows: Map<string, ContentNode[]>;
+    unresolved: UnresolvedLearningPathRef[];
+    cycles: LearningPathCycle[];
+  };
 }
 
 export function tagId(tag: string): string {
@@ -131,6 +149,7 @@ async function build(): Promise<ContentGraph> {
 
   const nodes: ContentNode[] = [];
   const slugMap = new Map<string, ContentNode>();
+  const wikiSlugMap = new Map<string, ContentNode>();
 
   function addEntry(collection: Collection, entry: { id: string; data: Record<string, unknown> }) {
     const slug = entry.id;
@@ -158,6 +177,7 @@ async function build(): Promise<ContentGraph> {
     for (const k of keys) {
       const lower = k.toLowerCase();
       if (!slugMap.has(lower)) slugMap.set(lower, node);
+      if (collection === 'wiki' && !wikiSlugMap.has(lower)) wikiSlugMap.set(lower, node);
     }
   }
 
@@ -279,5 +299,111 @@ async function build(): Promise<ContentGraph> {
     }
   }
 
-  return { nodes, links, backlinks, slugMap, animationBacklinks };
+  const prereqs = new Map<string, ContentNode[]>();
+  const follows = new Map<string, ContentNode[]>();
+  const unresolved: UnresolvedLearningPathRef[] = [];
+
+  function resolveLearningPathSlug(raw: string): ContentNode | null {
+    const key = String(raw ?? '').trim().toLowerCase();
+    if (!key) return null;
+    return wikiSlugMap.get(key) ?? slugMap.get(key) ?? null;
+  }
+
+  function collectLearningPath(
+    collection: Collection,
+    entry: { id: string; data: { prerequisites?: string[]; leadsTo?: string[] } },
+  ) {
+    const sourceId = canonicalId(collection, entry.id);
+    const pre = Array.isArray(entry.data.prerequisites) ? entry.data.prerequisites : [];
+    const lead = Array.isArray(entry.data.leadsTo) ? entry.data.leadsTo : [];
+    for (const raw of pre) {
+      const target = resolveLearningPathSlug(raw);
+      if (!target) {
+        unresolved.push({ from: sourceId, kind: 'prereq', raw });
+        continue;
+      }
+      if (target.id === sourceId) continue;
+      links.push({ source: sourceId, target: target.id, kind: 'prereq' });
+      let list = prereqs.get(sourceId);
+      if (!list) {
+        list = [];
+        prereqs.set(sourceId, list);
+      }
+      if (!list.some((n) => n.id === target.id)) list.push(target);
+    }
+    for (const raw of lead) {
+      const target = resolveLearningPathSlug(raw);
+      if (!target) {
+        unresolved.push({ from: sourceId, kind: 'follows', raw });
+        continue;
+      }
+      if (target.id === sourceId) continue;
+      links.push({ source: sourceId, target: target.id, kind: 'follows' });
+      let list = follows.get(sourceId);
+      if (!list) {
+        list = [];
+        follows.set(sourceId, list);
+      }
+      if (!list.some((n) => n.id === target.id)) list.push(target);
+    }
+  }
+  for (const e of posts) collectLearningPath('posts', e as { id: string; data: { prerequisites?: string[]; leadsTo?: string[] } });
+  for (const e of wiki) collectLearningPath('wiki', e as { id: string; data: { prerequisites?: string[]; leadsTo?: string[] } });
+
+  const cycles = detectLearningPathCycles(links);
+
+  return {
+    nodes,
+    links,
+    backlinks,
+    slugMap,
+    animationBacklinks,
+    learningPath: { prereqs, follows, unresolved, cycles },
+  };
+}
+
+// Builds the learning-order DAG (Y -> X when X has prereq Y, X -> Z when X leadsTo Z)
+// and reports every simple cycle via iterative DFS.
+function detectLearningPathCycles(links: ContentLink[]): LearningPathCycle[] {
+  const adj = new Map<string, string[]>();
+  for (const l of links) {
+    if (l.kind === 'follows') {
+      const bucket = adj.get(l.source) ?? [];
+      bucket.push(l.target);
+      adj.set(l.source, bucket);
+    } else if (l.kind === 'prereq') {
+      const bucket = adj.get(l.target) ?? [];
+      bucket.push(l.source);
+      adj.set(l.target, bucket);
+    }
+  }
+
+  const cycles: LearningPathCycle[] = [];
+  const seenCycleKeys = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const stackIdx = new Map<string, number>();
+
+  function dfs(node: string) {
+    if (stackIdx.has(node)) {
+      const start = stackIdx.get(node)!;
+      const cycle = stack.slice(start).concat(node);
+      const key = [...cycle].sort().join('|');
+      if (!seenCycleKeys.has(key)) {
+        seenCycleKeys.add(key);
+        cycles.push({ nodes: cycle });
+      }
+      return;
+    }
+    if (visited.has(node)) return;
+    visited.add(node);
+    stack.push(node);
+    stackIdx.set(node, stack.length - 1);
+    for (const next of adj.get(node) ?? []) dfs(next);
+    stack.pop();
+    stackIdx.delete(node);
+  }
+
+  for (const start of adj.keys()) dfs(start);
+  return cycles;
 }
