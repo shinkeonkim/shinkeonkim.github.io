@@ -18,6 +18,8 @@ const referenceById = z.object({
 
 const referenceItem = z.union([referenceById, referenceInline]);
 
+const learningPathLink = z.string().min(1);
+
 const posts = defineCollection({
   loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/posts' }),
   schema: z.object({
@@ -35,6 +37,8 @@ const posts = defineCollection({
     coverCredit: z.string().optional(),
     thumbnail: z.string().optional(),
     references: z.array(referenceItem).default([]),
+    prerequisites: z.array(learningPathLink).default([]),
+    leadsTo: z.array(learningPathLink).default([]),
   }),
 });
 
@@ -60,6 +64,8 @@ const wiki = defineCollection({
     coverAlt: z.string().optional(),
     thumbnail: z.string().optional(),
     references: z.array(referenceItem).default([]),
+    prerequisites: z.array(learningPathLink).default([]),
+    leadsTo: z.array(learningPathLink).default([]),
   }),
 });
 
