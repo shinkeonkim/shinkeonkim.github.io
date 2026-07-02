@@ -83,6 +83,68 @@ function classify(severity, _entries, collection, slug, message) {
   return { severity, collection, slug, message };
 }
 
+// Mirrors src/shared/lib/content/content-graph.ts detectLearningPathCycles:
+// prereq target -> source, follows source -> target (learning-order DAG).
+function findLearningPathCycles(entries, slugMap) {
+  const adj = new Map();
+  function addEdge(from, to) {
+    const b = adj.get(from) ?? [];
+    b.push(to);
+    adj.set(from, b);
+  }
+  for (const e of entries) {
+    if (e.collection !== 'posts' && e.collection !== 'wiki') continue;
+    const sourceKey = `${e.collection}:${e.slug}`;
+    const pre = Array.isArray(e.fm.prerequisites) ? e.fm.prerequisites : [];
+    const lead = Array.isArray(e.fm.leadsTo) ? e.fm.leadsTo : [];
+    for (const raw of pre) {
+      const target = slugMap.get(normKey(String(raw ?? '').trim()));
+      if (!target) continue;
+      const targetKey = `${target.collection}:${target.slug}`;
+      if (targetKey === sourceKey) continue;
+      addEdge(targetKey, sourceKey);
+    }
+    for (const raw of lead) {
+      const target = slugMap.get(normKey(String(raw ?? '').trim()));
+      if (!target) continue;
+      const targetKey = `${target.collection}:${target.slug}`;
+      if (targetKey === sourceKey) continue;
+      addEdge(sourceKey, targetKey);
+    }
+  }
+
+  const cycles = [];
+  const seenKeys = new Set();
+  const visited = new Set();
+  const stack = [];
+  const stackIdx = new Map();
+
+  function dfs(node) {
+    if (stackIdx.has(node)) {
+      const start = stackIdx.get(node);
+      const cyc = stack.slice(start).concat(node);
+      const key = [...cyc].sort().join('|');
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        cycles.push(cyc.map((k) => {
+          const [collection, slug] = k.split(':');
+          return { collection, slug };
+        }));
+      }
+      return;
+    }
+    if (visited.has(node)) return;
+    visited.add(node);
+    stack.push(node);
+    stackIdx.set(node, stack.length - 1);
+    for (const next of adj.get(node) ?? []) dfs(next);
+    stack.pop();
+    stackIdx.delete(node);
+  }
+  for (const start of adj.keys()) dfs(start);
+  return cycles;
+}
+
 async function checkAssetExists(rel) {
   if (!rel) return true;
   if (/^https?:\/\//.test(rel)) return true;
@@ -187,6 +249,32 @@ async function main() {
         }
       }
     }
+
+    if (e.collection === 'posts' || e.collection === 'wiki') {
+      for (const kind of ['prerequisites', 'leadsTo']) {
+        const list = Array.isArray(e.fm[kind]) ? e.fm[kind] : [];
+        for (const raw of list) {
+          const key = normKey(String(raw ?? '').trim());
+          if (!key) continue;
+          if (!slugMap.has(key)) {
+            violations.push(
+              classify(
+                'warn',
+                entries,
+                e.collection,
+                e.slug,
+                `${kind} unresolved: "${raw}" (no matching wiki/post/note slug)`,
+              ),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  for (const cycle of findLearningPathCycles(entries, slugMap)) {
+    const trail = cycle.map((n) => `${n.collection}/${n.slug}`).join(' -> ');
+    violations.push(classify('warn', entries, cycle[0].collection, cycle[0].slug, `learning-path cycle: ${trail}`));
   }
 
   const errors = violations.filter((v) => v.severity === 'error');
