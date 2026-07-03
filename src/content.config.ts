@@ -90,4 +90,25 @@ const sources = defineCollection({
   }),
 });
 
-export const collections = { posts, notes, wiki, sources };
+const courseChapter = z.object({
+  collection: z.enum(['posts', 'wiki', 'notes']),
+  id: z.string().min(1),
+  note: z.string().optional(),
+});
+
+const courses = defineCollection({
+  loader: glob({ pattern: '**/*.md', base: './src/content/courses' }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    level: z.enum(['beginner', 'intermediate', 'advanced']).default('intermediate'),
+    duration: z.string(),
+    cover: z.string().optional(),
+    coverAlt: z.string().optional(),
+    tags: z.array(z.string()).default([]),
+    chapters: z.array(courseChapter).min(1),
+    updated: z.coerce.date().optional(),
+  }),
+});
+
+export const collections = { posts, notes, wiki, sources, courses };
