@@ -1,0 +1,117 @@
+---
+import { getCollection, render } from 'astro:content';
+import QRCode from 'qrcode-svg';
+import { buildCheatsheet } from '@/shared/lib/content/cheatsheet';
+import { estimateReadingTime } from '@/shared/lib/content/reading-time';
+import { SITE_AUTHOR, SITE_LOCALE, SITE_URL, SITE_TITLE } from '@/shared/config';
+import '@/styles/cheatsheet.css';
+
+export async function getStaticPaths() {
+  const MIN_READING_MINUTES = 10;
+  const posts = (await getCollection('posts', ({ data }) => !data.draft)).filter((p) => {
+    const body = (p as { body?: string }).body ?? '';
+    const reading = estimateReadingTime(body);
+    const hasFence = /^```cheatsheet\s*\n/m.test(body);
+    return hasFence || (reading?.minutes ?? 0) >= MIN_READING_MINUTES;
+  });
+  return posts.map((post) => ({
+    params: { slug: post.id },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const body = (post as { body?: string }).body ?? '';
+const cheatsheet = buildCheatsheet(body);
+const { headings: _unused } = await render(post);
+void _unused;
+
+const articlePath = `/posts/${post.id}/`;
+const articleUrl = new URL(articlePath, SITE_URL).toString();
+
+const qrSvg = new QRCode({
+  content: articleUrl,
+  padding: 0,
+  width: 108,
+  height: 108,
+  color: '#000000',
+  background: '#ffffff',
+  ecl: 'M',
+  join: true,
+  container: 'svg-viewbox',
+}).svg();
+
+const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+const dateLabel = fmt.format(post.data.date);
+
+const sectionCount = cheatsheet.sections.length;
+const bulletCount = cheatsheet.sections.reduce((sum, s) => sum + s.items.length, 0);
+
+const layoutTitle = `${post.data.title} 치트시트`;
+---
+
+<html lang={SITE_LOCALE.split('-')[0]}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href={new URL(`${articlePath}cheatsheet/`, SITE_URL).toString()} />
+    <title>{layoutTitle} | {SITE_TITLE}</title>
+    <meta name="description" content={`${post.data.title} 의 A4 1페이지 요약 치트시트. QR 스캔으로 원문 이동.`} />
+  </head>
+  <body class="cheatsheet-body">
+    <a href={articlePath} class="cheatsheet-backlink" aria-label="원문으로 돌아가기">← 원문 보기</a>
+    <article class="cheatsheet-page" aria-label={`${post.data.title} 치트시트`}>
+      <header class="cheatsheet-header">
+        <div class="cheatsheet-header-text">
+          <p class="cheatsheet-eyebrow">🃏 치트시트 · {dateLabel}</p>
+          <h1 class="cheatsheet-title">{post.data.title}</h1>
+          {post.data.description && (
+            <p class="cheatsheet-description">{post.data.description}</p>
+          )}
+        </div>
+        <div class="cheatsheet-qr" aria-label="원문 QR 코드" set:html={qrSvg} />
+      </header>
+
+      {
+        cheatsheet.sections.length > 0 ? (
+          <div class="cheatsheet-columns">
+            {cheatsheet.sections.map((s) => (
+              <section class="cheatsheet-section">
+                {s.title && <h2>{s.title}</h2>}
+                <ul>
+                  {s.items.map((it) => (
+                    <li>{it}</li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        ) : (
+          <p class="cheatsheet-empty">
+            치트시트로 만들 만한 내용이 부족합니다. 본문에 <code>cheatsheet</code> fence 를 작성하거나 H2 아래 첫 문장을 채워주세요.
+          </p>
+        )
+      }
+
+      <footer class="cheatsheet-footer">
+        <div>
+          <span class="cheatsheet-author">{SITE_AUTHOR}</span>
+          <span class="cheatsheet-sep">·</span>
+          <a href={articleUrl} class="cheatsheet-url">{articleUrl}</a>
+        </div>
+        <div class="cheatsheet-meta">
+          <span>{sectionCount} sections</span>
+          <span class="cheatsheet-sep">·</span>
+          <span>{bulletCount} points</span>
+          <span class="cheatsheet-sep">·</span>
+          <span class="cheatsheet-source">source: {cheatsheet.source}</span>
+        </div>
+      </footer>
+    </article>
+  </body>
+</html>

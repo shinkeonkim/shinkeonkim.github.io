@@ -14,6 +14,8 @@ const MAX_ITEM_LENGTH = 200;
 
 function stripInline(raw: string): string {
   return raw
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^\s*[-*+]\s+/, '')
     .replace(/\[\[[^\]|#]+(?:\|([^\]]+))?\]\]/g, '$1')
     .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
