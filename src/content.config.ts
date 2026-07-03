@@ -20,6 +20,8 @@ const referenceItem = z.union([referenceById, referenceInline]);
 
 const learningPathLink = z.string().min(1);
 
+const complexityLevel = z.enum(['beginner', 'intermediate', 'advanced']);
+
 const posts = defineCollection({
   loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/posts' }),
   schema: z.object({
@@ -39,6 +41,7 @@ const posts = defineCollection({
     references: z.array(referenceItem).default([]),
     prerequisites: z.array(learningPathLink).default([]),
     leadsTo: z.array(learningPathLink).default([]),
+    level: complexityLevel.optional(),
   }),
 });
 
@@ -66,6 +69,7 @@ const wiki = defineCollection({
     references: z.array(referenceItem).default([]),
     prerequisites: z.array(learningPathLink).default([]),
     leadsTo: z.array(learningPathLink).default([]),
+    level: complexityLevel.optional(),
   }),
 });
 
