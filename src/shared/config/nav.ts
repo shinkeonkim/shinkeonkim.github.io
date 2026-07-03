@@ -4,6 +4,7 @@ export const NAV_ITEMS = [
   { href: '/notes/', label: '노트' },
   { href: '/wiki/', label: '위키' },
   { href: '/glossary/', label: '용어' },
+  { href: '/courses/', label: '코스' },
   { href: '/animations/', label: '애니메이션' },
   { href: '/graph/', label: '그래프' },
   { href: '/errata/', label: '정오표' },

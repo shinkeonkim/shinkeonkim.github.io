@@ -183,6 +183,9 @@ export default defineConfig({
         } else if (path === '/errata/' || path.startsWith('/errata/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.5;
+        } else if (path === '/courses/' || path.startsWith('/courses/')) {
+          item.changefreq = EnumChangefreq.WEEKLY;
+          item.priority = 0.75;
         } else if (path === '/tags/') {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.5;
