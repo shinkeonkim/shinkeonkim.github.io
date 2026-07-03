@@ -19,6 +19,8 @@ import remarkUrlPreview from './src/plugins/remark-url-preview.mjs';
 import remarkAnimation from './src/plugins/remark-animation.mjs';
 import remarkCheatsheet from './src/plugins/remark-cheatsheet.mjs';
 import remarkQuiz from './src/plugins/remark-quiz.mjs';
+import remarkDirective from 'remark-directive';
+import remarkSidenote from './src/plugins/remark-sidenote.mjs';
 import rehypeLazyImages from './src/plugins/rehype-lazy-images.mjs';
 import devEditor from './src/dev-only/integration.mjs';
 import modulepreload from './src/shared/lib/modulepreload-integration.mjs';
@@ -253,6 +255,8 @@ export default defineConfig({
       remarkMermaid,
       remarkCheatsheet,
       remarkQuiz,
+      remarkDirective,
+      remarkSidenote,
       remarkAlert,
       remarkWikilink,
       remarkMathLenient,
