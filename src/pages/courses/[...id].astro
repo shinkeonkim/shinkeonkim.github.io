@@ -1,0 +1,308 @@
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+import { SITE_LOCALE } from '@/shared/config';
+
+export async function getStaticPaths() {
+  const courses = await getCollection('courses');
+  return courses.map((course) => ({
+    params: { id: course.id },
+    props: { course },
+  }));
+}
+
+const { course } = Astro.props;
+
+const [posts, wiki, notes] = await Promise.all([
+  getCollection('posts'),
+  getCollection('wiki'),
+  getCollection('notes'),
+]);
+
+function resolveChapter(collection: string, id: string) {
+  if (collection === 'posts') {
+    const entry = posts.find((p) => p.id === id);
+    return entry
+      ? { title: entry.data.title, url: `/posts/${entry.id}/`, exists: true as const }
+      : { title: id, url: `/posts/${id}/`, exists: false as const };
+  }
+  if (collection === 'wiki') {
+    const entry = wiki.find((w) => w.id === id);
+    return entry
+      ? { title: entry.data.title, url: `/wiki/${entry.id}/`, exists: true as const }
+      : { title: id, url: `/wiki/${id}/`, exists: false as const };
+  }
+  if (collection === 'notes') {
+    const entry = notes.find((n) => n.id === id);
+    return entry
+      ? { title: id, url: `/notes/${entry.id}/`, exists: true as const }
+      : { title: id, url: `/notes/${id}/`, exists: false as const };
+  }
+  return { title: id, url: '#', exists: false as const };
+}
+
+const chapters = course.data.chapters.map((ch, i) => ({
+  index: i,
+  collection: ch.collection,
+  id: ch.id,
+  note: ch.note,
+  ...resolveChapter(ch.collection, ch.id),
+}));
+
+const brokenCount = chapters.filter((c) => !c.exists).length;
+
+const LEVEL_LABEL: Record<string, string> = {
+  beginner: '입문',
+  intermediate: '중급',
+  advanced: '심화',
+};
+
+const fmt = new Intl.DateTimeFormat(SITE_LOCALE, {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
+const COLLECTION_BADGE: Record<string, string> = {
+  posts: '글',
+  wiki: '위키',
+  notes: '노트',
+};
+---
+
+<BaseLayout
+  title={course.data.title}
+  description={course.data.description}
+>
+  <section class="mx-auto max-w-3xl px-5" data-course-id={course.id}>
+    <nav class="mb-3 text-sm text-fg-muted">
+      <a href="/courses/" class="hover:text-accent">← 학습 코스</a>
+    </nav>
+
+    <header class="mb-6">
+      <div class="course-detail-meta">
+        <span class="course-detail-level">{LEVEL_LABEL[course.data.level]}</span>
+        <span>{chapters.length}개 챕터</span>
+        <span class="course-detail-sep">·</span>
+        <span>{course.data.duration}</span>
+        {course.data.updated && (
+          <>
+            <span class="course-detail-sep">·</span>
+            <span>업데이트 {fmt.format(course.data.updated)}</span>
+          </>
+        )}
+      </div>
+      <h1 class="mb-2 mt-2 text-3xl font-bold tracking-tight">🎓 {course.data.title}</h1>
+      <p class="text-fg-muted">{course.data.description}</p>
+    </header>
+
+    <div class="course-progress-wrap" data-course-progress-wrap hidden>
+      <div class="course-progress-labels">
+        <span data-course-progress-label>0/{chapters.length} 완료</span>
+        <span data-course-progress-percent>0%</span>
+      </div>
+      <div class="course-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax={chapters.length}>
+        <span class="course-progress-fill" data-course-progress-fill style="width: 0%"></span>
+      </div>
+      <div class="course-progress-celebrate" data-course-celebrate hidden>
+        🎉 코스 완주! 축하합니다.
+      </div>
+    </div>
+
+    <ol class="course-chapter-list">
+      {chapters.map((ch) => (
+        <li
+          class:list={['course-chapter', { 'is-broken': !ch.exists }]}
+          data-course-chapter-index={ch.index}
+          data-course-chapter-key={`${ch.collection}:${ch.id}`}
+        >
+          <label class="course-chapter-check">
+            <input
+              type="checkbox"
+              data-course-chapter-checkbox
+              aria-label={`챕터 ${ch.index + 1} 완료 표시`}
+            />
+          </label>
+          <div class="course-chapter-body">
+            <div class="course-chapter-header">
+              <span class="course-chapter-index">Ch.{ch.index + 1}</span>
+              <span class="course-chapter-collection">{COLLECTION_BADGE[ch.collection] ?? ch.collection}</span>
+              {ch.exists ? (
+                <a href={ch.url} class="course-chapter-title" data-course-chapter-link>{ch.title}</a>
+              ) : (
+                <span class="course-chapter-title course-chapter-title-broken">
+                  {ch.title} <span class="course-chapter-broken-badge">누락</span>
+                </span>
+              )}
+            </div>
+            {ch.note && <p class="course-chapter-note">{ch.note}</p>}
+          </div>
+        </li>
+      ))}
+    </ol>
+
+    {brokenCount > 0 && (
+      <p class="course-broken-summary">
+        ⚠️ 참조 대상이 없는 챕터가 {brokenCount}개 있습니다. `content.config.ts` 나 course frontmatter 를 확인해주세요.
+      </p>
+    )}
+  </section>
+</BaseLayout>
+
+<style>
+  .course-detail-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    color: var(--color-fg-muted);
+    font-family: var(--font-mono);
+    align-items: center;
+  }
+  .course-detail-level {
+    padding: 0.05rem 0.5rem;
+    border: 1px solid var(--color-accent);
+    color: var(--color-accent);
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .course-detail-sep {
+    opacity: 0.5;
+  }
+  .course-progress-wrap {
+    margin: 1.5rem 0;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    background-color: var(--color-surface-elevated);
+  }
+  .course-progress-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.78rem;
+    color: var(--color-fg);
+    font-family: var(--font-mono);
+    margin-bottom: 0.35rem;
+  }
+  .course-progress-bar {
+    height: 6px;
+    background-color: var(--color-border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .course-progress-fill {
+    display: block;
+    height: 100%;
+    background-color: var(--color-accent);
+    transition: width 0.3s ease;
+  }
+  .course-progress-celebrate {
+    margin-top: 0.65rem;
+    padding: 0.5rem 0.75rem;
+    background-color: color-mix(in srgb, var(--color-accent) 15%, transparent);
+    color: var(--color-accent);
+    text-align: center;
+    border-radius: 0.35rem;
+    font-weight: 500;
+    font-size: 0.9rem;
+  }
+  .course-chapter-list {
+    list-style: none;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .course-chapter {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.7rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.45rem;
+    background-color: var(--color-surface-elevated);
+  }
+  .course-chapter.is-broken {
+    opacity: 0.65;
+  }
+  .course-chapter.is-completed {
+    border-left: 3px solid #16a34a;
+    background-color: color-mix(in srgb, #16a34a 4%, var(--color-surface-elevated));
+  }
+  .course-chapter-check {
+    display: inline-flex;
+    align-items: center;
+    padding-top: 0.15rem;
+  }
+  .course-chapter-check input {
+    width: 1.1rem;
+    height: 1.1rem;
+    cursor: pointer;
+    accent-color: var(--color-accent);
+  }
+  .course-chapter-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.1rem;
+  }
+  .course-chapter-index {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-fg-muted);
+    font-weight: 600;
+  }
+  .course-chapter-collection {
+    padding: 0.05rem 0.5rem;
+    background-color: var(--color-code-bg);
+    color: var(--color-fg-muted);
+    font-size: 0.65rem;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+  }
+  .course-chapter-title {
+    color: var(--color-fg);
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.92rem;
+    border-bottom: 1px dotted var(--color-border);
+  }
+  .course-chapter-title:hover {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+  }
+  .course-chapter-title-broken {
+    color: var(--color-fg-muted);
+    border-bottom: none;
+  }
+  .course-chapter-broken-badge {
+    padding: 0.05rem 0.35rem;
+    background-color: color-mix(in srgb, #dc2626 15%, transparent);
+    color: #dc2626;
+    font-size: 0.65rem;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    margin-left: 0.3rem;
+  }
+  .course-chapter-note {
+    margin: 0.3rem 0 0;
+    font-size: 0.78rem;
+    color: var(--color-fg-muted);
+    line-height: 1.5;
+  }
+  .course-broken-summary {
+    margin-top: 1.5rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid #dc2626;
+    border-left: 3px solid #dc2626;
+    border-radius: 0.4rem;
+    background-color: color-mix(in srgb, #dc2626 6%, var(--color-surface-elevated));
+    color: var(--color-fg);
+    font-size: 0.82rem;
+  }
+</style>
+
+
