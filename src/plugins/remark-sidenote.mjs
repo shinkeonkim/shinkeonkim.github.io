@@ -22,7 +22,8 @@ export default function remarkSidenote() {
   return (tree, file) => {
     idCounter = 0;
     const filePath = file?.path ?? file?.history?.[0] ?? 'sidenote';
-    visit(tree, ['textDirective', 'leafDirective', 'containerDirective'], (node, index, parent) => {
+    const DIRECTIVE_TYPES = new Set(['textDirective', 'leafDirective', 'containerDirective']);
+    visit(tree, (node) => DIRECTIVE_TYPES.has(node.type), (node, index, parent) => {
       if (node.name !== 'sidenote') return;
       if (!parent || typeof index !== 'number') return;
       const label = textContentOf(node).trim();
