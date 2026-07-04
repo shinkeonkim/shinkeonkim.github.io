@@ -47,7 +47,6 @@ const EXCLUDE_FILES = new Set([
   'bun.lock', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
   'requirements.md',
   'content-changelog.json',
-  'errata.json',
 ]);
 
 async function walk(dir, out) {

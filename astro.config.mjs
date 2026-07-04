@@ -180,9 +180,6 @@ export default defineConfig({
         } else if (path === '/glossary/' || path.startsWith('/glossary/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.6;
-        } else if (path === '/errata/' || path.startsWith('/errata/')) {
-          item.changefreq = EnumChangefreq.WEEKLY;
-          item.priority = 0.5;
         } else if (path === '/courses/' || path.startsWith('/courses/')) {
           item.changefreq = EnumChangefreq.WEEKLY;
           item.priority = 0.75;
