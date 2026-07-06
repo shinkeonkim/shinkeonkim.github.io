@@ -43,7 +43,7 @@ interface SeededNode extends GraphNode {
 function fibonacciSphereLayout(nodes: GraphNode[]): SeededNode[] {
   const n = nodes.length;
   if (n === 0) return [];
-  const radius = Math.max(80, 14 * Math.cbrt(n));
+  const radius = Math.max(120, 22 * Math.cbrt(n));
   const jitter = radius * 0.05;
   const rand = seededRandom(n * 31337 + 11);
   return nodes.map((node, i) => {

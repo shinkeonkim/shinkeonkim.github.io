@@ -35,6 +35,9 @@ const TAG_LABEL_GAP = 6;
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
+// Below this zoom scale, node labels hide so structure stays legible.
+const LABEL_ZOOM_THRESHOLD = 0.55;
+
 function seededRandom(seed: number): () => number {
   let s = seed | 0 || 1;
   return () => {
@@ -44,12 +47,15 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+// Golden-spiral seeding. densityScale (sqrt(n/80)) widens the outer radius as
+// n grows so dense graphs start pre-spread instead of piled at the center.
 function seedInitialLayout(nodes: SimNode[], width: number, height: number): void {
   const n = nodes.length;
   if (n === 0) return;
   const cx = width / 2;
   const cy = height / 2;
-  const maxRadius = Math.min(width, height) * 0.4;
+  const densityScale = Math.max(1, Math.sqrt(n / 80));
+  const maxRadius = Math.min(width, height) * 0.45 * densityScale;
   const scale = maxRadius / Math.sqrt(n);
   const jitter = Math.max(scale * 0.3, 1);
   const rand = seededRandom(n * 9973 + 7);
@@ -59,6 +65,27 @@ function seedInitialLayout(nodes: SimNode[], width: number, height: number): voi
     nodes[i].x = cx + r * Math.cos(theta) + (rand() - 0.5) * jitter;
     nodes[i].y = cy + r * Math.sin(theta) + (rand() - 0.5) * jitter;
   }
+}
+
+interface ForceParams {
+  linkDistance: number;
+  docCharge: number;
+  tagCharge: number;
+  docCollide: number;
+  centerStrength: number;
+  preTicks: number;
+}
+
+function computeForceParams(n: number): ForceParams {
+  const sizeFactor = Math.max(1, Math.sqrt(n / 60));
+  return {
+    linkDistance: Math.round(Math.max(80, 60 * sizeFactor)),
+    docCharge: -Math.round(Math.max(200, 220 * sizeFactor)),
+    tagCharge: -Math.round(Math.max(300, 330 * sizeFactor)),
+    docCollide: Math.round(Math.min(50, Math.max(28, 24 * sizeFactor))),
+    centerStrength: Math.max(0.03, 0.08 / sizeFactor),
+    preTicks: Math.min(80, 30 + Math.floor(n / 10)),
+  };
 }
 
 export default function Graph({ nodes, links, height = 560, query = '' }: Props) {
@@ -107,9 +134,13 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
 
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 4])
+      .scaleExtent([0.2, 4])
       .on('zoom', (event) => {
         root.attr('transform', event.transform.toString());
+        const showLabels = event.transform.k >= LABEL_ZOOM_THRESHOLD;
+        root
+          .selectAll<SVGTextElement, SimNode>('.graph-nodes text')
+          .style('display', showLabels ? '' : 'none');
       });
     svg.call(zoom);
 
@@ -187,34 +218,72 @@ export default function Graph({ nodes, links, height = 560, query = '' }: Props)
 
     nodeGroup.append('title').text((d) => d.title);
 
+    const params = computeForceParams(simNodes.length);
+
     const simulation = d3
       .forceSimulation<SimNode>(simNodes)
-      .alpha(0.6)
+      .alpha(0.7)
       .force(
         'link',
         d3
           .forceLink<SimNode, SimLink>(simLinks)
           .id((d) => d.id)
-          .distance(80)
-          .strength(0.4),
+          .distance(params.linkDistance)
+          .strength(0.35),
       )
       .force(
         'charge',
         d3
           .forceManyBody<SimNode>()
-          .strength((d) => (d.kind === 'tag' ? -260 : -160))
-          .distanceMax(400),
+          .strength((d) => (d.kind === 'tag' ? params.tagCharge : params.docCharge))
+          .theta(0.9),
       )
-      .force('center', d3.forceCenter(width / 2, height / 2).strength(0.05))
+      // forceX/forceY replace forceCenter: centroid-pulling forceCenter fights
+      // charge repulsion and re-clusters nodes. Per-axis positions do not.
+      .force('x', d3.forceX(width / 2).strength(params.centerStrength))
+      .force('y', d3.forceY(height / 2).strength(params.centerStrength))
       .force(
         'collide',
-        d3.forceCollide<SimNode>().radius((d) => {
-          if (d.kind === 'tag') return TAG_NODE_SIZE;
-          return 28;
-        }),
+        d3
+          .forceCollide<SimNode>()
+          .radius((d) => (d.kind === 'tag' ? TAG_NODE_SIZE + 4 : params.docCollide))
+          .strength(0.9)
+          .iterations(2),
       );
 
-    for (let i = 0; i < 30; i++) simulation.tick();
+    for (let i = 0; i < params.preTicks; i++) simulation.tick();
+
+    if (simNodes.length > 20) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const node of simNodes) {
+        const x = node.x ?? 0;
+        const y = node.y ?? 0;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      const bboxW = maxX - minX;
+      const bboxH = maxY - minY;
+      if (bboxW > 0 && bboxH > 0) {
+        const labelOverhang = 160;
+        const padding = 32;
+        const kx = (width - padding * 2) / (bboxW + labelOverhang);
+        const ky = (height - padding * 2) / bboxH;
+        const k = Math.max(0.25, Math.min(1, kx, ky));
+        if (k < 1) {
+          const centerX = (minX + maxX) / 2;
+          const centerY = (minY + maxY) / 2;
+          const tx = width / 2 - centerX * k;
+          const ty = height / 2 - centerY * k;
+          const initialTransform = d3.zoomIdentity.translate(tx, ty).scale(k);
+          svg.call(zoom.transform, initialTransform);
+        }
+      }
+    }
 
     const drag = d3
       .drag<SVGGElement, SimNode>()
