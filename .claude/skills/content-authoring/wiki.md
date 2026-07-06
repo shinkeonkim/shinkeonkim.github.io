@@ -43,11 +43,13 @@ src/content/wiki/
 ### 명령
 
 ```bash
+bun run sync:wiki-category                      # 실제 파일 수정 (--write)
+bun run validate:wiki-category                  # --strict, prebuild 에서 실행
 bun scripts/sync-wiki-category.mjs              # dry-run, would-be 변경 표시
-bun scripts/sync-wiki-category.mjs --write      # 실제 파일 수정
-bun scripts/sync-wiki-category.mjs --strict     # mismatch 발견 시 exit 1 (CI 용)
 bun scripts/sync-wiki-category.mjs --json       # 머신 가독 출력
 ```
+
+`validate:wiki-category` (즉 `--strict`) 는 `prebuild` 에 걸려 있어 category 값이 폴더와 불일치하면 빌드 중단. `subcategory` 불일치는 warn 로만 리포트 (semantic 이슈일 수 있으니 즉시 fail 시키지 않음).
 
 ### 수동 override
 
@@ -347,13 +349,57 @@ references:
 - QUIC (aliases 4개): [src/content/wiki/network/quic.md](file:///Users/koa/004-Projects/0001-Resume/100-github-io/src/content/wiki/network/quic.md)
 - 네이밍 가이드: [manual-docs/wiki-naming-guide.md](file:///Users/koa/004-Projects/0001-Resume/100-github-io/manual-docs/wiki-naming-guide.md)
 
+## 실제 관용 (269개 wiki 분석)
+
+새 위키를 쓸 때 아래 관용을 그대로 따르면 다른 페이지들과 자연스럽게 정렬됩니다.
+
+### Frontmatter
+
+| 필드 | 실사용률 | 관용 |
+|:---|:---|:---|
+| `title` | 100% | 65% `[Framework] Topic` 형식 (`[AWS]`, `[Spring]`, `[Python]`, `[Redis]` 등 대문자), 35% plain (`Bubble Sort`, `PostgreSQL` 같은 알고리즘/도구 자체) |
+| `aliases` | 100% | 3-8개. 영/한 혼합. 8개 이상이면 YAML list 문법 (`-` prefix) 선호 |
+| `tags` | 100% | 4-6개, 전부 lowercase + hyphenated |
+| `category` | 100% | 폴더 첫 segment 와 일치 (`sync-wiki-category --strict` 로 강제) |
+| `subcategory` | 15% | 폴더 2번째 segment 있을 때만 (`algorithm/string/parsing.mdx` → `subcategory: string`) |
+| `updated` | 100% | ISO date (`2026-06-25`) - 사실상 필수처럼 관용화 |
+| `references` | 100% | 3-6개. id-based 60%, inline 40%. 공식 docs (Spring/Django/Rails/Python) 는 id-based, 외부 링크는 inline |
+| `prerequisites` / `leadsTo` | 1.4% | 거의 미사용 (Django 5개 파일만). 필요할 때만 |
+| `description` | 0% | 실사용 없음. Optional 이니 굳이 채울 필요 없음 |
+
+### 본문 섹션 관용
+
+- **`## 정의`**: 100% (269/269). 첫 섹션은 항상 정의부터.
+- **`## 관련 위키`**: 100% (269/269). 마지막 섹션에 wikilink 3-8개.
+- 중간에 자주 등장: `## 기본` / `## 기초` (45%), `## 예제` (35%), `## 함정` (20%), `## 복잡도` (알고리즘, 15%)
+
+### Callout 관용
+
+- `> [!IMPORTANT]` - 12.6% (강조 사항, 흔한 오해 방지)
+- `> [!WARNING]` - 12.6% (실수 위험, 함정 섹션과 잘 어울림)
+- `> [!CAUTION]` - 4.5% (프로덕션 위험)
+- `> [!TIP]` - 1.1% (팁), `> [!NOTE]` - 0% (미사용)
+
+`## 함정` 섹션에는 `[!WARNING]` 또는 `[!CAUTION]` 을 붙이는 게 일반적.
+
+### 스타일
+
+- **italic emphasis** `*keyword*` 로 중요 개념 강조. 50+ 파일에서 관찰.
+- **코드블록 언어 필수**: java/python/sql/yaml/ruby/js/ts/bash 등 실제 언어. pseudocode 는 `text`.
+- **위키링크 밀도**: 평균 6-8개/파일. 알고리즘/개요 페이지는 45개까지.
+- **Mermaid**: 181/269 파일에서 사용. `flowchart` 45%, `sequenceDiagram` 25%. 라벨 quote 규칙은 [SKILL.md](SKILL.md#6-mermaid-label에-특수문자-있으면-반드시-quote) 참조.
+
 ## 검증 체크리스트 (Wiki 전용)
 
-- [ ] `title` 필수, 언어 키워드면 `[컨텍스트]` 형식
-- [ ] 파일명에 적절한 prefix (`js-`, `py-`, ...) 또는 prefix 없음 결정
-- [ ] `aliases` 에 원형 이름, 한국어 이름, 변형 모두 추가
-- [ ] 카테고리 디렉토리 적절히 선택 (`network/`, `sql/`, `javascript/`, ...)
-- [ ] 본문에서 다른 wiki 참조 시 `[[원형]]` 또는 `[[원형|표시이름]]`
+- [ ] `title` 필수. Framework/도메인 있으면 `[Framework] Topic` (대문자 시작), 순수 CS/알고리즘은 plain
+- [ ] 파일명에 적절한 prefix (`js-`, `py-`, ...) 또는 prefix 없음 결정 (아래 네이밍 컨벤션 참조)
+- [ ] `aliases` 에 원형 이름, 한국어 이름, 변형 모두 추가 (3-8개)
+- [ ] `tags` 4-6개, lowercase + hyphenated
+- [ ] `updated` ISO 날짜
+- [ ] 폴더 = `category` (자동, `bun run validate:wiki-category` 로 강제)
+- [ ] `## 정의` 로 시작, `## 관련 위키` 로 끝나기 (관용)
+- [ ] `## 함정` 섹션에는 `[!WARNING]` 또는 `[!CAUTION]` callout
+- [ ] Mermaid 라벨 특수문자 quote → `bun run validate:mermaid`
 - [ ] `references[].id` 모두 `sources/` 에 존재
 - [ ] em-dash 사용 안 함
 - [ ] [SKILL.md](SKILL.md) 의 공통 체크리스트 모두 통과

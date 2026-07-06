@@ -227,12 +227,80 @@ flowchart LR
 - `gitGraph`
 - `pie`
 - `gantt`
+- `quadrantChart`
 
 ### 동작
 
-- CDN ESM lazy import (이 페이지에서만 ~수백KB 로드)
+- CDN ESM lazy import (`mermaid@11.6.0`, 이 페이지에서만 ~수백KB 로드)
 - 다크/라이트 모드 자동 재렌더링
 - `<pre class="mermaid not-prose">` 로 변환
+- 파싱 실패 시 인라인 error 박스 (`.mermaid-error`) 로 fallback. 이 상태로 push 되지 않도록 `bun run validate:mermaid` 가 prebuild 에 걸려 있음.
+
+### Label quote 강제 규칙
+
+flowchart 파서는 `[label]`, `{label}`, `-->|label|` 안의 `(`, `)`, `{`, `}`, `"` 를 shape/string delimiter 로 해석합니다. 특수문자가 있으면 반드시 `"..."` 로 감싸세요.
+
+````markdown
+```mermaid
+%% BAD (validate:mermaid FAIL)
+flowchart LR
+    A[미리 fetch (병렬)]
+    B[SLI 측정<br/>"5xx = 0.02%"]
+    Q -->|Yes (모든 state Redis)| S
+    D[label with {curly}]
+
+%% GOOD
+flowchart LR
+    A["미리 fetch (병렬)"]
+    B["SLI 측정<br/>#quot;5xx = 0.02%#quot;"]   %% 내부 " 는 #quot; 로
+    Q -->|"Yes (모든 state Redis)"| S
+    D["label with {curly}"]
+```
+````
+
+quote 예외:
+- `[(text)]` 실린더 DB 노드 (mermaid 문법 자체)
+- 이미 `"..."` 감싸진 라벨
+- `.` `,` `/` `:` 같은 안전한 문장부호만 있는 라벨
+
+**sequenceDiagram** 은 flowchart 의 `Node[label]` shape 문법이 없습니다. 잘못 쓰면 `validate:mermaid` FAIL:
+
+```mermaid
+%% BAD
+sequenceDiagram
+    Client->>Edge[CloudFront Edge (가장 가까운 PoP)]
+
+%% GOOD
+sequenceDiagram
+    participant Edge as CloudFront Edge (가장 가까운 PoP)
+    Client->>Edge: request
+```
+
+**quadrantChart** 는 축/사분면 라벨에 공백/특수문자 있으면 반드시 quote:
+
+```mermaid
+%% BAD
+quadrantChart
+    x-axis 디스크/I-O 비용 낮음 --> 높음
+    quadrant-1 안전하지만 비쌈
+
+%% GOOD
+quadrantChart
+    x-axis "디스크 I-O 비용 낮음" --> "높음"
+    quadrant-1 "안전하지만 비쌈"
+```
+
+### 자동 수정 (codemod)
+
+대량 실패 시:
+
+```bash
+bun scripts/fix-mermaid-labels.mjs --dry     # diff 만 표시 (안전)
+bun scripts/fix-mermaid-labels.mjs            # 실제 적용
+bun scripts/fix-mermaid-labels.mjs --file <path>  # 단일 파일만
+```
+
+`(`, `)`, `{`, `}`, `"` 가 포함된 라벨을 자동으로 `"..."` 로 감싸고, 내부 `"` 는 `#quot;` 로 이스케이프. 이미 quoted 된 라벨, `[(...)]` 실린더, `%%` 코멘트, `classDef` / `linkStyle` / `style` 지시자는 건드리지 않음. sequenceDiagram/quadrantChart 의 semantic 오류는 자동 수정 밖.
 
 ### 예시
 

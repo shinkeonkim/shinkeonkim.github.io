@@ -273,6 +273,36 @@ flowchart LR
 ```
 ````
 
+### Label 안에 특수문자가 있으면 반드시 `"..."` quote
+
+mermaid 파서는 `[label]`, `{label}`, `-->|label|` 안의 `(`, `)`, `{`, `}`, `"`, `<br/>` 뒤의 `"` 등을 shape/string delimiter로 해석합니다. quote 없이 넣으면 브라우저 렌더 시점에 파싱 실패하고 인라인 error 박스로 fallback. `bun run validate:mermaid` 가 `prebuild` 에 걸려 있어 실패 시 빌드 차단.
+
+```mermaid
+%% BAD
+flowchart LR
+    A[미리 fetch (병렬)]                  %% 괄호 unquoted
+    B[SLI 측정<br/>"5xx = 0.02%"]         %% 큰따옴표 unquoted
+    Q -->|Yes (모든 state Redis)| S       %% 엣지 라벨 unquoted
+    D[label with {curly}]                 %% 중괄호 unquoted
+
+%% GOOD
+flowchart LR
+    A["미리 fetch (병렬)"]
+    B["SLI 측정<br/>#quot;5xx = 0.02%#quot;"]   %% 내부 " 는 #quot; 로 이스케이프
+    Q -->|"Yes (모든 state Redis)"| S
+    D["label with {curly}"]
+```
+
+quote가 필요없는 경우:
+- `[(text)]` 실린더 DB 노드 (mermaid 문법 자체)
+- 이미 `"..."` 로 감싸진 라벨
+- `.` `,` `/` `:` 같은 안전한 문장부호만 있는 라벨
+
+sequenceDiagram / quadrantChart 는 `Node[label]` shape 문법 자체가 없습니다 (flowchart 전용). 잘못 쓰면 `validate-mermaid` 가 잡아냄:
+
+- sequenceDiagram: participant에 설명을 넣고 싶으면 `participant Edge as CloudFront Edge (가장 가까운 PoP)` 형태로.
+- quadrantChart: `x-axis "left label" --> "right label"`, `quadrant-1 "레이블"` 처럼 축/사분면 라벨 모두 quote.
+
 자세히: [embeds.md](embeds.md#3-mermaid-다이어그램)
 
 ## 14. 애니메이션
@@ -329,6 +359,33 @@ bun run lint:no-em-dash --json      # JSON 출력
 
 빌드 파이프라인 (`prebuild`) 에 포함, 1건이라도 발견되면 빌드 실패.
 
+### Mermaid 검증 (`validate:mermaid`)
+
+```bash
+bun run validate:mermaid              # 전체 다이어그램 파싱 검증
+bun scripts/validate-mermaid.mjs --file src/content/wiki/ai/voice-rag.mdx  # 단일 파일
+bun scripts/validate-mermaid.mjs --json  # JSON 출력
+```
+
+**동작**: `src/content/**/*.{md,mdx}` 안의 모든 ` ```mermaid ` 펜스를 추출해서 mermaid.parse() 실행. 실패 시 `file:line + 파서 에러 첫 줄` 로 리포트.
+
+**공통 실패 원인**:
+- `[label with (parens)]` / `-->|label (parens)|` / `{label with (parens)}` unquoted 특수문자
+- sequenceDiagram 에서 flowchart 노드 shape 문법 사용
+- quadrantChart 의 축/사분면 라벨에 공백 있는데 unquoted
+
+**자동 수정 (codemod)**:
+
+```bash
+bun scripts/fix-mermaid-labels.mjs --dry     # diff 만 표시
+bun scripts/fix-mermaid-labels.mjs            # 실제 적용
+bun scripts/fix-mermaid-labels.mjs --file <path>  # 단일 파일만
+```
+
+`(`, `)`, `{`, `}`, `"` 가 포함된 라벨을 자동으로 `"..."` 로 감싸고, 내부 `"` 는 `#quot;` 로 이스케이프. 이미 `"..."` quoted 된 라벨, `[(...)]` 실린더, `%%` 코멘트, `classDef` / `linkStyle` / `style` 지시자는 건드리지 않음. semantic 오류 (sequenceDiagram 오용 등) 는 수동 수정 필요.
+
+빌드 파이프라인 (`prebuild`) 에 포함, 1건이라도 실패하면 빌드 중단.
+
 ### Content 검증
 
 ```bash
@@ -358,6 +415,7 @@ bun run validate:content --json       # JSON 출력
 bun run check:links                   # 내부/외부 링크 검증
 bun run check:links:internal          # 내부 링크만
 bun run audit:alt                     # 이미지 alt 텍스트 감사
+bun run validate:mermaid              # mermaid 다이어그램 파싱 검증
 bun astro check                       # 타입 검증
 ```
 
@@ -367,10 +425,12 @@ bun astro check                       # 타입 검증
 
 ```bash
 bun scripts/check-no-em-dash.mjs         # em-dash 검사
+bun scripts/validate-mermaid.mjs         # mermaid 다이어그램 파싱 검증
 bun scripts/download-pretendard.mjs      # 폰트 다운로드
 bun scripts/fetch-giscus-counts.mjs      # 댓글 수 갱신
 bun scripts/fetch-url-previews.mjs       # URL 미리보기 갱신
 bun scripts/generate-search-tags.mjs     # 검색 인덱스
+bun scripts/generate-changelog.mjs       # 변경 이력
 bun scripts/validate-content.mjs         # 콘텐츠 검증
 ```
 

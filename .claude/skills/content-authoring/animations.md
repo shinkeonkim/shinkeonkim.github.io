@@ -215,25 +215,55 @@ dev 모드에서 visual 편집:
 
 완전한 v4 템플릿: [manual-docs/animation-ai-prompt-guide.md](file:///Users/koa/004-Projects/0001-Resume/100-github-io/manual-docs/animation-ai-prompt-guide.md#빠른-시작-템플릿-v4) 의 "빠른 시작 템플릿" 섹션.
 
+## 자동 검증 (`validate:animations`)
+
+`bun run validate:animations` 가 `prebuild` 에 걸려 있어 아래 항목 중 하나라도 실패하면 빌드 중단:
+
+```bash
+bun run validate:animations                           # 전체 검증
+bun scripts/validate-animations.mjs --file <path>     # 단일 파일
+bun scripts/validate-animations.mjs --json            # JSON 출력
+```
+
+**검사 항목** (스키마 파싱 + 시맨틱 체크):
+
+1. JSON 파싱 및 [zod 스키마](file:///Users/koa/004-Projects/0001-Resume/100-github-io/src/entities/animation/engine/schema/index.ts) 통과. 스키마는 엔진 loader가 쓰는 것과 동일 소스.
+2. `elements[].id`, `chapters[].id`, `effects[].id` 컬렉션 내 중복 없음.
+3. 참조 무결성: `line/arrow.fromId`/`toId`, `group.childIds`, `effects[].elementId` 가 실제 element에 존재.
+4. 시간 무결성: 모든 `time` / `start` / `end` 가 `0 <= t <= duration` 범위. `appearance.start < appearance.end`.
+5. `tracks[].keyframes` 시간순 정렬.
+6. 파일명 (`{id}.json`) 이 문서 `id` 와 일치.
+
+### 실전에서 걸린 실수 사례
+
+| 파일 | 실수 | 결과 |
+|:---|:---|:---|
+| `articulation.json` | 그래프 노드 id 를 `A`, `B`, ... 대문자로 | zod 스키마의 `^[a-z0-9][a-z0-9_-]*$` regex 실패. loader가 `null` 리턴, 페이지 렌더 안 됨. |
+| `regions-trick.json` | duration=13000 인데 마지막 appearance.end=14000 | 시간 무결성 위반. 스키마는 통과하지만 runtime에서 unexpected 상태. |
+
+두 파일 다 브라우저에서는 조용히 실패했음. `validate-animations` 가 없었으면 배포됨.
+
 ## 검증 체크리스트
 
 - [ ] `id` 가 파일명(`{id}.json`)과 일치
-- [ ] `version` 이 `3` 또는 `4`
+- [ ] `version` 이 `3` 또는 `4` (신규는 `4`)
 - [ ] `duration` 설정, 모든 time 값이 `0 ~ duration` 범위
-- [ ] 모든 `elements[].id` 가 고유하며 `^[a-z0-9][a-z0-9_-]*$`
-- [ ] `effects[].elementId`, `fromId`/`toId` 가 실제 element id
+- [ ] 모든 `elements[].id` 가 고유하며 `^[a-z0-9][a-z0-9_-]*$` (**대문자 금지**)
+- [ ] `effects[].elementId`, `fromId`/`toId`, `group.childIds` 가 실제 element id
 - [ ] 모든 `appearances` 의 `start` < `end`
 - [ ] `tracks[].keyframes` 의 `time` 시간순 정렬
 - [ ] **각 track 의 첫 keyframe 이 `time: 0` 으로 초기값 명시** (함정 #1)
 - [ ] 색은 모두 `#RRGGBB` 형식
 - [ ] 좌표가 `canvas.width/height` 범위 내
 - [ ] loop 애니메이션은 마지막 keyframe 이 초기 상태로 복귀
+- [ ] `bun run validate:animations` 통과
 
 ## 테스트
 
 1. `public/animations/{id}.json` 으로 저장
-2. `bun dev` 후 `http://localhost:4321/animations/{id}/` 방문
-3. 또는 본문에 ` ```anim:{id} ` 코드 펜스로 삽입해 미리보기
+2. `bun run validate:animations --file public/animations/{id}.json` 로 검증
+3. `bun dev` 후 `http://localhost:4321/animations/{id}/` 방문
+4. 또는 본문에 ` ```anim:{id} ` 코드 펜스로 삽입해 미리보기
 
 ## 실제 예시 파일
 
@@ -244,7 +274,7 @@ dev 모드에서 visual 편집:
 - `public/animations/load-balancer.json` - 라운드 로빈
 - `public/animations/trie.json` - Trie prefix search
 
-128개 애니메이션 보유. `public/animations/` 디렉토리 참조.
+**382개 애니메이션 보유** (v4 91%, v3 9%). `public/animations/` 디렉토리 참조.
 
 ## 참고 파일
 
@@ -253,3 +283,4 @@ dev 모드에서 visual 편집:
 - 스키마 소스: [src/entities/animation/engine/schema/](file:///Users/koa/004-Projects/0001-Resume/100-github-io/src/entities/animation/engine/schema/)
 - 엔진: [src/entities/animation/engine/engine.tsx](file:///Users/koa/004-Projects/0001-Resume/100-github-io/src/entities/animation/engine/engine.tsx)
 - 플러그인: [src/plugins/remark-animation.mjs](file:///Users/koa/004-Projects/0001-Resume/100-github-io/src/plugins/remark-animation.mjs)
+- 자동 검증: [scripts/validate-animations.mjs](file:///Users/koa/004-Projects/0001-Resume/100-github-io/scripts/validate-animations.mjs)
