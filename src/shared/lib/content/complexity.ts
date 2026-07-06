@@ -9,6 +9,7 @@ export interface ComplexityMetrics {
   jargonRatio: number;
   formulaBlockCount: number;
   formulaDensity: number;
+  englishTechnicalRatio: number;
   score: number;
   level: ComplexityLevel;
 }
@@ -56,7 +57,10 @@ export function analyze(rawBody: string): ComplexityMetrics {
     .replace(/\s+/g, ' ')
     .trim();
 
-  const totalWords = cleaned.split(/\s+/).filter(Boolean).length;
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  const totalWords = words.length;
+  const englishTechnicalWords = words.filter((w) => /[A-Za-z]/.test(w)).length;
+  const englishTechnicalRatio = totalWords > 0 ? englishTechnicalWords / totalWords : 0;
   const sentenceMatches = cleaned.match(SENTENCE_SPLIT_RE);
   const sentenceCount = Math.max(1, sentenceMatches ? sentenceMatches.length : 1);
   const avgSentenceLength = totalWords / sentenceCount;
@@ -66,10 +70,11 @@ export function analyze(rawBody: string): ComplexityMetrics {
   const formulaDensity = totalWords > 0 ? formulaBlockCount / totalWords : 0;
 
   const score =
-    0.30 * normalize(avgSentenceLength, 10, 40) +
-    0.20 * normalize(avgSyllablesPerWord, 1.5, 3.0) +
-    0.30 * normalize(jargonRatio, 0.01, 0.10) +
-    0.20 * normalize(formulaDensity, 0.0, 0.05);
+    0.20 * normalize(avgSentenceLength, 8, 25) +
+    0.15 * normalize(avgSyllablesPerWord, 1.6, 2.8) +
+    0.15 * normalize(jargonRatio, 0.002, 0.02) +
+    0.25 * normalize(formulaDensity, 0.0, 0.012) +
+    0.25 * normalize(englishTechnicalRatio, 0.05, 0.35);
 
   const level: ComplexityLevel =
     score < 33 ? 'beginner' : score < 66 ? 'intermediate' : 'advanced';
@@ -83,6 +88,7 @@ export function analyze(rawBody: string): ComplexityMetrics {
     jargonRatio,
     formulaBlockCount,
     formulaDensity,
+    englishTechnicalRatio,
     score,
     level,
   };
