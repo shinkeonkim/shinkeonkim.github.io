@@ -3,6 +3,7 @@ import { type CollectionEntry } from 'astro:content';
 import BaseLayout from '../../../../layouts/BaseLayout.astro';
 import Pagination from '@/shared/ui/Pagination.astro';
 import WikiList from '@/widgets/wiki-list/WikiList.astro';
+import WikiFilterUI from '@/features/wiki-filter/ui/WikiFilterUI.astro';
 import { SITE_LOCALE, WIKI_PER_PAGE } from '@/shared/config';
 import { getWikiTaxonomy, groupCategoryBySubcategory } from '@/shared/lib/content/taxonomy';
 import { getWikiCategoryMeta } from '@/shared/lib/content/wiki-category-meta';
@@ -58,6 +59,46 @@ const subGroups = page.currentPage === 1
   : [];
 const hasSubGroups = subGroups.length > 1 || (subGroups[0]?.slug !== null && subGroups.length > 0);
 const categoryMeta = getWikiCategoryMeta(categoryName);
+
+// Build the category-scoped index for client-side filtering. Includes every
+// entry that belongs to the current category (not just the current page slice)
+// so search + tag filter operate on the whole category, matching how the
+// /wiki/ landing filter behaves against the full wiki set.
+interface WikiIndexEntry {
+  id: string;
+  title: string;
+  aliases: string[];
+  tags: string[];
+  updated: string | null;
+  updatedLabel: string | null;
+}
+
+const taxonomy = await getWikiTaxonomy();
+const allInCategory = (taxonomy.categories.get(categoryName) ?? [])
+  .slice()
+  .sort((a, b) => a.data.title.localeCompare(b.data.title));
+
+const wikiIndex: WikiIndexEntry[] = allInCategory.map((w) => ({
+  id: w.id,
+  title: w.data.title,
+  aliases: w.data.aliases ?? [],
+  tags: w.data.tags ?? [],
+  updated: w.data.updated ? w.data.updated.toISOString() : null,
+  updatedLabel: w.data.updated ? fmt.format(w.data.updated) : null,
+}));
+
+const tagCounts = new Map<string, number>();
+for (const w of allInCategory) {
+  for (const t of w.data.tags ?? []) {
+    tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
+  }
+}
+const sortedTags = Array.from(tagCounts.entries())
+  .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  .map(([tag, count]) => ({ tag, count }));
+
+// Escape `<` to prevent `</script>` injection from any title/tag string.
+const wikiIndexJson = JSON.stringify(wikiIndex).replace(/</g, '\\u003c');
 ---
 
 <BaseLayout
@@ -90,7 +131,7 @@ const categoryMeta = getWikiCategoryMeta(categoryName);
       >
       <span>{categoryName}</span>
     </h1>
-    <p class="mb-8 text-fg-muted">
+    <p class="mb-6 text-fg-muted">
       총 {page.total}개의 위키 · {page.currentPage} / {page.lastPage} 페이지
       <a
         href={`/wiki/category/${encodeURIComponent(categoryName)}/rss.xml`}
@@ -110,32 +151,72 @@ const categoryMeta = getWikiCategoryMeta(categoryName);
       </a>
     </p>
 
-    {hasSubGroups ? (
-      <div class="space-y-8">
-        {subGroups.map((g) => (
-          <section>
-            <header class="mb-2 flex items-baseline justify-between gap-2">
-              <h2 class="text-lg font-semibold">
-                {g.slug ? `📂 ${g.slug}` : '(기타)'}
-              </h2>
-              <span class="text-xs text-fg-muted tabular-nums">
-                {g.entries.length}개
-              </span>
-            </header>
-            <WikiList entries={g.entries} fmt={fmt} />
-          </section>
-        ))}
-      </div>
-    ) : (
-      <WikiList entries={page.data} fmt={fmt} />
-    )}
+    <WikiFilterUI tags={sortedTags} />
+
+    <div data-wiki-default-list>
+      {hasSubGroups ? (
+        <div class="space-y-8">
+          {subGroups.map((g) => (
+            <section>
+              <header class="mb-2 flex items-baseline justify-between gap-2">
+                <h2 class="text-lg font-semibold">
+                  {g.slug ? `📂 ${g.slug}` : '(기타)'}
+                </h2>
+                <span class="text-xs text-fg-muted tabular-nums">
+                  {g.entries.length}개
+                </span>
+              </header>
+              <WikiList entries={g.entries} fmt={fmt} />
+            </section>
+          ))}
+        </div>
+      ) : (
+        <WikiList entries={page.data} fmt={fmt} />
+      )}
+    </div>
+
+    <section data-wiki-filtered hidden data-pagefind-ignore="all" aria-label="검색 결과">
+      <p
+        class="mb-3 text-sm text-fg-muted"
+        data-wiki-filtered-count
+        aria-live="polite"
+      ></p>
+      <ul class="wiki-list" data-wiki-filtered-list></ul>
+      <p class="mt-3 hidden text-sm text-fg-muted" data-wiki-filtered-empty>
+        일치하는 위키 페이지가 없습니다. 다른 검색어나 태그를 시도해보세요.
+      </p>
+      <nav
+        data-wiki-filtered-pagination
+        class="mt-10 flex flex-wrap items-center justify-center gap-1.5 text-sm"
+        aria-label="검색 결과 페이지 네비게이션"
+        hidden
+      ></nav>
+    </section>
 
     {!hasSubGroups && (
-      <Pagination
-        currentPage={page.currentPage}
-        lastPage={page.lastPage}
-        baseUrl={categoryBase}
-      />
+      <div data-wiki-pagination-wrap>
+        <Pagination
+          currentPage={page.currentPage}
+          lastPage={page.lastPage}
+          baseUrl={categoryBase}
+        />
+      </div>
     )}
+
+    <script
+      is:inline
+      type="application/json"
+      id="wiki-index-data"
+      data-pagefind-ignore="all"
+      set:html={wikiIndexJson}
+    />
   </section>
 </BaseLayout>
+
+<script>
+  import { setupWikiFilter } from '@/features/wiki-filter/lib/wiki-filter';
+
+  if (document.readyState !== 'loading') setupWikiFilter();
+  else document.addEventListener('DOMContentLoaded', setupWikiFilter);
+  document.addEventListener('astro:page-load', setupWikiFilter);
+</script>
