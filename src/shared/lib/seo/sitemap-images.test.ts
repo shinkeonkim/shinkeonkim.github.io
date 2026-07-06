@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { parseField, extractFrontmatter, isDraft, entryToImage } from './sitemap-images.mjs';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { entryToImage, extractFrontmatter, isDraft, parseField } from './sitemap-images.mjs';
 
 describe('parseField', () => {
   it('parses unquoted value', () => {
@@ -93,5 +93,34 @@ describe('entryToImage', () => {
       site,
     );
     expect(r?.caption).toBe('long desc');
+  });
+
+  it('falls back to coverAlt when description is absent', () => {
+    const r = entryToImage('cover: /a.png\ncoverAlt: alt text\n', site);
+    expect(r?.caption).toBe('alt text');
+  });
+
+  it('returns null when cover URL is malformed', () => {
+    const r = entryToImage('cover: :::not a url:::\n', 'not-a-base');
+    expect(r).toBeNull();
+  });
+});
+
+describe('buildImageMap', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+  });
+
+  it('produces a Map of URLs from real content directory', async () => {
+    const mod = await import('./sitemap-images.mjs');
+    const map = await mod.buildImageMap('https://shinkeonkim.com');
+    expect(map).toBeInstanceOf(Map);
+  });
+
+  it('memoizes result across calls', async () => {
+    const mod = await import('./sitemap-images.mjs');
+    const first = await mod.buildImageMap('https://shinkeonkim.com');
+    const second = await mod.buildImageMap('https://shinkeonkim.com');
+    expect(first).toBe(second);
   });
 });

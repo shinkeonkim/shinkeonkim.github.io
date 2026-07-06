@@ -1,7 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('astro:content', () => ({
+  getCollection: vi.fn(async () => []),
+}));
+
+import { getCollection } from 'astro:content';
 import {
   WIKILINK_RE,
   extractWikilinkTargets,
+  getPublishedNotes,
+  getPublishedPosts,
+  getPublishedSources,
+  getPublishedWiki,
   sortByDateDesc,
   sortByTitleAsc,
 } from './content-queries';
@@ -77,5 +87,39 @@ describe('sortByTitleAsc', () => {
     const sorted = sortByTitleAsc(items);
     expect(items.map((e) => e.data.title)).toEqual(['b', 'a']);
     expect(sorted.map((e) => e.data.title)).toEqual(['a', 'b']);
+  });
+});
+
+describe('collection queries', () => {
+  const getCollectionMock = vi.mocked(getCollection);
+
+  it('getPublishedPosts filters drafts via predicate', async () => {
+    getCollectionMock.mockImplementation((async (
+      _col: string,
+      pred?: (entry: { data: { draft?: boolean } }) => boolean,
+    ) => {
+      const entries = [{ data: { draft: false } }, { data: { draft: true } }];
+      return pred ? entries.filter(pred) : entries;
+    }) as never);
+    const result = await getPublishedPosts();
+    expect(result).toHaveLength(1);
+  });
+
+  it('getPublishedWiki delegates to getCollection', async () => {
+    getCollectionMock.mockResolvedValue([{ id: 'w' }] as never);
+    const result = await getPublishedWiki();
+    expect(result).toHaveLength(1);
+  });
+
+  it('getPublishedNotes delegates to getCollection', async () => {
+    getCollectionMock.mockResolvedValue([{ id: 'n' }] as never);
+    const result = await getPublishedNotes();
+    expect(result).toHaveLength(1);
+  });
+
+  it('getPublishedSources delegates to getCollection', async () => {
+    getCollectionMock.mockResolvedValue([{ id: 's' }] as never);
+    const result = await getPublishedSources();
+    expect(result).toHaveLength(1);
   });
 });

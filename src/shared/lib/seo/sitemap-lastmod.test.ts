@@ -1,12 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  maxDate,
+  parseDate,
+  parseTagsArray,
+  pickDate,
+  resolveLastmod,
   slugify,
   tagSlug,
-  parseDate,
-  pickDate,
-  maxDate,
-  parseTagsArray,
-  resolveLastmod,
 } from './sitemap-lastmod.mjs';
 
 describe('slugify', () => {
@@ -170,5 +170,24 @@ describe('resolveLastmod', () => {
   });
   it('does not match numeric slugs that lack a trailing pagination segment', () => {
     expect(resolveLastmod(map, `${site}/posts/css-battle-01/`)).toBeUndefined();
+  });
+});
+
+describe('buildLastmodMap', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('produces a Map of URLs from real content directory', async () => {
+    const mod = await import('./sitemap-lastmod.mjs');
+    const map = await mod.buildLastmodMap('https://shinkeonkim.com');
+    expect(map).toBeInstanceOf(Map);
+  });
+
+  it('memoizes result across calls', async () => {
+    const mod = await import('./sitemap-lastmod.mjs');
+    const first = await mod.buildLastmodMap('https://shinkeonkim.com');
+    const second = await mod.buildLastmodMap('https://shinkeonkim.com');
+    expect(first).toBe(second);
   });
 });
