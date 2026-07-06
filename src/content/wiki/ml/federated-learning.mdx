@@ -1,0 +1,266 @@
+---
+title: "Federated Learning: 분산 학습 without central data"
+aliases:
+  - "federated learning"
+  - "연합 학습"
+  - "FL"
+  - "FedAvg"
+  - "FedProx"
+  - "FedYogi"
+  - "FedAdam"
+  - "SCAFFOLD"
+  - "cross-device FL"
+  - "cross-silo FL"
+  - "secure aggregation"
+  - "differential privacy"
+  - "DP-SGD"
+  - "Flower framework"
+  - "TensorFlow Federated"
+  - "PySyft"
+  - "FATE"
+tags: [ml, distributed, privacy, federated-learning, edge]
+category: ml
+updated: 2026-06-29
+references:
+  - title: "Communication-Efficient Learning of Deep Networks from Decentralized Data"
+    url: "https://arxiv.org/abs/1602.05629"
+    author: "McMahan et al., 2017"
+    note: "FedAvg 최초 제안"
+  - title: "Federated Learning: Challenges, Methods, and Future Directions"
+    url: "https://arxiv.org/abs/1908.07873"
+    author: "Li et al., 2020"
+    note: "포괄 서베이"
+  - title: "Advances and Open Problems in Federated Learning"
+    url: "https://arxiv.org/abs/1912.04977"
+    author: "Kairouz et al., 2021"
+    note: "Google 주도 대규모 서베이"
+  - title: "FedProx"
+    url: "https://arxiv.org/abs/1812.06127"
+    author: "Li et al., 2020"
+  - title: "SCAFFOLD"
+    url: "https://arxiv.org/abs/1910.06378"
+    author: "Karimireddy et al., 2020"
+  - title: "Practical Secure Aggregation for Privacy-Preserving Machine Learning"
+    url: "https://eprint.iacr.org/2017/281"
+    author: "Bonawitz et al., 2017"
+---
+
+## 정의
+
+**Federated Learning (FL)** 은 데이터를 **중앙에 모으지 않고** 각 클라이언트 (edge device, 병원, 은행 등) 가 로컬 데이터로 모델을 학습한 뒤 **모델 파라미터의 업데이트 (gradient 또는 weight)** 만 서버에 전송하여 집계하는 분산 학습 패러다임입니다. 서버는 원본 데이터를 절대 보지 않습니다.
+
+Google 이 2016~2017년경 Gboard (Android 키보드) 의 다음 단어 예측 학습을 위해 이 패러다임을 대중화했습니다.
+
+## 왜 필요한가
+
+- **개인정보 보호 규정**: GDPR (EU), HIPAA (US 의료), 국내 개인정보보호법 등이 원시 데이터의 외부 반출을 제한합니다.
+- **데이터 주권**: 병원 / 금융사 등 규제 산업의 데이터는 기관 내부에 머물러야 하는 경우가 많습니다.
+- **엣지 컴퓨팅**: 모바일/IoT 에서 데이터를 서버로 계속 전송하기엔 대역폭이 부담입니다.
+- **콜드 데이터**: 사용자 로컬에만 존재하는 데이터 (키보드 입력, 사진) 는 애초에 서버로 가지 않습니다.
+
+## FedAvg, 기본 알고리즘
+
+McMahan et al. (2017) 의 **FedAvg (Federated Averaging)** 는 FL 의 원형입니다.
+
+**서버 라운드 $t$**:
+
+1. 서버는 현재 글로벌 모델 $w_t$ 를 가지고 있습니다.
+2. 서버가 $K$ 개 클라이언트를 샘플링 (전체 $N$ 개 중 일부만) 하고 $w_t$ 를 전송합니다.
+3. 각 클라이언트 $k$ 는 로컬 데이터 $D_k$ 에서 $E$ epoch 만큼 SGD 를 돌려 $w_k^{t+1}$ 을 얻습니다.
+4. 클라이언트가 $w_k^{t+1}$ 을 서버에 전송합니다.
+5. 서버가 **가중 평균**:
+$$
+w_{t+1} = \sum_{k=1}^{K} \frac{n_k}{n} \cdot w_k^{t+1}
+$$
+   여기서 $n_k$ 는 클라이언트 $k$ 의 데이터 개수, $n = \sum n_k$ 입니다.
+
+수백 라운드를 반복하며 글로벌 모델이 수렴합니다.
+
+### 왜 그냥 gradient 를 보내지 않는가
+
+**FedSGD** (1 step gradient 만 보내는 방식) 도 가능하지만 통신량이 많아집니다. FedAvg 는 **로컬에서 여러 epoch 을 돌리고 나서 weight 을 보내므로 통신 횟수를 크게 줄입니다** (핵심 통찰).
+
+## 배포 유형
+
+### Cross-device FL
+
+- **수백만 ~ 수억 대의 모바일/IoT 기기**
+- 각 기기의 데이터는 소량 (수~수백 샘플)
+- 기기의 가용성은 불안정 (배터리, 네트워크)
+- 실제 예: **Google Gboard**, **Apple Siri**, **Meta Ranking**
+- Sampling 이 필수 (한 라운드에 전체 클라이언트 대상 불가능)
+
+### Cross-silo FL
+
+- **소수 (2~100 개) 의 신뢰할 수 있는 기관** (병원, 은행)
+- 각 사일로의 데이터는 대량
+- 통신 인프라 안정적
+- 실제 예: **NVIDIA Clara** (병원간 의료 영상), **WeBank FATE** (금융 컨소시엄)
+- 모든 사일로가 매 라운드 참여 가능
+
+## 주요 도전 과제
+
+### 1. Non-IID 데이터 (Statistical Heterogeneity)
+
+클라이언트마다 데이터 분포가 다릅니다. 예: 어떤 사용자는 영어로만, 어떤 사용자는 한국어로만 타이핑. 이 경우:
+
+- 각 클라이언트의 local update 가 서로 다른 방향을 가리킴 (**client drift**)
+- 단순 평균이 잘못된 방향으로 이동
+- 수렴 속도 저하, 최종 성능 하락
+
+### 2. System Heterogeneity
+
+- 클라이언트마다 컴퓨팅 성능 다름 (고사양 폰 vs 저사양 폰)
+- **Straggler**: 느린 클라이언트 때문에 라운드가 지연됨
+- 배터리, 네트워크 상태로 라운드 중 이탈 (**client dropout**)
+
+### 3. Communication Cost
+
+- 대형 모델 (수 GB) 을 매 라운드 수백만 클라이언트가 다운로드/업로드
+- **Model compression**, **quantization**, **sparsification** 으로 완화
+- **FetchSGD**, **top-K sparsification** 등 통신 최적화 알고리즘
+
+### 4. Privacy 공격
+
+Raw 데이터를 보내지 않아도 gradient 자체에서 정보가 새어 나올 수 있습니다.
+
+- **Gradient inversion**: gradient 로부터 원본 이미지 복원 (Zhu et al., 2019 "Deep Leakage from Gradients")
+- **Membership inference**: 특정 샘플이 학습에 쓰였는지 추론
+
+**FL 만으로는 프라이버시가 보장되지 않으며, DP 나 Secure Aggregation 을 함께 써야 합니다.**
+
+## 주요 변형
+
+### FedProx (Li et al., 2020)
+
+Non-IID 대응. 로컬 objective 에 **proximal term** 추가:
+
+$$
+\min_{w} F_k(w) + \frac{\mu}{2} \| w - w_t \|^2
+$$
+
+$\mu$ 는 하이퍼파라미터. 로컬 업데이트가 글로벌 모델에서 너무 멀리 벗어나지 못하도록 제약. Client drift 완화.
+
+### FedYogi / FedAdam (Reddi et al., 2020)
+
+서버에서 **adaptive optimizer** 사용. FedAvg 는 서버측에서 단순 평균이지만, FedYogi 는 Yogi (Adam 변형) 를 서버에 적용해 수렴을 안정화합니다.
+
+### SCAFFOLD (Karimireddy et al., 2020)
+
+**Control variate** 를 도입하여 client drift 를 correction. 클라이언트가 로컬 gradient 방향을 조정하는 벡터 $c_k$ 를 관리:
+
+$$
+w_k \leftarrow w_k - \eta (g_k - c_k + c)
+$$
+
+Non-IID 에서 FedAvg 보다 훨씬 빨리 수렴.
+
+### 개인화 FL (Personalized FL)
+
+모든 클라이언트가 같은 글로벌 모델을 쓰는 대신, **글로벌 모델 + 로컬 튜닝** 형태:
+
+- **Per-FedAvg**: MAML 계열, 글로벌 모델을 각 클라이언트가 한 step 파인튜닝
+- **pFedMe**: 클라이언트가 자기 모델 + 정규화 (글로벌 근처)
+- **Ditto**: 글로벌 + 개인 모델 병존, 두 목적을 함께 최적화
+
+## Privacy-Enhancing Techniques
+
+### Differential Privacy (DP)
+
+Gradient/weight 에 **calibrated noise** 를 추가하여, 특정 개인의 데이터가 있었는지 확률적으로 알 수 없게 만듭니다.
+
+**DP-SGD** (Abadi et al., 2016):
+
+1. Gradient 를 클립 (norm 상한 $C$)
+2. Gaussian noise $\mathcal{N}(0, \sigma^2 C^2)$ 추가
+3. Privacy budget $(\epsilon, \delta)$ 로 정량 관리
+
+FL 에서는 **client-level DP** (한 클라이언트 전체가 있었는지 감추기) 와 **sample-level DP** (한 샘플이 있었는지 감추기) 두 가지 granularity 가 있습니다.
+
+### Secure Aggregation
+
+Bonawitz et al. (2017) 의 프로토콜. 클라이언트들이 자기 업데이트를 **cryptographic masking** 으로 감춰서 서버가 볼 때는 **합만** 보이고 개별 값은 못 봅니다.
+
+핵심 아이디어: 클라이언트 쌍 사이에 secret share 를 교환하여 서로의 mask 가 합쳐지면 상쇄되도록 설계. Dropout 이 발생해도 threshold secret sharing 으로 복구 가능합니다.
+
+### Homomorphic Encryption (HE)
+
+암호화된 상태로 덧셈/곱셈 연산 가능. Gradient 를 암호화한 채로 서버가 집계, 클라이언트만 복호화. 계산 비용이 매우 크지만 강력한 프라이버시 보장.
+
+## 프레임워크
+
+| 프레임워크 | 개발/유지 | 특징 |
+|:---|:---|:---|
+| **[Flower](https://flower.dev/)** | 오픈소스 (Adap) | 프레임워크 애그노스틱 (PyTorch, TF, JAX), 실전 배포 지향 |
+| **[TensorFlow Federated (TFF)](https://www.tensorflow.org/federated)** | Google | 시뮬레이션 중심, Federated Analytics 강점 |
+| **[PySyft](https://github.com/OpenMined/PySyft)** | OpenMined | 프라이버시 도구 통합 (HE, MPC, DP) |
+| **[FATE](https://fate.fedai.org/)** | WeBank | Cross-silo 산업용, Chinese fintech 배포 사례 다수 |
+| **[NVFlare](https://github.com/NVIDIA/NVFlare)** | NVIDIA | Clara/의료 도메인, 프로덕션 지향 |
+| **[FedML](https://fedml.ai/)** | FedML Inc. | 학술 + 산업 겸용 플랫폼 |
+
+## 실전 코드 (Flower 예시)
+
+```python
+import flwr as fl
+import torch
+
+# 클라이언트 정의
+class MyClient(fl.client.NumPyClient):
+    def get_parameters(self, config):
+        return [p.detach().cpu().numpy() for p in model.parameters()]
+
+    def set_parameters(self, parameters):
+        for p, new in zip(model.parameters(), parameters):
+            p.data = torch.tensor(new)
+
+    def fit(self, parameters, config):
+        self.set_parameters(parameters)
+        train(model, local_dataloader, epochs=config["local_epochs"])
+        return self.get_parameters({}), len(local_dataset), {}
+
+    def evaluate(self, parameters, config):
+        self.set_parameters(parameters)
+        loss, acc = test(model, val_dataloader)
+        return float(loss), len(val_dataset), {"accuracy": acc}
+
+fl.client.start_numpy_client(server_address="server:8080", client=MyClient())
+```
+
+```python
+# 서버 정의
+strategy = fl.server.strategy.FedAvg(
+    fraction_fit=0.1,          # 매 라운드 10% 샘플링
+    min_fit_clients=10,
+    min_available_clients=100,
+    on_fit_config_fn=lambda rnd: {"local_epochs": 1},
+)
+
+fl.server.start_server(
+    server_address="0.0.0.0:8080",
+    config=fl.server.ServerConfig(num_rounds=100),
+    strategy=strategy,
+)
+```
+
+## 실전 배포 사례
+
+- **Google Gboard**: 다음 단어 예측, 이모지 추천 모두 FL 로 학습 (2017~)
+- **Apple**: Differential Privacy 기반 Emoji 추천, Siri 개선
+- **NVIDIA Clara**: COVID-19 흉부 CT 진단 모델을 30 개 병원 협업 학습 (2020)
+- **WeBank FATE**: 은행간 신용평가 모델
+- **Meta**: 광고 랭킹 모델의 프라이버시 강화 학습
+
+## 한계와 유의점
+
+- **극심한 non-IID** 에서는 개인화 FL 을 쓰거나 centralized 로 회귀하는 것이 낫습니다.
+- **모델 성능** 은 대개 centralized 대비 몇% 낮습니다. 프라이버시 규제 만족이 목적일 때 받아들일 만한 트레이드오프입니다.
+- **디버깅이 어렵습니다**. 클라이언트 데이터를 볼 수 없으므로 로컬 이슈 진단이 힘듭니다.
+- **공격 모델을 명시** 해야 합니다. Honest-but-curious 서버 vs malicious 서버, 개별 클라이언트 vs 담합 공격 등.
+
+## 참고
+
+- 관련 [[differential-privacy|Differential Privacy]] 를 결합하면 client-level / sample-level 프라이버시가 정량 보장됩니다
+- 관련 [[transfer-learning|Transfer Learning]] 을 클라이언트별 개인화에 결합하기도 합니다
+- 관련 [[classification-metrics|분류 모델 지표]] 로 각 라운드 성능 평가
+- Google AI Blog: [Federated Learning: Collaborative Machine Learning without Centralized Training Data](https://ai.googleblog.com/2017/04/federated-learning-collaborative.html)
+- Kairouz et al. 2021, [Advances and Open Problems in Federated Learning](https://arxiv.org/abs/1912.04977)

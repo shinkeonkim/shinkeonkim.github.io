@@ -1,0 +1,438 @@
+---
+title: "[JPA] fetch join: JOIN FETCH 로 연관 entity 즉시 로드"
+aliases:
+  - "fetch join"
+  - "JOIN FETCH"
+  - "페치 조인"
+  - "JPQL fetch join"
+  - "LEFT JOIN FETCH"
+  - "JPA fetch join"
+  - "join fetch"
+tags: [jpa, hibernate, fetch-join, jpql, n-plus-one, performance]
+category: spring
+updated: 2026-07-02
+references:
+  - title: "Jakarta Persistence 3.1 - JOIN FETCH"
+    url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#a4726"
+    note: "JOIN FETCH 명세"
+  - title: "Hibernate User Guide: Fetching"
+    url: "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#fetching"
+    note: "Hibernate fetch 전략"
+  - title: "Hibernate: MultipleBagFetchException"
+    url: "https://docs.jboss.org/hibernate/orm/current/javadocs/org/hibernate/loader/MultipleBagFetchException.html"
+    note: "다중 컬렉션 fetch 예외"
+---
+
+## 정의
+
+**fetch join** 은 JPQL 에서 연관 entity 를 **한 번의 SQL** 로 함께 로드하는 문법. `JOIN FETCH` 로 선언한다.
+
+```jpql
+SELECT p FROM Post p JOIN FETCH p.author
+```
+
+일반 `JOIN` 은 SQL JOIN 만 수행하고 결과 entity 만 반환한다. `JOIN FETCH` 는 JOIN 을 수행하면서 **연관 entity 를 함께 로드해 [[spring-jpa-persistence-context|영속성 컨텍스트]] 에 등록**한다. 이후 lazy proxy 접근 없이 필드 사용이 가능하다.
+
+주된 목적은 [[n-plus-one-problem|N+1 쿼리 문제]] 해결이다. 매핑 자체는 LAZY 로 두고, 필요한 쿼리에서만 명시적으로 함께 가져오는 패턴.
+
+관련 개념 정리는 [[spring-jpa-fetch-type]] 참고. FetchType.LAZY/EAGER 의 기본 동작과 EntityGraph, @BatchSize 대안은 그 페이지에서 다룬다.
+
+## 시각화
+
+```anim:spring-jpa-n-plus-one
+{}
+```
+
+LAZY 만 사용 시 N+1 발생, JOIN FETCH 로 1쿼리에 해결하는 흐름.
+
+## 기본 문법
+
+### INNER JOIN FETCH
+
+```java
+List<Post> posts = em.createQuery("""
+    SELECT p
+    FROM Post p
+    JOIN FETCH p.author
+""", Post.class).getResultList();
+```
+
+발생 SQL:
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`SELECT p, a
+FROM Post p
+JOIN FETCH p.author a`}
+  output={`SELECT p.id, p.title, p.author_id, p.created_at, ...,
+       a.id, a.name, a.email, ...
+FROM post p
+INNER JOIN user a ON p.author_id = a.id;
+-- 단 1번, author 까지 함께 SELECT`}
+/>
+
+`INNER JOIN` 이므로 author 가 없는 Post 는 결과에서 제외된다.
+
+### LEFT JOIN FETCH (LEFT OUTER JOIN FETCH)
+
+FK 가 null 인 row 도 포함:
+
+```jpql
+SELECT p FROM Post p LEFT JOIN FETCH p.author
+```
+
+발생 SQL 은 `LEFT OUTER JOIN`. author 가 없는 Post 는 `author = null` 로 채워져 반환된다.
+
+optional 연관 (`@ManyToOne(optional = true)`, nullable FK) 은 대부분 `LEFT JOIN FETCH` 가 안전하다.
+
+## fetch join 이 하는 일
+
+Hibernate 관점에서 `JOIN FETCH p.author` 는 두 단계를 한 번에 처리:
+
+1. **SQL JOIN**: `INNER JOIN user a ON p.author_id = a.id`
+2. **연관 entity 초기화**: 조회된 author 를 즉시 영속성 컨텍스트에 로드하고 `Post.author` 필드에 세팅
+
+이 결과:
+
+- `post.getAuthor()` 호출 시 lazy proxy 초기화 SELECT 가 발생하지 않는다
+- 트랜잭션이 끝난 뒤 (`detached` 상태에서) 접근해도 `LazyInitializationException` 이 발생하지 않는다
+
+## JOIN vs JOIN FETCH 차이
+
+```jpql
+-- (1) 일반 JOIN
+SELECT p FROM Post p JOIN p.author a WHERE a.name = :name
+
+-- (2) JOIN FETCH
+SELECT p FROM Post p JOIN FETCH p.author WHERE p.author.name = :name
+```
+
+| 항목 | JOIN | JOIN FETCH |
+|---|---|---|
+| SQL | `INNER JOIN` | `INNER JOIN` (동일) |
+| SELECT 대상 | 조인 대상 컬럼 안 가져옴 | 조인 대상 컬럼 모두 가져옴 |
+| 연관 entity 초기화 | ❌ (여전히 lazy proxy) | ✅ (managed entity) |
+| 후속 lazy 초기화 | 있음 (N+1 가능) | 없음 |
+| 반환 타입 | 명시 대상만 | 명시 대상만 (author 는 내부 로딩) |
+
+일반 JOIN 은 **WHERE 조건용**, JOIN FETCH 는 **조회 + 초기화용**. 조건과 초기화를 모두 원하면 두 개를 조합할 수도 있다.
+
+```jpql
+SELECT p
+FROM Post p
+JOIN FETCH p.author a
+WHERE a.email LIKE :domain
+```
+
+같은 관계에 `JOIN FETCH` 한 번이면 조건도 걸 수 있다 (implicit alias 활용).
+
+## 컬렉션 fetch join 과 카르테시안 곱
+
+`@OneToMany` / `@ManyToMany` 컬렉션을 fetch join 하면 **row 가 곱해진다**.
+
+```java
+@Entity
+class Post {
+    @Id Long id;
+    @OneToMany(mappedBy = "post", fetch = FetchType.LAZY)
+    List<Comment> comments = new ArrayList<>();
+}
+```
+
+```jpql
+SELECT p FROM Post p JOIN FETCH p.comments
+```
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  outputLabel="반환된 결과"
+  code={`-- Post id=1 에 comments 3개
+-- Post id=2 에 comments 2개
+SELECT p, c FROM post p INNER JOIN comment c ON c.post_id = p.id;`}
+  output={`p.id | c.id
+-----|-----
+  1  |  10   -- Post 1 (comment 10)
+  1  |  11   -- Post 1 (comment 11) <- 중복
+  1  |  12   -- Post 1 (comment 12) <- 중복
+  2  |  20   -- Post 2 (comment 20)
+  2  |  21   -- Post 2 (comment 21) <- 중복
+
+-- getResultList().size() == 5 (2가 아님)`}
+/>
+
+Hibernate 는 카르테시안 곱으로 부풀어난 row 를 그대로 넘긴다. 결과 List 에 **같은 Post 인스턴스가 여러 번 등장**한다. (인스턴스는 동일하다. `==` 비교는 true 다. 1차 캐시 덕분.)
+
+### DISTINCT 로 해결
+
+```jpql
+SELECT DISTINCT p FROM Post p JOIN FETCH p.comments
+```
+
+Hibernate 는 두 곳에서 dedup 한다:
+
+1. **SQL 에 DISTINCT 붙임** (실제로는 대부분 무의미, Post 컬럼이 같아도 comment 컬럼이 다르니 SQL DISTINCT 로는 안 걸러짐)
+2. **결과 List 에서 같은 id 의 Post 인스턴스 제거** (핵심 동작)
+
+Hibernate 6+ 는 SQL DISTINCT 를 기본으로 생략한다 (`hibernate.query.passDistinctThrough=false` 와 동일). 애초에 SQL 성능 문제라서 자동 회피.
+
+### hibernate.query.passDistinctThrough
+
+```yaml
+spring:
+  jpa:
+    properties:
+      hibernate:
+        query.passDistinctThrough: false   # (Hibernate 5) SQL DISTINCT 생략
+```
+
+Hibernate 5 에서 fetch join + DISTINCT 성능 개선용. Hibernate 6+ 는 기본값이 false 라 신경 쓸 필요 없음.
+
+## MultipleBagFetchException
+
+**두 개 이상의 `List` (bag) 를 동시에 JOIN FETCH 하면** Hibernate 가 카르테시안 곱을 감당 못 해 예외를 던진다.
+
+```java
+@Entity
+class Post {
+    @OneToMany(mappedBy = "post") List<Comment> comments;
+    @OneToMany(mappedBy = "post") List<Tag> tags;
+}
+```
+
+```jpql
+SELECT p FROM Post p
+JOIN FETCH p.comments
+JOIN FETCH p.tags     -- ❌ MultipleBagFetchException
+```
+
+이유: Post 3개, comment 5개, tag 4개면 카르테시안 곱은 `3 * 5 * 4 = 60` row. 두 컬렉션의 index 를 잃어버려 dedup 순서를 보장할 수 없음.
+
+### 해결 1: 하나만 `Set` 으로 변경
+
+```java
+@OneToMany(mappedBy = "post") Set<Comment> comments;
+@OneToMany(mappedBy = "post") List<Tag> tags;   // List 하나만 남김
+```
+
+`Set` 은 order 보장이 없어 Hibernate 가 다르게 다룬다. bag 은 List 만 해당.
+
+### 해결 2: 하나만 fetch join, 나머지는 `@BatchSize` / EntityGraph
+
+```jpql
+SELECT p FROM Post p JOIN FETCH p.comments
+```
+
++ `Tag` 는 `@BatchSize(size = 100)` 나 별도 조회.
+
+이게 실무에서 가장 흔한 패턴. 자세히는 [[spring-jpa-fetch-type#@BatchSize (Hibernate 확장)|@BatchSize 항목]] 참고.
+
+### 해결 3: 두 단계 쿼리
+
+```java
+// 1) posts 만 조회
+List<Post> posts = em.createQuery("SELECT p FROM Post p", Post.class).getResultList();
+List<Long> ids = posts.stream().map(Post::getId).toList();
+
+// 2) 각 컬렉션 별도 IN 쿼리 (Hibernate 가 1차 캐시로 자동 매칭)
+em.createQuery("SELECT p FROM Post p JOIN FETCH p.comments WHERE p.id IN :ids", Post.class)
+  .setParameter("ids", ids).getResultList();
+
+em.createQuery("SELECT p FROM Post p JOIN FETCH p.tags WHERE p.id IN :ids", Post.class)
+  .setParameter("ids", ids).getResultList();
+```
+
+같은 트랜잭션 안에서 [[spring-jpa-persistence-context|영속성 컨텍스트]] 가 동일한 Post 인스턴스에 comments 와 tags 를 각각 채워준다.
+
+## Pageable + 컬렉션 fetch join = in-memory paging
+
+Spring Data JPA 의 `Pageable` 을 컬렉션 fetch join 과 조합하면 Hibernate 가 **경고 후 메모리에서 페이징**한다.
+
+```java
+@Query("SELECT p FROM Post p JOIN FETCH p.comments")
+Page<Post> findAllWithComments(Pageable pageable);
+```
+
+로그:
+
+```
+HHH000104: firstResult/maxResults specified with collection fetch;
+           applying in memory!
+```
+
+Hibernate 가 **전체 row 를 메모리에 로드 후 잘라낸다**. Post 100만 건 + comment 각 10개면 1천만 row 를 JVM 힙에 올린 뒤 잘라낸다. **OOM 위험이 매우 크다**.
+
+### 해결 패턴 (2 단계 fetch)
+
+```java
+// 1) id 만 paging (join fetch 없이)
+@Query("SELECT p.id FROM Post p ORDER BY p.createdAt DESC")
+Page<Long> findPostIds(Pageable pageable);
+
+// 2) 그 id 들만 fetch join 으로 컬렉션 로드
+@Query("SELECT p FROM Post p JOIN FETCH p.comments WHERE p.id IN :ids")
+List<Post> findWithCommentsByIds(@Param("ids") List<Long> ids);
+```
+
+두 단계로 나누면 정확한 SQL LIMIT 이 걸린다.
+
+### 컬렉션 아닌 fetch join 은 OK
+
+`@ManyToOne` / `@OneToOne` 은 row 가 곱해지지 않으므로 Pageable 과 함께 사용해도 SQL 페이징이 정상 적용된다.
+
+```java
+@Query("SELECT p FROM Post p JOIN FETCH p.author")
+Page<Post> findAll(Pageable pageable);   // OK: LIMIT 정상 적용
+```
+
+## Nested fetch join (여러 depth)
+
+연쇄 fetch join 가능:
+
+```jpql
+SELECT p
+FROM Post p
+JOIN FETCH p.author a
+JOIN FETCH a.profile pr
+```
+
+Post + author + profile 을 한 쿼리에 로드. 3개 테이블 INNER JOIN.
+
+주의:
+- 단일 연관 (ToOne) 이 이어질 때는 무방
+- 중간에 컬렉션이 껴 있으면 카르테시안 곱 폭발
+
+```jpql
+-- ⚠️ 위험
+SELECT p FROM Post p
+JOIN FETCH p.comments c
+JOIN FETCH c.author       -- comment 마다 author, row 곱해짐
+```
+
+정말 필요하다면 별도 조회로 분리하거나 EntityGraph 로 명시적으로 depth 제한.
+
+## Spring Data JPA @Query 통합
+
+```java
+public interface PostRepository extends JpaRepository<Post, Long> {
+    // 단일 fetch join
+    @Query("SELECT p FROM Post p JOIN FETCH p.author WHERE p.id = :id")
+    Optional<Post> findByIdWithAuthor(@Param("id") Long id);
+
+    // countQuery 필수 (fetch join 은 count 만들 때 문제)
+    @Query(
+        value = "SELECT p FROM Post p LEFT JOIN FETCH p.author",
+        countQuery = "SELECT COUNT(p) FROM Post p"
+    )
+    Page<Post> findAllWithAuthor(Pageable pageable);
+
+    // 컬렉션 + DISTINCT
+    @Query("SELECT DISTINCT p FROM Post p LEFT JOIN FETCH p.comments WHERE p.id IN :ids")
+    List<Post> findAllWithCommentsByIds(@Param("ids") List<Long> ids);
+}
+```
+
+**countQuery 를 반드시 지정**해야 하는 이유: Spring 이 자동 생성하는 count 쿼리에 `JOIN FETCH` 가 남으면 SQL syntax error (`SELECT COUNT(p) FROM Post p JOIN FETCH p.author` 는 표준 위반).
+
+## fetch join 이 적용되지 않는 경우
+
+### 1. Native query
+
+```java
+@Query(value = "SELECT * FROM post JOIN user ON ...", nativeQuery = true)
+```
+
+`JOIN FETCH` 는 JPQL 문법이라 native query 에는 없다. Native 는 그냥 SQL JOIN 이라 연관 초기화가 안 된다.
+
+### 2. `@Modifying` UPDATE / DELETE
+
+Bulk 쿼리는 [[spring-jpa-persistence-context|영속성 컨텍스트]] 를 우회하므로 fetch join 이 의미 없다.
+
+### 3. Cross join
+
+JPA 표준은 카르테시안 곱 명시적 cross join 을 fetch 로 표현 못 한다.
+
+## 실전 패턴
+
+### 패턴 1: 단건 상세 조회
+
+```java
+@Query("""
+    SELECT p FROM Post p
+    LEFT JOIN FETCH p.author
+    LEFT JOIN FETCH p.category
+    WHERE p.id = :id
+""")
+Optional<Post> findDetail(@Param("id") Long id);
+```
+
+ToOne 두 개까지는 fetch join 안정적. 상세 페이지 최적화.
+
+### 패턴 2: 목록 + 요약 정보
+
+```java
+@Query("""
+    SELECT p FROM Post p
+    JOIN FETCH p.author
+    WHERE p.status = 'PUBLISHED'
+    ORDER BY p.publishedAt DESC
+""")
+Page<Post> findPublishedList(Pageable pageable);
+```
+
+목록에서 필요한 ToOne 관계만 fetch join. 댓글 등 컬렉션은 상세에서만 로드.
+
+### 패턴 3: 컬렉션 + Pageable (2 단계)
+
+```java
+@Query("SELECT p.id FROM Post p ORDER BY p.publishedAt DESC")
+Page<Long> findIds(Pageable pageable);
+
+@Query("""
+    SELECT DISTINCT p FROM Post p
+    LEFT JOIN FETCH p.comments
+    WHERE p.id IN :ids
+""")
+List<Post> findWithComments(@Param("ids") List<Long> ids);
+
+// 사용
+Page<Long> ids = repo.findIds(pageable);
+List<Post> posts = repo.findWithComments(ids.getContent());
+```
+
+메모리 페이징 우회 + 정확한 SQL LIMIT.
+
+## fetch join vs 대안 요약
+
+| 상황 | 추천 | 이유 |
+|---|---|---|
+| ToOne 단건 상세 | fetch join | 단순, 1 쿼리 |
+| ToOne 목록 + Pageable | fetch join | row 안 곱해져 SQL LIMIT OK |
+| 컬렉션 1 개 + 목록 | `@EntityGraph` + DISTINCT | 선언적 |
+| 컬렉션 1 개 + Pageable | 2 단계 (id → in) | in-memory paging 회피 |
+| 컬렉션 2 개 이상 | `@BatchSize` 또는 분리 fetch | MultipleBagFetchException 회피 |
+| 조건에 따라 다름 | ad-hoc `@EntityGraph(attributePaths=...)` | 쿼리마다 결정 |
+
+## 함정과 베스트 프랙티스
+
+- **DISTINCT 는 필수 (컬렉션 fetch join)**: dedup 없으면 List 중복
+- **Pageable + 컬렉션 fetch join 금지**: in-memory paging → OOM 위험
+- **countQuery 명시** (Spring Data JPA `Page` 반환 시)
+- **컬렉션 2 개 이상 동시 fetch join 금지**: `MultipleBagFetchException`
+- **Set 으로 바꾸면 우회 가능하지만 순서 보장 사라짐**: 도메인 요구사항에 따라 선택
+- **Nested fetch join 은 ToOne 만 안전**: ToMany 가 껴 있으면 row 폭발
+- **Native query 는 fetch join 없음**: 관계 초기화하려면 별도 조회 필요
+- **`WHERE p.author.name = ...` 대신 명시 alias 로 조건**: `WHERE a.name = ...`, 실수 방지
+- **implicit path 로 부주의하게 조건 걸면 unnecessary JOIN** 추가 발생 가능
+
+## 관련 위키
+
+- [[spring-jpa-fetch-type]] - FetchType.LAZY/EAGER 기본 동작
+- [[n-plus-one-problem]] - N+1 문제 개념 정리
+- [[spring-jpql]] - JPQL 문법 전반
+- [[spring-data-jpa]] - Spring Data JPA Repository
+- [[spring-jpa-persistence-context]] - 영속성 컨텍스트와 lazy proxy
+- [[spring-jpql-projection]] - DTO projection (fetch join 대안)
+- [[spring-jpql-dynamic-queries]] - QueryDSL / Specification

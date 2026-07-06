@@ -1,0 +1,240 @@
+---
+title: "Maximum Flow: Ford-Fulkerson, Edmonds-Karp, Dinic"
+aliases:
+  - "Mincut"
+  - "Maximum Flow"
+  - "Max Flow"
+  - "최대 유량"
+  - "Ford-Fulkerson"
+  - "Edmonds-Karp"
+  - "Dinic"
+  - "Dinic Algorithm"
+  - "Push-Relabel"
+  - "네트워크 유량"
+  - "network flow"
+  - "residual graph"
+  - "잔여 그래프"
+  - "min cut"
+  - "최소 컷"
+  - "max-flow min-cut"
+tags: [algorithm, graph, network-flow, max-flow]
+category: algorithm
+subcategory: graph
+updated: 2026-06-29
+references:
+  - id: cp-algorithms
+    note: "graph/edmonds_karp.html, graph/dinic.html"
+  - title: "CLRS Ch 26, Maximum Flow"
+    author: "Cormen et al."
+---
+
+## 정의
+
+**Maximum Flow (최대 유량)** 문제는 방향 그래프 $G = (V, E)$ 와 소스 $s$, 싱크 $t$ 가 주어졌을 때, **각 간선의 용량 제약** 아래에서 $s$ 에서 $t$ 로 흘려보낼 수 있는 유량의 최댓값을 찾는 문제입니다.
+
+- **간선 용량** $c(u, v) \geq 0$
+- **유량 보존**: 중간 정점 $v$ 는 $\sum_u f(u, v) = \sum_w f(v, w)$
+- **용량 제약**: $0 \leq f(u, v) \leq c(u, v)$
+- **목표**: $|f| = \sum_v f(s, v)$ 최대화
+
+## 응용 (매우 광범위)
+
+- **매칭**: 이분 매칭 → 최대 유량으로 환원
+- **분리**: 최소 컷 = 최대 유량 (max-flow min-cut)
+- **project selection, image segmentation, baseball elimination**
+- **k-connectivity, edge disjoint paths**
+
+**Max Flow 로 환원되는 문제는 놀랄 만큼 많습니다.** 문제에서 "동시에 다녀야 한다", "어느 하나만 선택", "그룹 분리" 등의 힌트가 있으면 유량 화합을 의심.
+
+## 핵심 개념
+
+### Residual Graph (잔여 그래프)
+
+핵심 트릭. 유량 $f$ 가 흐르고 있을 때, **잔여 용량** $c_f(u, v) = c(u, v) - f(u, v)$ + **역방향 취소 간선** $c_f(v, u) = f(u, v)$.
+
+역방향 간선의 의미: **이미 흘린 유량을 취소** 하고 다른 경로로 재배치할 수 있게 하는 것. 이것 없으면 그리디 (첫 경로가 최선인 척) 가 최적을 놓칠 수 있습니다.
+
+### Augmenting Path (증가 경로)
+
+잔여 그래프에서 $s \to t$ 로 가는 경로. 그 경로의 최소 잔여 용량만큼 유량을 흘려보낼 수 있습니다.
+
+### Max-Flow Min-Cut 정리
+
+**최대 유량 = 최소 컷 용량**. Ford & Fulkerson 1956.
+
+- **s-t 컷** $(S, T)$: $s \in S, t \in T$ 로 정점을 두 집합으로 분할
+- **컷 용량** = $\sum_{u \in S, v \in T} c(u, v)$
+- 최소 컷의 용량 = 최대 유량
+
+이 대응이 유량 알고리즘의 이론적 근간이며, 최소 컷을 구할 때도 max-flow 알고리즘을 그대로 씁니다.
+
+## Ford-Fulkerson (일반 프레임워크)
+
+```
+f ← 0
+while (잔여 그래프에서 s→t 경로 P 존재):
+    Δ ← min(c_f(u,v) for (u,v) in P)
+    P 를 따라 f 를 Δ 만큼 증가
+return |f|
+```
+
+**경로 선택 방식** 에 따라 알고리즘이 달라집니다.
+
+### 유리수 용량, 무한 루프 위험
+
+임의로 경로를 선택하면 **비유리수 용량에서는 종료가 보장되지 않습니다**. 따라서 실무에서는 항상 정수 (또는 유리수) 용량이라고 가정합니다.
+
+## Edmonds-Karp
+
+**BFS 로 shortest augmenting path** (간선 수 기준) 를 선택.
+
+**시간 복잡도**: $O(V \cdot E^2)$
+
+```cpp
+const int INF = 1e9;
+int n;                      // 정점 수
+vector<vector<int>> capacity;  // capacity[u][v]
+vector<vector<int>> adj;    // 양방향 저장 (역방향 잔여 간선 위해)
+
+int bfs(int s, int t, vector<int>& parent) {
+    fill(parent.begin(), parent.end(), -1);
+    parent[s] = s;
+    queue<pair<int,int>> q;
+    q.push({s, INF});
+    while (!q.empty()) {
+        auto [cur, flow] = q.front(); q.pop();
+        for (int next : adj[cur]) {
+            if (parent[next] == -1 && capacity[cur][next] > 0) {
+                parent[next] = cur;
+                int new_flow = min(flow, capacity[cur][next]);
+                if (next == t) return new_flow;
+                q.push({next, new_flow});
+            }
+        }
+    }
+    return 0;
+}
+
+int max_flow(int s, int t) {
+    int flow = 0;
+    vector<int> parent(n);
+    int new_flow;
+    while ((new_flow = bfs(s, t, parent))) {
+        flow += new_flow;
+        int cur = t;
+        while (cur != s) {
+            int prev = parent[cur];
+            capacity[prev][cur] -= new_flow;
+            capacity[cur][prev] += new_flow;
+            cur = prev;
+        }
+    }
+    return flow;
+}
+```
+
+## Dinic
+
+**BFS 로 level graph 만들고, DFS 로 blocking flow** 를 여러 개 한꺼번에 밀어넣기. Edmonds-Karp 보다 훨씬 빠릅니다.
+
+**시간 복잡도**: $O(V^2 \cdot E)$. 단, **이분 그래프에서는 $O(E \sqrt V)$** (Hopcroft-Karp 계열).
+
+경쟁 프로그래밍에서는 사실상 표준 max-flow 알고리즘.
+
+```cpp
+struct Dinic {
+    struct Edge { int to, rev; long long cap; };
+    vector<vector<Edge>> g;
+    vector<int> level, iter;
+    int n;
+
+    Dinic(int n) : n(n), g(n), level(n), iter(n) {}
+
+    void add_edge(int from, int to, long long cap) {
+        g[from].push_back({to, (int)g[to].size(), cap});
+        g[to].push_back({from, (int)g[from].size() - 1, 0});
+    }
+
+    bool bfs(int s) {
+        fill(level.begin(), level.end(), -1);
+        queue<int> q;
+        level[s] = 0; q.push(s);
+        while (!q.empty()) {
+            int v = q.front(); q.pop();
+            for (auto& e : g[v]) if (e.cap > 0 && level[e.to] < 0) {
+                level[e.to] = level[v] + 1;
+                q.push(e.to);
+            }
+        }
+        return level[n - 1] >= 0;  // t 도달 가능?
+    }
+
+    long long dfs(int v, int t, long long f) {
+        if (v == t) return f;
+        for (int& i = iter[v]; i < (int)g[v].size(); i++) {
+            Edge& e = g[v][i];
+            if (e.cap > 0 && level[v] < level[e.to]) {
+                long long d = dfs(e.to, t, min(f, e.cap));
+                if (d > 0) {
+                    e.cap -= d;
+                    g[e.to][e.rev].cap += d;
+                    return d;
+                }
+            }
+        }
+        return 0;
+    }
+
+    long long max_flow(int s, int t) {
+        long long flow = 0;
+        while (bfs(s)) {
+            fill(iter.begin(), iter.end(), 0);
+            long long f;
+            while ((f = dfs(s, t, LLONG_MAX)) > 0) flow += f;
+        }
+        return flow;
+    }
+};
+```
+
+## Push-Relabel (Preflow-Push)
+
+Goldberg & Tarjan 1988. 개념이 다름: **preflow (유량 보존 위반 허용) 를 만든 뒤 넘치는 곳을 relabel + push 로 해결**.
+
+- 최악 $O(V^2 \sqrt E)$
+- 상수가 크지만 매우 큰 그래프에서 유리
+- 병렬화 가능
+- 경쟁 프로그래밍에서는 Dinic 이 대부분 충분해서 잘 안 씀
+
+## 이분 매칭
+
+**이분 그래프 최대 매칭 = max-flow** 로 환원 가능:
+
+1. 소스 $s$ 를 왼쪽 정점 그룹에 용량 1 로 연결
+2. 오른쪽 정점 그룹을 싱크 $t$ 에 용량 1 로 연결
+3. 원래 이분 그래프 간선을 용량 1 로 유지
+4. Max-flow 구하기 = 매칭 크기
+
+Hopcroft-Karp 는 이 특수 케이스에서 $O(E \sqrt V)$ 로 개선한 것.
+
+## Min Cost Max Flow (MCMF)
+
+간선에 **cost** 도 있고, 최대 유량을 흘리되 **최소 비용**. SPFA 기반 (Bellman-Ford 변형) 또는 potential + Dijkstra 로 구현.
+
+응용: assignment problem, transportation problem, 여러 자원 할당.
+
+## 함정
+
+- **역방향 간선 잊음**: 잔여 그래프의 핵심. 없으면 그리디처럼 잘못된 답.
+- **간선 리스트 저장 (양방향)**: `add_edge` 는 정방향 + 역방향 (용량 0) 두 개를 추가. 페어 관리를 위해 rev index 저장.
+- **정수 오버플로**: 큰 용량 문제는 `long long`.
+- **음수 용량**: 정의상 없어야 함. 있으면 그래프 모델링 오류.
+- **자기 루프**: 유량 0 으로 안전. 하지만 코드 상 처리 필요.
+
+## 참고
+
+- 관련 [[bipartite-matching|이분 매칭]]
+- 관련 [[mcmf|Min Cost Max Flow]]
+- 관련 [[shortest-path|Shortest Path]] (Bellman-Ford / SPFA 는 MCMF 에 사용)
+- cp-algorithms: [Dinic](https://cp-algorithms.com/graph/dinic.html)
+- CLRS Ch 26

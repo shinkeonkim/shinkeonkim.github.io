@@ -1,0 +1,411 @@
+---
+title: "N+1 쿼리 문제"
+aliases:
+  - "django-orm"
+  - "N+1"
+  - "N + 1"
+  - "N plus 1"
+  - "N+1 problem"
+  - "N+1 문제"
+  - "N+1 쿼리"
+  - "N+1 query"
+  - "ORM N+1"
+  - "N plus one problem"
+  - "n-plus-one"
+tags: [orm, performance, query, n-plus-one, database]
+category: database-internals
+updated: 2026-07-02
+references:
+  - title: "Martin Fowler - ORM Hate"
+    url: "https://martinfowler.com/bliki/OrmHate.html"
+    note: "ORM 의 함정 개요"
+  - title: "Hibernate User Guide: Fetching"
+    url: "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#fetching"
+  - id: rails-guides
+    note: "Active Record Query Interface - https://guides.rubyonrails.org/active_record_querying.html#eager-loading-associations"
+  - id: django-docs
+    note: "Database optimization - https://docs.djangoproject.com/en/stable/topics/db/optimization/"
+---
+
+## 정의
+
+**N+1 쿼리 문제** = ORM 이 부모 entity N 개를 조회한 뒤, **각 부모의 연관 entity 를 하나씩 로드**하면서 추가 SQL 이 N 번 발생하는 성능 안티패턴.
+
+이름의 의미:
+- **1**: 부모 목록 SELECT (1번)
+- **N**: 각 부모마다 연관 SELECT (N번)
+- **총 N+1 쿼리**
+
+SQL 한 번에 끝낼 작업을 부모 개수만큼 반복 발생시키므로, 데이터가 커질수록 응답시간이 선형이 아니라 **쿼리 왕복 (round-trip) 만큼 폭발**한다.
+
+ORM (Hibernate/JPA, Active Record, Django ORM, Sequelize, TypeORM 등) 공통 문제. 원인은 대부분 **lazy loading + 반복문**의 조합.
+
+## 시각화
+
+```anim:spring-jpa-n-plus-one
+{}
+```
+
+lazy loading + 반복문이 만드는 N+1 → JOIN 으로 1쿼리에 해결.
+
+## 왜 발생하나
+
+전형적 시나리오:
+
+```java
+// 1. Post 목록 조회 (SQL 1번)
+List<Post> posts = postRepository.findAll();
+
+// 2. 반복문에서 author 접근 (SQL N번)
+for (Post p : posts) {
+    System.out.println(p.getAuthor().getName());   // 매번 lazy proxy 초기화 → SELECT
+}
+```
+
+발생 SQL:
+
+<CodeWithOutput
+  language="sql"
+  outputLanguage="text"
+  outputLabel="실행된 SQL"
+  code={`-- 코드 의도: posts 1번 + author 1번, 총 2쿼리
+SELECT p.* FROM post p;
+-- 각 post 의 author.getName() 접근`}
+  output={`SELECT p.* FROM post p;                       -- 1번
+SELECT u.* FROM user u WHERE u.id = 1;       -- N번 (post 마다)
+SELECT u.* FROM user u WHERE u.id = 2;
+SELECT u.* FROM user u WHERE u.id = 3;
+... (post 개수만큼)`}
+/>
+
+posts 100 개면 SQL **101 번**. `p.getAuthor()` 를 호출하는 순간 ORM 이 lazy proxy 를 초기화하려고 개별 SELECT 를 날리기 때문.
+
+### 눈에 안 보이는 위치에서도 발생
+
+- 템플릿 렌더링: Thymeleaf, JSP 에서 `${post.author.name}` 순회
+- Jackson 직렬화: `@JsonManagedReference` 순회 시 lazy 컬렉션 접근
+- toString() / equals() / hashCode(): 연관 필드 사용하면 함정
+- 로깅: `log.info("posts: {}", posts)` 도 컬렉션 전체 순회
+
+## 성능 영향 (실제 수치 감각)
+
+DB 왕복 지연 (round-trip time, RTT):
+- **로컬 DB**: 0.1 ~ 1 ms
+- **같은 리전 클라우드**: 1 ~ 5 ms
+- **다른 리전**: 20 ~ 100 ms
+
+Post 100 건 조회 + 각 author lazy load 라면:
+
+| 환경 | JOIN 1쿼리 | N+1 (101쿼리) | 차이 |
+|---|---|---|---|
+| 로컬 DB (1ms RTT) | ~10 ms | ~110 ms | 11 배 |
+| 같은 리전 (3ms RTT) | ~15 ms | ~350 ms | 23 배 |
+| 다른 리전 (50ms RTT) | ~80 ms | ~5,100 ms | 63 배 |
+
+트래픽이 낮은 개발 환경에서는 문제가 안 보이지만 운영에서 QPS 가 오르면 즉시 스레드 풀 고갈 / DB connection 고갈로 연결된다.
+
+**응답시간뿐 아니라 DB 부하도 문제**. 100 배 늘어난 쿼리 수는 커넥션 풀 대기, 락 경합, statement cache 압박을 동반한다.
+
+## 감지 방법
+
+### 1. SQL 로깅
+
+가장 기본. 개발 / 스테이징에서 SQL 로그 켜고 순회 로직 실행:
+
+```yaml
+# Spring / JPA
+spring:
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+logging.level.org.hibernate.SQL: DEBUG
+```
+
+```ruby
+# Rails
+ActiveRecord::Base.logger = Logger.new(STDOUT)
+```
+
+```python
+# Django
+LOGGING = {
+    "loggers": {"django.db.backends": {"level": "DEBUG", "handlers": ["console"]}}
+}
+```
+
+같은 쿼리 패턴이 다른 파라미터로 반복되면 N+1 신호.
+
+### 2. 자동 감지 도구
+
+| 프레임워크 | 도구 |
+|---|---|
+| JPA / Hibernate | [Hypersistence Utils](https://github.com/vladmihalcea/hypersistence-utils) `assertSelectCount()` |
+| Rails | `bullet` gem: 개발 환경 자동 알림 + CI 실패 |
+| Rails 6.1+ | `strict_loading: true` 옵션 |
+| Django | `django-debug-toolbar` SQL 패널 + `django-silk` |
+| Prisma | `prisma-query-count` 유틸 |
+| TypeORM | `logger: 'advanced-console'` + 수동 추적 |
+
+### 3. 통합 테스트에서 쿼리 수 assert
+
+가장 견고한 방법. 쿼리 수를 명시적으로 검증한다.
+
+```java
+// Spring 예시 (Hypersistence Utils)
+@Test
+void findAllWithAuthor_uses_single_query() {
+    var assertion = SQLStatementCountValidator.reset();
+    postService.getAllPostsWithAuthor();
+    SQLStatementCountValidator.assertSelectCount(1);
+}
+```
+
+```ruby
+# Rails / RSpec (with rspec-sqlimit)
+it "no N+1" do
+  expect { get "/posts" }.to make_database_queries(count: 2)
+end
+```
+
+```python
+# Django
+def test_list_no_n_plus_one(self):
+    with self.assertNumQueries(2):
+        response = self.client.get("/posts/")
+```
+
+리팩터링 시 N+1 재발을 막는 안전망.
+
+## 해결 전략 3가지
+
+### 전략 1: JOIN (한 쿼리에 다 가져오기)
+
+부모와 자식을 **한 번의 SQL JOIN** 으로 조회. 왕복이 1번.
+
+```sql
+SELECT p.*, a.*
+FROM post p
+INNER JOIN user a ON p.author_id = a.id;
+```
+
+- **JPA**: [[spring-jpa-fetch-join|JOIN FETCH]] 또는 `@EntityGraph`
+- **Rails**: `eager_load(:author)` 또는 `includes(:author).references(:author)`
+- **Django**: `select_related("author")`
+
+**장점**: 1쿼리
+**단점**:
+- 컬렉션 (ToMany) 이면 카르테시안 곱 → row 곱해짐
+- 큰 결과에서 JOIN 자체가 무거움
+- Pageable 과 컬렉션 조합 시 문제 (JPA 는 in-memory paging 경고)
+
+### 전략 2: IN 절 배치 조회 (부모 + 자식 2쿼리)
+
+부모 먼저 조회, 자식은 `WHERE parent_id IN (...)` 로 한 번에.
+
+```sql
+-- 1
+SELECT * FROM post;
+-- 2
+SELECT * FROM comment WHERE post_id IN (1, 2, 3, ..., 50);
+```
+
+- **JPA**: `@BatchSize`, `default_batch_fetch_size`, `@EntityGraph` (fetch join 아닌 subselect)
+- **Rails**: `preload(:comments)` (항상 IN 방식) 또는 `includes(:comments)` (조건 없으면 자동 IN)
+- **Django**: `prefetch_related("comments")`
+
+**장점**:
+- 카르테시안 곱 없음
+- 페이징과 잘 어울림
+- 컬렉션 다수 처리 가능
+
+**단점**: 2쿼리 (그래도 N+1 대비 극적 개선)
+
+### 전략 3: 캐시 / counter 컬럼
+
+- **자주 접근하는 count** → 부모에 컬럼으로 저장 (`Rails counter_cache`, Hibernate `@Formula`)
+- **자주 접근하는 값** → 캐시 계층 (Redis, application cache)
+- **정말 자주 반복 조회** → CQRS / read model 분리
+
+관계 로딩 자체를 제거하는 접근.
+
+## 프레임워크별 해결
+
+### JPA / Hibernate
+
+```java
+// 1. fetch join
+@Query("SELECT p FROM Post p JOIN FETCH p.author")
+List<Post> findAllWithAuthor();
+
+// 2. @EntityGraph
+@EntityGraph(attributePaths = {"author"})
+List<Post> findAll();
+
+// 3. @BatchSize (Hibernate 확장)
+@Entity
+class Post {
+    @OneToMany(mappedBy = "post", fetch = LAZY)
+    @BatchSize(size = 100)
+    List<Comment> comments;
+}
+```
+
+기본은 **LAZY 로 매핑 + 쿼리마다 필요한 것만 명시**. 자세히는 [[spring-jpa-fetch-type]] 과 [[spring-jpa-fetch-join]] 참고.
+
+### Rails / Active Record
+
+```ruby
+# 1. includes (자동 선택: preload 또는 eager_load)
+Post.includes(:author)
+
+# 2. preload (항상 IN 절)
+Post.preload(:author)
+
+# 3. eager_load (항상 LEFT OUTER JOIN)
+Post.eager_load(:author)
+
+# 4. strict_loading (Rails 6.1+): 의도 안 한 lazy 차단
+class Post < ApplicationRecord
+  has_many :comments, strict_loading: true
+end
+```
+
+자세히는 [[rails-query-optimization]] 참고. 개발 환경에는 `bullet` gem 필수.
+
+### Django
+
+```python
+# 1. select_related (FK, OneToOne → JOIN)
+Post.objects.select_related("author")
+
+# 2. prefetch_related (ToMany → IN 절)
+Post.objects.prefetch_related("comments")
+
+# 3. Prefetch: 세밀 제어
+from django.db.models import Prefetch
+Post.objects.prefetch_related(
+    Prefetch(
+        "comments",
+        queryset=Comment.objects.filter(approved=True).select_related("author"),
+    )
+)
+```
+
+자세히는 [[django-orm-advanced]] 참고.
+
+### Node.js ORM (참고)
+
+```javascript
+// Sequelize
+Post.findAll({ include: [{ model: User, as: 'author' }] });
+
+// TypeORM
+postRepository.find({ relations: ['author'] });
+
+// Prisma
+prisma.post.findMany({ include: { author: true } });
+```
+
+세 라이브러리 모두 include 지정이 필수. Prisma 는 아예 lazy 개념이 없어 명시 없으면 관계가 로드되지 않는다 (다른 종류의 안전 장치).
+
+## 프레임워크 공통 함정
+
+### 함정 1: `has_many :through` / 컬렉션 N+1
+
+부모 → 중간 테이블 → 손자 조회 시 두 레벨 N+1 이 동시에 발생.
+
+```ruby
+# Rails: post → tags 를 통해 → categories
+posts.each { |p| p.tags.each { |t| t.category } }
+```
+
+해결: 깊은 nested `includes(tags: :category)` 또는 단계별 preload.
+
+### 함정 2: 직렬화에서 노출
+
+컨트롤러에서는 fetch 명시했지만 serializer / view 에서 다른 관계를 추가로 접근하는 경우.
+
+```java
+// PostDto
+public String getAuthorProfileImage() {
+    return post.getAuthor().getProfile().getImageUrl();
+    //                       ^^^^^^^^^ 여기서 lazy proxy 초기화!
+}
+```
+
+**해결**: DTO 로 미리 projection 하거나 fetch 시점에 모든 필요한 필드 포함.
+
+### 함정 3: 자체 관계 (self-referencing)
+
+트리 구조에서 재귀적으로 부모/자식 접근하면 depth 만큼 N+1 배가.
+
+```python
+def get_ancestry(comment):
+    return [comment] + get_ancestry(comment.parent) if comment.parent else [comment]
+    # 각 재귀마다 SELECT
+```
+
+**해결**: recursive CTE (Postgres `WITH RECURSIVE`), materialized path, closure table 같은 트리 저장 패턴.
+
+### 함정 4: 조건부 접근
+
+```java
+if (post.getFeatured() && post.getComments().size() > 5) { ... }
+//                        ^^^^^^^^^^^^^^^^^^^^^^^^^ featured 아닌 것도 있으면 안 걸리지만 걸리면 lazy 초기화
+```
+
+**해결**: 조건 검사에 필요한 값도 미리 fetch 하거나 SIZE() 를 SQL 수준에서 계산.
+
+### 함정 5: Kotlin data class / Java record 의 자동 참조
+
+`@JsonAutoDetect`, Lombok `@ToString(includeAllFields=true)` 등이 lazy 필드를 자동으로 건드릴 수 있음.
+
+**해결**: `@ToString(exclude = {"comments"})`, `@JsonIgnore` 로 명시적 제외.
+
+## 예방 도구 (환경별)
+
+| 시나리오 | 도구 / 설정 |
+|---|---|
+| JPA 개발 환경 | SQL 로깅 + `hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS` |
+| JPA 테스트 | Hypersistence Utils `assertSelectCount()` |
+| JPA 운영 | p6spy, datasource-proxy, APM (Datadog / New Relic) |
+| Rails 개발 | `bullet` gem, `strict_loading` |
+| Rails 테스트 | `rspec-sqlimit`, `make_database_queries` matcher |
+| Django 개발 | `django-debug-toolbar`, `django-silk` |
+| Django 테스트 | `assertNumQueries` |
+| 프레임워크 무관 | pg_stat_statements (Postgres), slow query log (MySQL), APM 트레이스 |
+
+## 왜 ORM 이 이런 함정을 만드나
+
+ORM 의 핵심 가치는 **객체 그래프처럼 데이터를 다루는 편의성**. `post.author.name` 이 자연스럽게 SQL 로 바뀌면 좋겠지만, 그러려면 미리 어떤 관계가 필요할지 알아야 한다.
+
+두 극단:
+- **모든 관계를 eager 로 미리 로드**: 매 쿼리마다 불필요한 대량 데이터 (JPA 의 `FetchType.EAGER` 함정)
+- **lazy 로만 두고 접근 시점에 초기화**: N+1
+
+**해답은 옵트인 eager**. 기본 lazy, 필요한 곳에서 명시적으로 fetch 선언. 모든 성숙한 ORM 이 이 방향으로 수렴한다 (JPA 는 `@ManyToOne` 기본이 EAGER 라 예외, 잘못된 기본값).
+
+## 함정과 베스트 프랙티스
+
+- **연관 매핑은 기본 LAZY** (JPA 는 `@ManyToOne` 도 명시적으로 LAZY 지정)
+- **쿼리 시점에 필요한 관계만 명시적으로 fetch** (JOIN FETCH, includes, select_related)
+- **JOIN vs IN 배치 상황별 선택**: ToOne 은 JOIN, ToMany 는 IN 배치 우선
+- **컬렉션 여러 개 fetch 는 위험**: 하나만 JOIN + 나머지는 IN 배치
+- **직렬화 / view 에서 관계 접근하지 마세요**: DTO 로 미리 projection
+- **자동 감지 도구 항상 켜기**: 개발에 bullet / debug-toolbar, 테스트에 assertNumQueries
+- **자주 접근하는 count 는 counter 컬럼**: 관계 로딩 자체를 회피
+- **트랜잭션 밖에서 관계 접근 금지**: `LazyInitializationException` 함정
+- **APM 트레이스로 운영 관찰**: SQL 로그로는 안 보이는 hot path 발견
+- **QueryDSL / Criteria API 로 fetch 위치 명시**: JPQL 이 익숙하지 않은 팀에서
+
+## 관련 위키
+
+- [[spring-jpa-fetch-join]] - JPA 의 JOIN FETCH 상세
+- [[spring-jpa-fetch-type]] - FetchType.LAZY/EAGER
+- [[spring-jpa-persistence-context]] - 영속성 컨텍스트와 lazy proxy
+- [[rails-query-optimization]] - Rails preload/eager_load/includes
+- [[django-orm-advanced]] - Django select_related/prefetch_related
+- [[jpa-rails-eager-comparison]] - JPA EAGER vs Rails eager_load
+- [[query-explain-plan]] - EXPLAIN 으로 실제 실행 계획 확인

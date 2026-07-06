@@ -1,0 +1,271 @@
+---
+title: "VM vs Container: 층 구조, 성능, 격리 완벽 비교"
+aliases:
+  - "vm vs container"
+  - "vm 컨테이너 비교"
+  - "container vs vm"
+  - "왜 컨테이너가 빠른가"
+  - "왜 vm이 무거운가"
+  - "boot time comparison"
+  - "kernel sharing"
+  - "커널 공유"
+  - "startup overhead"
+tags: [virtualization, vm, container, docker, comparison]
+category: virtualization
+updated: 2026-06-29
+references:
+  - title: "An Updated Performance Comparison of Virtual Machines and Linux Containers"
+    url: "https://dominoweb.draco.res.ibm.com/reports/rc25482.pdf"
+    author: "Felter et al., IBM 2015"
+    note: "고전 벤치마크"
+  - title: "gVisor: Application Kernel for Containers"
+    url: "https://gvisor.dev/"
+  - title: "Kata Containers"
+    url: "https://katacontainers.io/"
+---
+
+## 정의
+
+**VM 과 Container 는 같은 문제 (하나의 물리 서버에 여러 워크로드 격리) 를 다른 방식으로 푸는 두 접근** 입니다. VM 은 하드웨어를 가상화하고, Container 는 OS 를 가상화합니다. 이 근본적 차이가 성능, 격리, 이미지 크기, 부팅 시간 모두를 결정합니다.
+
+이 문서는 두 접근을 시각화 세 개로 완전 해부합니다.
+
+## 층 구조
+
+```anim:virt-vm-vs-container-stack
+{}
+```
+
+### VM 스택 (왼쪽)
+
+- **Hardware** → **Host OS** (Type 2) 또는 없음 (Type 1) → **Hypervisor** → **Guest Kernel × N** → **libs / bins × N** → **App × N**
+- 각 VM 이 **자체 커널 인스턴스** 를 실행
+- 게스트가 물리 하드웨어를 착각하도록 hypervisor 가 CPU/메모리/디바이스를 가상화
+
+### Container 스택 (오른쪽)
+
+- **Hardware** → **Host Kernel (공유!)** → **Container Runtime** → **libs / bins × N** → **App × N**
+- 모든 컨테이너가 **하나의 host 커널을 공유**
+- 커널의 [[cgroups-namespaces|namespaces]] 로 프로세스/파일시스템/네트워크 뷰를 격리
+- [[cgroups-namespaces|cgroups]] 로 CPU/메모리 사용량 상한 부여
+
+### 핵심 요점
+
+**"어디까지 공유하는가"** 가 모든 차이를 만듭니다.
+
+- VM: 하드웨어까지만 공유 → 각자 커널, 강한 격리, 큰 오버헤드
+- Container: 커널까지 공유 → 얇은 격리, 낮은 오버헤드
+
+## 왜 Container 가 빠른가
+
+### 1. 커널 부팅 없음
+
+VM 부팅: BIOS/UEFI → 부트로더 → 커널 초기화 (수십 초) → init/systemd → 앱
+
+Container 부팅: 프로세스 fork → namespace 설정 → chroot → 앱 실행 (수백 ms)
+
+**커널을 부팅하지 않는다는 것 자체가 최대 이득**입니다.
+
+### 2. 시스템콜 직접 실행
+
+VM 의 앱이 시스템콜을 하면: 게스트 커널로 → hypervisor 트랩 (VT-x 도움) → 필요시 에뮬레이션 → 게스트 커널이 응답 → 앱
+
+Container 의 앱이 시스템콜을 하면: **host 커널로 직접**. 트랩도 게스트 커널도 없음.
+
+virtio, EPT 등 하드웨어 가속으로 VM 오버헤드는 많이 줄었지만, syscall 밀집형 워크로드 (파일 I/O, 네트워크) 에서는 여전히 container 가 유리합니다.
+
+### 3. 메모리 오버헤드가 작다
+
+VM 하나: 게스트 커널 자체가 100~500MB, glibc/systemd 등 기본 서비스 포함하면 GB 단위 시작
+
+Container 하나: libs + app 만, MB~수십 MB
+
+같은 하드웨어에 VM 수십 개 vs Container 수천 개가 물리적 한계입니다.
+
+### 4. 이미지 크기가 작다
+
+VM 이미지: 전체 배포판 (수 GB)
+
+Container 이미지: 앱 + 필요한 libs 만 (수십 MB)
+
+특히 [[docker|Docker]] 의 layered filesystem 은 여러 컨테이너가 read-only 레이어를 공유해 저장 공간을 크게 절약합니다.
+
+```anim:virt-docker-image-layers
+{}
+```
+
+## 왜 VM 이 강한가
+
+### 1. 완전한 격리
+
+- 각자 커널이므로 **한 게스트에서 커널을 아무리 만져도 다른 게스트는 무영향**
+- Container 는 host 커널 취약점이 있으면 모든 컨테이너에 영향
+- 규제/보안 감사 요구가 강한 도메인에서 VM 이 선호되는 이유
+
+### 2. 다른 OS 실행
+
+- Linux 위에서 Windows 실행 가능 (또는 반대)
+- Container 는 host 커널과 같은 OS 계열만 가능 (Windows container 는 Windows host, Linux container 는 Linux host)
+
+### 3. 커널 수준 조작
+
+- 실시간 커널, 커스텀 커널 모듈, 특정 커널 버전 고정 등
+- Container 는 host 커널 그대로 씀
+
+### 4. 하드웨어 에뮬레이션
+
+- 다른 CPU 아키텍처 (예: x86 호스트에서 ARM 게스트, QEMU 로)
+- 특수 디바이스, 레거시 하드웨어
+
+### 5. Live Migration
+
+- 실행 중 VM 을 다른 서버로 무중단 이동 (VMware vMotion 등)
+- Container 도 CRIU 기반 migration 있지만 성숙도 낮음
+
+## 성능 벤치마크 (Felter et al., IBM 2015)
+
+고전적 비교. Docker vs KVM.
+
+| 워크로드 | Native | Docker | KVM | 차이 |
+|:---|:---:|:---:|:---:|:---|
+| **CPU (LINPACK)** | 100 | 100 | 100 | 하드웨어 가속 덕에 거의 동일 |
+| **메모리 (STREAM)** | 100 | 100 | 100 | 동일 |
+| **디스크 (fio random)** | 100 | 99 | 92 | KVM 이 다소 손해, virtio 로 완화 |
+| **네트워크 (TCP)** | 100 | 96 | 92 | Docker bridge 오버헤드, KVM virtio-net |
+| **DB (MySQL)** | 100 | 98 | 82 | 통합 오버헤드, KVM 이 크게 뒤짐 |
+| **부팅 시간** | - | 1s | 45s | 순서가 다름 |
+
+**요약**: 순수 CPU/메모리는 거의 무료, 디스크/네트워크는 각 5~10% 손해, 부팅/이미지 는 container 압승.
+
+이 벤치마크는 2015 년 것이고, 이후 하드웨어 가속과 virtio 개선으로 VM 이 상당히 따라잡았습니다. 오늘날 프로덕션 워크로드에서 순수 성능 차이는 미미하며, **주된 차이는 부팅 속도, 이미지 크기, 밀도** 입니다.
+
+## 격리 강도 스펙트럼
+
+가장 약한 격리 → 가장 강한 격리:
+
+```
+프로세스 (chroot) < Container (namespaces+cgroups) < gVisor / Kata < VM (Type 2) < VM (Type 1) < 물리 분리
+```
+
+### 중간층 기술
+
+- **gVisor** (Google): 컨테이너와 host 사이에 **사용자 공간 커널** 을 넣어 syscall 을 격리. Container 편의 + VM 에 근접한 격리.
+- **Kata Containers**: 각 컨테이너를 **microVM** 안에서 실행. OCI 호환. Firecracker 등 hypervisor 활용.
+- **Firecracker**: AWS Lambda 의 기반. 125ms 부팅 microVM.
+- **AWS Nitro Enclaves**: 완전 격리된 microVM, 심지어 host 도 접근 불가.
+
+이 기술들은 "container 처럼 쓰고 VM 처럼 격리" 를 목표로 합니다.
+
+## 언제 무엇을 쓸까
+
+### VM 선호
+
+- 규제 산업 (금융, 의료, 정부)
+- 멀티테넌트 클라우드 (테넌트간 강한 격리 필수)
+- 서로 다른 OS 필요
+- 레거시 앱 (오래된 Windows 등)
+- 커널 수준 튜닝 (실시간 시스템)
+
+### Container 선호
+
+- 마이크로서비스 (수백~수천 개 서비스)
+- CI/CD 파이프라인 (빠른 빌드/테스트/배포)
+- 자원 밀도 (더 많이 얹기)
+- 개발/운영 환경 일치 (dev = staging = prod)
+- 빠른 스케일링
+
+### 하이브리드 (현대 클라우드 표준)
+
+물리 서버 → EC2 VM 여러 대 → 각 VM 안에 Docker 컨테이너 수십 개.
+
+또는 **AWS Fargate / Google Cloud Run**: 컨테이너를 사용하지만 내부적으로는 microVM 안에서 격리 (Firecracker + gVisor).
+
+## 상세 비교표
+
+| 항목 | Virtual Machine | Container |
+|:---|:---|:---|
+| **가상화 대상** | 하드웨어 | OS (namespaces + cgroups) |
+| **커널** | 게스트 각자 | host 공유 |
+| **하드웨어 지원** | VT-x, EPT, IOMMU 활용 | 없음 (커널 기능만) |
+| **부팅 시간** | 30~60 초 | 100~500 ms |
+| **이미지 크기** | GB (전체 OS) | 수십 MB (앱 중심) |
+| **메모리 오버헤드** | GB (게스트 커널 포함) | MB (프로세스만) |
+| **CPU 오버헤드** | ~5% (하드웨어 가속 후) | ~1% |
+| **디스크 I/O** | 90~95% (virtio) | ~99% |
+| **네트워크** | 90~95% (virtio-net, SR-IOV) | ~99% (host mode 시) |
+| **격리 강도** | 강함 (커널 분리) | 중간 (커널 공유) |
+| **밀도 (서버당)** | 수십 개 | 수백~수천 개 |
+| **다른 OS 실행** | 가능 | 불가 (같은 커널 계열만) |
+| **관리 도구** | libvirt, vSphere, Hyper-V Mgr | Docker, Podman, Kubernetes |
+| **오케스트레이션** | OpenStack, VMware vRealize | Kubernetes, Nomad, Docker Swarm |
+| **live migration** | 성숙 (vMotion, KVM libvirt) | 미성숙 (CRIU) |
+| **이미지 포맷** | qcow2, VMDK, VHD, OVF | OCI (Docker/Docker Hub) |
+| **주요 hypervisor / runtime** | KVM, Xen, ESXi, Hyper-V | containerd, runc, CRI-O |
+
+## 혼동하기 쉬운 지점
+
+### "Container 는 프로세스일 뿐?"
+
+**절반 맞습니다.** 컨테이너 안의 프로세스는 host 커널 관점에서 그냥 다른 프로세스와 동등합니다. `ps aux` 를 host 에서 실행하면 컨테이너의 프로세스가 보입니다. 다만 컨테이너 안에서 `ps` 를 실행하면 자기 [[cgroups-namespaces|PID namespace]] 만 보이므로 다른 컨테이너의 프로세스는 안 보입니다.
+
+### "VM 도 container 도 부팅한다?"
+
+용어 오해입니다.
+
+- VM 은 **게스트 커널을 부팅**합니다 (BIOS → 부트로더 → 커널 초기화)
+- Container 는 **프로세스를 시작**할 뿐, 부팅이 없습니다. `docker run alpine echo hi` 는 그냥 새 프로세스 fork 후 namespace 격리한 것.
+
+### "Docker 는 VM 이다?"
+
+macOS 나 Windows 에서 Docker Desktop 을 쓰면 **내부적으로는 Linux VM 을 하나 띄우고 그 안에 Docker 를 실행** 합니다. Linux 커널이 없는 host 에서 Linux container 를 돌리려면 어쩔 수 없습니다.
+
+- macOS: HyperKit 또는 QEMU 기반
+- Windows: WSL2 (Hyper-V 기반)
+
+Linux host 에서는 순수 컨테이너입니다.
+
+### "Container 는 안전한가?"
+
+**Container escape** 은 실존하는 위협입니다.
+
+- CVE-2019-5736 (runc): 호스트 runc 바이너리를 컨테이너가 덮어써서 escape
+- CVE-2022-0492 (cgroups v1): rogue cgroup 으로 root 상승
+- Kernel 취약점 → 모든 컨테이너 영향
+
+기본 방어층: **seccomp** (syscall 화이트리스트), **AppArmor / SELinux**, **user namespace** (rootless), **capabilities drop**, **read-only filesystem**. 이 방어층을 다 켜면 실용적 격리 강도는 상당히 올라갑니다. 그래도 VM 만큼은 아닙니다.
+
+## 예제 성능 (실측 감각)
+
+로컬 노트북 기준 (M1 Pro, macOS + Docker Desktop):
+
+- Alpine container `docker run --rm alpine echo hi`: ~250ms
+- Ubuntu container `docker run --rm ubuntu:24.04 echo hi`: ~400ms (첫 실행 이미지 pull 제외)
+- KVM Ubuntu 24.04 부팅 (`virsh start`): ~40s
+- VirtualBox Ubuntu 부팅: ~50s
+
+이미지 크기:
+
+- `alpine:latest`: ~8 MB
+- `ubuntu:24.04`: ~80 MB
+- `nginx:latest`: ~190 MB
+- Ubuntu 24.04 cloud-image qcow2: ~600 MB
+
+메모리 사용 (idle):
+
+- Alpine container: ~2 MB
+- nginx container: ~10 MB
+- KVM Ubuntu 최소 설치: ~500 MB
+- KVM Ubuntu desktop: ~2 GB
+
+## 참고
+
+- 관련 [[virtualization|가상화 전체]]
+- 관련 [[hypervisor|Hypervisor]]
+- 관련 [[virtual-machine|Virtual Machine]]
+- 관련 [[docker|Docker]]
+- 관련 [[lxc-system-containers|LXC]]
+- 관련 [[cgroups-namespaces|cgroups + namespaces]]
+- 관련 [[k8s-pod|Kubernetes Pod]]
+- 벤치마크: [Felter et al. 2015, IBM](https://dominoweb.draco.res.ibm.com/reports/rc25482.pdf)
+- gVisor: [https://gvisor.dev/](https://gvisor.dev/)
+- Kata Containers: [https://katacontainers.io/](https://katacontainers.io/)

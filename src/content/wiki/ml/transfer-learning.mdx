@@ -1,0 +1,307 @@
+---
+title: "Transfer Learning: pre-training, fine-tuning, domain adaptation"
+aliases:
+  - "transfer learning"
+  - "전이 학습"
+  - "fine-tuning"
+  - "파인튜닝"
+  - "파인 튜닝"
+  - "pre-training"
+  - "pretraining"
+  - "downstream task"
+  - "domain adaptation"
+  - "도메인 적응"
+  - "foundation model"
+  - "파운데이션 모델"
+  - "PEFT"
+  - "LoRA"
+  - "adapter"
+  - "prompt tuning"
+  - "prefix tuning"
+  - "catastrophic forgetting"
+  - "negative transfer"
+tags: [ml, deep-learning, transfer-learning, fine-tuning, foundation-model]
+category: ml
+updated: 2026-06-29
+references:
+  - title: "A Survey on Transfer Learning"
+    url: "https://ieeexplore.ieee.org/document/5288526"
+    author: "Pan & Yang, 2010"
+    note: "고전 서베이, inductive / transductive / unsupervised 분류"
+  - title: "How transferable are features in deep neural networks?"
+    url: "https://arxiv.org/abs/1411.1792"
+    author: "Yosinski et al., 2014"
+    note: "레이어별 전이 가능성 실험"
+  - title: "On the Opportunities and Risks of Foundation Models"
+    url: "https://arxiv.org/abs/2108.07258"
+    author: "Bommasani et al., 2021"
+    note: "Foundation Model 명명"
+  - title: "LoRA: Low-Rank Adaptation of Large Language Models"
+    url: "https://arxiv.org/abs/2106.09685"
+    author: "Hu et al., 2021"
+  - title: "Parameter-Efficient Transfer Learning for NLP"
+    url: "https://arxiv.org/abs/1902.00751"
+    author: "Houlsby et al., 2019"
+    note: "Adapter 최초 제안"
+  - title: "Universal Language Model Fine-tuning for Text Classification (ULMFiT)"
+    url: "https://arxiv.org/abs/1801.06146"
+    author: "Howard & Ruder, 2018"
+  - title: "Domain-Adversarial Training of Neural Networks"
+    url: "https://arxiv.org/abs/1505.07818"
+    author: "Ganin et al., 2015"
+    note: "DANN"
+---
+
+## 정의
+
+**Transfer Learning** 은 **source task/domain 에서 학습한 지식을 target task/domain 에 재사용** 하여 학습 효율을 높이는 패러다임입니다. 대규모 데이터로 사전 학습한 모델을 소량의 태스크 특화 데이터로 미세 조정하는 것이 대표적입니다.
+
+핵심 가정: **저수준 특징 (edge, syllable, phoneme) 은 대체로 도메인/태스크에 관계없이 유용하다.** 이 가정이 성립할 때 처음부터 학습하는 것보다 훨씬 적은 데이터와 시간으로 좋은 성능을 얻을 수 있습니다.
+
+## 왜 필요한가
+
+- **데이터 부족**: target task 데이터가 수천 개인데 처음부터 CNN/Transformer 를 학습하면 과적합 심함
+- **계산 비용**: LLM 을 처음부터 학습하는 것은 조 단위 예산이 필요, 사전 학습 모델 재사용이 현실적
+- **범용 표현 학습**: ImageNet 이나 대규모 웹 코퍼스로 학습한 표현은 이후 대부분의 downstream 태스크에 유용
+
+## 고전 분류 (Pan & Yang, 2010)
+
+Source 와 target 의 **도메인 (input 분포)** 과 **태스크 (output/label)** 차이 여부에 따라:
+
+| 유형 | Source 도메인 | Source 태스크 | Target 도메인 | Target 태스크 | 예 |
+|:---|:---:|:---:|:---:|:---:|:---|
+| **Inductive Transfer** | 같음/유사 | 다름 | 같음 | 다름 (라벨 있음) | ImageNet 분류 → 의료 영상 분류 |
+| **Transductive Transfer (Domain Adaptation)** | 다름 | 같음 | 다름 | 같음 | 서구인 얼굴 인식 → 아시아인 얼굴 인식 |
+| **Unsupervised Transfer** | 다름 | 다름 | 다름 | 다름 (라벨 없음) | 클러스터링 지식 전이 |
+
+딥러닝 시대에는 이 구분이 흐려지고 있으며, 실질적으로는 **"대규모 사전 학습 + downstream 파인튜닝"** 이라는 한 가지 패러다임이 지배적입니다.
+
+## 딥러닝 관점: 레이어별 전이 가능성
+
+Yosinski et al. (2014) 는 AlexNet 의 각 레이어를 하나씩 얼려 (freeze) target 태스크에 옮기는 실험으로 다음을 밝혔습니다.
+
+- **저수준 레이어 (conv1, conv2)**: 에지, 색깔 필터. **일반적** 이라 대부분의 태스크에 잘 전이됩니다.
+- **중간 레이어**: 조각, 형태. **부분적** 으로 전이됩니다.
+- **고수준 레이어 (fc7, fc8)**: 클래스 특화. 원본 태스크에 강하게 특화되어 있어 **잘 전이되지 않습니다**.
+
+이 통찰이 오늘날 대부분의 fine-tuning 전략의 근거입니다.
+
+## Fine-tuning 전략
+
+### 1. Feature Extractor
+
+**사전 학습 모델 전체를 freeze**, 마지막에 새 head (선형 분류기) 만 학습합니다.
+
+```python
+import torch
+from torchvision.models import resnet50
+
+model = resnet50(weights='IMAGENET1K_V2')
+for p in model.parameters():
+    p.requires_grad = False
+
+# 새 head
+model.fc = torch.nn.Linear(2048, num_target_classes)
+# model.fc.parameters() 만 학습
+```
+
+- 데이터가 극히 적을 때 유리
+- 학습 빠르고 안정적이지만 성능 상한이 낮음
+
+### 2. Full Fine-tuning
+
+**모든 파라미터를 학습**, 다만 작은 learning rate (예: 1e-5) 사용.
+
+```python
+for p in model.parameters():
+    p.requires_grad = True
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+```
+
+- 데이터가 충분할 때 최고 성능
+- 대신 catastrophic forgetting 위험 있음
+
+### 3. Discriminative Fine-tuning (ULMFiT)
+
+**레이어별로 다른 learning rate**. 낮은 레이어는 작은 LR, 높은 레이어는 큰 LR.
+
+$$
+\eta^{(l-1)} = \eta^{(l)} / 2.6
+$$
+
+Howard & Ruder (2018) 이 ULMFiT 에서 제안했고, NLP 파인튜닝의 기준이 되었습니다.
+
+### 4. Gradual Unfreezing
+
+먼저 head 만 학습 (다른 레이어 freeze), 그 다음 마지막 레이어를 unfreeze, 그 다음 그 아래 레이어를 unfreeze 하는 식으로 **레이어별로 서서히 녹입니다**. Catastrophic forgetting 완화에 효과적입니다.
+
+## Foundation Models
+
+Bommasani et al. (2021) 는 다음 조건을 만족하는 모델을 **Foundation Model** 로 명명했습니다.
+
+1. 대규모 self-supervised pre-training
+2. 광범위한 downstream 태스크에 적응 가능
+
+대표: **BERT, GPT, T5, CLIP, ViT, DINO, SAM, LLaMA**. Transfer learning 이 이제 특별한 기법이 아니라 **AI 시스템 구축의 기본 방식** 이 되었다는 관점 전환입니다.
+
+## PEFT (Parameter-Efficient Fine-Tuning)
+
+Foundation model 이 수십억 파라미터 규모가 되면서 full fine-tuning 은 GPU 메모리도, 저장 공간도 감당하기 어려워졌습니다. **일부 파라미터만 학습** 하는 기법들이 나왔습니다.
+
+### Adapter (Houlsby et al., 2019)
+
+Transformer 블록 안에 **작은 병목 레이어** 를 삽입, 원본 파라미터는 freeze, adapter 만 학습:
+
+```
+x → [Layer Norm] → [Attention] → [Add] → [Adapter (down → nonlinear → up)] → [FFN] → [Add] → [Adapter] → out
+```
+
+전체의 3~5% 정도만 학습해도 full fine-tuning 에 근접한 성능.
+
+### LoRA (Hu et al., 2021)
+
+가중치 업데이트 $\Delta W$ 를 **low-rank 분해** 로 근사:
+
+$$
+W' = W + \Delta W = W + BA, \quad A \in \mathbb{R}^{r \times k}, B \in \mathbb{R}^{d \times r}
+$$
+
+$r \ll \min(d, k)$ 이면 $BA$ 가 $\Delta W$ 를 근사합니다. 학습 파라미터는 $r(d+k)$ 개로 크게 줄어들고, inference 때는 $W + BA$ 를 병합하면 추가 지연이 없습니다. 오늘날 LLM 파인튜닝의 사실상 표준입니다.
+
+```python
+# peft 라이브러리 예
+from peft import LoraConfig, get_peft_model
+
+config = LoraConfig(
+    r=8,                          # rank
+    lora_alpha=32,                # scaling factor
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.05,
+    bias="none",
+)
+model = get_peft_model(base_model, config)
+```
+
+**QLoRA** (Dettmers et al., 2023) 는 4-bit 양자화 + LoRA 로 GPU 메모리를 더 줄였습니다.
+
+### Prompt Tuning / Prefix Tuning
+
+**모델은 완전 freeze**, 입력에 학습 가능한 **soft token 벡터** 만 추가:
+
+- **Prompt Tuning** (Lester et al., 2021): 입력 앞에 학습 가능한 임베딩 몇 개 추가
+- **Prefix Tuning** (Li & Liang, 2021): 각 Transformer 레이어의 key/value 앞에 접두 벡터 삽입
+
+파라미터 수가 극히 작지만 (< 0.1%) 매우 큰 모델에서만 효과적입니다.
+
+### BitFit (Ben-Zaken et al., 2021)
+
+**bias 파라미터만 학습**. 극단적으로 적은 파라미터로도 특정 태스크에서 경쟁력 있음.
+
+## Domain Adaptation
+
+Source 와 target 의 **입력 분포가 다를 때** 사용됩니다.
+
+### Feature Alignment
+
+두 도메인의 feature 분포를 정렬:
+
+- **MMD (Maximum Mean Discrepancy)**: RKHS 에서 두 분포의 평균 벡터 거리 최소화
+- **CORAL (Correlation Alignment)**: 공분산 매트릭스 정렬
+
+### Adversarial Domain Adaptation (DANN)
+
+Ganin et al. (2015) 의 DANN 은 두 도메인의 feature 를 **discriminator 가 구분 못하게** 학습시킵니다.
+
+```
+feature extractor → classifier (label 예측, 정상 gradient)
+                 → domain discriminator (source vs target, gradient reversal)
+```
+
+Gradient Reversal Layer (GRL) 로 discriminator loss 의 gradient 를 뒤집어 feature 를 domain-invariant 하게 만듭니다.
+
+### Self-training / Pseudo-labeling
+
+Target 데이터의 라벨을 모델 예측으로 채우고 (confidence 높은 것만), 다시 학습. 반복.
+
+## Catastrophic Forgetting
+
+Fine-tuning 시 사전 학습에서 얻은 일반 지식이 **소실** 되는 현상. 특히 target 데이터가 적을 때 심각합니다.
+
+완화 기법:
+
+- **작은 learning rate + 짧은 학습**
+- **Elastic Weight Consolidation (EWC)** (Kirkpatrick et al., 2017): 원본 파라미터 근처에 머무르도록 L2-regularization, Fisher Information 으로 중요도 가중
+- **Rehearsal**: 원본 태스크 샘플을 fine-tuning 중에도 계속 노출
+- **PEFT (adapter, LoRA)**: 원본 파라미터는 그대로 두므로 자연스럽게 forgetting 방지
+
+## Negative Transfer
+
+**source 와 target 이 관련 없으면 오히려 성능 하락**. 예: 자연 이미지 사전 학습 → 위성 이미지 태스크 는 도움이 되지만, 자연 이미지 사전 학습 → 의료 X-ray 태스크는 부정적 전이 사례가 알려져 있습니다.
+
+방지책:
+
+- Source 선택 시 domain similarity 검토 (feature 통계, MMD 로 측정)
+- 모델 여러 개 후보 중 target 검증으로 선택
+- 애매하면 사전 학습 도메인이 넓은 foundation model 사용 (CLIP, DINOv2 등)
+
+## 실전 예시
+
+### NLP: BERT fine-tuning
+
+```python
+from transformers import BertForSequenceClassification, Trainer, TrainingArguments
+
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
+
+training_args = TrainingArguments(
+    output_dir="./results",
+    num_train_epochs=3,
+    per_device_train_batch_size=16,
+    learning_rate=2e-5,           # BERT paper 권장
+    warmup_steps=500,
+    weight_decay=0.01,
+)
+
+trainer = Trainer(model=model, args=training_args, train_dataset=ds, ...)
+trainer.train()
+```
+
+### Vision: ViT fine-tuning
+
+```python
+from transformers import ViTForImageClassification
+
+model = ViTForImageClassification.from_pretrained(
+    "google/vit-base-patch16-224",
+    num_labels=num_classes,
+    ignore_mismatched_sizes=True,  # 새 head 필요
+)
+```
+
+### LLM: LoRA fine-tuning
+
+```python
+from peft import LoraConfig, get_peft_model, TaskType
+
+config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.1,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+)
+
+model = get_peft_model(base_llm, config)
+model.print_trainable_parameters()
+# trainable: ~4M / total: ~7B (0.06%)
+```
+
+## 참고
+
+- 관련 지표: [[classification-metrics|분류 모델 지표]]
+- 관련 시스템: [[federated-learning|Federated Learning]] 에서도 pretrained model 을 초기점으로 씁니다
+- 관련 평가: [[helm-llm-benchmark|HELM]] 은 여러 downstream 태스크에서 foundation model 을 평가합니다
+- HuggingFace: [PEFT library](https://github.com/huggingface/peft)
+- Paper: [Bommasani et al. 2021, Foundation Models](https://arxiv.org/abs/2108.07258)
+- Survey: [A Comprehensive Survey on Transfer Learning](https://arxiv.org/abs/1911.02685) (Zhuang et al., 2020)

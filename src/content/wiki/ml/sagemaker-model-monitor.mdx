@@ -1,0 +1,340 @@
+---
+title: "[AWS SageMaker] Model Monitor: 모델 및 데이터 드리프트 감지"
+aliases:
+  - "sagemaker model monitor"
+  - "SageMaker Model Monitor"
+  - "model monitor"
+  - "data drift"
+  - "model drift"
+  - "concept drift"
+  - "model quality drift"
+  - "bias drift"
+  - "feature attribution drift"
+  - "data quality monitor"
+  - "model quality monitor"
+  - "데이터 드리프트"
+  - "모델 드리프트"
+  - "DefaultModelMonitor"
+  - "ModelQualityMonitor"
+tags: [aws, sagemaker, mlops, monitoring, drift]
+category: ml
+updated: 2026-06-29
+references:
+  - title: "Data and model quality monitoring with Amazon SageMaker Model Monitor"
+    url: "https://docs.aws.amazon.com/sagemaker/latest/dg/model-monitor.html"
+    note: "AWS 공식 문서"
+  - title: "Amazon SageMaker Model Monitor availability change"
+    url: "https://docs.aws.amazon.com/sagemaker/latest/dg/model-monitor-availability-change.html"
+    note: "2026-07-30 신규 종료 안내"
+  - title: "Amazon SageMaker Model Monitor 공식 예제 노트북"
+    url: "https://sagemaker-examples.readthedocs.io/en/latest/sagemaker_model_monitor/introduction/SageMaker-ModelMonitoring.html"
+---
+
+> [!WARNING]
+> **AWS 공식 발표 (2026)**: **2026-07-30 부터 SageMaker Model Monitor 는 신규 고객 사용이 중단됩니다.** 기존 사용 고객은 계속 이용 가능하며 보안/가용성 개선은 유지되지만, **신규 기능 추가는 없습니다.** 대안으로 [Amazon SageMaker AI 통합 모니터링](https://docs.aws.amazon.com/sagemaker/latest/dg/model-monitor-availability-change.html), 또는 서드파티 (EvidentlyAI, WhyLabs, Arize, Fiddler 등) 를 고려하세요.
+
+## 정의
+
+**Amazon SageMaker Model Monitor** 는 SageMaker AI 로 프로덕션 배포된 ML 모델의 **데이터 및 모델 품질을 지속 모니터링** 하고, 드리프트가 발생하면 알림을 보내는 관리형 서비스입니다. 실시간 endpoint 와 배치 transform 작업 양쪽 모두를 지원합니다.
+
+핵심 아이디어: **학습 데이터로 baseline 통계** 를 만들어 두고, 프로덕션 요청/응답을 캡처하여 **주기적으로 baseline 과 비교**, 위반 (violation) 을 감지합니다.
+
+## 4 가지 모니터 타입
+
+Model Monitor 가 제공하는 네 가지 감시 유형입니다.
+
+### 1. Data Quality Monitor
+
+- **입력 데이터 통계 변화 감지**
+- 학습 데이터의 통계 (feature 별 평균, 분산, 결측 비율, distinct 개수, 데이터 타입 등) 를 baseline 으로 삼음
+- 프로덕션 입력이 이 통계에서 크게 벗어나면 위반
+- Data drift 라고도 부름
+
+### 2. Model Quality Monitor
+
+- **예측 성능 지표 자체를 모니터링**
+- Accuracy, F1, precision, recall, MSE, MAE 등 (참고: [[classification-metrics|분류 모델 지표]])
+- **정답 라벨 (ground truth)** 이 나중에 제공되어야 하므로, 프로덕션 예측과 라벨을 매칭하는 파이프라인이 필요
+- Concept drift 감지 목적
+
+### 3. Bias Drift Monitor
+
+- **인구통계 집단 간 예측 편향 변화**
+- SageMaker Clarify 와 통합
+- 지표: DPPL (Difference in Positive Proportions in Predicted Labels), DI (Disparate Impact) 등
+- 학습 시점 대비 특정 집단에 대한 편향이 커졌는지 감시
+
+### 4. Feature Attribution Drift Monitor
+
+- **feature importance 분포 변화**
+- SHAP 값 기반, 각 feature 가 예측에 기여하는 정도가 학습 시점과 달라졌는지
+- 입력 통계는 안 변했는데 feature 의 역할이 바뀐 미묘한 shift 를 잡음
+
+## 아키텍처
+
+```
+┌──────────────┐    inference    ┌───────────────────┐
+│   Client     │ ─────────────>  │  SageMaker        │
+└──────────────┘   request +     │  Endpoint         │
+       ▲          response       │  (with            │
+       │                         │   DataCapture)    │
+       │                         └────────┬──────────┘
+       │                                  │ capture
+       │                                  ▼
+       │                          ┌────────────────┐
+       │                          │   S3 bucket    │  ◀── training data baseline
+       │                          │   captured/    │      (statistics.json,
+       │                          └────────┬───────┘       constraints.json)
+       │                                   │
+       │                                   ▼
+       │                          ┌────────────────┐
+       │                          │  Monitoring    │
+       │                          │  Schedule      │  (hourly / daily)
+       │                          │  (Processing   │
+       │                          │   Job)         │
+       │                          └────────┬───────┘
+       │                                   │
+       │                                   ▼
+       │                          ┌────────────────┐
+       │  alert  ┌────────────┐   │  CloudWatch    │
+       └────────┤ SNS/Lambda  ├───┤  Metrics +     │
+                └────────────┘    │  Alarms        │
+                                  └────────────────┘
+```
+
+### 단계별 컴포넌트
+
+1. **Data Capture**: 엔드포인트에 `DataCaptureConfig` 활성화, 입력/출력을 S3 에 저장
+2. **Baseline**: 학습 데이터에서 `suggest_baseline()` 실행 → `statistics.json` + `constraints.json` 생성
+3. **Monitoring Schedule**: cron 또는 hourly 로 Processing Job 자동 실행
+4. **Processing Job**: 컨테이너에서 캡처 데이터 vs baseline 비교, 위반 리포트 생성
+5. **CloudWatch**: 위반 개수, 지표를 CloudWatch 메트릭으로 발행. 알람 → SNS → Lambda / Slack / PagerDuty
+
+## Python SDK 클래스
+
+`sagemaker` Python SDK 의 각 모니터 클래스:
+
+| 클래스 | 모니터 타입 |
+|:---|:---|
+| `sagemaker.model_monitor.DefaultModelMonitor` | Data Quality |
+| `sagemaker.model_monitor.ModelQualityMonitor` | Model Quality |
+| `sagemaker.model_monitor.ModelBiasMonitor` | Bias Drift |
+| `sagemaker.model_monitor.ModelExplainabilityMonitor` | Feature Attribution Drift |
+
+공통 인터페이스:
+
+- `suggest_baseline(...)`: baseline 통계 생성
+- `create_monitoring_schedule(...)`: 스케줄 등록
+- `describe_schedule()`, `list_executions()`, `stop_monitoring_schedule()`, `delete_monitoring_schedule()`
+
+## 실전 코드 (Data Quality)
+
+### 1. Endpoint 에 Data Capture 활성화
+
+```python
+from sagemaker.model_monitor import DataCaptureConfig
+
+data_capture_config = DataCaptureConfig(
+    enable_capture=True,
+    sampling_percentage=100,
+    destination_s3_uri=f"s3://{bucket}/captured/",
+    capture_options=["REQUEST", "RESPONSE"],
+    csv_content_types=["text/csv"],
+    json_content_types=["application/json"],
+)
+
+predictor = model.deploy(
+    initial_instance_count=1,
+    instance_type="ml.m5.xlarge",
+    data_capture_config=data_capture_config,
+)
+```
+
+### 2. Baseline 생성
+
+```python
+from sagemaker.model_monitor import DefaultModelMonitor
+from sagemaker.model_monitor.dataset_format import DatasetFormat
+
+monitor = DefaultModelMonitor(
+    role=role,
+    instance_count=1,
+    instance_type="ml.m5.xlarge",
+    volume_size_in_gb=20,
+    max_runtime_in_seconds=3600,
+)
+
+monitor.suggest_baseline(
+    baseline_dataset=f"s3://{bucket}/training-data.csv",
+    dataset_format=DatasetFormat.csv(header=True),
+    output_s3_uri=f"s3://{bucket}/baselines/",
+    wait=True,
+)
+```
+
+결과로 `statistics.json` (feature 별 mean, std, min, max, distinct_count 등) 과 `constraints.json` (허용 범위) 이 생깁니다.
+
+### 3. Monitoring Schedule 등록
+
+```python
+from sagemaker.model_monitor import CronExpressionGenerator
+
+monitor.create_monitoring_schedule(
+    monitor_schedule_name="my-daily-monitor",
+    endpoint_input=predictor.endpoint_name,
+    output_s3_uri=f"s3://{bucket}/monitor-reports/",
+    statistics=monitor.baseline_statistics(),
+    constraints=monitor.suggested_constraints(),
+    schedule_cron_expression=CronExpressionGenerator.hourly(),
+    enable_cloudwatch_metrics=True,
+)
+```
+
+### 4. CloudWatch 알람 연결
+
+```python
+import boto3
+
+cw = boto3.client("cloudwatch")
+
+cw.put_metric_alarm(
+    AlarmName="ModelMonitor-FeatureBaselineDrift",
+    MetricName="feature_baseline_drift_check_violations",
+    Namespace="aws/sagemaker/Endpoints/data-metrics",
+    Statistic="Sum",
+    Period=3600,
+    EvaluationPeriods=1,
+    Threshold=1,
+    ComparisonOperator="GreaterThanOrEqualToThreshold",
+    AlarmActions=["arn:aws:sns:us-east-1:123:model-alerts"],
+    Dimensions=[
+        {"Name": "Endpoint", "Value": predictor.endpoint_name},
+        {"Name": "MonitoringSchedule", "Value": "my-daily-monitor"},
+    ],
+)
+```
+
+## Model Quality 의 ground truth 연결
+
+Model Quality Monitor 는 **예측 결과와 실제 정답을 매칭** 해야 하는 게 특별합니다.
+
+1. 예측 시 각 요청에 `inference_id` 부여 (헤더 또는 payload 필드)
+2. 나중에 정답 라벨이 확정되면 `s3://.../ground_truth/YYYY/MM/DD/HH/data.json` 에 저장
+3. Model Quality Monitor 가 이 두 소스를 조인해서 accuracy/F1 등 계산
+
+라벨 지연이 큰 서비스 (예: 이탈 예측은 30 일 후 결과 확인) 에는 스케줄을 그에 맞게 설정합니다.
+
+## Baseline 파일 형식
+
+### statistics.json (예)
+
+```json
+{
+  "version": 0.0,
+  "dataset": { "item_count": 10000 },
+  "features": [
+    {
+      "name": "age",
+      "inferred_type": "Fractional",
+      "numerical_statistics": {
+        "common": { "num_present": 9980, "num_missing": 20 },
+        "mean": 34.5, "sum": 344310, "std_dev": 12.3,
+        "min": 18, "max": 88,
+        "distribution": { "kll": { ... } }
+      }
+    }
+  ]
+}
+```
+
+### constraints.json (예)
+
+```json
+{
+  "version": 0.0,
+  "features": [
+    {
+      "name": "age",
+      "inferred_type": "Fractional",
+      "completeness": 0.998,
+      "num_constraints": { "is_non_negative": true }
+    }
+  ],
+  "monitoring_config": {
+    "evaluate_constraints": "Enabled",
+    "datatype_check_threshold": 1.0,
+    "domain_content_threshold": 1.0,
+    "distribution_constraints": {
+      "perform_comparison": "Enabled",
+      "comparison_threshold": 0.1,
+      "comparison_method": "Robust"
+    }
+  }
+}
+```
+
+`comparison_method` 는 `Simple` / `Robust` / `LInfty` 등이 있으며, 통계 비교 방식을 정의합니다.
+
+## 지원 데이터 타입 제한
+
+- **tabular 입력만** 자동 통계 지원. 이미지 분류 모델의 이미지 입력은 통계 계산 불가, 하지만 **출력 라벨은 모니터링 가능**
+- Multi-model endpoint 미지원
+- Data Capture 저장소 disk 사용률 75% 이상이면 캡처 중단 → 정기 정리 필요
+
+## 다른 도구와 비교
+
+| 도구 | 관리 방식 | 강점 | 약점 |
+|:---|:---|:---|:---|
+| **SageMaker Model Monitor** | AWS 관리형 | SageMaker 통합 편함 | **2026-07-30 신규 종료**, 커스터마이징 제한 |
+| **[EvidentlyAI](https://www.evidentlyai.com/)** | 오픈소스 + 클라우드 | 시각화 강함, 프레임워크 애그노스틱 | 셀프 호스팅 부담 |
+| **[WhyLabs](https://whylabs.ai/)** | SaaS | whylogs 프로파일링 라이브러리 좋음 | 유료 |
+| **[Arize AI](https://arize.com/)** | SaaS | LLM 모니터링 강점 (Phoenix) | 유료 |
+| **[Fiddler](https://www.fiddler.ai/)** | SaaS | 대기업 규제 산업 대응 | 무거움 |
+| **Prometheus + Grafana + 자체 스크립트** | 셀프 | 완전 제어 | 초기 구현 부담 |
+
+## 비용
+
+Model Monitor 는 **처리 작업 (Processing Job) 실행 비용** 을 청구합니다:
+
+- 인스턴스 타입 (`ml.m5.xlarge` 등) × 실행 시간
+- 하루 24 회 (매 시간) × 30 분씩 실행이면 대략 12 시간분 비용
+- S3 저장 (capture, baseline, report), CloudWatch 메트릭 별도
+
+프로덕션에서는 하루 1~2 회 스케줄로 충분한 경우가 많습니다.
+
+## Best Practice
+
+- **Baseline 은 학습 데이터가 아니라 최근 검증 데이터** 로 만들면 편차가 작습니다
+- **Alert threshold 를 여러 심각도로** (warning: violations>=1, critical: violations>=5)
+- **CloudWatch 대신 EventBridge → Lambda → 슬랙** 을 자주 사용
+- **비용 통제**: 트래픽 크면 `sampling_percentage=10` 정도로 낮춰서 캡처
+- **Model Quality 는 라벨 지연을 감안** 하여 스케줄 늦춤
+- **위반이 나면 자동 재학습 트리거** 하는 파이프라인 (SageMaker Pipelines + Step Functions)
+- **드리프트가 아니라 데이터 파이프라인 문제일 가능성** 을 먼저 검토 (매핑 코드 변경, 스키마 변경 등)
+
+## Model Drift 개념 정리
+
+Model Monitor 가 감지하려는 것들:
+
+- **Data Drift** (Covariate Shift): 입력 $P(X)$ 분포 변화. 데이터 자체가 달라진 경우
+- **Concept Drift**: 입력-출력 관계 $P(Y|X)$ 변화. 예측 대상 자체의 성질 변화 (예: 사기 패턴이 진화)
+- **Label Drift**: $P(Y)$ 변화. 실제 정답 분포가 달라진 경우
+- **Prediction Drift**: 모델 예측 $P(\hat{Y})$ 변화. 위 셋 중 하나 이상의 결과
+
+각각 다른 시그널이며, 4 가지 모니터가 이 시그널들을 부분적으로 커버합니다.
+
+## 대안 (2026 신규 종료 이후)
+
+신규 프로젝트라면 다음을 고려:
+
+1. **Evidently + SageMaker Pipelines**: 오픈소스, SageMaker 안에서 처리 작업으로 실행
+2. **whylogs + WhyLabs**: 데이터 프로파일링 라이브러리, WhyLabs SaaS
+3. **자체 구축**: Great Expectations 로 데이터 품질, MLflow 로 모델 성능 트래킹
+4. **AWS 대체**: 앞으로 나올 SageMaker AI 의 통합 모니터링 (공지 참고)
+
+## 참고
+
+- 관련 [[classification-metrics|분류 모델 지표]] 는 Model Quality Monitor 의 근간
+- 관련 [[transfer-learning|Transfer Learning]] fine-tuned 모델도 동일하게 모니터링 대상
+- AWS 공식: [Model Monitor](https://docs.aws.amazon.com/sagemaker/latest/dg/model-monitor.html), [Availability change](https://docs.aws.amazon.com/sagemaker/latest/dg/model-monitor-availability-change.html)
+- 참고 아티클: [Model drift 관련 개념](https://www.evidentlyai.com/ml-in-production/data-drift)
