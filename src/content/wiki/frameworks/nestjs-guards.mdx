@@ -1,0 +1,411 @@
+---
+title: "[NestJS] Guards"
+aliases:
+  - "NestJS Guard"
+  - "NestJS Guards"
+  - "@UseGuards"
+  - "AuthGuard"
+  - "RolesGuard"
+  - "canActivate"
+  - "Passport NestJS"
+  - "JWT NestJS"
+  - "NestJS 가드"
+tags: [nestjs, guards, auth, security]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Guards"
+    url: "https://docs.nestjs.com/guards"
+  - title: "NestJS Authentication"
+    url: "https://docs.nestjs.com/security/authentication"
+  - title: "NestJS Authorization"
+    url: "https://docs.nestjs.com/security/authorization"
+  - title: "Passport.js"
+    url: "https://www.passportjs.org/"
+---
+
+## 정의
+
+**NestJS Guard** 는 특정 요청이 controller method 에 도달하기 전에 실행되어 **접근 허용 여부** 를 결정합니다. Middleware 이후, Interceptor / Pipe 이전에 실행되며, `canActivate()` 가 `true` 를 반환해야 통과합니다. 주로 **인증 (authentication)** 과 **인가 (authorization)** 에 사용.
+
+## 기본 구조
+
+```typescript
+import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import { Observable } from 'rxjs';
+
+@Injectable()
+export class MyGuard implements CanActivate {
+  canActivate(
+    context: ExecutionContext,
+  ): boolean | Promise<boolean> | Observable<boolean> {
+    const request = context.switchToHttp().getRequest();
+    return validateRequest(request);
+  }
+}
+```
+
+`ExecutionContext` 는 HTTP/WebSocket/RPC 등 모든 프로토콜 통합.
+
+## AuthGuard 예제 (JWT)
+
+```typescript
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+
+@Injectable()
+export class JwtAuthGuard implements CanActivate {
+  constructor(private jwtService: JwtService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const req = context.switchToHttp().getRequest();
+    const token = this.extractToken(req);
+    if (!token) throw new UnauthorizedException('Missing token');
+
+    try {
+      const payload = await this.jwtService.verifyAsync(token, {
+        secret: process.env.JWT_SECRET,
+      });
+      req.user = payload;
+      return true;
+    } catch {
+      throw new UnauthorizedException('Invalid token');
+    }
+  }
+
+  private extractToken(req: any): string | undefined {
+    const [type, token] = req.headers.authorization?.split(' ') ?? [];
+    return type === 'Bearer' ? token : undefined;
+  }
+}
+```
+
+## 부착 방법
+
+### Method 단위
+
+```typescript
+@Controller('users')
+export class UsersController {
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  me(@Req() req) {
+    return req.user;
+  }
+}
+```
+
+### Controller 전체
+
+```typescript
+@Controller('users')
+@UseGuards(JwtAuthGuard)
+export class UsersController {
+  @Get('me') me() { ... }
+  @Get(':id') find() { ... }
+}
+```
+
+### Global
+
+```typescript
+// main.ts
+const app = await NestFactory.create(AppModule);
+app.useGlobalGuards(new JwtAuthGuard(app.get(JwtService)));
+```
+
+Global 은 DI 어려움. Module 로 등록하는 편이 관용:
+
+```typescript
+// app.module.ts
+import { APP_GUARD } from '@nestjs/core';
+
+@Module({
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+  ],
+})
+export class AppModule {}
+```
+
+## Public Endpoint (Guard 우회)
+
+Global guard 를 걸면 모든 route 에 적용. 예외 (로그인, 헬스체크) 처리는 metadata + Reflector.
+
+```typescript
+// common/decorators/public.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const IS_PUBLIC_KEY = 'isPublic';
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+```
+
+Guard 에서 확인:
+
+```typescript
+import { Reflector } from '@nestjs/core';
+
+@Injectable()
+export class JwtAuthGuard implements CanActivate {
+  constructor(
+    private reflector: Reflector,
+    private jwtService: JwtService,
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+
+    // 인증 로직 ...
+  }
+}
+```
+
+사용:
+
+```typescript
+@Post('login')
+@Public()
+login(@Body() dto: LoginDto) { ... }
+```
+
+## Roles Guard (인가)
+
+Role 기반 접근 제어.
+
+```typescript
+// roles.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const ROLES_KEY = 'roles';
+export const Roles = (...roles: string[]) => SetMetadata(ROLES_KEY, roles);
+
+// roles.guard.ts
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.getAllAndOverride<string[]>(
+      ROLES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    if (!requiredRoles) return true;
+
+    const { user } = context.switchToHttp().getRequest();
+    return requiredRoles.some((role) => user.roles?.includes(role));
+  }
+}
+```
+
+사용:
+
+```typescript
+@Controller('admin')
+@UseGuards(JwtAuthGuard, RolesGuard)   // 순서 중요: JWT 먼저 -> role 확인
+export class AdminController {
+  @Get('users')
+  @Roles('admin', 'moderator')
+  listUsers() { ... }
+}
+```
+
+## Passport 통합 (`@nestjs/passport`)
+
+Passport strategy 를 NestJS Guard 로 wrapping.
+
+```bash
+npm i @nestjs/passport passport passport-jwt
+npm i @types/passport-jwt -D
+```
+
+### JWT Strategy
+
+```typescript
+import { PassportStrategy } from '@nestjs/passport';
+import { Strategy, ExtractJwt } from 'passport-jwt';
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor() {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      secretOrKey: process.env.JWT_SECRET,
+    });
+  }
+
+  async validate(payload: any) {
+    return { userId: payload.sub, email: payload.email };
+  }
+}
+```
+
+### Guard
+
+```typescript
+import { AuthGuard } from '@nestjs/passport';
+
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {}
+```
+
+### Module
+
+```typescript
+@Module({
+  imports: [
+    PassportModule,
+    JwtModule.register({
+      secret: process.env.JWT_SECRET,
+      signOptions: { expiresIn: '1h' },
+    }),
+  ],
+  providers: [JwtStrategy, AuthService],
+  exports: [AuthService, JwtModule],
+})
+export class AuthModule {}
+```
+
+### Local Strategy (username + password)
+
+```typescript
+import { Strategy } from 'passport-local';
+
+@Injectable()
+export class LocalStrategy extends PassportStrategy(Strategy) {
+  constructor(private authService: AuthService) {
+    super({ usernameField: 'email' });
+  }
+
+  async validate(email: string, password: string): Promise<any> {
+    const user = await this.authService.validateUser(email, password);
+    if (!user) throw new UnauthorizedException();
+    return user;
+  }
+}
+
+@Injectable()
+export class LocalAuthGuard extends AuthGuard('local') {}
+
+// 사용
+@Post('login')
+@UseGuards(LocalAuthGuard)
+async login(@Req() req) {
+  return this.authService.login(req.user);
+}
+```
+
+## Async Guard
+
+```typescript
+async canActivate(context: ExecutionContext): Promise<boolean> {
+  const req = context.switchToHttp().getRequest();
+  const user = await this.userService.verifyToken(req.headers.token);
+  req.user = user;
+  return Boolean(user);
+}
+```
+
+## Guard 실행 순서
+
+여러 guard 를 부착하면 **순서대로 AND**:
+
+```typescript
+@UseGuards(JwtAuthGuard, RolesGuard, ThrottleGuard)
+```
+
+- JwtAuth false -> 즉시 401 (다음 guard 실행 X)
+- 모두 true -> 통과
+
+## Guard 에서 예외 던지기
+
+기본:
+
+```typescript
+if (!allowed) throw new UnauthorizedException('Reason');
+```
+
+`canActivate` 가 `false` 리턴하면 자동 `ForbiddenException`. 명시적 예외를 던지는 편이 메시지 커스텀 가능.
+
+## WebSocket / RPC Guard
+
+같은 인터페이스, `context.switchToWs()` / `context.switchToRpc()`:
+
+```typescript
+canActivate(context: ExecutionContext): boolean {
+  if (context.getType() === 'ws') {
+    const client = context.switchToWs().getClient();
+    return client.handshake.auth.token === 'valid';
+  }
+  const req = context.switchToHttp().getRequest();
+  return req.headers.authorization === 'valid';
+}
+```
+
+## Rate Limit Guard
+
+`@nestjs/throttler` 사용:
+
+```typescript
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+
+@Module({
+  imports: [
+    ThrottlerModule.forRoot([{
+      ttl: 60000,
+      limit: 100,
+    }]),
+  ],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+  ],
+})
+export class AppModule {}
+```
+
+Endpoint 별 커스터마이제이션:
+
+```typescript
+@Throttle({ default: { limit: 3, ttl: 60000 } })
+@Post('login')
+login() { ... }
+
+@SkipThrottle()
+@Get('health')
+health() { ... }
+```
+
+## 함정
+
+> [!WARNING]
+> **Guard 순서**. Auth guard 를 먼저, role guard 를 나중에. JWT 없이 role 확인 못 함.
+
+> [!CAUTION]
+> **Global guard + DI**. `useGlobalGuards()` 는 DI 없이 인스턴스. Module 에서 `APP_GUARD` 로 등록해야 DI 가능.
+
+> [!WARNING]
+> **`@Public()` 데코레이터 안 붙이면** 로그인 endpoint 도 인증 요구 -> chicken-and-egg.
+
+> [!IMPORTANT]
+> **`Reflector.getAllAndOverride`** 는 method + class 순으로. Method decorator 가 class decorator override.
+
+> [!CAUTION]
+> **Guard 에서 async 는 성능 영향**. DB 조회 등 무거우면 캐시 (Redis) 고려.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-controllers|Controllers]] - `@UseGuards()`
+- [[nestjs-modules|Modules]] - AuthModule
+- [[nestjs-providers|Providers]] - Reflector, JwtService 주입
+- [[nestjs-interceptors|Interceptors]] - 다음 단계
+- [[nestjs-middleware|Middleware]] - 이전 단계
+- [[nestjs-exception-filters|Exception Filters]] - Guard 예외 처리
+- [[ts-decorators|TypeScript Decorators]]

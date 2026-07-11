@@ -1,0 +1,379 @@
+---
+title: "[Koa] Middleware (Onion Model)"
+aliases:
+  - "Koa Middleware"
+  - "Koa Onion Model"
+  - "Koa async middleware"
+  - "koa-compose"
+  - "Koa 미들웨어"
+  - "koa next"
+tags: [koa, middleware, onion-model, async]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "Koa Middleware"
+    url: "https://koajs.com/#application"
+  - title: "koa-compose"
+    url: "https://github.com/koajs/compose"
+  - title: "Koa Cascading"
+    url: "https://koajs.com/#cascading"
+---
+
+## 정의
+
+**Koa Middleware** 는 요청/응답 사이에 실행되는 async 함수입니다. 각 미들웨어는 `ctx` (context) 와 `next` (다음 미들웨어를 실행하는 함수) 를 받고, **`await next()`** 로 downstream 을 실행하고 그 이후에 upstream 로직을 실행합니다. 이것이 **onion model (양파 모델)**.
+
+## 기본 구조
+
+```javascript
+app.use(async (ctx, next) => {
+  console.log('before');
+  await next();
+  console.log('after');
+});
+```
+
+- `next()` 를 호출 안 하면 다음 미들웨어로 안 감 (chain 중단)
+- `await next()` 를 잊으면 async 흐름 깨짐
+
+## Onion Model 예시
+
+```javascript
+app.use(async (ctx, next) => {
+  console.log('1 in');
+  await next();
+  console.log('1 out');
+});
+
+app.use(async (ctx, next) => {
+  console.log('2 in');
+  await next();
+  console.log('2 out');
+});
+
+app.use(async (ctx) => {
+  console.log('3 handler');
+  ctx.body = 'response';
+});
+```
+
+실행 순서:
+
+```
+1 in
+  2 in
+    3 handler   ← 응답 body 세팅
+  2 out
+1 out           ← 마지막
+```
+
+- `await next()` 이전: **downstream** 방향 로직
+- `await next()` 이후: **upstream** 방향 로직
+
+## 왜 이 모델이 유용한가
+
+### 1. 응답 시간 측정
+
+```javascript
+app.use(async (ctx, next) => {
+  const start = Date.now();
+  await next();                             // 실제 handler 실행
+  const ms = Date.now() - start;             // handler 끝난 후
+  ctx.set('X-Response-Time', `${ms}ms`);
+});
+```
+
+### 2. 에러 catch
+
+```javascript
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    ctx.status = err.status || 500;
+    ctx.body = {error: err.message};
+    ctx.app.emit('error', err, ctx);
+  }
+});
+```
+
+### 3. 응답 wrapping
+
+```javascript
+app.use(async (ctx, next) => {
+  await next();
+  if (ctx.body && typeof ctx.body === 'object') {
+    ctx.body = {
+      success: true,
+      data: ctx.body,
+      timestamp: new Date().toISOString(),
+    };
+  }
+});
+```
+
+### 4. 트레이싱
+
+```javascript
+app.use(async (ctx, next) => {
+  const span = tracer.startSpan('http.request');
+  ctx.state.span = span;
+  try {
+    await next();
+    span.setStatus({code: 0});
+  } catch (err) {
+    span.setStatus({code: 2, message: err.message});
+    throw err;
+  } finally {
+    span.end();
+  }
+});
+```
+
+## Middleware 종류
+
+### 함수 (async)
+
+```javascript
+app.use(async (ctx, next) => {
+  // ...
+});
+```
+
+### 함수 (일반 Promise 리턴)
+
+```javascript
+app.use((ctx, next) => {
+  return doAsyncWork().then(() => next());
+});
+```
+
+### Generator function (deprecated, Koa v1 스타일)
+
+Koa v3 는 지원 안 함.
+
+## 조건부 실행
+
+```javascript
+app.use(async (ctx, next) => {
+  if (ctx.path.startsWith('/api')) {
+    await next();
+    return;
+  }
+  ctx.body = 'not api';
+});
+```
+
+## Middleware 등록 순서
+
+```javascript
+app.use(errorHandler);
+app.use(logger);
+app.use(cors());
+app.use(helmet());
+app.use(bodyParser());
+app.use(session);
+app.use(authMiddleware);
+app.use(router.routes());
+app.use(router.allowedMethods());
+```
+
+**관용**:
+1. 최외곽: error handler (모든 예외 catch)
+2. 관측: logger, request-id, tracing
+3. 보안: cors, helmet
+4. 파싱: body parser, cookies
+5. 인증: session, auth
+6. 라우팅: router
+
+## Async 안 하는 미들웨어
+
+```javascript
+app.use((ctx, next) => {
+  ctx.set('X-Powered-By', 'Koa');
+  return next();
+});
+```
+
+`ctx.body` 만 세팅하고 `next()` 없이 종료:
+
+```javascript
+app.use(async (ctx) => {
+  ctx.body = 'Static response';
+});
+```
+
+## `next()` 안 부르면?
+
+```javascript
+app.use(async (ctx, next) => {
+  ctx.body = 'stopped here';
+  // await next() 없음
+});
+
+app.use(async (ctx) => {
+  ctx.body = 'never reached';
+});
+```
+
+두 번째 미들웨어 실행 안 됨. 조건부 short-circuit 에 활용.
+
+## `koa-compose` (여러 미들웨어를 하나로)
+
+```javascript
+const compose = require('koa-compose');
+
+const middlewareStack = compose([
+  errorHandler,
+  logger,
+  bodyParser(),
+]);
+
+app.use(middlewareStack);
+```
+
+Router 내부에서도 활용.
+
+## Conditional middleware (paths)
+
+Koa 자체는 path 별 미들웨어 지원 X. 조건부로 직접:
+
+```javascript
+app.use(async (ctx, next) => {
+  if (!ctx.path.startsWith('/admin')) {
+    return next();
+  }
+  // admin 만
+  if (!ctx.state.user?.isAdmin) {
+    ctx.throw(403);
+  }
+  await next();
+});
+```
+
+또는 `koa-mount`:
+
+```javascript
+const mount = require('koa-mount');
+const adminApp = new Koa();
+adminApp.use(adminAuthMiddleware);
+adminApp.use(adminRouter.routes());
+
+app.use(mount('/admin', adminApp));
+```
+
+## Error propagation
+
+Middleware 안에서 `throw` 하면 upstream 으로 전파. 첫 error handler 가 catch:
+
+```javascript
+app.use(async (ctx, next) => {
+  try { await next(); } catch (err) { /* handle */ }
+});
+
+app.use(async (ctx, next) => {
+  throw new Error('boom');   // 위 catch 로 감
+});
+```
+
+`ctx.throw()` 도 같은 방식 (`http-errors`).
+
+## App emit error
+
+```javascript
+app.on('error', (err, ctx) => {
+  logger.error('Unhandled error:', err);
+  Sentry.captureException(err);
+});
+```
+
+Middleware chain 밖에서도 처리 가능 (default handler 실행 후 emit).
+
+## 공식 미들웨어
+
+`@koa/*` scope:
+
+- **`@koa/router`**: 라우팅
+- **`@koa/cors`**: CORS
+- **`@koa/multer`**: multipart
+- **`@koa/bodyparser`**: body parsing
+
+Community:
+
+- **`koa-helmet`**: 보안 헤더
+- **`koa-session`**: session
+- **`koa-static`**: 정적 파일
+- **`koa-mount`**: sub-app mounting
+- **`koa-compress`**: gzip/brotli
+- **`koa-logger`**: 개발 로그
+- **`koa-pino-logger`**: JSON 로그
+- **`koa-jwt`**: JWT 인증
+- **`koa-ratelimit`**: rate limiting
+- **`koa-passport`**: Passport 통합
+- **`koa-response-time`**: X-Response-Time
+
+## 사용자 정의 미들웨어
+
+옵션 받는 factory 형태 관용:
+
+```javascript
+function requestId(options = {}) {
+  const headerName = options.headerName || 'X-Request-Id';
+
+  return async (ctx, next) => {
+    const id = ctx.get(headerName) || crypto.randomUUID();
+    ctx.state.requestId = id;
+    ctx.set(headerName, id);
+    await next();
+  };
+}
+
+app.use(requestId({headerName: 'X-Trace-ID'}));
+```
+
+## 미들웨어 안에서 next 여러 번 호출
+
+```javascript
+app.use(async (ctx, next) => {
+  await next();
+  await next();   // Error: next() called multiple times
+});
+```
+
+`next` 는 한 번만.
+
+## Middleware 성능
+
+- 각 미들웨어는 async 함수 호출 오버헤드
+- 20 개 넘어가면 latency 눈에 띔
+- 필수만 등록
+
+## 함정
+
+> [!WARNING]
+> **`await next()` 잊으면 chain 이탈**. 다음 미들웨어 실행 안 되고 응답 empty.
+
+> [!CAUTION]
+> **`next()` 두 번 호출 = 오류**. Koa-compose 가 감지.
+
+> [!WARNING]
+> **동기 미들웨어에서 `next()` return 안 하면** 후속 흐름 안 됨. `return next()` 습관.
+
+> [!IMPORTANT]
+> **Middleware 순서**. Error handler outermost, router innermost.
+
+> [!CAUTION]
+> **Middleware 안 blocking I/O 금지**. Sync fs, JSON.parse 큰 payload 등. Event loop 정지.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-context|Koa Context]] - ctx 사용
+- [[koa-router|Koa Router]] - Router 미들웨어
+- [[koa-body|Koa Body Parsing]]
+- [[koa-error-handling|Koa Error Handling]]
+- [[koa-testing|Koa Testing]]
+- [[js-async-await|JavaScript async/await]]
+- [[nestjs-middleware|NestJS Middleware]] - 대비
+- [[nestjs-interceptors|NestJS Interceptors]] - 대비 (Onion 유사)
+- [[fastapi-middleware|FastAPI Middleware]]

@@ -1,0 +1,358 @@
+---
+title: "[Koa] Koa vs Express"
+aliases:
+  - "Koa vs Express"
+  - "Express vs Koa"
+  - "koa express 비교"
+  - "koa express 차이"
+  - "Node.js framework 비교"
+tags: [koa, express, comparison, framework]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "Koa"
+    url: "https://koajs.com/"
+  - title: "Express"
+    url: "https://expressjs.com/"
+  - title: "Koa vs Express"
+    url: "https://github.com/koajs/koa/blob/master/docs/koa-vs-express.md"
+---
+
+## 정의
+
+Koa 와 Express 는 모두 Node.js 웹 프레임워크이지만 **철학과 API 스타일이 다릅니다**. Express 는 오래됐고 방대한 생태계 (2010~), Koa 는 async/await 우선 (2013~). 창시자는 같은 TJ Holowaychuk 이며 Koa 는 Express 의 후계 성격.
+
+## 한눈에 비교
+
+| 축 | Express | Koa |
+|:---|:---|:---|
+| **첫 릴리스** | 2010 | 2013 |
+| **크기** | 500KB+ (deps) | 매우 작음 (~200KB) |
+| **비동기** | callback 기본, async/await 도 가능 | async/await first |
+| **미들웨어 모델** | linear (next()) | onion (await next()) |
+| **Request/Response** | req, res 각각 | ctx (통합) |
+| **에러 처리** | try/catch 어려움 (callback) | async try/catch 자연 |
+| **라우팅** | 내장 (`app.get`) | 별도 (`@koa/router`) |
+| **Body parser** | 내장 (`express.json()`) | 별도 (`@koa/bodyparser`) |
+| **템플릿** | 내장 지원 | 별도 |
+| **정적 파일** | 내장 (`express.static`) | 별도 (`koa-static`) |
+| **커뮤니티** | 매우 큼 | 중간 |
+| **생태계** | 방대 (10,000+ 미들웨어) | 작음 (koa- 프리픽스) |
+| **채택** | 압도적 다수 | 소수 |
+
+## 미들웨어 스타일
+
+### Express
+
+```javascript
+// callback 스타일
+app.get('/users/:id', (req, res, next) => {
+  User.findById(req.params.id, (err, user) => {
+    if (err) return next(err);
+    res.json(user);
+  });
+});
+
+// async 스타일 (수동 try/catch)
+app.get('/users/:id', async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    res.json(user);
+  } catch (err) {
+    next(err);
+  }
+});
+```
+
+Express 는 async error 를 자동으로 안 잡음. `express-async-errors` 패키지 또는 wrapper 필요.
+
+### Koa
+
+```javascript
+router.get('/users/:id', async (ctx) => {
+  const user = await User.findById(ctx.params.id);
+  ctx.body = user;
+});
+```
+
+Async error 는 upstream 으로 자동 전파. 미들웨어에서 `try/catch`.
+
+## Middleware chain
+
+### Express (linear)
+
+```javascript
+app.use((req, res, next) => {
+  console.log('1');
+  next();
+  console.log('1 after');   // 이는 실행되지만 응답 이후 관측 어려움
+});
+
+app.use((req, res, next) => {
+  console.log('2');
+  res.send('done');
+});
+
+// 출력: 1, 2, 1 after (하지만 response 완료 이후)
+```
+
+### Koa (onion)
+
+```javascript
+app.use(async (ctx, next) => {
+  console.log('1 in');
+  await next();
+  console.log('1 out');    // response 이후 확실히 실행
+});
+
+app.use(async (ctx) => {
+  console.log('2');
+  ctx.body = 'done';
+});
+
+// 출력: 1 in, 2, 1 out
+```
+
+Koa 의 onion 모델은 응답 시간 측정, 에러 catch, wrapping 이 자연스럽습니다.
+
+## Response 처리
+
+### Express
+
+```javascript
+app.get('/', (req, res) => {
+  res.status(201);
+  res.set('X-Custom', 'value');
+  res.json({ok: true});
+  // 또는 chain
+  res.status(201).set('X-Custom', 'value').json({ok: true});
+});
+```
+
+`res.send`, `res.json`, `res.render`, `res.redirect` 등 method 다양.
+
+### Koa
+
+```javascript
+router.get('/', async (ctx) => {
+  ctx.status = 201;
+  ctx.set('X-Custom', 'value');
+  ctx.body = {ok: true};   // JSON 자동
+});
+```
+
+`ctx.body` 하나로. Type 자동 감지 (string -> text/html, object -> json).
+
+## Error 처리
+
+### Express
+
+```javascript
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(err.status || 500).json({error: err.message});
+});
+
+// async error 자동 X (v4)
+app.get('/', async (req, res, next) => {
+  try {
+    await doAsyncWork();
+  } catch (err) {
+    next(err);   // 수동
+  }
+});
+```
+
+Express 5 에서 async error 를 자동 처리 예정.
+
+### Koa
+
+```javascript
+// 첫 미들웨어
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    ctx.status = err.status || 500;
+    ctx.body = {error: err.message};
+    ctx.app.emit('error', err, ctx);
+  }
+});
+
+// 그냥 throw
+router.get('/', async (ctx) => {
+  await doAsyncWork();   // 실패 시 자동 upstream
+  ctx.body = 'ok';
+});
+```
+
+## 성능
+
+- Express: baseline. 특별한 최적화 없음.
+- Koa: 조금 빠름 (코어 작음). 미들웨어 오버헤드 감소.
+- Fastify: 훨씬 빠름 (JSON 최적화, 스키마 컴파일). 성능이 최우선이면 Fastify.
+
+## 언제 어느 것을?
+
+### Express 유지 / 선택
+
+- 기존 코드베이스
+- 광범위한 미들웨어 필요 (Passport strategies, 특수 통합)
+- 팀이 Express 익숙
+- 튜토리얼/문서/자료 방대 필요
+- Express 5+ async 개선 후
+
+### Koa 선택
+
+- 새 프로젝트 + async/await 자연스러움 원함
+- 가벼운 코어 + 필요한 것만 조합
+- Onion 모델 (트레이싱, error handling 통일) 이점
+- Express 미들웨어 안 필수
+
+### 대안 고려
+
+- **Fastify**: 성능 최상, schema-first
+- **NestJS**: 대규모 앱 구조, TypeScript, DI
+- **Hono**: Cloudflare Workers / Edge 최적
+- **Elysia**: Bun native
+
+## 코드 예시 나란히
+
+### Hello World
+
+```javascript
+// Express
+const express = require('express');
+const app = express();
+
+app.get('/', (req, res) => res.send('Hello'));
+app.listen(3000);
+```
+
+```javascript
+// Koa
+const Koa = require('koa');
+const Router = require('@koa/router');
+
+const app = new Koa();
+const router = new Router();
+
+router.get('/', ctx => { ctx.body = 'Hello'; });
+
+app.use(router.routes());
+app.listen(3000);
+```
+
+### JSON API
+
+```javascript
+// Express
+app.use(express.json());
+app.post('/users', async (req, res, next) => {
+  try {
+    const user = await User.create(req.body);
+    res.status(201).json(user);
+  } catch (err) {
+    next(err);
+  }
+});
+```
+
+```javascript
+// Koa
+const bodyParser = require('@koa/bodyparser');
+app.use(bodyParser());
+
+router.post('/users', async ctx => {
+  const user = await User.create(ctx.request.body);
+  ctx.status = 201;
+  ctx.body = user;
+});
+```
+
+### Error handler
+
+```javascript
+// Express
+app.use((err, req, res, next) => {
+  res.status(err.status || 500).json({error: err.message});
+});
+```
+
+```javascript
+// Koa (최상단 미들웨어)
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    ctx.status = err.status || 500;
+    ctx.body = {error: err.message};
+  }
+});
+```
+
+### File upload
+
+```javascript
+// Express + multer
+const multer = require('multer');
+const upload = multer({dest: '/uploads/'});
+app.post('/upload', upload.single('file'), (req, res) => {
+  res.json({filename: req.file.filename});
+});
+```
+
+```javascript
+// Koa + @koa/multer
+const multer = require('@koa/multer');
+const upload = multer({dest: '/uploads/'});
+router.post('/upload', upload.single('file'), async ctx => {
+  ctx.body = {filename: ctx.file.filename};
+});
+```
+
+## 마이그레이션 (Express -> Koa)
+
+주요 변환:
+
+1. **`req.method` -> `ctx.method`**, `req.path` -> `ctx.path`
+2. **`req.body` -> `ctx.request.body`**
+3. **`res.status(200).json(x)` -> `ctx.status = 200; ctx.body = x`**
+4. **`(req, res, next)` -> `(ctx, next)`**
+5. **`app.get(...)` -> Router 로 이관**
+6. **Middleware 등록 순서** 재검토 (onion model 로)
+7. **미들웨어 (`express-session`, `helmet`, ...) -> koa 버전**
+
+대규모 앱은 마이그레이션 노력 큼. 새 프로젝트만 Koa 선택 후 기존은 유지가 관용.
+
+## 함정
+
+> [!WARNING]
+> **Express middleware 는 Koa 에서 못 씀**. Express 는 `(req, res, next)`, Koa 는 `(ctx, next)`. koa-connect 로 래핑 가능하지만 완전 X.
+
+> [!CAUTION]
+> **Express 5 는 async 자동 처리**. Express 4 는 아님. 프로젝트 버전 확인.
+
+> [!WARNING]
+> **Koa 는 라우팅/body parser 없음**. Express 에서 온 사람이 자주 실수.
+
+> [!IMPORTANT]
+> **미들웨어 표기법 다름**. Express `app.use(m)`, Koa `app.use(m)` 은 같아 보이지만 signature 다름.
+
+> [!CAUTION]
+> **성능은 프레임워크보다 코드가 지배적**. 프레임워크 선택은 팀/생태계가 우선.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - Koa 개요
+- [[koa-middleware|Koa Middleware]] - Onion model
+- [[koa-context|Koa Context]]
+- [[koa-router|Koa Router]]
+- [[koa-body|Koa Body Parsing]]
+- [[koa-error-handling|Koa Error Handling]]
+- [[koa-testing|Koa Testing]]
+- [[koa-deployment|Koa Deployment]]
+- [[nestjs|NestJS]] - Opinionated framework
+- [[js-async-await|JavaScript async/await]]
+- [[js-callback|JavaScript Callback]]
+- [[js-promise|JavaScript Promise]]

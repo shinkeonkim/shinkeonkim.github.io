@@ -1,0 +1,541 @@
+---
+title: "[NestJS] Deployment (Docker, Kubernetes, PM2)"
+aliases:
+  - "NestJS Deployment"
+  - "NestJS Docker"
+  - "NestJS Kubernetes"
+  - "NestJS PM2"
+  - "NestJS 배포"
+  - "NestJS production"
+tags: [nestjs, deployment, docker, kubernetes, production]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Deployment"
+    url: "https://docs.nestjs.com/faq/deployment"
+  - title: "PM2 Documentation"
+    url: "https://pm2.keymetrics.io/"
+---
+
+## 정의
+
+**NestJS Deployment** 는 프로덕션 환경에서 앱을 배포/운영하기 위한 절차입니다. Docker 이미지 빌드, Kubernetes 매니페스트, PM2 프로세스 관리, graceful shutdown, health check, 로깅, 관측 도구를 포함합니다.
+
+## Build
+
+```bash
+# 프로덕션 빌드
+npm run build     # nest build
+
+# dist/ 에 컴파일된 JS
+node dist/main.js
+```
+
+`nest-cli.json`:
+
+```json
+{
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "compilerOptions": {
+    "deleteOutDir": true,
+    "webpack": false          // SWC (또는 esbuild) 옵션
+  }
+}
+```
+
+## SWC / esbuild (빠른 빌드)
+
+```bash
+npm i -D @swc/cli @swc/core
+```
+
+`nest-cli.json`:
+
+```json
+{
+  "compilerOptions": {
+    "builder": "swc",
+    "typeCheck": true
+  }
+}
+```
+
+**주의**: SWC 는 emitDecoratorMetadata 지원. class-validator 는 여전히 작동.
+
+## Dockerfile (multi-stage)
+
+```dockerfile
+# --- builder ---
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Dependency cache
+COPY package*.json ./
+RUN npm ci
+
+# Build
+COPY . .
+RUN npm run build
+
+# Prisma (있으면)
+RUN npx prisma generate
+
+# 프로덕션 의존성만
+RUN npm ci --omit=dev && npm cache clean --force
+
+# --- runtime ---
+FROM node:20-alpine
+WORKDIR /app
+
+# non-root user
+RUN addgroup -g 1001 -S app && adduser -S app -u 1001
+
+COPY --from=builder --chown=app:app /app/node_modules ./node_modules
+COPY --from=builder --chown=app:app /app/dist ./dist
+COPY --from=builder --chown=app:app /app/package.json ./
+# Prisma
+COPY --from=builder --chown=app:app /app/prisma ./prisma
+
+USER app
+
+EXPOSE 3000
+
+# Graceful shutdown
+CMD ["node", "dist/main"]
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s \
+  CMD wget --spider -q http://localhost:3000/health || exit 1
+```
+
+### `.dockerignore`
+
+```
+node_modules
+dist
+.git
+.env
+.env.*
+*.md
+test
+coverage
+.vscode
+.idea
+```
+
+## Graceful Shutdown
+
+```typescript
+// main.ts
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // Shutdown hooks 활성화
+  app.enableShutdownHooks();
+
+  await app.listen(3000);
+}
+bootstrap();
+```
+
+Provider 에서 `OnApplicationShutdown` 구현:
+
+```typescript
+@Injectable()
+export class DatabaseService implements OnApplicationShutdown {
+  async onApplicationShutdown(signal?: string) {
+    console.log(`Shutting down: ${signal}`);
+    await this.prisma.$disconnect();
+  }
+}
+```
+
+**동작**: SIGTERM 수신 -> 새 요청 accept 중지 -> in-flight 요청 완료 -> shutdown hook 실행 -> 프로세스 종료.
+
+## Health Check
+
+`@nestjs/terminus` + `@nestjs/health-check`:
+
+```bash
+npm i @nestjs/terminus
+```
+
+```typescript
+// health.controller.ts
+import { Controller, Get } from '@nestjs/common';
+import { HealthCheck, HealthCheckService, HttpHealthIndicator, MemoryHealthIndicator } from '@nestjs/terminus';
+import { PrismaHealthIndicator } from './prisma.health';
+
+@Controller('health')
+export class HealthController {
+  constructor(
+    private health: HealthCheckService,
+    private http: HttpHealthIndicator,
+    private memory: MemoryHealthIndicator,
+    private prisma: PrismaHealthIndicator,
+  ) {}
+
+  @Get('live')
+  @HealthCheck()
+  liveness() {
+    return this.health.check([
+      () => this.memory.checkHeap('memory_heap', 250 * 1024 * 1024),
+    ]);
+  }
+
+  @Get('ready')
+  @HealthCheck()
+  readiness() {
+    return this.health.check([
+      () => this.prisma.isHealthy('database'),
+      () => this.http.pingCheck('external_api', 'https://external-api/health'),
+    ]);
+  }
+}
+```
+
+### Kubernetes probe
+
+- **livenessProbe**: 앱 살아있는가 (fail 시 재시작)
+- **readinessProbe**: 트래픽 받을 준비 (fail 시 LB 에서 제외)
+- **startupProbe**: 초기 부팅 (긴 초기화)
+
+## Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: myapp}
+  template:
+    metadata:
+      labels: {app: myapp}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: app
+          image: myrepo/myapp:v1.2.3
+          ports: [{containerPort: 3000}]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: myapp-secrets, key: db-url}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: {name: myapp-secrets, key: jwt-secret}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: 1, memory: 1Gi}
+          livenessProbe:
+            httpGet: {path: /health/live, port: 3000}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /health/ready, port: 3000}
+            periodSeconds: 5
+          startupProbe:
+            httpGet: {path: /health/live, port: 3000}
+            failureThreshold: 30
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]   # LB 제외 대기
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+spec:
+  selector: {app: myapp}
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.example.com]
+      secretName: myapp-tls
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: myapp, port: {number: 80}}
+```
+
+## HPA
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: myapp-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+```
+
+## PM2 (Node 프로세스 관리자)
+
+VM 배포 시 사용. Kubernetes 는 kubelet 이 그 역할.
+
+```bash
+npm i -g pm2
+
+pm2 start dist/main.js --name myapp -i max   # max = CPU 개수
+pm2 status
+pm2 logs myapp
+pm2 reload myapp   # zero-downtime reload
+pm2 stop myapp
+pm2 startup       # systemd 등록
+pm2 save          # 재부팅 시 복원
+```
+
+`ecosystem.config.js`:
+
+```javascript
+module.exports = {
+  apps: [{
+    name: 'myapp',
+    script: 'dist/main.js',
+    instances: 'max',
+    exec_mode: 'cluster',
+    env_production: {
+      NODE_ENV: 'production',
+      PORT: 3000,
+    },
+    max_memory_restart: '1G',
+    kill_timeout: 30000,
+    listen_timeout: 10000,
+    error_file: '/var/log/myapp/error.log',
+    out_file: '/var/log/myapp/out.log',
+  }],
+};
+```
+
+## 로깅 (JSON, structured)
+
+### NestJS 11 native JSON logger
+
+```typescript
+// main.ts
+import { ConsoleLogger, LogLevel } from '@nestjs/common';
+
+const app = await NestFactory.create(AppModule, {
+  logger: new ConsoleLogger({
+    json: true,
+    logLevels: ['error', 'warn', 'log'],
+  }),
+});
+```
+
+### nestjs-pino (권장)
+
+```bash
+npm i nestjs-pino pino-http
+```
+
+```typescript
+import { LoggerModule } from 'nestjs-pino';
+
+@Module({
+  imports: [
+    LoggerModule.forRoot({
+      pinoHttp: {
+        level: process.env.LOG_LEVEL || 'info',
+        transport: process.env.NODE_ENV === 'development'
+          ? { target: 'pino-pretty' }
+          : undefined,
+        redact: ['req.headers.authorization'],
+      },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+`main.ts`:
+
+```typescript
+const app = await NestFactory.create(AppModule, {bufferLogs: true});
+app.useLogger(app.get(Logger));
+```
+
+## OpenTelemetry
+
+```bash
+npm i @opentelemetry/api @opentelemetry/sdk-node \
+  @opentelemetry/auto-instrumentations-node \
+  @opentelemetry/exporter-trace-otlp-http
+```
+
+```typescript
+// tracing.ts
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+
+const sdk = new NodeSDK({
+  traceExporter: new OTLPTraceExporter({
+    url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+  }),
+  instrumentations: [getNodeAutoInstrumentations()],
+});
+
+sdk.start();
+```
+
+`main.ts` 최상단에 `import './tracing';` (다른 import 보다 먼저).
+
+## Sentry
+
+```bash
+npm i @sentry/node
+```
+
+```typescript
+import * as Sentry from '@sentry/node';
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  tracesSampleRate: 0.1,
+});
+
+// AllExceptionsFilter 안에서
+Sentry.captureException(exception);
+```
+
+## Database Migration
+
+### Prisma
+
+```bash
+# 배포 파이프라인에서
+npx prisma migrate deploy
+```
+
+### TypeORM
+
+```bash
+npm run typeorm migration:run
+```
+
+### Kubernetes init container
+
+```yaml
+initContainers:
+  - name: migrate
+    image: myrepo/myapp:v1.2.3
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+    env:
+      - name: DATABASE_URL
+        valueFrom:
+          secretKeyRef: {name: myapp-secrets, key: db-url}
+containers:
+  - name: app
+    ...
+```
+
+## CI/CD 예시 (GitHub Actions)
+
+```yaml
+name: deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: |
+            ghcr.io/myorg/myapp:${{ github.sha }}
+            ghcr.io/myorg/myapp:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/setup-kubectl@v3
+      - uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+      - run: |
+          kubectl set image deployment/myapp app=ghcr.io/myorg/myapp:${{ github.sha }}
+          kubectl rollout status deployment/myapp --timeout=5m
+```
+
+## 함정
+
+> [!WARNING]
+> **`enableShutdownHooks()` 안 부르면 SIGTERM 무시**. `docker stop` 이 SIGKILL 로 강제 종료 -> in-flight 요청 손실.
+
+> [!CAUTION]
+> **PM2 는 이미 K8s 컨테이너 안에는 불필요**. kubelet 이 프로세스 관리. PM2 는 VM 배포용.
+
+> [!WARNING]
+> **환경변수 secret 을 이미지에 굽지 마세요**. 항상 runtime injection.
+
+> [!IMPORTANT]
+> **`terminationGracePeriodSeconds` > shutdown hook 완료 시간**. K8s 가 강제 종료하기 전에 정리.
+
+> [!CAUTION]
+> **Prisma binary target**. Alpine + linux-musl 명시 필요. 안 그러면 런타임 오류.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-config|Config]] - env 관리
+- [[nestjs-database|Database]] - migration
+- [[nestjs-microservices|Microservices]]
+- [[nestjs-testing|Testing]] - CI
+- [[nestjs-modules|Modules]] - AppModule
+- [[kubernetes|Kubernetes]]
+- [[k8s-deployment|K8s Deployment]]
+- [[k8s-service|K8s Service]]
+- [[k8s-ingress|K8s Ingress]]
+- [[container-image-best-practices|Container Image Best Practices]]
+- [[oci-image|OCI Image]]
+- [[fastapi-deployment|FastAPI Deployment]] - 대비
+- [[flask-deployment|Flask Deployment]] - 대비

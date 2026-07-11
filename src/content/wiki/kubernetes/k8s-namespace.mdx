@@ -1,0 +1,365 @@
+---
+title: "[Kubernetes] Namespace"
+aliases:
+  - "Kubernetes Namespace"
+  - "k8s namespace"
+  - "kubectl namespace"
+  - "네임스페이스"
+  - "kubectl ns"
+  - "default namespace"
+  - "kube-system"
+tags: [kubernetes, namespace, isolation, multi-tenancy]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Kubernetes Namespaces"
+    url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/"
+  - title: "Resource Quotas"
+    url: "https://kubernetes.io/docs/concepts/policy/resource-quotas/"
+  - title: "Hierarchical Namespaces (HNC)"
+    url: "https://github.com/kubernetes-sigs/hierarchical-namespaces"
+---
+
+## 정의
+
+**Namespace** 는 같은 물리 클러스터 안에서 리소스 (Pod, Service, ConfigMap 등) 를 **논리적으로 격리** 하는 단위입니다. 이름 충돌 회피, [[k8s-rbac|RBAC]] 스코프, [[k8s-resource-management|ResourceQuota]], [[k8s-network-policy|NetworkPolicy]] 의 기본 경계로 사용됩니다.
+
+## 왜 필요한가
+
+- **환경/팀 분리**: dev / stg / prod 를 한 클러스터에서 격리
+- **이름 충돌 회피**: 같은 이름 (`web`) 을 여러 팀이 각자 namespace 에 사용
+- **리소스 제한**: 팀별 CPU/메모리 총량 상한
+- **RBAC 스코프**: 특정 namespace 에만 권한 부여
+- **NetworkPolicy 스코프**: namespace 안/밖 트래픽 제어
+- **관측성 분리**: Prometheus / Loki 등에서 namespace 라벨로 필터
+
+## 기본 namespace
+
+새 클러스터에는 4개의 시스템 namespace 가 있습니다.
+
+| Namespace | 역할 |
+|:---|:---|
+| **`default`** | Namespace 지정 없이 만든 리소스 저장소. 프로덕션은 사용 지양 |
+| **`kube-system`** | 클러스터 컴포넌트 (kube-proxy, CoreDNS, kubelet ...) |
+| **`kube-public`** | 모든 사용자 (인증 안 된 사용자 포함) 가 읽는 리소스 |
+| **`kube-node-lease`** | Node heartbeat lease 저장 (성능 최적화) |
+
+`default` 에 앱을 배포하지 마세요. 항상 명시적 namespace.
+
+## 생성 및 조작
+
+### CLI
+
+```bash
+# 생성
+kubectl create namespace dev
+kubectl create namespace stg
+kubectl create namespace prod
+
+# 목록
+kubectl get namespaces
+kubectl get ns   # 축약
+
+# 삭제 (그 안의 모든 리소스도 함께 삭제!)
+kubectl delete namespace dev
+
+# 특정 namespace 리소스 조회
+kubectl get pods -n dev
+kubectl get all -n prod
+```
+
+### YAML
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels:
+    environment: development
+    team: platform
+  annotations:
+    description: "Development namespace for platform team"
+```
+
+리소스에 명시:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod   # 명시!
+spec:
+  ...
+```
+
+명시 안 하면 `default` 에 생성됩니다.
+
+## Context 전환
+
+매 명령마다 `-n prod` 붙이는 대신 default namespace 를 변경:
+
+```bash
+# 확인
+kubectl config current-context
+kubectl config view --minify | grep namespace:
+
+# 변경
+kubectl config set-context --current --namespace=prod
+
+# 편의 도구: kubens
+kubens prod
+
+# 편의 도구: kubectx (context 전환)
+kubectx aws-prod
+```
+
+`kubectx / kubens` (ahmetb) 는 클러스터 관리자의 필수 도구.
+
+## Namespace 스코프 vs 클러스터 스코프
+
+**Namespace scoped** (namespace 안에 속함):
+- Pod, Service, Deployment, StatefulSet, DaemonSet
+- ConfigMap, Secret
+- PVC, ServiceAccount
+- Role, RoleBinding
+- NetworkPolicy, Ingress
+- Job, CronJob
+- HPA, PDB
+- Endpoints
+
+**Cluster scoped** (namespace 없음):
+- Node, Namespace 자체
+- PersistentVolume (PV)
+- StorageClass, VolumeAttachment
+- ClusterRole, ClusterRoleBinding
+- CustomResourceDefinition (CRD)
+- ValidatingWebhookConfiguration, MutatingWebhookConfiguration
+- APIService, ComponentStatus
+- PriorityClass
+
+목록 확인:
+
+```bash
+kubectl api-resources --namespaced=true
+kubectl api-resources --namespaced=false
+```
+
+## DNS
+
+Namespace 는 클러스터 DNS 에 반영. 서비스 완전 이름:
+
+```
+<service-name>.<namespace>.svc.cluster.local
+```
+
+예: `db.data.svc.cluster.local` 은 `data` namespace 의 `db` service.
+
+### 같은 namespace 안
+
+```bash
+# app-ns 안의 두 pod
+curl http://api   # 같은 namespace 내에서는 short name OK
+```
+
+### 다른 namespace 참조
+
+```bash
+# frontend namespace 에서 backend namespace 의 서비스 호출
+curl http://api.backend
+curl http://api.backend.svc.cluster.local
+```
+
+## ResourceQuota (팀별 리소스 상한)
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: dev
+spec:
+  hard:
+    requests.cpu: "10"       # 총 CPU 요청 상한
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    pods: "50"                # 총 Pod 수
+    services: "10"
+    services.loadbalancers: "2"
+    persistentvolumeclaims: "10"
+    configmaps: "50"
+    secrets: "50"
+```
+
+한도 초과 시 새 Pod 생성 거부.
+
+## LimitRange (Pod/컨테이너별 기본값)
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: dev
+spec:
+  limits:
+    - type: Container
+      default:                # limit 안 지정 시 이 값
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:         # request 안 지정 시
+        cpu: 100m
+        memory: 128Mi
+      max:                    # 최대 허용
+        cpu: 2
+        memory: 4Gi
+      min:                    # 최소
+        cpu: 10m
+        memory: 32Mi
+```
+
+개발자가 리소스 요청을 안 넣어도 sane defaults.
+
+## NetworkPolicy scope
+
+기본적으로 namespace 는 네트워크 격리를 **하지 않습니다** (모든 Pod 간 통신 허용). 격리하려면 [[k8s-network-policy|NetworkPolicy]]:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-namespace
+  namespace: prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              environment: production
+```
+
+`prod` namespace 는 자기 자신 + `environment: production` 라벨의 namespace 만 허용.
+
+## RBAC 스코프
+
+Namespace 스코프 role:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: dev
+  name: pod-reader
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+```
+
+`dev` namespace 에서만 유효. 자세한 것은 [[k8s-rbac|RBAC]] 참조.
+
+## Multi-tenancy 패턴
+
+### 1. Namespace per team (가장 흔함)
+
+```
+team-alpha/
+team-beta/
+team-gamma/
+```
+
+- 팀별 RBAC + ResourceQuota + NetworkPolicy
+- 실행 오버헤드 최소
+- Kernel 격리 없음 (같은 노드에 다른 팀 Pod 이 함께)
+
+### 2. Namespace per environment
+
+```
+dev/
+stg/
+prod/
+```
+
+- 관용적. 그러나 dev 부하가 prod 에 영향 가능
+- 진짜 격리는 클러스터 분리 (prod 는 별 클러스터)
+
+### 3. Hierarchical Namespaces (HNC, sigs)
+
+Namespace 를 트리로 조직:
+
+```
+team-alpha/
+  ├─ team-alpha-dev/
+  ├─ team-alpha-stg/
+  └─ team-alpha-prod/
+```
+
+정책 상속 (RoleBinding, NetworkPolicy 등). `kubectl-hns` 로 관리.
+
+### 4. Virtual Cluster (vcluster)
+
+한 namespace 안에 완전한 가상 클러스터 실행. 강한 격리.
+
+## Namespace 삭제 시 주의
+
+- **모든 리소스 재귀 삭제**. Pod, Service, PVC 등 모두.
+- **Finalizer 가 걸린 리소스는 stuck**. `kubectl get ns dev -o yaml` 로 finalizer 확인 후 수동 제거.
+- **CRD instance 는 삭제 순서에 따라 위험**. CRD 자체가 cluster-scoped 이므로 남을 수 있음.
+
+Stuck namespace 정리 (긴급):
+
+```bash
+kubectl get namespace stuck-ns -o json > stuck.json
+# stuck.json 의 spec.finalizers 를 [] 로 변경 후
+kubectl replace --raw "/api/v1/namespaces/stuck-ns/finalize" -f stuck.json
+```
+
+**위험한 조치**. 리소스가 진짜 정리 안 됐을 수 있음.
+
+## Namespace 라벨 활용
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    environment: production
+    tier: critical
+    team: platform
+    pod-security.kubernetes.io/enforce: restricted
+```
+
+Pod Security Standards 자동 적용 (PSA), namespaceSelector 활용, Cost allocation 태깅.
+
+## 함정
+
+> [!WARNING]
+> **default namespace 남용 금지**. 팀/환경 격리가 사라짐.
+
+> [!CAUTION]
+> **Namespace 삭제 = 안의 모든 리소스 삭제**. 실수 방지: 프로덕션 클러스터에는 sensitive namespace 에 `kubectl-neat` / OPA 로 delete 제한.
+
+> [!WARNING]
+> **Cluster-scoped 리소스 (PV, ClusterRole) 는 namespace 로 격리 안 됨**. RBAC 로 개별 관리.
+
+> [!IMPORTANT]
+> **Namespace 격리는 네트워크 자동 격리 아님**. NetworkPolicy 별도 설정.
+
+> [!CAUTION]
+> **네트워크 이름 충돌**. 같은 이름의 Service 를 여러 namespace 에 두면 short name 호출 시 자기 namespace 우선. 명시적 FQDN 사용.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[k8s-architecture|Kubernetes Architecture]]
+- [[k8s-rbac|RBAC]] - Namespace scoped role
+- [[k8s-network-policy|NetworkPolicy]] - Namespace 간 네트워크
+- [[k8s-resource-management|Resource Management]] - ResourceQuota, LimitRange
+- [[k8s-labels-selectors|Labels & Selectors]] - Namespace label
+- [[k8s-service|Service]] - Namespace 별 DNS
+- [[kubectl|kubectl]] - kubectl 조작

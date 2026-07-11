@@ -1,0 +1,340 @@
+---
+title: "[AWS] CloudTrail (API Activity Logging)"
+aliases:
+  - "AWS CloudTrail"
+  - "CloudTrail"
+  - "AWS API logging"
+  - "CloudTrail Lake"
+  - "CloudTrail Data Events"
+  - "CloudTrail Insights"
+  - "CloudTrail Trail"
+  - "CloudTrail Event History"
+  - "AWS 감사 로그"
+  - "AWS API 감사"
+tags: [aws, cloud, security, audit, logging, governance]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "AWS CloudTrail User Guide"
+    url: "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-user-guide.html"
+  - title: "CloudTrail Lake"
+    url: "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-lake.html"
+  - title: "CloudTrail Insights"
+    url: "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-insights-events-with-cloudtrail.html"
+  - title: "CloudTrail Data Events"
+    url: "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html"
+---
+
+## 정의
+
+**AWS CloudTrail** 은 AWS 계정의 **API 호출 및 사용자 활동을 기록** 하는 감사 로깅 서비스입니다. "**누가, 언제, 어디서, 어떤 API 를, 어떤 리소스에 대해 호출했는가**" 에 답하기 위한 신뢰할 수 있는 이벤트 이력을 자동 수집합니다.
+
+**핵심 목적**: 사후 조사 (incident response), 컴플라이언스 감사, 이상 활동 탐지, 리소스 변경 추적.
+
+## 왜 CloudTrail 인가
+
+- **자동 활성**: 모든 AWS 계정에서 **Event history** (90일) 기본 켜져 있음
+- **모든 서비스 커버**: 400+ AWS 서비스의 API 호출
+- **IAM 통합**: 어떤 principal 이 호출했는지 (user, role, service, root)
+- **네트워크 정보**: source IP, user agent
+- **리소스 변경**: 어떤 리소스가 create/modify/delete 되었는지
+- **컴플라이언스 필수**: PCI, HIPAA, SOC, ISO 등 모든 프레임워크가 요구
+
+## 이벤트 종류
+
+### 1. Management Events (기본)
+
+리소스 자체를 관리하는 API. `CreateBucket`, `RunInstances`, `AttachRolePolicy`, `PutBucketPolicy` 등.
+
+- **Read**: `Get*`, `List*`, `Describe*`
+- **Write**: `Create*`, `Delete*`, `Modify*`, `Attach*`
+
+기본 활성. Free tier (첫 trail).
+
+### 2. Data Events (선택)
+
+**리소스 안의 데이터** 관련 API. 대량 발생.
+
+- **S3 Object**: `GetObject`, `PutObject`, `DeleteObject`
+- **Lambda**: `Invoke`
+- **DynamoDB Item**: `PutItem`, `GetItem`
+- **RDS Data API**: `ExecuteStatement`
+- **VPC 관련**: Flow logs, DNS
+- **Bedrock Model Invocation**
+- **S3 Vector Query**
+
+**추가 요금**. 큰 볼륨이라 필요한 리소스만 명시적 활성.
+
+### 3. Insights Events (선택)
+
+**비정상 API 호출 패턴 자동 감지**. 예: `TerminateInstances` 가 평소 대비 폭증.
+
+- 머신러닝 기반 baseline
+- 별도 요금
+- Management/Data 모두 대상
+
+## Trail 이란
+
+CloudTrail 이벤트를 **저장/전달** 하는 구성. 트레일은 3 종류 대상:
+
+- **S3 bucket**: 장기 저장 (필수)
+- **CloudWatch Logs**: 실시간 스트림 + Insight 쿼리
+- **EventBridge**: 룰 기반 자동 대응 (Lambda 트리거)
+
+### Trail 유형
+
+**Single-region trail**: 한 리전만
+**Multi-region trail**: 모든 리전 (권장)
+**Organization trail**: AWS Organizations 전체 계정 (권장 for enterprise)
+
+## Event History (기본 90일)
+
+콘솔에서 즉시 조회 가능한 최근 90일 이력. **모든 계정 기본 활성, 무료**.
+
+- Management events 만
+- CloudTrail Lake 나 트레일 안 만들어도 사용 가능
+- **90일 이상 저장 필요 시 반드시 Trail 활성** (S3 백업)
+
+## Trail 생성
+
+```bash
+aws cloudtrail create-trail \
+  --name org-trail \
+  --s3-bucket-name my-cloudtrail-bucket \
+  --is-multi-region-trail \
+  --is-organization-trail \
+  --enable-log-file-validation \
+  --kms-key-id arn:aws:kms:...:key/xxx \
+  --cloud-watch-logs-log-group-arn arn:aws:logs:...:log-group:CloudTrail/logs \
+  --cloud-watch-logs-role-arn arn:aws:iam::...:role/CloudTrailToCloudWatch
+
+aws cloudtrail start-logging --name org-trail
+```
+
+- `enable-log-file-validation`: 로그 무결성 서명 (**변조 감지**)
+- `kms-key-id`: 로그 파일 KMS 암호화
+- `is-organization-trail`: 조직 전체 계정 수집
+
+## Log 예시
+
+```json
+{
+  "eventVersion": "1.09",
+  "userIdentity": {
+    "type": "IAMUser",
+    "principalId": "AIDAxxx",
+    "arn": "arn:aws:iam::123456789012:user/alice",
+    "accountId": "123456789012",
+    "userName": "alice"
+  },
+  "eventTime": "2026-07-07T10:15:32Z",
+  "eventSource": "s3.amazonaws.com",
+  "eventName": "DeleteBucket",
+  "awsRegion": "us-east-1",
+  "sourceIPAddress": "203.0.113.5",
+  "userAgent": "aws-cli/2.15.0",
+  "requestParameters": {
+    "bucketName": "my-critical-bucket"
+  },
+  "responseElements": null,
+  "requestID": "abc123...",
+  "eventID": "xyz789...",
+  "readOnly": false,
+  "resources": [
+    {
+      "ARN": "arn:aws:s3:::my-critical-bucket",
+      "accountId": "123456789012",
+      "type": "AWS::S3::Bucket"
+    }
+  ],
+  "eventType": "AwsApiCall",
+  "recipientAccountId": "123456789012"
+}
+```
+
+## CloudTrail Lake
+
+CloudTrail 이벤트를 **관리형 데이터 레이크** 로 저장 후 SQL 쿼리.
+
+```sql
+-- 예: 지난 7일 root 사용자 활동
+SELECT eventTime, eventSource, eventName, sourceIPAddress
+FROM eds-abc-123
+WHERE eventTime > timestamp '2026-06-30 00:00:00'
+  AND userIdentity.type = 'Root'
+ORDER BY eventTime DESC;
+
+-- IAM 정책 변경 이력
+SELECT eventTime, userIdentity.arn, eventName, requestParameters
+FROM eds-abc-123
+WHERE eventName IN ('PutRolePolicy', 'AttachRolePolicy', 'DetachRolePolicy', 'DeleteRolePolicy')
+  AND eventTime > timestamp '2026-01-01 00:00:00';
+```
+
+### Lake 특징
+
+- **최대 10년 보존** (표준 저장)
+- **SQL 인터페이스** (Athena 없이)
+- **Cross-account, cross-region 통합** 이벤트 store
+- **CloudTrail + 외부 이벤트** 지원 (컨피그 이벤트, 감사 소스)
+- **Event data store** 리소스로 관리
+
+**요금**: 인제스션 GB 당, 저장 GB-월, 쿼리 스캔 GB.
+
+## CloudTrail Insights
+
+비정상 활동 자동 감지. 예:
+- `TerminateInstances` 호출 급증
+- `AssumeRole` 실패 급증
+- 특정 사용자의 unusual behavior
+
+Insight 감지 시 별도 로그 파일 + EventBridge 이벤트.
+
+## S3 저장 (백업 저장소)
+
+Trail 이 S3 에 로그 파일 저장. 폴더 구조:
+
+```
+s3://my-cloudtrail-bucket/
+├── AWSLogs/
+│   └── 123456789012/
+│       └── CloudTrail/
+│           └── us-east-1/
+│               └── 2026/07/07/
+│                   └── 123456789012_CloudTrail_us-east-1_20260707T1015Z_xxx.json.gz
+└── AWSLogs/
+    └── 123456789012/
+        └── CloudTrail-Digest/    ← log file validation digest
+```
+
+- **`.json.gz` 압축**
+- **매 5분 (또는 15분) 저장**
+- **Digest** (log file validation) 로 위조 감지
+
+## 무결성 검증
+
+```bash
+aws cloudtrail validate-logs \
+  --trail-arn arn:aws:cloudtrail:us-east-1:123456789012:trail/org-trail \
+  --start-time 2026-07-01T00:00:00Z \
+  --end-time 2026-07-07T00:00:00Z
+```
+
+Digest 파일이 SHA-256 해시 + RSA 서명. 로그 파일 변조/삭제 감지.
+
+## EventBridge 통합
+
+CloudTrail 이벤트를 실시간으로 EventBridge 에.
+
+```json
+{
+  "source": ["aws.s3"],
+  "detail-type": ["AWS API Call via CloudTrail"],
+  "detail": {
+    "eventSource": ["s3.amazonaws.com"],
+    "eventName": ["DeleteBucket", "DeleteObject"]
+  }
+}
+```
+
+Lambda 로 자동 대응 (예: `DeleteBucket` 감지 -> Slack 알림, 관리자 승인).
+
+## CloudWatch Logs 통합
+
+CloudWatch Insights 로 실시간 쿼리:
+
+```
+fields @timestamp, userIdentity.arn, eventName, sourceIPAddress
+| filter eventName = "ConsoleLogin"
+| filter responseElements.ConsoleLogin = "Success"
+| stats count(*) by userIdentity.arn
+| sort by count desc
+```
+
+Metric Filter 로 CloudWatch alarm 도.
+
+## 대표 활용
+
+### 1. Root 활동 감지
+
+Root 로 로그인 = 즉시 alert. 대부분 root 는 만들어놓고 안 씀. 사용 감지는 침해 신호.
+
+```json
+{
+  "source": ["aws.signin"],
+  "detail-type": ["AWS Console Sign In via CloudTrail"],
+  "detail": {
+    "userIdentity": { "type": ["Root"] }
+  }
+}
+```
+
+### 2. IAM 변경 알림
+
+Role, policy 변경 = 관리자 승인 필요.
+
+### 3. 리소스 삭제 감사
+
+`Delete*` API 를 CloudTrail Lake 에 유지 -> 사후 조사.
+
+### 4. 컴플라이언스 증거
+
+감사인에게 "지난 1년간 이 S3 버킷에 접근한 principal 목록" 을 SQL 로 응답.
+
+## Governance 4 서비스 비교
+
+**CloudTrail** 은 4 개 서비스 (CloudTrail, Config, Artifact, Audit Manager) 중 **API 호출/사용자 활동 기록** 담당.
+
+| 서비스 | 역할 | 무엇을 수집 |
+|:---|:---|:---|
+| **CloudTrail** | API 호출 로깅 | 누가/언제/어떤 API/어떤 리소스 |
+| **Config** | 리소스 구성 변경 | 리소스의 현재/과거 설정, 정책 위반 |
+| **Artifact** | AWS 자체 컴플라이언스 문서 | ISO, SOC, PCI 등 AWS 인증서 다운로드 |
+| **Audit Manager** | 감사 자동화 | CT + Config 를 프레임워크 기반 감사 보고서 자동 컴파일 |
+
+자세한 것은 [[aws-audit-manager|Audit Manager]] 참조.
+
+## 요금
+
+- **첫 trail**: management event 무료
+- **추가 trail**: management event 100만당 (~2 USD)
+- **Data events**: 100만당 (~0.1 USD, 서비스 별)
+- **Insights**: 분석된 100만 event 당
+- **CloudTrail Lake**:
+  - 인제스션 GB 당
+  - 저장 GB-월
+  - 쿼리 스캔 GB 당
+- **S3 저장 요금** 별도
+
+## 함정
+
+> [!WARNING]
+> **Multi-region trail 안 켜면** 다른 리전 활동 miss. 반드시 multi-region.
+
+> [!CAUTION]
+> **Data events 를 다 켜면 요금 폭발**. 대상 리소스 명시적 선택.
+
+> [!WARNING]
+> **S3 저장 후 삭제 정책 (lifecycle)** 안 걸면 무한 축적. 필요 보존 기간만 S3 Standard, 이후 Glacier.
+
+> [!IMPORTANT]
+> **Log file validation 활성 필수**. 컴플라이언스 감사인은 무결성 요구.
+
+> [!CAUTION]
+> **KMS 암호화 후 KMS 키 삭제 시 로그 접근 불가**. Key policy 관리 신중.
+
+> [!WARNING]
+> **Root 활동 알림 안 걸면** 침해 감지 지연. EventBridge + SNS 필수.
+
+## 관련 위키
+
+- [[aws-config|AWS Config]] - 리소스 구성 변경 (짝)
+- [[aws-audit-manager|Audit Manager]] - CloudTrail 을 감사 증거로
+- [[aws-artifact|Artifact]] - AWS 자체 컴플라이언스
+- [[aws-iam|IAM]] - Principal 정보 소스
+- [[aws-s3|S3]] - 로그 저장소
+- [[aws-cloudwatch|CloudWatch]] - Logs, Metric Filter, Alarm
+- [[aws-eventbridge|EventBridge]] - 실시간 자동 대응
+- [[aws-kms|KMS]] - 로그 암호화
+- [[aws-lambda|Lambda]] - 이벤트 응답
+- [[aws-sns|SNS]] - 알림

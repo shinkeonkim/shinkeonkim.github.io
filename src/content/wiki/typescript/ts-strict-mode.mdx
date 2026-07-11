@@ -1,0 +1,348 @@
+---
+title: "[TypeScript] Strict Mode & tsconfig"
+aliases:
+  - "TypeScript Strict Mode"
+  - "TS strict"
+  - "strictNullChecks"
+  - "noImplicitAny"
+  - "strictFunctionTypes"
+  - "noUncheckedIndexedAccess"
+  - "TypeScript tsconfig"
+  - "TypeScript compiler options"
+  - "TS 엄격 모드"
+tags: [typescript, tsconfig, strict, compiler]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Compiler Options"
+    url: "https://www.typescriptlang.org/tsconfig"
+  - title: "TypeScript Strict Options"
+    url: "https://www.typescriptlang.org/tsconfig#strict"
+---
+
+## 정의
+
+**Strict Mode** 는 여러 엄격한 타입 검사 플래그를 한 번에 켜는 `tsconfig.json` 옵션 (`strict: true`) 입니다. 강력한 타입 안전성을 제공하지만, 기존 코드베이스에는 대량의 오류를 발생시킬 수 있어 도입 시 계획이 필요합니다.
+
+## `strict: true` 로 켜지는 것
+
+```json
+{
+  "compilerOptions": {
+    "strict": true
+  }
+}
+```
+
+이는 다음을 모두 활성화합니다:
+
+- `noImplicitAny`
+- `strictNullChecks`
+- `strictFunctionTypes`
+- `strictBindCallApply`
+- `strictPropertyInitialization`
+- `noImplicitThis`
+- `useUnknownInCatchVariables`
+- `alwaysStrict`
+
+각각을 개별로 켜기도 가능.
+
+## `noImplicitAny`
+
+암묵적 `any` 를 금지.
+
+```typescript
+function log(msg) {            // 오류: msg 의 타입이 any
+  console.log(msg);
+}
+
+function log(msg: string) {    // OK
+  console.log(msg);
+}
+```
+
+**함정**: 마이그레이션 초기에는 많은 오류. `// @ts-nocheck` 나 파일 단위 `any` 로 임시 완화.
+
+## `strictNullChecks`
+
+`null` 과 `undefined` 를 값 있는 타입에 포함 안 함.
+
+```typescript
+let name: string = null;       // 오류
+let name: string | null = null;   // OK
+
+function greet(name: string) { ... }
+greet(null);                    // 오류
+greet(undefined);               // 오류
+```
+
+`Array.prototype.find` 등이 자동으로 `T | undefined` 리턴:
+
+```typescript
+const users = [{id: 1}, {id: 2}];
+const found = users.find(u => u.id === 3);
+found.id;   // 오류: found 는 undefined 일 수 있음
+
+if (found) {
+  found.id;   // OK
+}
+```
+
+**가장 중요한 옵션**. 반드시 켜세요.
+
+## `strictFunctionTypes`
+
+함수 매개변수 타입을 **contravariant** 로 검사 (더 엄격).
+
+```typescript
+type Animal = {name: string};
+type Dog = {name: string; bark(): void};
+
+let f: (a: Animal) => void = (d: Dog) => d.bark();   // 오류 (strictFunctionTypes)
+```
+
+이 옵션 없이는 bivariant (덜 엄격) 로 허용됨. 안전성을 위해 켜세요.
+
+**예외**: method 시그니처 (`interface X { method(a: A): void }`) 는 여전히 bivariant. 함수 필드 (`interface X { method: (a: A) => void }`) 만 strict.
+
+## `strictBindCallApply`
+
+`fn.call`, `fn.apply`, `fn.bind` 를 엄격 검사.
+
+```typescript
+function greet(name: string, age: number) { ... }
+
+greet.call(null, "kim", 30);    // OK
+greet.call(null, "kim");         // 오류: age 누락
+greet.call(null, "kim", "thirty");   // 오류: age 타입 불일치
+```
+
+## `strictPropertyInitialization`
+
+Class field 가 constructor 에서 반드시 초기화.
+
+```typescript
+class User {
+  name: string;                  // 오류: constructor 에서 초기화 안 함
+  email: string = "";             // OK: 기본값
+  age!: number;                   // OK: definite assignment (외부에서 초기화 보장)
+
+  constructor(name: string) {
+    this.name = name;             // OK: constructor 에서
+  }
+}
+```
+
+## `noImplicitThis`
+
+`this` 의 타입이 암묵적 any 인 경우 오류.
+
+```typescript
+function bad() {
+  console.log(this.x);   // 오류: this 가 any
+}
+
+function good(this: {x: number}) {
+  console.log(this.x);   // OK
+}
+```
+
+## `useUnknownInCatchVariables`
+
+`catch` 절의 예외를 `any` 대신 `unknown` 으로.
+
+```typescript
+try {
+  ...
+} catch (e) {
+  e.message;              // 오류 (useUnknownInCatchVariables)
+  if (e instanceof Error) {
+    e.message;            // OK
+  }
+}
+```
+
+TS 4.4+ 에 도입. `strict: true` 로 자동 활성.
+
+## `alwaysStrict`
+
+Emit 되는 JS 에 `"use strict"` 자동 삽입 + parse 시 strict mode.
+
+## Strict 외 자주 켜는 옵션
+
+### `noUncheckedIndexedAccess`
+
+배열/객체 인덱스 접근이 `T | undefined` 를 리턴.
+
+```typescript
+const arr: number[] = [1, 2, 3];
+const x = arr[0];   // strict 만: number
+                     // + noUncheckedIndexedAccess: number | undefined
+```
+
+```typescript
+const map: Record<string, string> = {};
+const y = map["nokey"];   // + noUncheckedIndexedAccess: string | undefined
+```
+
+실전에서는 배열 접근이 자주 `undefined` 를 반환하므로 켜는 편이 안전. 하지만 for loop 등 이미 안전한 접근도 오류.
+
+### `noImplicitReturns`
+
+함수의 모든 경로가 값을 리턴해야 함.
+
+```typescript
+function example(x: boolean): string {
+  if (x) return "yes";
+  // 오류: else 경로가 return 없음
+}
+```
+
+### `noFallthroughCasesInSwitch`
+
+Switch case 의 fall-through 를 오류.
+
+```typescript
+switch (x) {
+  case 1:
+    doA();
+    // 오류: break/return 없이 다음 case 로 떨어짐
+  case 2:
+    doB();
+    break;
+}
+```
+
+### `noUnusedLocals`, `noUnusedParameters`
+
+미사용 변수/파라미터 오류.
+
+```typescript
+function f(a: number, b: number) {   // 오류: b 미사용
+  return a * 2;
+}
+```
+
+ESLint 로 처리하는 편이 관용 (더 유연).
+
+### `exactOptionalPropertyTypes`
+
+`x?: T` 를 `undefined` 명시적 할당 금지.
+
+```typescript
+type Opts = {debug?: boolean};
+
+const o: Opts = {debug: undefined};   // 오류 (exactOptionalPropertyTypes)
+```
+
+미묘하지만 실전 케이스가 있어 켜는 프로젝트도 있음.
+
+### `noPropertyAccessFromIndexSignature`
+
+Index signature 필드는 `.foo` 대신 `["foo"]` 만 허용:
+
+```typescript
+const obj: {[key: string]: string} = {a: "1"};
+
+obj.a;         // 오류 (noPropertyAccessFromIndexSignature)
+obj["a"];      // OK
+```
+
+명시적 필드와 index signature 를 구분하여 오타 방지.
+
+## 권장 (2026 표준)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "noEmit": true
+  },
+  "include": ["src/**/*"]
+}
+```
+
+`skipLibCheck: true` 는 node_modules 의 `.d.ts` 검사 스킵 (성능). 대부분의 프로젝트에서 켜는 편.
+
+## Strict 도입 전략
+
+### 1. 신규 프로젝트
+
+처음부터 `strict: true`. 코드가 자연스럽게 strict 를 준수.
+
+### 2. 기존 프로젝트
+
+점진 도입:
+
+**Step 1**: `noImplicitAny: false` 로 시작, 다른 strict 옵션 하나씩:
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": false
+  }
+}
+```
+
+**Step 2**: 파일별 `// @ts-strict-ignore` 로 opt-out (커스텀 도구 필요) 또는 `// @ts-nocheck` 로 개별 무시.
+
+**Step 3**: 도구 (`ts-migrate`, `type-coverage`) 로 커버리지 측정, 점진 개선.
+
+**Step 4**: 전 코드가 strict 준수하면 `noImplicitAny: true` 로.
+
+### 3. tsc-baseline
+
+에러를 기록해두고 새 오류만 실패시키는 도구. `git bisect` 스타일로 점진 개선.
+
+## 성능 최적화
+
+- **`skipLibCheck: true`**: node_modules `.d.ts` 검사 스킵
+- **`incremental: true`**: `.tsbuildinfo` 캐시로 재컴파일 가속
+- **`composite: true`**: project reference 활성화 (모노레포)
+- **`--extendedDiagnostics`**: 컴파일 시간 프로파일
+
+## 함정
+
+> [!WARNING]
+> **`skipLibCheck: false`** 는 방대한 시간 소비. `@types/*` 안의 오류까지 검사. 특별한 이유 없으면 `true`.
+
+> [!CAUTION]
+> **`strictPropertyInitialization` + Reflect / DI**. NestJS, TypeORM 등이 constructor 밖에서 필드 초기화하면 오류. `!` 로 assert.
+
+> [!WARNING]
+> **`noUncheckedIndexedAccess` 는 광범위 영향**. 모든 배열 인덱스 접근이 `T | undefined`. for-of 나 map 로 안전 접근하는 편이 관용.
+
+> [!IMPORTANT]
+> **`strict` 를 부분 활성화하면 명시**. `strict: true` + 개별 `false` override 는 리팩토링 시 잊기 쉬움. 명시적 리스트가 유지보수 유리.
+
+> [!CAUTION]
+> **Emit 대상과 lib 불일치**. `target: "ES2022"` + `lib: ["ES2015"]` 은 이상. lib 은 최소 target 이상.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-modules|Modules]] - tsconfig 다른 옵션들
+- [[ts-declaration-files|Declaration Files]] - .d.ts
+- [[ts-primitive-types|Primitive Types]] - null / undefined
+- [[ts-narrowing|Type Narrowing]] - strictNullChecks 후 좁히기
+- [[ts-generics|Generics]] - strict 검사
+- [[ts-decorators|Decorators]] - experimentalDecorators

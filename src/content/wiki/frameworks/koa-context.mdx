@@ -1,0 +1,367 @@
+---
+title: "[Koa] Context (ctx)"
+aliases:
+  - "Koa Context"
+  - "Koa ctx"
+  - "ctx.request"
+  - "ctx.response"
+  - "ctx.state"
+  - "Koa 컨텍스트"
+tags: [koa, context, request, response]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "Koa Context"
+    url: "https://koajs.com/#context"
+  - title: "Koa Request"
+    url: "https://koajs.com/#request"
+  - title: "Koa Response"
+    url: "https://koajs.com/#response"
+---
+
+## 정의
+
+**Koa Context (`ctx`)** 는 각 요청마다 생성되어 미들웨어와 route handler 에 전달되는 객체입니다. `req` (Node 원본), `request` (Koa 확장), `response` (Koa 확장), `state` (요청 스코프 저장), 헬퍼 메서드를 한 곳에 통합합니다.
+
+## ctx 의 계층
+
+```
+ctx
+├── req                   ← Node 원본 IncomingMessage
+├── res                   ← Node 원본 ServerResponse
+├── request               ← Koa 확장 Request
+│   ├── header, headers
+│   ├── method
+│   ├── url, originalUrl
+│   ├── path
+│   ├── query
+│   ├── body (bodyparser 뒤)
+│   ├── ip, ips
+│   └── ...
+├── response              ← Koa 확장 Response
+│   ├── header, headers (set/get)
+│   ├── status
+│   ├── message
+│   ├── body
+│   ├── length
+│   ├── type
+│   └── ...
+├── app                   ← Application
+├── state                 ← 요청 스코프 저장소
+├── cookies               ← 쿠키 조작
+└── (delegated: ctx.body === ctx.response.body 등)
+```
+
+### Delegation
+
+편의를 위해 `ctx` 자체에도 자주 쓰는 속성이 위임되어 있습니다.
+
+```javascript
+ctx.method      === ctx.request.method
+ctx.path        === ctx.request.path
+ctx.query       === ctx.request.query
+ctx.header      === ctx.request.header
+ctx.body        === ctx.response.body      // getter/setter
+ctx.status      === ctx.response.status
+ctx.set(...)    === ctx.response.set(...)
+```
+
+즉 `ctx.body = 'ok'` 는 `ctx.response.body = 'ok'`.
+
+## Request 정보
+
+```javascript
+app.use(async (ctx) => {
+  ctx.method;         // 'GET', 'POST', ...
+  ctx.url;             // '/users?page=1' (전체)
+  ctx.originalUrl;     // proxy 이전 URL
+  ctx.path;            // '/users' (query 제외)
+  ctx.querystring;     // 'page=1'
+  ctx.query;           // {page: '1'} (parsed)
+  ctx.host;            // 'example.com:3000'
+  ctx.hostname;        // 'example.com'
+  ctx.protocol;        // 'https'
+  ctx.secure;          // boolean
+  ctx.ip;              // client IP
+  ctx.ips;             // proxy chain (proxy=true 필요)
+
+  ctx.header;          // request headers
+  ctx.get('user-agent');
+  ctx.get('content-type');
+
+  ctx.type;            // request Content-Type (짧게)
+  ctx.length;          // Content-Length
+});
+```
+
+## Body (bodyparser 뒤)
+
+```javascript
+const bodyParser = require('@koa/bodyparser');
+app.use(bodyParser());
+
+app.use(async (ctx) => {
+  ctx.request.body;      // parsed body
+  // JSON:      {name: 'kim'}
+  // Form:      {name: 'kim'}
+  // Text:      'raw text'
+});
+```
+
+**주의**: Koa 는 기본 body 를 파싱 안 함. `@koa/bodyparser`, `koa-body`, `koa-bodyparser` 하나를 설치.
+
+자세한 것은 [[koa-body|Koa Body Parsing]] 참조.
+
+## Files
+
+`koa-body` 또는 `@koa/multer` 로 파일 업로드:
+
+```javascript
+const koaBody = require('koa-body').default;
+app.use(koaBody({multipart: true}));
+
+app.use(async (ctx) => {
+  ctx.request.files;     // {upload: File}
+});
+```
+
+## Response 조작
+
+### body
+
+```javascript
+ctx.body = 'string';                    // text/html (또는 text/plain 감지)
+ctx.body = { key: 'value' };            // JSON
+ctx.body = Buffer.from('...');           // binary
+ctx.body = fs.createReadStream(path);   // stream
+ctx.body = null;                         // 204 no content
+```
+
+### status
+
+```javascript
+ctx.status = 200;
+ctx.status = 201;
+ctx.status = 404;
+```
+
+`ctx.body` 를 설정하면 status 가 자동으로 200 (또는 204 for null). 명시 없으면 대개 404.
+
+### message
+
+```javascript
+ctx.message = 'Custom OK';    // 200 Custom OK
+```
+
+### type (Content-Type)
+
+```javascript
+ctx.type = 'json';           // -> application/json
+ctx.type = 'html';           // -> text/html
+ctx.type = 'text';           // -> text/plain
+ctx.type = 'application/xml';
+```
+
+### length
+
+```javascript
+ctx.length = 1024;    // Content-Length
+```
+
+Auto-computed for string/Buffer, manual for streams.
+
+### header 조작
+
+```javascript
+ctx.set('X-Custom', 'value');
+ctx.set({'X-A': 'a', 'X-B': 'b'});
+ctx.append('Set-Cookie', 'session=abc');
+ctx.remove('X-Foo');
+ctx.vary('Accept-Encoding');
+```
+
+### redirect
+
+```javascript
+ctx.redirect('/login');
+ctx.redirect('/login', 301);   // status 명시
+ctx.redirect('back', '/');      // Referer 기반, alt fallback
+```
+
+기본 302.
+
+### attachment (파일 다운로드)
+
+```javascript
+ctx.attachment('report.pdf');
+ctx.type = 'application/pdf';
+ctx.body = fs.createReadStream('/path/to/report.pdf');
+// Content-Disposition: attachment; filename="report.pdf"
+```
+
+## `ctx.state` (Request-scoped 저장소)
+
+미들웨어 간 데이터 전달. Session, 인증된 사용자 등.
+
+```javascript
+app.use(async (ctx, next) => {
+  ctx.state.user = await getUserFromToken(ctx.get('authorization'));
+  await next();
+});
+
+router.get('/me', async (ctx) => {
+  ctx.body = ctx.state.user;
+});
+```
+
+TypeScript:
+
+```typescript
+interface AppState { user?: User; requestId: string; }
+const app = new Koa<AppState>();
+```
+
+## `ctx.throw()` / `ctx.assert()`
+
+```javascript
+ctx.throw(400, 'Missing email');
+ctx.throw(401, 'Unauthorized');
+ctx.throw(500, 'Internal', {internal: true});   // 3rd = properties
+
+// assert 는 truthy 검사
+ctx.assert(user, 401, 'Login required');
+ctx.assert(id, 400, 'ID required');
+```
+
+`ctx.throw` 는 `createError()` (`http-errors`) 사용. `try/catch` 없이 던지면 default error handler 로.
+
+## Cookies
+
+```javascript
+ctx.cookies.get('session');
+ctx.cookies.set('session', 'abc', {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax',
+  maxAge: 3600_000,
+  path: '/',
+  domain: 'example.com',
+});
+ctx.cookies.set('session', null);   // 삭제
+```
+
+Signed cookies (`app.keys` 필요):
+
+```javascript
+app.keys = ['secret1', 'secret2'];   // 첫 번째로 서명, 나머지는 검증
+
+ctx.cookies.set('session', 'abc', {signed: true});
+ctx.cookies.get('session', {signed: true});   // 검증 실패 시 undefined
+```
+
+## Content Negotiation
+
+### `ctx.accepts()`
+
+```javascript
+ctx.accepts('json');                     // 'json' | false
+ctx.accepts('html', 'json');             // 순위대로
+ctx.accepts('image/png', 'image/tiff');
+```
+
+Accept 헤더 기반.
+
+### `ctx.acceptsLanguages()`
+
+```javascript
+ctx.acceptsLanguages('en', 'ko');
+```
+
+### `ctx.acceptsEncodings()`, `ctx.acceptsCharsets()`
+
+같은 패턴.
+
+## `ctx.request` vs `ctx.req`
+
+- **`ctx.req`**: Node 원본 `IncomingMessage`. 스트림 접근 등.
+- **`ctx.request`**: Koa 확장. `body`, `query` 등 파싱된 것.
+
+미들웨어에서 stream 을 원본으로 처리 (large file upload without body parser):
+
+```javascript
+app.use(async (ctx) => {
+  ctx.req.pipe(fs.createWriteStream('/tmp/upload'));
+});
+```
+
+## `ctx.response` vs `ctx.res`
+
+- **`ctx.res`**: Node 원본 `ServerResponse`
+- **`ctx.response`**: Koa 확장
+
+**주의**: `ctx.res.end()` 직접 호출하면 Koa 의 응답 처리 우회. 대신 `ctx.body` 사용.
+
+## Async in `ctx`
+
+`ctx` 는 요청마다 새로 생성. AsyncLocalStorage 를 대체하는 자연스러운 request scope.
+
+```javascript
+app.use(async (ctx, next) => {
+  ctx.state.trace = tracer.startSpan('request');
+  try {
+    await next();
+  } finally {
+    ctx.state.trace.finish();
+  }
+});
+```
+
+## Prototype extension
+
+`ctx.app.context` 로 모든 요청에 자동 노출되는 헬퍼 추가:
+
+```javascript
+app.context.db = new Database();
+
+// 어느 미들웨어든
+async (ctx) => {
+  const user = await ctx.db.query('...');
+};
+```
+
+TypeScript 는 `AppContext` 인터페이스 확장:
+
+```typescript
+declare module 'koa' {
+  interface DefaultContext {
+    db: Database;
+  }
+}
+```
+
+## 함정
+
+> [!WARNING]
+> **`ctx.res.end()` 호출 금지** (Koa 응답 우회). `ctx.body` 로.
+
+> [!CAUTION]
+> **`ctx.request.body` 는 body parser 뒤에서만**. Parser 전에는 undefined.
+
+> [!WARNING]
+> **`app.proxy = true` 안 하면 `ctx.ip`, `ctx.protocol` 이 프록시 뒤에서 오답**. Nginx / ALB 뒤 배포 시 필수.
+
+> [!IMPORTANT]
+> **`ctx.state` 는 request scope**. `ctx.app.context` 확장은 app scope (모든 요청 공유).
+
+> [!CAUTION]
+> **`ctx.throw(500)` + downstream 에서 catch 없음** = default error handler 가 500 반환. 사용자에 stack trace 노출 위험.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-middleware|Koa Middleware]] - ctx 사용
+- [[koa-router|Koa Router]] - ctx.params
+- [[koa-body|Koa Body Parsing]] - ctx.request.body
+- [[koa-error-handling|Koa Error Handling]] - ctx.throw
+- [[js-async-await|JavaScript async/await]]
+- [[nestjs-controllers|NestJS Controllers]] - `@Req` 대비

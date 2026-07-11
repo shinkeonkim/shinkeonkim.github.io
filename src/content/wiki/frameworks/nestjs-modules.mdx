@@ -1,0 +1,359 @@
+---
+title: "[NestJS] Modules"
+aliases:
+  - "NestJS Module"
+  - "NestJS Modules"
+  - "@Module decorator"
+  - "Dynamic Module"
+  - "Global Module"
+  - "forwardRef"
+  - "NestJS 모듈"
+tags: [nestjs, modules, architecture]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Modules"
+    url: "https://docs.nestjs.com/modules"
+  - title: "NestJS Dynamic Modules"
+    url: "https://docs.nestjs.com/fundamentals/dynamic-modules"
+  - title: "NestJS Circular Dependency"
+    url: "https://docs.nestjs.com/fundamentals/circular-dependency"
+---
+
+## 정의
+
+**NestJS Module** 은 `@Module()` 데코레이터가 붙은 클래스로, 관련된 controller, provider, import/export 를 하나로 묶는 조직 단위입니다. Angular 의 NgModule 에서 영감. **애플리케이션 = module 트리** 이고, root module (`AppModule`) 이 진입점입니다.
+
+## 기본 구조
+
+```typescript
+import { Module } from '@nestjs/common';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+import { DatabaseModule } from '../database/database.module';
+
+@Module({
+  imports: [DatabaseModule],
+  controllers: [UsersController],
+  providers: [UsersService],
+  exports: [UsersService],
+})
+export class UsersModule {}
+```
+
+### 4 개의 배열
+
+- **`imports`**: 이 모듈이 사용할 다른 모듈
+- **`controllers`**: HTTP 라우트를 처리할 controller
+- **`providers`**: 이 모듈 내부에서 DI 로 주입할 클래스
+- **`exports`**: 이 모듈을 import 한 다른 모듈에서 사용할 provider
+
+## 왜 모듈로 나누나
+
+- **Feature 단위 조직**: users, auth, orders 등 도메인별
+- **의존성 격리**: import 하지 않은 module 의 provider 는 접근 못 함
+- **테스트 편의**: 모듈 단위 테스트 가능
+- **재사용**: 공통 모듈 (Database, Config, Logger)
+
+## Feature Module 패턴
+
+큰 앱은 여러 feature module 로 나눔:
+
+```typescript
+// AppModule (root)
+@Module({
+  imports: [
+    ConfigModule.forRoot(),
+    DatabaseModule,
+    UsersModule,
+    AuthModule,
+    OrdersModule,
+    HealthModule,
+  ],
+})
+export class AppModule {}
+```
+
+각 feature 는 자기 controller + service + DTO 소유.
+
+## Shared Module
+
+여러 모듈이 공통 provider 사용:
+
+```typescript
+@Module({
+  providers: [CommonService],
+  exports: [CommonService],
+})
+export class CommonModule {}
+```
+
+이 module 을 import 한 곳에서 CommonService 를 injection 받을 수 있음.
+
+**주의**: 각 module 은 별도 DI container. Shared module 을 여러 곳에서 import 해도 provider instance 는 **동일** (singleton).
+
+## Global Module
+
+`@Global()` 로 모든 모듈에서 접근 가능:
+
+```typescript
+@Global()
+@Module({
+  providers: [LoggerService],
+  exports: [LoggerService],
+})
+export class LoggerModule {}
+```
+
+이제 어느 module 이든 imports 없이 LoggerService 주입.
+
+**주의**: 남용 금지. 의존성이 명확하지 않아 refactoring 어려움. Config, Logger 등 정말 전역인 것만.
+
+## Dynamic Module (동적 설정)
+
+Runtime 에 옵션을 받아 module 을 configure. **`forRoot`, `forRootAsync`, `forFeature`** 관용:
+
+```typescript
+// database.module.ts
+import { DynamicModule, Module } from '@nestjs/common';
+import { DatabaseService } from './database.service';
+
+@Module({})
+export class DatabaseModule {
+  static forRoot(options: DatabaseOptions): DynamicModule {
+    return {
+      module: DatabaseModule,
+      providers: [
+        {
+          provide: 'DATABASE_OPTIONS',
+          useValue: options,
+        },
+        DatabaseService,
+      ],
+      exports: [DatabaseService],
+    };
+  }
+
+  static forRootAsync(asyncOptions: DatabaseAsyncOptions): DynamicModule {
+    return {
+      module: DatabaseModule,
+      imports: asyncOptions.imports || [],
+      providers: [
+        {
+          provide: 'DATABASE_OPTIONS',
+          useFactory: asyncOptions.useFactory,
+          inject: asyncOptions.inject || [],
+        },
+        DatabaseService,
+      ],
+      exports: [DatabaseService],
+    };
+  }
+}
+```
+
+### 사용
+
+```typescript
+// AppModule
+@Module({
+  imports: [
+    DatabaseModule.forRoot({
+      host: 'localhost',
+      port: 5432,
+    }),
+    // 또는 async
+    DatabaseModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        host: config.get('DB_HOST'),
+        port: config.get('DB_PORT'),
+      }),
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+**`forFeature`** 는 여러 곳에서 다른 옵션으로 재사용 (예: TypeORM 의 entity 별 repository):
+
+```typescript
+@Module({
+  imports: [TypeOrmModule.forFeature([User, Order])],
+})
+export class MyModule {}
+```
+
+## Circular Dependency (순환 참조)
+
+Module A imports B, B imports A -> `forwardRef`:
+
+```typescript
+// UsersModule
+@Module({
+  imports: [forwardRef(() => AuthModule)],
+  providers: [UsersService],
+  exports: [UsersService],
+})
+export class UsersModule {}
+
+// AuthModule
+@Module({
+  imports: [forwardRef(() => UsersModule)],
+  providers: [AuthService],
+  exports: [AuthService],
+})
+export class AuthModule {}
+```
+
+서비스 안에서도:
+
+```typescript
+@Injectable()
+export class AuthService {
+  constructor(
+    @Inject(forwardRef(() => UsersService))
+    private usersService: UsersService,
+  ) {}
+}
+```
+
+**주의**: 순환 참조 자체가 설계 냄새. 대개 두 서비스를 하나로 합치거나, 공통 인터페이스를 별도 module 로 추출.
+
+## Module 의 lifecycle hooks
+
+```typescript
+import { OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+
+@Injectable()
+export class MyService implements OnModuleInit, OnModuleDestroy {
+  async onModuleInit() {
+    // 모든 module 이 초기화된 후
+    console.log('Module initialized');
+  }
+
+  async onModuleDestroy() {
+    // 애플리케이션 종료 전
+    await this.cleanup();
+  }
+}
+```
+
+전체 lifecycle:
+1. `OnModuleInit`
+2. `OnApplicationBootstrap`
+3. `OnModuleDestroy`
+4. `BeforeApplicationShutdown` (`app.enableShutdownHooks()` 필요)
+5. `OnApplicationShutdown`
+
+## 모듈 재구성 패턴
+
+### Feature module
+
+```
+users/
+├── users.module.ts
+├── users.controller.ts
+├── users.service.ts
+├── users.repository.ts
+├── dto/
+├── entities/
+└── users.controller.spec.ts
+```
+
+### Sub-modules
+
+```
+users/
+├── users.module.ts
+├── profile/
+│   ├── profile.controller.ts
+│   ├── profile.service.ts
+│   └── profile.module.ts
+├── settings/
+│   ├── settings.controller.ts
+│   ├── settings.service.ts
+│   └── settings.module.ts
+```
+
+`users.module.ts` 가 `ProfileModule`, `SettingsModule` 을 import.
+
+## 실전 예: DatabaseModule + UsersModule
+
+```typescript
+// database/database.module.ts
+import { Module, DynamicModule } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { PrismaClient } from '@prisma/client';
+
+@Module({})
+export class DatabaseModule {
+  static forRoot(): DynamicModule {
+    return {
+      module: DatabaseModule,
+      providers: [
+        {
+          provide: PrismaClient,
+          useFactory: (config: ConfigService) => new PrismaClient({
+            datasources: {
+              db: { url: config.get('DATABASE_URL') }
+            }
+          }),
+          inject: [ConfigService],
+        },
+      ],
+      exports: [PrismaClient],
+      global: true,
+    };
+  }
+}
+
+// users/users.module.ts
+@Module({
+  controllers: [UsersController],
+  providers: [UsersService],
+  exports: [UsersService],
+})
+export class UsersModule {}
+
+// app.module.ts
+@Module({
+  imports: [
+    ConfigModule.forRoot({isGlobal: true}),
+    DatabaseModule.forRoot(),
+    UsersModule,
+  ],
+})
+export class AppModule {}
+```
+
+## 함정
+
+> [!WARNING]
+> **Provider export 잊지 않기**. exports 에 안 넣으면 imports 한 module 에서 접근 못 함.
+
+> [!CAUTION]
+> **`@Global()` 남용**. Global module 로 하면 편하지만 의존성 관계 흐려짐.
+
+> [!WARNING]
+> **Circular deps 는 refactor 신호**. `forwardRef` 는 임시 방편.
+
+> [!IMPORTANT]
+> **DynamicModule 은 imports 배열에**. `forRoot()` 호출 결과가 module 리터럴. 정적 module 과 섞어도 됨.
+
+> [!CAUTION]
+> **Feature module 이 너무 큼**. sub-module 로 분할. 하나의 module 에 20+ file 이면 리팩토링.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-controllers|Controllers]]
+- [[nestjs-providers|Providers & DI]]
+- [[nestjs-guards|Guards]]
+- [[nestjs-interceptors|Interceptors]]
+- [[nestjs-config|Config]] - Global module 예시
+- [[nestjs-database|Database]] - Dynamic module 예시
+- [[nestjs-testing|Testing]] - Module 단위 테스트
+- [[typescript|TypeScript]]
+- [[ts-decorators|TypeScript Decorators]]

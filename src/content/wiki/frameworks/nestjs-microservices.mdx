@@ -1,0 +1,440 @@
+---
+title: "[NestJS] Microservices (Kafka, NATS, RabbitMQ, gRPC, TCP)"
+aliases:
+  - "NestJS Microservices"
+  - "ClientProxy"
+  - "@MessagePattern"
+  - "@EventPattern"
+  - "NestJS Kafka"
+  - "NestJS RabbitMQ"
+  - "NestJS gRPC"
+  - "NestJS NATS"
+  - "NestJS 마이크로서비스"
+tags: [nestjs, microservices, messaging, kafka, rabbitmq, grpc]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Microservices"
+    url: "https://docs.nestjs.com/microservices/basics"
+  - title: "NestJS Kafka"
+    url: "https://docs.nestjs.com/microservices/kafka"
+  - title: "NestJS gRPC"
+    url: "https://docs.nestjs.com/microservices/grpc"
+---
+
+## 정의
+
+**NestJS Microservices** 는 HTTP 대신 message broker (Kafka, RabbitMQ, NATS, Redis) 나 gRPC / TCP 로 통신하는 서비스를 같은 프로그래밍 모델로 작성하는 기능입니다. Controller 대신 Message pattern handler 를 정의하고, `ClientProxy` 로 다른 서비스에 요청합니다.
+
+## 지원 Transport
+
+- **TCP** (기본): 단순 socket
+- **Redis** (pub/sub): 이벤트 유연
+- **NATS**: 가벼움, cloud native
+- **MQTT**: IoT
+- **RabbitMQ (AMQP)**: 성숙, queue + routing
+- **Kafka**: 이벤트 스트리밍, 대규모
+- **gRPC**: HTTP/2 + Protocol Buffers, RPC
+- **Custom**: 자체 구현
+
+## Microservice 앱 생성
+
+```typescript
+// main.ts
+import { NestFactory } from '@nestjs/core';
+import { Transport } from '@nestjs/microservices';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.createMicroservice(AppModule, {
+    transport: Transport.KAFKA,
+    options: {
+      client: {
+        brokers: ['localhost:9092'],
+        clientId: 'my-service',
+      },
+      consumer: {
+        groupId: 'my-consumer-group',
+      },
+    },
+  });
+  await app.listen();
+}
+bootstrap();
+```
+
+## Hybrid (HTTP + Microservice)
+
+한 앱이 HTTP 도 서빙:
+
+```typescript
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  app.connectMicroservice({
+    transport: Transport.KAFKA,
+    options: {...},
+  });
+
+  await app.startAllMicroservices();
+  await app.listen(3000);   // HTTP
+}
+```
+
+## Message Pattern (Request-Response)
+
+Controller 에서:
+
+```typescript
+import { Controller } from '@nestjs/common';
+import { MessagePattern, Payload } from '@nestjs/microservices';
+
+@Controller()
+export class UsersController {
+  @MessagePattern({cmd: 'get_user'})
+  async getUser(@Payload() data: {id: number}) {
+    return this.usersService.findOne(data.id);
+  }
+
+  @MessagePattern({cmd: 'create_user'})
+  async createUser(@Payload() dto: CreateUserDto) {
+    return this.usersService.create(dto);
+  }
+}
+```
+
+Broker 에서 `{cmd: 'get_user'}` 패턴 매칭.
+
+## Event Pattern (Fire-and-forget)
+
+응답 없음, side effect 만:
+
+```typescript
+@EventPattern('user_created')
+async handleUserCreated(@Payload() data: UserCreatedEvent) {
+  await this.emailService.sendWelcome(data.email);
+}
+```
+
+## Client (다른 서비스 호출)
+
+### Module
+
+```typescript
+import { ClientsModule, Transport } from '@nestjs/microservices';
+
+@Module({
+  imports: [
+    ClientsModule.register([
+      {
+        name: 'USERS_SERVICE',
+        transport: Transport.KAFKA,
+        options: {
+          client: {brokers: ['localhost:9092']},
+          consumer: {groupId: 'orders-consumer'},
+        },
+      },
+    ]),
+  ],
+})
+export class OrdersModule {}
+```
+
+### 사용
+
+```typescript
+import { ClientKafka, ClientProxy } from '@nestjs/microservices';
+
+@Injectable()
+export class OrdersService {
+  constructor(
+    @Inject('USERS_SERVICE') private usersClient: ClientKafka,
+  ) {}
+
+  async onModuleInit() {
+    // Kafka 는 subscribe 명시적으로
+    this.usersClient.subscribeToResponseOf('get_user');
+    await this.usersClient.connect();
+  }
+
+  async getUser(id: number) {
+    // Request-response (RxJS Observable 반환)
+    return this.usersClient.send({cmd: 'get_user'}, {id}).toPromise();
+  }
+
+  async notifyUserCreated(user: User) {
+    // Event (fire-and-forget)
+    this.usersClient.emit('user_created', user);
+  }
+}
+```
+
+## Kafka 심화
+
+### Producer 설정
+
+```typescript
+{
+  transport: Transport.KAFKA,
+  options: {
+    client: {
+      brokers: ['localhost:9092'],
+      clientId: 'producer-1',
+    },
+    producer: {
+      allowAutoTopicCreation: true,
+      transactionalId: 'my-txn',   // exactly-once
+    },
+    consumer: {
+      groupId: 'my-group',
+      allowAutoTopicCreation: true,
+      sessionTimeout: 30000,
+      heartbeatInterval: 3000,
+    },
+    subscribe: {
+      fromBeginning: false,
+    },
+  },
+}
+```
+
+### 커스텀 partition
+
+```typescript
+this.kafka.emit('user_created', {
+  key: user.id.toString(),   // partition key
+  value: user,
+  headers: {'x-source': 'nest'},
+});
+```
+
+### Exactly-once
+
+Producer 트랜잭션 + consumer offset commit 관리. 자세한 것은 Kafka 문서.
+
+## RabbitMQ 심화
+
+### 설정
+
+```typescript
+{
+  transport: Transport.RMQ,
+  options: {
+    urls: ['amqp://localhost:5672'],
+    queue: 'user_queue',
+    queueOptions: {
+      durable: true,
+    },
+    noAck: false,        // manual ack
+    prefetchCount: 10,   // per-worker
+  },
+}
+```
+
+### Manual Ack
+
+```typescript
+@MessagePattern('process_order')
+async processOrder(@Payload() data: any, @Ctx() ctx: RmqContext) {
+  const channel = ctx.getChannelRef();
+  const originalMsg = ctx.getMessage();
+
+  try {
+    await this.processInternal(data);
+    channel.ack(originalMsg);
+  } catch (error) {
+    channel.nack(originalMsg, false, false);   // DLQ 로 (false = requeue X)
+  }
+}
+```
+
+### Dead Letter Exchange
+
+```typescript
+queueOptions: {
+  durable: true,
+  arguments: {
+    'x-dead-letter-exchange': 'dlx',
+    'x-dead-letter-routing-key': 'user_dlq',
+    'x-message-ttl': 60000,
+  },
+}
+```
+
+## gRPC
+
+### Proto 파일
+
+```protobuf
+// users.proto
+syntax = "proto3";
+package users;
+
+service UsersService {
+  rpc GetUser (GetUserRequest) returns (User);
+  rpc StreamUsers (Empty) returns (stream User);
+}
+
+message GetUserRequest {
+  int32 id = 1;
+}
+
+message User {
+  int32 id = 1;
+  string email = 2;
+  string name = 3;
+}
+
+message Empty {}
+```
+
+### Server
+
+```typescript
+// main.ts
+const app = await NestFactory.createMicroservice<MicroserviceOptions>(
+  AppModule,
+  {
+    transport: Transport.GRPC,
+    options: {
+      package: 'users',
+      protoPath: join(__dirname, 'users.proto'),
+      url: '0.0.0.0:5000',
+    },
+  },
+);
+await app.listen();
+```
+
+### Controller
+
+```typescript
+import { GrpcMethod, GrpcStreamMethod } from '@nestjs/microservices';
+import { Observable } from 'rxjs';
+
+@Controller()
+export class UsersController {
+  @GrpcMethod('UsersService', 'GetUser')
+  async getUser(data: {id: number}): Promise<User> {
+    return this.usersService.findOne(data.id);
+  }
+
+  @GrpcStreamMethod('UsersService', 'StreamUsers')
+  streamUsers(): Observable<User> {
+    return this.usersService.stream();
+  }
+}
+```
+
+### Client
+
+```typescript
+import { ClientGrpc, GrpcMethod, Transport } from '@nestjs/microservices';
+
+@Injectable()
+export class OrdersService implements OnModuleInit {
+  private usersService: UsersServiceClient;
+
+  constructor(@Inject('USERS_PACKAGE') private client: ClientGrpc) {}
+
+  onModuleInit() {
+    this.usersService = this.client.getService<UsersServiceClient>('UsersService');
+  }
+
+  async getUser(id: number) {
+    return firstValueFrom(this.usersService.getUser({id}));
+  }
+}
+```
+
+## Message Serialization
+
+기본 JSON. Custom serializer / deserializer:
+
+```typescript
+class CustomSerializer implements Serializer {
+  serialize(value: any): any {
+    return {data: value, timestamp: Date.now()};
+  }
+}
+```
+
+## Retry / DLQ
+
+프레임워크 레벨 지원 제한적. Consumer 코드에서:
+
+```typescript
+@MessagePattern('process')
+async process(@Payload() data: any, @Ctx() ctx: RmqContext) {
+  const retryCount = data.retry || 0;
+  try {
+    await this.handleMessage(data);
+    ctx.getChannelRef().ack(ctx.getMessage());
+  } catch (err) {
+    if (retryCount < 3) {
+      // republish with retry count
+    } else {
+      // DLQ
+      ctx.getChannelRef().nack(ctx.getMessage(), false, false);
+    }
+  }
+}
+```
+
+## v11 신규
+
+- **Status / Unwrap / On methods**: transporter 상태
+- **NATS queue per handler**
+- **NATS gracefull shutdown**
+- **DI container 로부터 microservice options**
+
+## Interceptor / Guard / Pipe
+
+같은 개념 적용:
+
+```typescript
+@UseGuards(AuthGuard)
+@UseInterceptors(LoggingInterceptor)
+@MessagePattern('secure_op')
+async secureOp(@Payload() data: any) { ... }
+```
+
+Guard 안:
+
+```typescript
+canActivate(ctx: ExecutionContext): boolean {
+  if (ctx.getType() === 'rpc') {
+    const rpcCtx = ctx.switchToRpc();
+    // ...
+  }
+}
+```
+
+## 함정
+
+> [!WARNING]
+> **Kafka subscribe 를 잊으면 응답 못 받음**. `subscribeToResponseOf('pattern')` + `connect()`.
+
+> [!CAUTION]
+> **Message ordering**. Kafka 는 partition 안에서만 순서. RabbitMQ 는 queue 안에서 순서.
+
+> [!WARNING]
+> **Exactly-once vs at-least-once**. 대부분 broker 는 at-least-once. Idempotent handler 필수.
+
+> [!IMPORTANT]
+> **Timeout 관리**. Request-response 는 client 가 timeout 명시. 응답 안 오면 hang.
+
+> [!CAUTION]
+> **Serialization**. 큰 payload 는 broker 부담. Reference (S3 URL) 만 전달하는 편이 나은 경우.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-controllers|Controllers]] - MessagePattern 대상
+- [[nestjs-modules|Modules]] - ClientsModule
+- [[nestjs-providers|Providers]] - ClientProxy 주입
+- [[nestjs-config|Config]] - broker URL
+- [[nestjs-deployment|Deployment]]
+- [[nestjs-testing|Testing]]
+- [[nestjs-exception-filters|Exception Filters]]
+- [[fastapi-background-tasks|FastAPI Background Tasks]] - 대비 (Celery/Arq)

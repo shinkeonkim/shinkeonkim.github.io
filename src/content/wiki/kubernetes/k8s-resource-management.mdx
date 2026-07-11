@@ -1,0 +1,347 @@
+---
+title: "[Kubernetes] Resource Management (Requests, Limits, QoS)"
+aliases:
+  - "Kubernetes Resource Management"
+  - "requests limits"
+  - "QoS Class"
+  - "Guaranteed"
+  - "Burstable"
+  - "BestEffort"
+  - "LimitRange"
+  - "ResourceQuota"
+  - "쿠버네티스 리소스 관리"
+  - "CPU throttling"
+  - "OOMKilled"
+tags: [kubernetes, resource, qos, cpu, memory]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Managing Resources for Containers"
+    url: "https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"
+  - title: "Kubernetes QoS Classes"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/"
+  - title: "Resource Quotas"
+    url: "https://kubernetes.io/docs/concepts/policy/resource-quotas/"
+  - title: "Limit Ranges"
+    url: "https://kubernetes.io/docs/concepts/policy/limit-range/"
+---
+
+## 정의
+
+**Kubernetes Resource Management** 는 CPU, 메모리, ephemeral storage, hugepages 등의 리소스를 파드에 할당하고 제한하는 시스템입니다. 각 컨테이너의 **request** (스케줄링 기준, 보장) 와 **limit** (사용 상한) 을 지정하고, Pod 전체의 **QoS Class** (Guaranteed / Burstable / BestEffort) 가 결정됩니다.
+
+## Request vs Limit
+
+### Request (요청)
+
+- **스케줄러가 노드 선택** 시 기준. 노드에 request 총합 만큼의 여유가 있어야 스케줄링.
+- **최소 보장**: 노드 부하 중에도 request 만큼은 사용 가능 (실제로는 CPU 는 항상 보장, 메모리는 상황 따라).
+
+### Limit (상한)
+
+- **사용 상한**. 초과 시 CPU 는 throttling, 메모리는 OOM Kill.
+- **스케줄러 기준 아님**: 노드가 100 vCPU 인데 limit 총합 200 vCPU 여도 스케줄링 OK (over-commit).
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web
+spec:
+  containers:
+    - name: web
+      image: nginx
+      resources:
+        requests:
+          cpu: 500m         # 0.5 vCPU 보장
+          memory: 512Mi
+          ephemeral-storage: 1Gi
+        limits:
+          cpu: 2            # 최대 2 vCPU
+          memory: 2Gi
+          ephemeral-storage: 5Gi
+```
+
+## 단위
+
+### CPU
+
+- **1** = 1 vCPU (또는 1 hyperthread on x86)
+- **1000m (milliCPU)** = 1 vCPU
+- **500m** = 0.5 vCPU (fractional 표현)
+- **100m** = 0.1 vCPU (매우 작은 요청)
+
+### Memory
+
+- **Ki, Mi, Gi, Ti** (2진, IEC): 1024 배
+- **K, M, G, T** (10진, SI): 1000 배
+- **1 Gi** = 1 073 741 824 bytes
+- **1 G** = 1 000 000 000 bytes
+
+**관용**: 항상 `Mi`, `Gi`.
+
+## QoS Classes
+
+Pod 의 request/limit 조합으로 결정. 노드 압박 (memory pressure) 시 **BestEffort 부터** evict.
+
+### 1. Guaranteed
+
+**모든 컨테이너**가 request == limit 이고 CPU + memory 모두 지정.
+
+```yaml
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+```
+
+- 노드 압박 시 **가장 나중에 evict**
+- CPU pinning 가능 (`--cpu-manager-policy=static`)
+- 실시간 워크로드 (DB, Kafka broker 등) 관용
+
+### 2. Burstable
+
+Request < limit 이거나 부분 지정. Guaranteed 와 BestEffort 사이.
+
+```yaml
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+```
+
+- 대부분 워크로드가 여기
+- Request 보장 + burst 여유
+
+### 3. BestEffort
+
+Request/limit 아예 없음.
+
+```yaml
+resources: {}
+```
+
+- **가장 먼저 evict**
+- 실전 프로덕션 지양
+
+## CPU throttling
+
+CFS (Completely Fair Scheduler) 에 limit 을 quota 로 설정. 100ms 주기 (`cpu.cfs_period_us`) 안에 `limit * 100ms` 이상 사용 시 throttle.
+
+**함정**: **CPU limit 은 성능 저하** 원인이 됩니다. Multi-threaded 앱이 짧은 순간 burst 하면 throttle. 특히 GC (JVM, .NET, Go), warm-up 단계.
+
+### 권장 정책
+
+- **CPU limit 없이 request 만**: 노드 유휴 시 자유 사용, 부하 시 request 보장
+- **CPU limit 필요**: 매우 노이지 이웃 방지 필요 시, throttling 인지하고 성능 테스트
+
+이견도 있음. Multi-tenant 환경, quota 회계 필요 시 limit 유지. Java/Python 은 throttling 취약, Go 는 상대적으로 관대.
+
+## Memory OOM
+
+Memory limit 초과 -> **kernel OOM Killer** 가 프로세스 죽임 (SIGKILL). Pod `OOMKilled` 상태.
+
+**함정**:
+- **JVM heap 은 limit 을 자동 감지 못 함** (< JDK 10). `-Xmx` 명시 필요. 또는 `-XX:MaxRAMPercentage`.
+- **Python multiprocessing**: fork 시 copy-on-write 로 실제 메모리 계산 어려움.
+- **Node.js**: `--max-old-space-size` 로 heap 상한.
+- **Go runtime**: 원격 GC 인지, `GOMEMLIMIT` (Go 1.19+) 로 조절.
+
+Memory limit 없이 방치하면 노드의 다른 Pod 을 굶겨 시스템 전체 위험. 반드시 limit 설정.
+
+## QoS 노드 압박 시
+
+Node 가 memory pressure 감지 -> kubelet 이 Pod 순서대로 evict:
+
+1. **BestEffort**
+2. **Burstable** (request 를 초과 사용하는 것 우선)
+3. **Guaranteed**
+
+CPU pressure 는 evict 없이 throttling 만. Memory 만 evict 발동.
+
+## LimitRange (namespace 기본값)
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: dev
+spec:
+  limits:
+    - type: Container
+      default:                # limit 안 지정 시 이 값
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:         # request 안 지정 시
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: 4
+        memory: 8Gi
+      min:
+        cpu: 10m
+        memory: 32Mi
+      maxLimitRequestRatio:
+        cpu: 4                 # limit/request 비율 상한
+        memory: 4
+```
+
+`max*`, `min` 초과 시 admission 에서 거부.
+
+## ResourceQuota (namespace 총 상한)
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: dev
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    pods: "100"
+    persistentvolumeclaims: "20"
+    requests.storage: 500Gi
+```
+
+Namespace 안 총합 초과 시 새 리소스 거부. 자세한 것은 [[k8s-namespace|Namespace]] 참조.
+
+## PriorityClass & Preemption
+
+높은 priority Pod 은 낮은 priority Pod 을 **evict (preemption)** 하여 스케줄 자리 확보.
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+description: "Critical workloads"
+---
+apiVersion: v1
+kind: Pod
+spec:
+  priorityClassName: high-priority
+```
+
+시스템 컴포넌트는 `system-cluster-critical` (2000000000), `system-node-critical` (2000001000) 사용.
+
+## VPA (Vertical Pod Autoscaler)
+
+Request/limit 을 자동 조정. 관찰된 사용량 기반.
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: web-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  updatePolicy:
+    updateMode: "Auto"    # 또는 "Recreate", "Off" (recommendation only)
+  resourcePolicy:
+    containerPolicies:
+      - containerName: web
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 2
+          memory: 4Gi
+```
+
+자세한 것은 [[k8s-hpa-vpa|HPA / VPA]] 참조.
+
+## Ephemeral Storage
+
+컨테이너의 writable layer + emptyDir. 노드의 filesystem 사용.
+
+```yaml
+resources:
+  requests:
+    ephemeral-storage: 1Gi
+  limits:
+    ephemeral-storage: 5Gi
+```
+
+초과 시 Pod evict.
+
+**주의**: 로그도 여기에 씀 (`kubectl logs` 소스). 큰 로그 = ephemeral 소모.
+
+## Extended Resources
+
+GPU, RDMA, SR-IOV 등:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 2
+    intel.com/rdma: 1
+```
+
+Device plugin 이 노드 리소스로 등록.
+
+## In-place resize (K8s 1.27+ Alpha, 1.33+ Beta)
+
+Pod 재시작 없이 request/limit 조정:
+
+```yaml
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2
+    memory: 2Gi
+  resizePolicy:
+    - resourceName: cpu
+      restartPolicy: NotRequired    # CPU 는 재시작 없이
+    - resourceName: memory
+      restartPolicy: RestartContainer
+```
+
+VPA 와 통합 진행 중. 미래에는 재시작 없는 vertical scaling.
+
+## 함정
+
+> [!WARNING]
+> **CPU limit 없이 memory limit 없이 Pod = BestEffort**. 노드 부하 시 최우선 evict.
+
+> [!CAUTION]
+> **CPU throttling 이 latency 를 죽입니다**. JVM warm-up, GC, burst 트래픽. limit 없이 request 만 두는 편이 성능 유리.
+
+> [!WARNING]
+> **Memory limit 초과 = 즉시 SIGKILL**. Graceful 종료 없음. JVM, Node 등은 자동 heap 튜닝 안 됨, 명시적 세팅.
+
+> [!IMPORTANT]
+> **Request 는 스케줄러 기준**. 실제 사용량이 아님. 사용량 지속 초과하면 evict 는 아니지만 node pressure 유발.
+
+> [!CAUTION]
+> **JVM `-XX:+UseContainerSupport` (default 후 JDK 11+)** 없으면 컨테이너 limit 안 봄. 명시.
+
+> [!WARNING]
+> **`ephemeral-storage` limit 을 안 걸면 로그 폭주로 노드 fill**. 반드시 설정.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[k8s-pod|Pod]]
+- [[k8s-hpa-vpa|HPA / VPA]] - 자동 스케일링
+- [[k8s-scheduling|Scheduling]] - Request 는 scheduler 기준
+- [[k8s-namespace|Namespace]] - LimitRange, ResourceQuota
+- [[k8s-architecture|Kubernetes Architecture]] - kubelet, cgroup
+- [[k8s-debugging|Debugging]] - OOM, throttling 진단

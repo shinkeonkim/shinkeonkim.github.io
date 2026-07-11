@@ -1,0 +1,420 @@
+---
+title: "[Kubernetes] Debugging (kubectl debug, Ephemeral Containers, Events)"
+aliases:
+  - "Kubernetes Debugging"
+  - "kubectl debug"
+  - "ephemeral containers"
+  - "CrashLoopBackoff"
+  - "ImagePullBackoff"
+  - "OOMKilled"
+  - "kubectl events"
+  - "쿠버네티스 디버깅"
+tags: [kubernetes, debugging, troubleshooting, ephemeral-container]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Debug Running Pods"
+    url: "https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/"
+  - title: "Ephemeral Containers"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/ephemeral-containers/"
+  - title: "kubectl debug"
+    url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_debug/"
+  - title: "Troubleshoot Clusters"
+    url: "https://kubernetes.io/docs/tasks/debug/debug-cluster/"
+---
+
+## 정의
+
+**Kubernetes Debugging** 은 Pod, 노드, 클러스터 문제를 진단하는 도구/기법 집합입니다. 로그, 이벤트, `kubectl describe`, ephemeral container, `kubectl debug` 를 조합해 원인 추적합니다.
+
+## 기본 진단 절차
+
+```bash
+# 1. 리소스 상태
+kubectl get pods -n <ns>
+kubectl get all -n <ns>
+
+# 2. 자세한 상태
+kubectl describe pod <name> -n <ns>
+
+# 3. 이벤트 (원인 힌트)
+kubectl get events -n <ns> --sort-by=.metadata.creationTimestamp
+kubectl events --for pod/<name> -n <ns>   # v1.31+
+
+# 4. 로그
+kubectl logs <name> -n <ns>
+kubectl logs <name> -c <container> -n <ns>       # multi-container
+kubectl logs <name> --previous -n <ns>            # 이전 컨테이너 (crashed)
+kubectl logs -f <name> -n <ns>                    # follow
+kubectl logs -l app=web -n <ns> --tail=100
+
+# 5. exec (컨테이너 안 진단)
+kubectl exec -it <name> -n <ns> -- /bin/sh
+kubectl exec -it <name> -c <container> -- bash
+
+# 6. port-forward (로컬 접근)
+kubectl port-forward pod/<name> 8080:80 -n <ns>
+```
+
+## Pod 상태 코드
+
+### Pending
+
+- **스케줄 실패**: `kubectl describe` -> Events 에서 확인
+- **원인**:
+  - 노드 리소스 부족 (Insufficient cpu, memory)
+  - [[k8s-scheduling|Node Selector / Affinity]] 매치 안 됨
+  - Taint 매치 안 됨
+  - PVC 프로비저닝 실패
+  - Image pull 실패 (있으면 ImagePullBackoff)
+
+### ContainerCreating
+
+- Volume mount 진행 중
+- Image pulling
+- CNI 네트워크 설정 중
+
+몇 초 이상 지속되면 문제. `describe` 로 확인.
+
+### Running
+
+정상. 컨테이너 실행 중.
+
+### CrashLoopBackoff
+
+- 컨테이너가 시작 후 exit -> kubelet 재시작 -> 다시 exit 반복
+- Backoff 는 10s -> 20s -> 40s -> ... -> 5m 로 점진 증가
+- 원인:
+  - 앱 오류 (config 잘못, DB 연결 실패)
+  - 시작 명령 오류
+  - 의존 서비스 부재
+  - Memory limit 초과 -> OOMKilled -> 재시작
+- **`kubectl logs --previous`** 로 이전 로그 확인 필수
+
+### ImagePullBackoff / ErrImagePull
+
+- 이미지 pull 실패
+- 원인:
+  - 이미지 이름/태그 오타
+  - Private registry 인증 실패 (imagePullSecrets 확인)
+  - Registry 접근 불가 (VPC endpoint, IAM)
+  - Rate limit (Docker Hub, ECR)
+
+```bash
+kubectl describe pod <name>
+# Events 에서 pull error 메시지 확인
+
+kubectl get secret <pull-secret> -o yaml
+# 인증 정보 검증
+```
+
+### CreateContainerError
+
+- Container runtime 오류
+- 원인:
+  - 잘못된 command / args
+  - Config file 없음
+  - Volume mount 실패
+
+### CreateContainerConfigError
+
+- ConfigMap / Secret 참조 오류
+
+### OOMKilled
+
+- Memory limit 초과 -> 커널 OOM Killer 가 죽임
+- `kubectl describe pod` 에서 `Last State: Terminated, Reason: OOMKilled`
+- 대응:
+  - Memory limit 증가
+  - Memory leak 조사 (heap dump, profiler)
+  - JVM `-Xmx`, Python `resource.setrlimit`, Node `--max-old-space-size`
+
+### Terminating (stuck)
+
+- Graceful termination 진행 중
+- `terminationGracePeriodSeconds` (기본 30초) 후에도 남으면:
+  - Finalizer 남아있음
+  - preStop hook 무한
+  - kubelet 통신 불가
+
+강제 삭제 (**주의**):
+
+```bash
+kubectl delete pod <name> --grace-period=0 --force
+```
+
+## kubectl describe
+
+가장 중요한 명령. 모든 문제의 단서.
+
+```bash
+kubectl describe pod <name> -n <ns>
+```
+
+**주요 섹션**:
+- **Status**: Running / Pending / ...
+- **Containers**: 각 컨테이너 상태, restart count, last state (with reason)
+- **Volumes**: mount 상태
+- **QoS Class**: [[k8s-resource-management|Guaranteed / Burstable / BestEffort]]
+- **Node**: 어느 노드에 배치
+- **Events**: 최근 이벤트 (시간순)
+
+Node, StatefulSet, Deployment, PVC 등 모든 리소스에 사용.
+
+## 로그 심화
+
+### 이전 로그
+
+```bash
+kubectl logs <name> --previous
+```
+
+CrashLoopBackoff 디버깅에 필수.
+
+### 여러 컨테이너
+
+```bash
+kubectl logs <name> --all-containers
+kubectl logs <name> --all-containers --prefix    # 컨테이너 이름 prefix
+```
+
+### 라벨 선택
+
+```bash
+kubectl logs -l app=web --tail=100
+kubectl logs -l app=web --max-log-requests=10
+```
+
+### stern (외부 도구)
+
+여러 pod 로그 병렬 스트리밍. 관리자 필수 도구.
+
+```bash
+stern --namespace prod 'web.*' --since 1h
+```
+
+## kubectl exec
+
+컨테이너 안 명령 실행.
+
+```bash
+kubectl exec -it <name> -- /bin/sh
+kubectl exec <name> -- ls /var/log
+kubectl exec <name> -c <container> -- env
+```
+
+**함정**:
+- Distroless 이미지는 shell 없음
+- Alpine 은 `sh` 만 (`bash` 없음)
+- 이미지에 진단 도구 (curl, netcat, dig) 부재하면 exec 무력
+
+## Ephemeral Containers (kubectl debug)
+
+기존 Pod 에 임시 컨테이너 삽입. **Distroless / minimal 이미지 디버깅** 의 답.
+
+```bash
+# 기존 pod 에 debug container 추가
+kubectl debug -it <pod> --image=busybox --target=<container>
+
+# 노드 디버깅 (node 에 privileged pod)
+kubectl debug node/<node-name> -it --image=ubuntu
+
+# Pod 복제 (원본 유지, 디버그 이미지로 새 pod)
+kubectl debug <pod> -it --copy-to=<pod>-debug --container=<name> --image=busybox
+```
+
+Ephemeral container 는 Pod spec 에 자동 추가되지만 별도 리소스 관리.
+
+**주의**:
+- Ephemeral container 는 재시작 안 됨
+- Resource limit 없음
+- Restart 불가
+
+## 이벤트
+
+```bash
+# 전체 이벤트
+kubectl get events -n <ns>
+
+# 시간순
+kubectl get events -n <ns> --sort-by=.metadata.creationTimestamp
+
+# 특정 리소스
+kubectl get events --field-selector involvedObject.name=<name>
+
+# 새 명령 (v1.31+)
+kubectl events --for pod/<name>
+```
+
+이벤트는 **1시간 후 자동 삭제**. Prometheus / Grafana 로 장기 보관 관용.
+
+## 네트워크 디버깅
+
+### Service 도달 여부
+
+```bash
+# Pod 안에서
+kubectl exec -it <pod> -- curl http://myservice.mynamespace.svc.cluster.local
+
+# 임시 디버그 pod
+kubectl run tmp-shell --rm -it --image=nicolaka/netshoot -- /bin/bash
+# netshoot: curl, dig, nslookup, iperf, tcpdump 등 다 있음
+```
+
+### DNS
+
+```bash
+kubectl exec -it <pod> -- nslookup myservice
+kubectl exec -it <pod> -- dig myservice.mynamespace.svc.cluster.local
+```
+
+CoreDNS pod 확인:
+
+```bash
+kubectl get pods -n kube-system -l k8s-app=kube-dns
+kubectl logs -n kube-system -l k8s-app=kube-dns
+```
+
+### NetworkPolicy
+
+Traffic 이 막힐 때:
+
+```bash
+kubectl get networkpolicy -n <ns>
+kubectl describe networkpolicy <name> -n <ns>
+```
+
+임시 exec 로 tcp 시험:
+
+```bash
+kubectl exec <pod> -- nc -vz <target> <port>
+```
+
+## kubectl top
+
+리소스 사용량. `metrics-server` 필요.
+
+```bash
+kubectl top nodes
+kubectl top pods -n <ns>
+kubectl top pod --containers -n <ns>
+```
+
+CPU throttling / memory pressure 확인.
+
+## 노드 디버깅
+
+```bash
+kubectl get nodes
+kubectl describe node <name>
+kubectl top nodes
+
+# 노드에 SSH (관리형이면 SSM 등)
+# ...
+
+# 노드에 임시 디버그 pod
+kubectl debug node/<name> -it --image=ubuntu
+# host filesystem 은 /host 에 mount
+chroot /host
+```
+
+**노드 상태 조건**:
+- **Ready**: kubelet 정상
+- **MemoryPressure**: 메모리 부족
+- **DiskPressure**: 디스크 부족
+- **PIDPressure**: PID 소진
+- **NetworkUnavailable**: 네트워크 문제
+
+## 이미지 검증
+
+```bash
+# 이미지 pull 시험
+kubectl run test-pull --image=<image> --restart=Never --rm -it -- true
+
+# 이미지 크기 확인
+kubectl get pod <name> -o jsonpath='{.spec.containers[*].image}'
+docker manifest inspect <image>
+```
+
+## 흔한 문제와 해결
+
+### 1. Pod 이 Pending
+
+```bash
+kubectl describe pod <name> | grep -A20 Events
+```
+
+- **Insufficient cpu/memory**: 노드 리소스 부족. HPA, cluster autoscaler 확인.
+- **No matching nodes**: NodeSelector / Affinity / Taint 검토.
+- **PVC pending**: StorageClass 확인.
+
+### 2. CrashLoopBackoff
+
+```bash
+kubectl logs <pod> --previous
+```
+
+- Config 잘못
+- DB 연결 실패 (DNS, credential)
+- OOMKilled -> 메모리 늘리기
+
+### 3. ImagePullBackoff
+
+```bash
+kubectl describe pod <name>
+# Events 에서 pull error 상세
+```
+
+- 이미지 이름 오타
+- imagePullSecrets 잘못
+- Registry 접근 불가
+
+### 4. Service 안 됨
+
+```bash
+kubectl get endpoints <service>
+```
+
+- Endpoints 비어있음: selector 오타 or Pod 준비 안 됨
+- Endpoints 있음: 네트워크 정책 or Pod 앱 오류
+
+### 5. Ingress 안 됨
+
+```bash
+kubectl describe ingress <name>
+kubectl get ingressclass
+```
+
+- IngressClass 미지정
+- Ingress controller 미설치
+- TLS secret 부재
+
+## 함정
+
+> [!WARNING]
+> **`kubectl delete pod` 는 recreate**. Deployment 가 있으면 새 pod. 근본 문제 안 잡히면 무한 실패.
+
+> [!CAUTION]
+> **`--grace-period=0 --force`** 는 최후의 수단. Volume detach 실패 등 부작용 가능.
+
+> [!WARNING]
+> **로그가 회전**. 큰 로그는 오래 안 남음. Loki / CloudWatch Logs 로 장기 저장.
+
+> [!IMPORTANT]
+> **이벤트는 1시간 만료**. 장기 조사에는 별도 저장 (kubernetes-event-exporter).
+
+> [!CAUTION]
+> **kubectl 버전 skew**. Client 와 cluster 버전이 심하게 다르면 옵션 안 먹음. 클러스터 버전에 맞춤.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[kubectl|kubectl]] - CLI
+- [[k8s-pod|Pod]]
+- [[k8s-resource-management|Resource Management]] - OOM, throttling
+- [[k8s-scheduling|Scheduling]] - Pending 원인
+- [[k8s-service|Service]] - Endpoint 디버깅
+- [[k8s-ingress|Ingress]]
+- [[k8s-network-policy|NetworkPolicy]]
+- [[k8s-persistent-volumes|PV / PVC]] - PVC pending
+- [[k8s-init-sidecar|Init & Sidecar Containers]]

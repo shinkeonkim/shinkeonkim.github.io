@@ -1,0 +1,390 @@
+---
+title: "[AWS] Config (Resource Configuration Tracking)"
+aliases:
+  - "AWS Config"
+  - "Config"
+  - "Config Rules"
+  - "Config Aggregator"
+  - "Config Conformance Pack"
+  - "AWS Config Recorder"
+  - "Config Advanced Query"
+  - "AWS 리소스 구성"
+  - "AWS 컴플라이언스"
+tags: [aws, cloud, security, governance, compliance, config]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "AWS Config Developer Guide"
+    url: "https://docs.aws.amazon.com/config/latest/developerguide/WhatIsConfig.html"
+  - title: "AWS Config Rules"
+    url: "https://docs.aws.amazon.com/config/latest/developerguide/evaluate-config.html"
+  - title: "AWS Config Conformance Packs"
+    url: "https://docs.aws.amazon.com/config/latest/developerguide/conformance-packs.html"
+  - title: "AWS Config Aggregator"
+    url: "https://docs.aws.amazon.com/config/latest/developerguide/aggregate-data.html"
+  - title: "AWS Managed Config Rules"
+    url: "https://docs.aws.amazon.com/config/latest/developerguide/managed-rules-by-aws-config.html"
+---
+
+## 정의
+
+**AWS Config** 는 AWS 계정 안 **리소스의 구성 (configuration) 상태를 지속 기록** 하고, **정책 규칙 (Config Rules)** 위반을 자동 감지하는 서비스입니다. "**리소스가 지금 어떤 설정인가? 언제, 누가, 어떻게 바꿨나? 회사 정책에 부합하는가?**" 에 답합니다.
+
+**핵심 목적**: 리소스 구성 변경 감사, 컴플라이언스 자동 검증, drift 감지, 사후 조사.
+
+## CloudTrail 과의 차이
+
+두 서비스는 자주 혼동됩니다.
+
+| 축 | CloudTrail | Config |
+|:---|:---|:---|
+| **기록 대상** | API 호출 (동사) | 리소스 상태 (명사) |
+| **질문** | 누가 언제 무엇을 호출했나 | 리소스가 지금 어떤 상태인가 |
+| **자료** | 이벤트 (시간순 활동) | 스냅샷 (configuration item) |
+| **평가** | 활동 자체 (액션) | 정책 부합 (compliance) |
+| **필수 조합** | 감사 로그 | 리소스 인벤토리 |
+
+**예**:
+- CloudTrail: "alice 가 10:15 에 `PutBucketPolicy` 호출"
+- Config: "이 S3 버킷은 지금 public access 가 허용되어 있고, 지난 1시간 전부터 그랬으며, 정책 위반 상태"
+
+두 서비스는 **상호 보완**. 함께 사용.
+
+## Configuration Item (CI)
+
+Config 가 저장하는 **리소스의 스냅샷** 단위.
+
+```json
+{
+  "configurationItemVersion": "1.3",
+  "configurationItemCaptureTime": "2026-07-07T10:15:32.000Z",
+  "configurationItemStatus": "OK",
+  "configurationStateId": "1720340132000",
+  "arn": "arn:aws:s3:::my-bucket",
+  "resourceType": "AWS::S3::Bucket",
+  "resourceId": "my-bucket",
+  "resourceName": "my-bucket",
+  "awsRegion": "us-east-1",
+  "availabilityZone": "Multiple Availability Zones",
+  "resourceCreationTime": "2025-01-15T00:00:00.000Z",
+  "tags": {"team": "platform"},
+  "relationships": [
+    {
+      "resourceType": "AWS::S3::AccountPublicAccessBlock",
+      "resourceName": "AccountLevelBlock"
+    }
+  ],
+  "configuration": {
+    "name": "my-bucket",
+    "creationDate": "2025-01-15T00:00:00.000Z",
+    "publicAccessBlockConfiguration": {
+      "blockPublicAcls": false,
+      "ignorePublicAcls": false,
+      "blockPublicPolicy": false,
+      "restrictPublicBuckets": false
+    },
+    "encryptionConfiguration": {...},
+    "versioningConfiguration": {"status": "Enabled"},
+    "logging": {...},
+    ...
+  }
+}
+```
+
+**리소스 변경 시마다** 새 CI 생성. History 로 저장.
+
+## Configuration Recorder
+
+Config 를 활성화하면 recorder 가 리소스 변경을 지속 캡처.
+
+```bash
+aws configservice put-configuration-recorder \
+  --configuration-recorder name=default,roleARN=arn:aws:iam::123:role/AWSConfigRole \
+  --recording-group allSupported=true,includeGlobalResourceTypes=true
+
+aws configservice start-configuration-recorder --configuration-recorder-name default
+```
+
+- **allSupported**: 모든 리소스 타입 (권장)
+- **includeGlobalResourceTypes**: IAM, CloudFront 등 (하나의 리전만 지정)
+- **recordingMode** (2024+): Continuous (모든 변경) 또는 Daily (일 1회 스냅샷, 저비용)
+
+## Delivery Channel
+
+CI + snapshot 을 S3 로 전달.
+
+```bash
+aws configservice put-delivery-channel \
+  --delivery-channel name=default,s3BucketName=my-config-bucket,snsTopicARN=arn:aws:sns:...:config-updates
+```
+
+- **S3 bucket**: 장기 저장 (필수)
+- **SNS topic**: 실시간 알림
+
+## Config Rules (평가)
+
+**리소스가 정책에 부합하는지 자동 검증**.
+
+### 2 유형
+
+**1. AWS Managed Rules** (300+)
+
+AWS 가 제공. 대표:
+- `s3-bucket-public-access-prohibited`
+- `s3-bucket-server-side-encryption-enabled`
+- `iam-user-mfa-enabled`
+- `iam-password-policy`
+- `rds-storage-encrypted`
+- `restricted-ssh` (SG 0.0.0.0/0 22 검사)
+- `required-tags`
+- `ec2-instance-managed-by-systems-manager`
+
+**2. Custom Rules**
+
+Lambda 함수 로직으로 판단:
+
+```python
+def lambda_handler(event, context):
+    invoking_event = json.loads(event['invokingEvent'])
+    ci = invoking_event['configurationItem']
+
+    compliance = 'COMPLIANT'
+    if ci['resourceType'] == 'AWS::S3::Bucket':
+        config = ci['configuration']
+        if not config.get('publicAccessBlockConfiguration', {}).get('blockPublicPolicy'):
+            compliance = 'NON_COMPLIANT'
+
+    return {
+        'compliance_type': compliance,
+        'annotation': 'blockPublicPolicy is disabled'
+    }
+```
+
+## Trigger 유형
+
+Rule 이 언제 평가되는가:
+
+- **Configuration change**: 리소스 변경 시 (즉시)
+- **Periodic**: 정기 (1시간, 3시간, ...)
+- **Both**
+
+## 예: 정책 정의
+
+```json
+{
+  "ConfigRuleName": "s3-bucket-public-access-prohibited",
+  "Source": {
+    "Owner": "AWS",
+    "SourceIdentifier": "S3_BUCKET_PUBLIC_ACCESS_PROHIBITED"
+  },
+  "Scope": {
+    "ComplianceResourceTypes": ["AWS::S3::Bucket"]
+  }
+}
+```
+
+Config 가 모든 S3 버킷을 평가 -> compliant/non-compliant 상태.
+
+## Remediation (자동 수정)
+
+**Non-compliant 감지 시 자동 수정**. SSM Automation runbook 실행.
+
+```bash
+aws configservice put-remediation-configuration \
+  --config-rule-name s3-bucket-public-access-prohibited \
+  --target-type SSM_DOCUMENT \
+  --target-id AWS-DisableS3BucketPublicReadWrite \
+  --automatic \
+  --maximum-automatic-attempts 3
+```
+
+- **자동 (`Automatic: true`)** 또는 **수동 (승인 후)**
+- SSM Automation runbook 이 실제 수정 실행 (예: `PublicAccessBlock` 켜기)
+- IAM role 필요
+
+## Conformance Pack
+
+**여러 Config rule + remediation 을 하나의 YAML/CloudFormation** 으로 묶은 패키지. 산업 표준 프레임워크 (PCI, HIPAA, NIST) 매핑.
+
+```yaml
+# Sample Conformance Pack YAML
+Resources:
+  S3BucketPublicAccessProhibited:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: s3-bucket-public-access-prohibited
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_ACCESS_PROHIBITED
+      ...
+  IAMUserMFAEnabled:
+    Type: AWS::Config::ConfigRule
+    ...
+  RDSStorageEncrypted:
+    Type: AWS::Config::ConfigRule
+    ...
+```
+
+### 사전 정의 Pack
+
+- **Operational Best Practices for CIS**
+- **Operational Best Practices for HIPAA Security**
+- **Operational Best Practices for PCI-DSS**
+- **Operational Best Practices for NIST 800-53**
+- **Operational Best Practices for AWS Well-Architected**
+- **Operational Best Practices for AI/ML** (2024+)
+
+배포 시 rule 다수 자동 활성.
+
+## Config Aggregator
+
+**Multi-account, multi-region 통합 뷰**.
+
+```bash
+aws configservice put-configuration-aggregator \
+  --configuration-aggregator-name org-aggregator \
+  --organization-aggregation-source \
+    'RoleArn=arn:aws:iam::...:role/AWSConfigRole,AllAwsRegions=true'
+```
+
+Central account (audit account) 가 모든 계정의 리소스/컴플라이언스 대시보드.
+
+## Advanced Query (SQL)
+
+Config 데이터를 SQL 로 쿼리.
+
+```sql
+SELECT
+  resourceId,
+  resourceType,
+  configuration.publicAccessBlockConfiguration.blockPublicPolicy
+FROM
+  AWS::S3::Bucket
+WHERE
+  configuration.publicAccessBlockConfiguration.blockPublicPolicy = false
+```
+
+Config Aggregator 상에서 조직 전체 쿼리:
+
+```sql
+SELECT AWS_REGION, COUNT(*) as count
+FROM AWS::EC2::Instance
+WHERE configuration.state.name = 'running'
+GROUP BY AWS_REGION
+ORDER BY count DESC;
+```
+
+리소스 인벤토리, 감사 답변에 활용.
+
+## Config History
+
+리소스의 시간에 따른 상태 변화. Timeline 시각화.
+
+```bash
+aws configservice get-resource-config-history \
+  --resource-type AWS::S3::Bucket \
+  --resource-id my-bucket \
+  --earlier-time 2026-01-01T00:00:00Z \
+  --later-time 2026-07-07T00:00:00Z
+```
+
+특정 리소스의 configuration change 순서대로.
+
+## Config 로 답할 수 있는 질문
+
+- "3개월 전 이 S3 버킷의 encryption 설정은?"
+- "지난 30일간 public access 가 열린 S3 버킷은?"
+- "지금 non-compliant EC2 인스턴스 리스트 + 사유"
+- "이 IAM role 이 지난 6개월간 어떤 policy 부착 이력?"
+- "PCI DSS Conformance Pack 상 현재 위반 개수"
+
+## 요금
+
+- **Configuration item 기록**: 1000 CI 당 (~0.003 USD)
+- **Config rule 평가**: rule/region/월 당 (~2 USD/rule)
+- **Conformance pack**: 안에 있는 rule 개수만큼
+- **Advanced query**: 무료 (Config aggregator 로 확인)
+- **Aggregator**: 무료
+
+**주의**: 리소스 변경이 많은 계정 (예: Lambda 대량 배포, Auto Scaling) 은 CI 수만 개 -> 요금 폭증. `recordingMode: Daily` 로 완화.
+
+## 실전 활용
+
+### 1. S3 public access 방지
+
+```
+Rule: s3-bucket-public-access-prohibited
+Remediation: AWS-DisableS3BucketPublicReadWrite (자동)
+알림: SNS -> Slack
+```
+
+### 2. EC2 encryption 강제
+
+```
+Rule: encrypted-volumes
+Remediation: 자동 안 됨 (기존 볼륨 재암호화 어려움)
+알림 후 수동 처리
+```
+
+### 3. IAM 정책 감사
+
+```
+Rule: iam-user-mfa-enabled
+Rule: iam-password-policy
+```
+
+### 4. 태그 강제
+
+```
+Rule: required-tags
+Parameters: tag1Key=owner, tag2Key=cost-center
+Remediation: SSM (auto tag from CloudTrail eventUser)
+```
+
+### 5. 컴플라이언스 상시
+
+```
+Deploy: Conformance Pack for HIPAA
+Dashboard: Compliance % over time
+```
+
+## 함정
+
+> [!WARNING]
+> **allSupported 인데 Global type 안 켜면** IAM/CloudFront 등 miss. `includeGlobalResourceTypes: true` (한 리전만).
+
+> [!CAUTION]
+> **Config rule 이 많으면 요금 증가**. Conformance pack 배포 시 예상 요금 확인.
+
+> [!WARNING]
+> **Remediation 자동 은 위험할 수 있음**. Public S3 를 실수로 잠그면 사용자 서비스 중단. 프로덕션은 수동 승인 (승인 후 자동).
+
+> [!IMPORTANT]
+> **Multi-region 필수**. 모든 리전 활성해야 완전한 인벤토리.
+
+> [!CAUTION]
+> **S3 저장 lifecycle**. Config 는 CI 를 S3 에 지속 저장. Glacier 로 이관 lifecycle 없으면 요금 증가.
+
+> [!WARNING]
+> **Delete recorder 시 이력 사라짐**. Recorder 는 일시정지만, 삭제 신중.
+
+## Governance 4 서비스와 관계
+
+**Config** 는 4 개 (CloudTrail, Config, Artifact, Audit Manager) 중 **리소스 구성 변경 및 정책 부합 검증** 담당.
+
+- **CloudTrail 이 활동을 기록** (누가/언제 API 호출)
+- **Config 가 상태를 기록** (리소스가 지금 어떤 설정)
+- **Artifact 가 AWS 자체 인증** (AWS 인프라의 컴플라이언스)
+- **Audit Manager 가 감사 보고서 자동 컴파일** (CT + Config 를 프레임워크에 매핑)
+
+## 관련 위키
+
+- [[aws-cloudtrail|CloudTrail]] - 활동 로깅 (짝)
+- [[aws-audit-manager|Audit Manager]] - Config 데이터를 감사 증거로
+- [[aws-artifact|Artifact]] - AWS 자체 컴플라이언스
+- [[aws-iam|IAM]] - IAM 정책 감사
+- [[aws-s3|S3]] - Config 저장소
+- [[aws-cloudwatch|CloudWatch]] - Config 이벤트 알림
+- [[aws-eventbridge|EventBridge]] - 자동 대응
+- [[aws-sns|SNS]] - 알림
+- [[aws-lambda|Lambda]] - Custom rule 로직

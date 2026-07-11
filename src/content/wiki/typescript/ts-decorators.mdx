@@ -1,0 +1,399 @@
+---
+title: "[TypeScript] Decorators"
+aliases:
+  - "TypeScript Decorators"
+  - "TS Decorators"
+  - "TC39 decorators"
+  - "experimentalDecorators"
+  - "TypeScript 5 decorators"
+  - "class decorator"
+  - "method decorator"
+  - "TS 데코레이터"
+tags: [typescript, decorators, metaprogramming]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Decorators (TC39 Stage 3)"
+    url: "https://www.typescriptlang.org/docs/handbook/decorators.html"
+  - title: "TC39 Decorators Proposal"
+    url: "https://github.com/tc39/proposal-decorators"
+  - title: "Decorators Metadata"
+    url: "https://github.com/tc39/proposal-decorator-metadata"
+---
+
+## 정의
+
+**Decorator** 는 class, method, accessor, property, parameter 에 부착되는 함수로 그 대상을 검사/수정할 수 있습니다. TypeScript 는 두 가지 데코레이터 시스템을 지원합니다.
+
+- **TC39 Stage 3 decorators** (TypeScript 5.0+, 표준화 예정): `experimentalDecorators: false` (기본)
+- **Legacy experimental decorators** (TypeScript 1.5+, `experimentalDecorators: true`): 기존 Angular/NestJS 스타일
+
+두 시스템은 **완전히 다른 API**. 프로젝트에서 하나만 선택.
+
+## Stage 3 Decorators (TypeScript 5.0+)
+
+### Class Decorator
+
+```typescript
+function logged<T extends new (...args: any[]) => any>(
+  target: T,
+  context: ClassDecoratorContext,
+): T {
+  return class extends target {
+    constructor(...args: any[]) {
+      super(...args);
+      console.log(`Created ${context.name}`);
+    }
+  };
+}
+
+@logged
+class Person {
+  constructor(public name: string) {}
+}
+
+new Person("kim");   // "Created Person"
+```
+
+`context` 는 metadata:
+
+```typescript
+interface ClassDecoratorContext {
+  kind: "class";
+  name: string | undefined;
+  addInitializer(initializer: () => void): void;
+  metadata: DecoratorMetadata;
+}
+```
+
+### Method Decorator
+
+```typescript
+function log<This, Args extends any[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => Return>,
+) {
+  const name = String(context.name);
+  return function(this: This, ...args: Args): Return {
+    console.log(`[${name}] called with`, args);
+    const result = target.apply(this, args);
+    console.log(`[${name}] returned`, result);
+    return result;
+  };
+}
+
+class Calculator {
+  @log
+  add(a: number, b: number): number {
+    return a + b;
+  }
+}
+
+new Calculator().add(1, 2);
+// [add] called with [1, 2]
+// [add] returned 3
+```
+
+### Field Decorator
+
+```typescript
+function bounded<This, Value>(
+  target: undefined,
+  context: ClassFieldDecoratorContext<This, Value>,
+): (this: This, initial: Value) => Value {
+  const name = context.name;
+  return function(initial: Value): Value {
+    Object.defineProperty(this, name, {
+      value: initial,
+      writable: false,
+    });
+    return initial;
+  };
+}
+
+class Config {
+  @bounded
+  version = "1.0.0";
+}
+```
+
+### Getter / Setter Decorator
+
+```typescript
+function readOnly<This, Value>(
+  target: () => Value,
+  context: ClassGetterDecoratorContext<This, Value>,
+): () => Value {
+  return target;
+}
+
+class User {
+  @readOnly
+  get name() {
+    return "kim";
+  }
+}
+```
+
+### Accessor Decorator (TC39 새 문법)
+
+`accessor` 키워드로 auto-implemented getter/setter:
+
+```typescript
+function loggedAccessor<This, Value>(
+  target: {get: () => Value; set: (v: Value) => void},
+  context: ClassAccessorDecoratorContext<This, Value>,
+) {
+  return {
+    get() {
+      console.log("get", context.name);
+      return target.get.call(this);
+    },
+    set(v: Value) {
+      console.log("set", context.name, v);
+      target.set.call(this, v);
+    },
+  };
+}
+
+class User {
+  @loggedAccessor
+  accessor name = "kim";
+}
+```
+
+### Decorator with Options (Factory)
+
+```typescript
+function throttle(ms: number) {
+  return function<This, Args extends any[], Return>(
+    target: (this: This, ...args: Args) => Return,
+    context: ClassMethodDecoratorContext,
+  ) {
+    let last = 0;
+    return function(this: This, ...args: Args): Return | undefined {
+      const now = Date.now();
+      if (now - last < ms) return;
+      last = now;
+      return target.apply(this, args);
+    };
+  };
+}
+
+class Api {
+  @throttle(1000)
+  fetch() { ... }
+}
+```
+
+## Legacy Decorators (experimentalDecorators)
+
+`tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
+```
+
+### Class Decorator
+
+```typescript
+function sealed(constructor: Function) {
+  Object.seal(constructor);
+  Object.seal(constructor.prototype);
+}
+
+@sealed
+class Config {}
+```
+
+### Method Decorator
+
+```typescript
+function log(target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+  const original = descriptor.value;
+  descriptor.value = function(...args: any[]) {
+    console.log(`[${propertyKey}]`, args);
+    return original.apply(this, args);
+  };
+}
+
+class Calculator {
+  @log
+  add(a: number, b: number): number {
+    return a + b;
+  }
+}
+```
+
+- `target`: class prototype (instance method) 또는 class 자체 (static)
+- `propertyKey`: method name
+- `descriptor`: PropertyDescriptor (value, writable, ...)
+
+### Property Decorator
+
+```typescript
+function readOnly(target: any, propertyKey: string) {
+  Object.defineProperty(target, propertyKey, {writable: false});
+}
+
+class User {
+  @readOnly
+  id = 1;
+}
+```
+
+### Parameter Decorator
+
+```typescript
+function required(target: any, propertyKey: string, parameterIndex: number) {
+  // 메타데이터 기록. 실제 검증은 method decorator 에서
+}
+
+class Api {
+  fetch(@required id: string) { ... }
+}
+```
+
+### emitDecoratorMetadata
+
+Reflect API 로 타입 메타데이터 조회 가능 (파라미터 타입 등). `reflect-metadata` 폴리필 필요:
+
+```typescript
+import "reflect-metadata";
+
+function inject(target: any, propertyKey: string, parameterIndex: number) {
+  const types = Reflect.getMetadata("design:paramtypes", target, propertyKey);
+  console.log("param types:", types);
+}
+```
+
+**NestJS / TypeORM 등의 핵심 원리** 이지만, 표준 (Stage 3) 은 아님. Angular, TypeORM 은 여전히 legacy 사용.
+
+## Stage 3 vs Legacy 요약
+
+| 기준 | Stage 3 | Legacy |
+|:---|:---|:---|
+| **표준** | TC39 표준화 진행 중 | TypeScript 실험적 |
+| **활성화** | 기본 (5.0+) | `experimentalDecorators: true` |
+| **파라미터 데코레이터** | 미지원 | 지원 |
+| **메타데이터** | `context.metadata` | `reflect-metadata` |
+| **Angular / NestJS 호환** | 아직 X | O |
+| **미래 지향** | O | X (deprecated 예정) |
+
+**결론**: 새 프로젝트는 Stage 3, 기존 Angular/NestJS 는 legacy 유지.
+
+## 실전 예시
+
+### Autobind (this binding)
+
+```typescript
+function autobind<This, Args extends any[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => Return>,
+) {
+  const methodName = String(context.name);
+  context.addInitializer(function(this: This) {
+    (this as any)[methodName] = (target as any).bind(this);
+  });
+}
+
+class Button {
+  label = "click me";
+
+  @autobind
+  handleClick() {
+    console.log(this.label);
+  }
+}
+
+const b = new Button();
+const handler = b.handleClick;
+handler();   // "click me" (this 유실 없음)
+```
+
+### Retry decorator
+
+```typescript
+function retry(times: number, delay: number) {
+  return function<This, Args extends any[], Return>(
+    target: (this: This, ...args: Args) => Promise<Return>,
+    context: ClassMethodDecoratorContext,
+  ) {
+    return async function(this: This, ...args: Args): Promise<Return> {
+      let lastError: unknown;
+      for (let i = 0; i < times; i++) {
+        try {
+          return await target.apply(this, args);
+        } catch (e) {
+          lastError = e;
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      throw lastError;
+    };
+  };
+}
+
+class Api {
+  @retry(3, 1000)
+  async fetchUser(id: number): Promise<User> {
+    return fetch(`/users/${id}`).then(r => r.json());
+  }
+}
+```
+
+### Memoize
+
+```typescript
+function memoize<This, Args extends any[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  context: ClassMethodDecoratorContext,
+) {
+  const cache = new Map<string, Return>();
+  return function(this: This, ...args: Args): Return {
+    const key = JSON.stringify(args);
+    if (cache.has(key)) return cache.get(key)!;
+    const result = target.apply(this, args);
+    cache.set(key, result);
+    return result;
+  };
+}
+
+class Fibonacci {
+  @memoize
+  compute(n: number): number {
+    return n <= 1 ? n : this.compute(n - 1) + this.compute(n - 2);
+  }
+}
+```
+
+## 함정
+
+> [!WARNING]
+> **Stage 3 vs Legacy 는 완전히 다른 API**. 섞어 쓰면 안 되고, tsconfig 에서 하나 선택.
+
+> [!CAUTION]
+> **Legacy 는 미래에 제거될 수도 있음**. NestJS 등이 아직 마이그레이션 안 됐으니 당장 걱정은 없지만 장기 프로젝트는 주의.
+
+> [!WARNING]
+> **Stage 3 는 아직 브라우저 native 지원 미미**. Babel/TypeScript 트랜스파일 필요.
+
+> [!IMPORTANT]
+> **Decorator 는 자동 호출 시점**. Class 정의 시 실행. Instance 마다 실행 X. 초기화 로직은 `context.addInitializer` 활용.
+
+> [!CAUTION]
+> **디버깅 어려움**. Decorator 로 감싸진 method 는 stack trace 가 복잡. Sourcemap 유지.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-generics|Generics]] - Generic decorator
+- [[ts-strict-mode|Strict Mode]] - experimentalDecorators
+- [[ts-modules|Modules]] - reflect-metadata import
+- [[js-class|JavaScript class]] - 대상
+- [[py-decorator|Python Decorator]] - 대비

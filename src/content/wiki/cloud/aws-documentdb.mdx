@@ -1,0 +1,358 @@
+---
+title: "[AWS] Amazon DocumentDB"
+aliases:
+  - "AWS DocumentDB"
+  - "Amazon DocumentDB"
+  - "DocumentDB"
+  - "DocDB"
+  - "DocumentDB Elastic Clusters"
+  - "DocumentDB Global Clusters"
+  - "MongoDB compatible AWS"
+  - "Amazon 문서 데이터베이스"
+tags: [aws, cloud, database, nosql, document, mongodb-compatible]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "Amazon DocumentDB Developer Guide"
+    url: "https://docs.aws.amazon.com/documentdb/latest/developerguide/what-is.html"
+  - title: "Amazon DocumentDB Elastic Clusters"
+    url: "https://docs.aws.amazon.com/documentdb/latest/developerguide/docdb-elastic-clusters.html"
+  - title: "MongoDB Compatibility"
+    url: "https://docs.aws.amazon.com/documentdb/latest/developerguide/mongo-apis.html"
+  - title: "DocumentDB Global Clusters"
+    url: "https://docs.aws.amazon.com/documentdb/latest/developerguide/global-clusters.html"
+---
+
+## 정의
+
+**Amazon DocumentDB** 는 AWS 가 관리하는 **문서 지향 (document-oriented) NoSQL 데이터베이스** 로, **MongoDB API 호환** 을 제공합니다. Aurora 스타일의 shared cluster storage (6-way replicated across 3 AZ) 위에 문서 데이터 모델을 얹었습니다. 2019년 GA, 이후 **Elastic Clusters** (2023), **Global Clusters**, 최신 MongoDB API 버전 지원으로 확장되었습니다.
+
+## 왜 DocumentDB 인가
+
+- **MongoDB 앱을 이관 without rewrite**: 기존 mongo driver, aggregation pipeline, ODM (Mongoose) 그대로
+- **관리형**: patching, backup, HA, monitoring 자동
+- **Aurora-스타일 스토리지**: 강한 내구성, 저지연 read replica
+- **Elastic Clusters**: sharded scale-out 자동
+- **AWS 통합**: IAM, VPC, KMS, CloudWatch, PrivateLink, S3 backup
+
+**vs Native MongoDB Atlas**:
+- DocumentDB 는 mongo API **호환** 이지만 완전한 mongo 가 아님. 특정 명령 미지원.
+- Atlas 는 완전 MongoDB. AWS marketplace 통합.
+- DocumentDB 는 VPC only, IAM 통합.
+
+## MongoDB 호환성
+
+**호환 API 버전** (2026 기준): MongoDB 4.0, 5.0 wire protocol 지원.
+
+### 지원되는 것
+
+- Documents, collections
+- CRUD (`insertOne`, `find`, `updateOne`, `deleteMany`, ...)
+- Aggregation pipeline (`$match`, `$group`, `$lookup`, `$unwind`, ...)
+- Change streams
+- 대부분 index 유형 (single, compound, multikey, text, geospatial)
+- MongoDB drivers (Node.js, Python, Java, .NET, Go, ...)
+- ODM: Mongoose (일부 제한)
+
+### 지원 안 하는 것 (주요)
+
+- **Server-side JavaScript** (`$where`, `mapReduce` 등)
+- **Custom aggregation operator** (`$function`, `$accumulator`)
+- **다중 collection 트랜잭션의 일부 기능**
+- **일부 admin 명령**
+- **`$expr` 의 특정 표현** (버전에 따라)
+- **$vectorSearch** (Atlas 전용, DocumentDB 는 별도 벡터 지원 없음)
+
+호환성 확인: `aws docdb-elastic supported-mongo-apis` 또는 공식 문서 매트릭스.
+
+## 아키텍처
+
+### Instance-based Cluster (Provisioned)
+
+```
+Primary Instance (Writer)
+Reader Instances (최대 15)
+        ↓
+Shared Cluster Storage (S3 based, 6 copies × 3 AZ)
+```
+
+- **Primary**: 유일한 writer
+- **Readers**: read scale-out, 자동 failover 대상
+- **인스턴스 유형**: db.t3, db.r5, db.r6g, db.r7g
+
+Aurora 와 같은 스토리지 아키텍처: compute/storage 분리, 자동 확장 (최대 128 TiB).
+
+### Elastic Clusters (Sharded, 2023~)
+
+Sharded 자동. 수백만 IOPS, 수 페타바이트 확장.
+
+- **Shard**: 데이터 파티션
+- **Shard key**: 파티션 기준 (choose wisely)
+- 최소 shard: 1, 최대 32
+- 각 shard 는 자체 replica (16 replica per shard)
+- Rebalancing 자동
+
+```bash
+aws docdb-elastic create-cluster \
+  --cluster-name my-elastic \
+  --admin-user-name admin \
+  --admin-user-password ... \
+  --shard-capacity 2 \
+  --shard-count 4 \
+  --auth-type PLAIN_TEXT
+```
+
+## Global Clusters
+
+Cross-region low-latency read + DR.
+
+- **Primary region**: read/write
+- **Secondary regions** (최대 5): read-only
+- Replication lag: ~1s 목표
+- Failover 시 secondary -> primary 승격
+
+## 연결 방법
+
+### mongosh
+
+```bash
+mongosh --host mycluster.docdb.us-east-1.amazonaws.com:27017 \
+  --tls --tlsCAFile global-bundle.pem \
+  --retryWrites=false \
+  --username admin --password
+```
+
+**주의**: `--retryWrites=false` 필수 (DocumentDB 는 retryable write 미지원).
+
+### Node.js driver
+
+```javascript
+const { MongoClient } = require('mongodb');
+
+const uri = 'mongodb://admin:password@mycluster.docdb.us-east-1.amazonaws.com:27017/?tls=true&tlsCAFile=global-bundle.pem&retryWrites=false';
+
+const client = new MongoClient(uri);
+await client.connect();
+const db = client.db('mydb');
+const users = db.collection('users');
+
+await users.insertOne({email: 'a@b.com', name: 'kim'});
+const doc = await users.findOne({email: 'a@b.com'});
+```
+
+TLS 필수 (기본 활성). `global-bundle.pem` 은 AWS root CA.
+
+### Python (pymongo)
+
+```python
+import pymongo
+import urllib.parse
+
+client = pymongo.MongoClient(
+    f"mongodb://{urllib.parse.quote_plus('admin')}:{urllib.parse.quote_plus('password')}@mycluster.docdb.us-east-1.amazonaws.com:27017/",
+    tls=True,
+    tlsCAFile='global-bundle.pem',
+    retryWrites=False,
+)
+
+db = client['mydb']
+users = db['users']
+users.insert_one({'email': 'a@b.com', 'name': 'kim'})
+```
+
+## Index
+
+```javascript
+// Single field
+db.users.createIndex({email: 1}, {unique: true});
+
+// Compound
+db.orders.createIndex({user_id: 1, created_at: -1});
+
+// Multikey (array)
+db.products.createIndex({tags: 1});
+
+// Text
+db.articles.createIndex({title: "text", body: "text"});
+
+// TTL (자동 만료)
+db.sessions.createIndex({expiresAt: 1}, {expireAfterSeconds: 0});
+
+// Geospatial
+db.places.createIndex({location: "2dsphere"});
+```
+
+## Aggregation Pipeline
+
+```javascript
+db.orders.aggregate([
+  {$match: {status: 'completed'}},
+  {$group: {
+    _id: '$user_id',
+    total: {$sum: '$amount'},
+    count: {$sum: 1}
+  }},
+  {$sort: {total: -1}},
+  {$limit: 10},
+  {$lookup: {
+    from: 'users',
+    localField: '_id',
+    foreignField: '_id',
+    as: 'user'
+  }},
+  {$unwind: '$user'}
+]);
+```
+
+대부분 stage 지원. 자세한 매트릭스는 공식 문서.
+
+## Change Streams
+
+DB 변경 이벤트 실시간 스트림.
+
+```javascript
+const changeStream = db.orders.watch([
+  {$match: {'fullDocument.status': 'completed'}}
+]);
+
+changeStream.on('change', (event) => {
+  console.log('New completed order:', event.fullDocument);
+});
+```
+
+Kafka Connect, Kinesis, Lambda 등과 조합.
+
+## 백업 & 복구
+
+- **Automated backup**: 최대 35일 (기본 1일)
+- **Manual snapshot**: 무제한
+- **PITR (Point-in-time Recovery)**: 초 단위
+- **Cross-region copy**: DR
+
+## 모니터링
+
+CloudWatch metrics:
+- `CPUUtilization`, `FreeableMemory`, `BufferCacheHitRatio`
+- `DatabaseConnections`, `ReadIOPS`, `WriteIOPS`
+- `ReplicaLag`, `ClusterReplicaLagMaximum`
+
+**Performance Insights**: 쿼리별 latency, top waits.
+
+**Audit logs**: CloudWatch Logs 로.
+
+## 보안
+
+- **VPC only** (public endpoint 없음)
+- **TLS 필수** (기본 강제)
+- **KMS**: 저장 암호화
+- **IAM**:
+  - **AWS IAM authentication**: passwordless (`MONGODB-AWS` 인증 메커니즘)
+  - IAM policy 로 API 접근 제어 (management API)
+- **Fine-grained access**: 사용자/role 기반 RBAC
+- **Field-level encryption**: MongoDB 5.0+ 유사 기능
+
+## 스토리지 & 스케일링
+
+### Instance-based
+
+- Storage: 자동 확장, 최대 128 TiB
+- Read scale: replica 추가 (최대 15)
+- Write scale: primary 인스턴스 upsize (수직)
+
+### Elastic Cluster
+
+- Storage: shard 수 × 최대 크기 (수 페타바이트)
+- Read + Write scale: shard 추가
+
+## 요금
+
+- **인스턴스 시간당** (instance-based)
+- **RCU/WCU 시간당** (elastic, shard capacity)
+- **Storage GB-월**
+- **IO 요청 (I/O optimized 옵션)**
+- **Backup storage**
+- **Data transfer**
+
+Provisioned IOPS 별도 없음 (Aurora 유사, 사용량 기반).
+
+## DocumentDB vs 대안
+
+| DB | 강점 | 약점 |
+|:---|:---|:---|
+| **DocumentDB** | AWS 관리형, mongo API | 완전한 mongo 아님, VPC only |
+| **MongoDB Atlas** | Real MongoDB, all features | 별도 벤더 |
+| **DynamoDB** | Serverless, single-digit ms | key-value 지향, JSON 다르게 |
+| **Firestore** | GCP, offline sync | GCP 종속 |
+| **Cosmos DB** | Multi-model, multi-region | Azure |
+
+## 사용 사례
+
+- **User profiles**: 유연한 스키마
+- **Content management**: 문서, 게시물
+- **Product catalog**: 다양한 속성
+- **Real-time analytics**: change streams
+- **IoT**: 시계열 이벤트
+- **Personalization**: 사용자별 다른 필드
+
+## 마이그레이션 (MongoDB -> DocumentDB)
+
+### 1. DMS
+
+AWS Database Migration Service. Full load + CDC.
+
+```
+MongoDB source ── DMS (CDC) ── DocumentDB
+```
+
+### 2. mongodump / mongorestore
+
+작은 데이터셋:
+
+```bash
+mongodump --uri "mongodb://source" --out backup/
+mongorestore --uri "mongodb://target" backup/
+```
+
+### 3. Change Streams + 자체 도구
+
+Cutover 시점을 다운타임 없이.
+
+### 호환성 사전 검증
+
+```bash
+aws docdb describe-events   # 마이그레이션 이벤트
+```
+
+또는 [MongoDB compatibility tool](https://github.com/awsdocs/amazon-documentdb-developer-guide) 로 사전 확인.
+
+## 함정
+
+> [!WARNING]
+> **`retryWrites=true` 는 오류**. DocumentDB 미지원. 반드시 `retryWrites=false`.
+
+> [!CAUTION]
+> **완전한 MongoDB 아님**. `mapReduce`, `$function`, server-side JS 등 미지원. 마이그레이션 전 호환성 확인.
+
+> [!WARNING]
+> **VPC only**. 인터넷에서 직접 접근 불가. VPN, PrivateLink, bastion.
+
+> [!IMPORTANT]
+> **Shard key 신중 선택** (Elastic Cluster). 잘못 잡으면 hot shard.
+
+> [!CAUTION]
+> **TLS root CA**. `global-bundle.pem` 을 앱에 배포. 만료 갱신.
+
+> [!WARNING]
+> **Aggregation 성능 함정**. `$lookup` 남용은 느림. Index 없는 필드로 lookup 은 최악.
+
+## 관련 위키
+
+- [[aws-rds|RDS]] - 관계형 대안
+- [[aws-neptune|Neptune]] - 그래프 대안
+- [[aws-redshift|Redshift]] - 분석 대안
+- [[aws-s3|S3]] - 백업 저장
+- [[aws-iam|IAM]] - IAM 인증
+- [[aws-kms|KMS]] - 저장 암호화
+- [[aws-vpc|VPC]] - 네트워크
+- [[aws-cloudwatch|CloudWatch]] - 모니터링
+- [[mvcc|MVCC]] - 트랜잭션 배경

@@ -1,0 +1,338 @@
+---
+title: "[Kubernetes] CRDs & Operators"
+aliases:
+  - "Kubernetes CRD"
+  - "Custom Resource Definition"
+  - "Kubernetes Operator"
+  - "Operator Pattern"
+  - "Operator SDK"
+  - "Kubebuilder"
+  - "controller-runtime"
+  - "쿠버네티스 오퍼레이터"
+  - "쿠버네티스 CRD"
+tags: [kubernetes, crd, operator, controller, extensibility]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Custom Resources"
+    url: "https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/"
+  - title: "Operator Pattern"
+    url: "https://kubernetes.io/docs/concepts/extend-kubernetes/operator/"
+  - title: "Kubebuilder Book"
+    url: "https://book.kubebuilder.io/"
+  - title: "Operator SDK"
+    url: "https://sdk.operatorframework.io/"
+  - title: "controller-runtime"
+    url: "https://github.com/kubernetes-sigs/controller-runtime"
+---
+
+## 정의
+
+**Custom Resource Definition (CRD)** 는 Kubernetes API 에 **새 리소스 타입** 을 추가하는 기능입니다. `apiVersion` + `kind` 를 정의하면 kubectl / apiserver 가 마치 내장 리소스처럼 취급합니다.
+
+**Operator** 는 CRD + 그 리소스를 관리하는 **컨트롤러** 의 조합입니다. 사람 운영자가 하는 작업 (설치, 백업, 업그레이드, 스케일링) 을 코드로 자동화합니다. CoreOS 가 2016년 제안한 패턴.
+
+## 왜 필요한가
+
+### CRD 없이의 한계
+
+내장 리소스 (Pod, Deployment, Service) 만으로는 복잡한 앱 (DB, Kafka, ML pipeline) 관리에 부족.
+
+- **DB primary 승격 절차**: 여러 리소스 조합 + 순서 있는 조정
+- **Backup / Restore**: 시간 기반 이벤트 처리
+- **Version upgrade**: 데이터 마이그레이션 포함 단계별
+
+이를 사람이 runbook 으로 관리하는 대신 **선언적 리소스 + 자동 컨트롤러** 로.
+
+### 예: Postgres Operator
+
+내장 리소스만으로 Postgres HA 클러스터 배포:
+- StatefulSet 3개 (primary + replica)
+- ConfigMap 여러 개
+- Service (primary, replica 각각)
+- PVC
+- Backup CronJob
+- ...
+
+Operator 는 이것을 하나의 CR 로 압축:
+
+```yaml
+apiVersion: acid.zalan.do/v1
+kind: postgresql
+metadata:
+  name: prod-db
+spec:
+  numberOfInstances: 3
+  postgresql:
+    version: "16"
+  volume:
+    size: 100Gi
+  backup:
+    schedule: "0 3 * * *"
+```
+
+Operator 가 모든 내부 리소스 자동 관리.
+
+## CRD 정의
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: myapps.example.com
+spec:
+  group: example.com
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                image:
+                  type: string
+                config:
+                  type: object
+                  properties:
+                    logLevel:
+                      type: string
+                      enum: [debug, info, warn, error]
+              required: [replicas, image]
+            status:
+              type: object
+              properties:
+                readyReplicas:
+                  type: integer
+                phase:
+                  type: string
+      subresources:
+        status: {}
+        scale:
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.readyReplicas
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+  scope: Namespaced
+  names:
+    plural: myapps
+    singular: myapp
+    kind: MyApp
+    shortNames: [ma]
+```
+
+이후:
+
+```bash
+kubectl get myapp
+kubectl apply -f myapp-instance.yaml
+```
+
+```yaml
+apiVersion: example.com/v1alpha1
+kind: MyApp
+metadata:
+  name: prod-app
+spec:
+  replicas: 3
+  image: myapp:1.0
+  config:
+    logLevel: info
+```
+
+CRD 만 만들면 **저장은 되지만 아무 일도 안 일어남**. Controller 가 필요.
+
+## Controller (Operator 의 핵심)
+
+Controller 는 CR 을 watch 하며 spec 대로 실제 리소스를 조정. **Reconciliation loop**:
+
+```go
+for {
+  observed := watch(CR)               // 관측
+  desired := computeDesiredState(observed)
+  actual := getCurrentState()
+  diff := compareStates(desired, actual)
+  applyChanges(diff)                   // 조정
+}
+```
+
+### 기본 원칙
+
+- **선언적 (declarative)**: `spec` 이 원하는 상태
+- **Idempotent**: 같은 spec 여러 번 reconcile 해도 동일 결과
+- **Eventually consistent**: 즉시 반영 아님, 최종 수렴
+
+## Kubebuilder / Operator SDK
+
+Operator 를 처음부터 짜지 말고 프레임워크 활용:
+
+- **[Kubebuilder](https://book.kubebuilder.io/)**: kubernetes-sigs 프로젝트. Go 언어. controller-runtime 기반.
+- **[Operator SDK](https://sdk.operatorframework.io/)**: Red Hat 주도. Kubebuilder + OperatorHub 통합. Go, Ansible, Helm.
+- **[KUDO](https://kudo.dev/)**: YAML DSL. 간단한 Operator.
+- **[Metacontroller](https://metacontroller.github.io/metacontroller/)**: JavaScript/Python 등 임의 언어로 controller.
+- **[kopf](https://kopf.readthedocs.io/)**: Python framework.
+
+### Kubebuilder 예시
+
+```bash
+# 초기화
+mkdir myapp-operator && cd myapp-operator
+kubebuilder init --domain example.com --repo example.com/myapp-operator
+
+# API + Controller 생성
+kubebuilder create api --group apps --version v1alpha1 --kind MyApp
+
+# CRD schema 정의 (api/v1alpha1/myapp_types.go)
+type MyAppSpec struct {
+    Replicas int32  `json:"replicas"`
+    Image    string `json:"image"`
+}
+
+type MyAppStatus struct {
+    ReadyReplicas int32 `json:"readyReplicas"`
+}
+
+# Controller 로직 (controllers/myapp_controller.go)
+func (r *MyAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    var myapp examplev1.MyApp
+    if err := r.Get(ctx, req.NamespacedName, &myapp); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+
+    // Deployment 존재 확인 & 조정
+    deploy := &appsv1.Deployment{}
+    err := r.Get(ctx, types.NamespacedName{Name: myapp.Name, Namespace: myapp.Namespace}, deploy)
+    if apierrors.IsNotFound(err) {
+        newDeploy := r.deploymentForMyApp(&myapp)
+        r.Create(ctx, newDeploy)
+        return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+    }
+
+    // Replica 갱신
+    if *deploy.Spec.Replicas != myapp.Spec.Replicas {
+        deploy.Spec.Replicas = &myapp.Spec.Replicas
+        r.Update(ctx, deploy)
+    }
+
+    // Status 갱신
+    myapp.Status.ReadyReplicas = deploy.Status.ReadyReplicas
+    r.Status().Update(ctx, &myapp)
+
+    return ctrl.Result{}, nil
+}
+
+# 실행
+make install run    # dev
+make docker-build docker-push IMG=...
+make deploy IMG=...  # prod
+```
+
+## Capability Levels (Operator SDK)
+
+Operator 성숙도 5단계:
+
+1. **Basic Install**: 앱 설치
+2. **Seamless Upgrades**: 버전 업그레이드
+3. **Full Lifecycle**: 백업/복구, 실패 복구
+4. **Deep Insights**: 메트릭, alert, 로그 통합
+5. **Auto Pilot**: 자동 스케일링, 자가 튜닝, 이상 감지
+
+프로덕션 사용 시 3+ 요구.
+
+## OperatorHub
+
+[operatorhub.io](https://operatorhub.io/) 에 커뮤니티 operator 목록. 유명 operator:
+
+- **Prometheus Operator** (kube-prometheus-stack)
+- **cert-manager**
+- **ArgoCD Operator**
+- **PostgreSQL Operator** (Zalando / CloudNativePG / crunchy-data)
+- **Kafka Operator** (Strimzi)
+- **Redis Operator** (spotahome, ot-container-kit)
+- **Elastic Cloud on Kubernetes (ECK)**
+- **Istio Operator**
+- **Percona Operators** (MySQL, MongoDB)
+
+## 실전 CRD 팁
+
+### 1. Version strategy
+
+`v1alpha1` -> `v1beta1` -> `v1` 순 관용. Alpha 는 실험, beta 는 안정 후 GA 준비, v1 은 안정.
+
+**Conversion webhook**: 여러 버전 지원 시 서버측 변환:
+
+```yaml
+spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: myapp-webhook
+          path: /convert
+      conversionReviewVersions: [v1]
+```
+
+### 2. Status subresource
+
+`spec` 과 `status` 를 별도 subresource 로 관리하면:
+- Controller 만 status 갱신 (RBAC 분리)
+- `kubectl edit` 이 status 조작 방지
+- Conflict 감소
+
+### 3. Printer columns
+
+`kubectl get myapp` 표시 컬럼 커스터마이제이션.
+
+### 4. Validating admission webhook
+
+CR 생성/수정 시 추가 검증. Simple validation 은 OpenAPI schema, complex 는 webhook.
+
+### 5. Finalizer
+
+CR 삭제 시 정리 작업. `metadata.finalizers` 에 이름 추가하면 controller 가 정리 후 finalizer 제거해야 실제 삭제.
+
+## 함정
+
+> [!WARNING]
+> **CRD 는 cluster-scoped**. Namespace 마다 다른 CRD 불가. 조심스러운 도입.
+
+> [!CAUTION]
+> **CR schema 변경은 breaking**. 필드 추가는 OK, 삭제/타입 변경은 미리 마이그레이션 계획.
+
+> [!WARNING]
+> **Controller 다중 replica 는 leader election 필요**. 안 그러면 두 controller 가 동시 조정 -> race.
+
+> [!IMPORTANT]
+> **Reconcile 는 idempotent 여야**. 여러 번 호출해도 같은 결과. `Requeue` + `RequeueAfter` 로 retry.
+
+> [!CAUTION]
+> **Finalizer 잘못 걸면 CR 삭제 불가**. Controller 죽으면 stuck. 신중히.
+
+> [!WARNING]
+> **CRD 는 API 부하 증가**. 큰 status field, 많은 CR 인스턴스 = etcd 부담. Compaction 정기.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[k8s-architecture|Architecture]] - apiserver 확장
+- [[k8s-admission-controllers|Admission Controllers]] - Validating/Mutating webhook
+- [[k8s-rbac|RBAC]] - CR 접근 제어
+- [[k8s-namespace|Namespace]] - Namespaced vs Cluster
+- [[helm|Helm]] - Operator 도 helm chart 로 배포 가능
+- [[argocd|ArgoCD]] - GitOps + CRD

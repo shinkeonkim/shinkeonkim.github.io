@@ -1,0 +1,344 @@
+---
+title: "[AWS] Amazon RDS (Relational Database Service)"
+aliases:
+  - "AWS RDS"
+  - "Amazon RDS"
+  - "RDS"
+  - "RDS MySQL"
+  - "RDS PostgreSQL"
+  - "RDS MariaDB"
+  - "RDS Oracle"
+  - "RDS SQL Server"
+  - "RDS Db2"
+  - "RDS Proxy"
+  - "RDS Blue Green"
+  - "RDS Performance Insights"
+  - "RDS Extended Support"
+  - "Amazon 관계형 데이터베이스"
+tags: [aws, cloud, database, rds, relational, mysql, postgresql]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "Amazon RDS User Guide"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html"
+  - title: "RDS Multi-AZ Deployments"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZSingleStandby.html"
+  - title: "RDS Proxy"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html"
+  - title: "RDS Blue/Green Deployments"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/blue-green-deployments.html"
+  - title: "RDS Performance Insights"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.html"
+  - title: "RDS Extended Support"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/extended-support.html"
+---
+
+## 정의
+
+**Amazon RDS (Relational Database Service)** 는 AWS 가 관리하는 **관계형 데이터베이스 서비스** 입니다. 6개 엔진 (MySQL, PostgreSQL, MariaDB, Oracle, SQL Server, IBM Db2) 을 지원하며, 프로비저닝/패치/백업/HA 를 AWS 가 담당합니다. **Aurora** 는 기술적으로 별개 서비스 (`rds` API 를 공유하지만 스토리지/엔진이 다름).
+
+## 지원 엔진
+
+| 엔진 | 특성 |
+|:---|:---|
+| **MySQL** | 5.7 EOL 진행, 8.0, 8.4 (2025+) |
+| **PostgreSQL** | 13-17 활성, 12- Extended Support |
+| **MariaDB** | 10.6, 10.11, 11.4 |
+| **Oracle** | Standard Edition 2, Enterprise Edition |
+| **SQL Server** | Express, Web, Standard, Enterprise |
+| **IBM Db2** | Standard, Advanced (2023+) |
+
+**Aurora** (별도):
+- **Aurora MySQL** (5.7, 8.0 호환)
+- **Aurora PostgreSQL** (13-17)
+- **Aurora Serverless v2**
+- **Aurora DSQL** (2024+, distributed serverless)
+- **Aurora Global Database**
+
+## RDS vs Aurora
+
+| 축 | RDS 표준 | Aurora |
+|:---|:---|:---|
+| **엔진** | 6 개 | MySQL, PostgreSQL 호환 |
+| **스토리지** | EBS (인스턴스에 붙음) | Shared cluster storage (S3 backed) |
+| **성능** | 표준 | 3-5배 (MySQL 대비) |
+| **HA** | Multi-AZ standby | 자체 6-way replica × 3 AZ |
+| **Read replica** | 최대 5 (엔진 별) | 최대 15 |
+| **Failover** | 60-120s | < 30s |
+| **비용** | 낮음 | 높음 (성능/기능 대가) |
+| **Storage 자동 확장** | 128 TiB (자동) | 128 TiB (자동) |
+| **Serverless** | X (RDS Custom 예외) | Aurora Serverless v2 |
+
+**결정**:
+- 소규모 / 단순 앱 -> RDS 표준
+- 고가용성 + 확장성 + PostgreSQL/MySQL -> Aurora
+- Oracle / SQL Server / Db2 -> RDS (Aurora 미지원)
+
+## 인스턴스 클래스
+
+- **db.t4g, db.t3**: Burstable, dev/test
+- **db.m5, db.m6i, db.m7g**: General purpose
+- **db.r5, db.r6i, db.r7g, db.x2g**: Memory optimized
+- **db.z1d**: High single-threaded (Oracle)
+
+**Graviton (t4g, m6g, r6g, r7g)**: 20-30% 저비용, 대부분 워크로드 호환.
+
+## 스토리지
+
+| 타입 | 특성 |
+|:---|:---|
+| **General Purpose SSD (gp2, gp3)** | 대부분 워크로드. gp3 는 IOPS/throughput 독립 설정 |
+| **Provisioned IOPS (io1, io2)** | 예측 가능한 고성능 (수십만 IOPS) |
+| **Magnetic** | Legacy, 사용 안 함 |
+
+**Storage Autoscaling**: 자동 확장 (권장). 초기 크기 + 상한 지정.
+
+## Multi-AZ Deployments
+
+자세한 것은 [[aws-rds-multi-az|RDS Multi-AZ]] 참조.
+
+### Multi-AZ Instance (전통)
+
+- Primary + Standby (다른 AZ)
+- 동기 replication
+- Standby 는 접근 불가 (백업/failover 용)
+- Failover: 60-120s
+- Read scale: X (읽기도 primary 만)
+
+### Multi-AZ DB Cluster (Cluster mode)
+
+- Primary + 2 Reader (3 AZ)
+- 반동기 (semi-sync)
+- **Reader 에 접근 가능** (read scale)
+- Failover: 35s 이하
+- MySQL 8.0.28+, PostgreSQL 13+ 지원
+
+## Read Replica
+
+- 비동기 replication
+- 최대 5 개 (MySQL/PostgreSQL/MariaDB), 15 개 (Aurora)
+- Cross-region 가능
+- 승격 가능 (primary 로)
+- 요금: 인스턴스 시간 + inter-AZ 데이터 전송
+
+## 백업 & 복구
+
+### Automated Backup
+
+- **매일 스냅샷 + transaction log** 저장
+- **Retention**: 1-35일
+- **Backup window**: 자동 또는 수동 지정
+- **PITR (Point-in-time Recovery)**: 초 단위 (5분 기본, log 발행 간격)
+
+### Manual Snapshot
+
+- 사용자 지정
+- 무제한 유지
+- Cross-region copy 가능
+- Cross-account share 가능
+
+### Snapshot Export to S3
+
+Parquet 형식으로 S3 export -> Athena/Redshift Spectrum 분석.
+
+## Blue/Green Deployments (2023+)
+
+**Zero-downtime engine upgrade / schema change**.
+
+```
+Blue (production)  ────┐
+                        ├── promote green
+Green (staging copy) ──┘
+```
+
+- Green 은 blue 의 완전 복제 + 원하는 변경 (버전 업, 스키마)
+- 프로덕션 트래픽은 계속 blue
+- Green 검증 후 **switchover** 실행 (< 1분)
+- 두 endpoint 이름 교체
+- 자동 replica lag 검증, safety check
+
+MySQL / PostgreSQL / MariaDB 지원. Oracle/SQL Server 는 별도 방식.
+
+## RDS Proxy
+
+Connection pooling + failover 가속 + IAM/Secrets Manager 통합.
+
+**해결하는 문제**:
+- Lambda / 서버리스가 요청마다 새 connection 열어 DB 소진
+- Failover 시 connection reset 느림
+
+```
+App / Lambda ── RDS Proxy ── RDS instance
+```
+
+- Proxy 가 물리 연결 pool 유지
+- App connect 는 논리 연결 (fast open/close)
+- Failover 감지 시 자동 재라우팅
+- IAM 인증, Secrets Manager 통합
+- Endpoint 별 read/write 분리
+
+**주의**: TLS 필수, 요금 (시간당 + 데이터).
+
+## Performance Insights
+
+Query-level 성능 분석. **DB Load** 를 시각화 (초당 avg active sessions).
+
+- Top SQL, Top waits, Top hosts
+- Retention: 7일 무료, 최대 2년 유료
+- SQL statistics: query 별 실행 통계
+
+Enhanced Monitoring 은 OS 레벨 (CPU, memory, disk IOPS).
+
+## IAM Database Authentication
+
+패스워드 대신 IAM 토큰:
+
+```bash
+# MySQL/PostgreSQL
+TOKEN=$(aws rds generate-db-auth-token \
+  --hostname mydb.abcd.us-east-1.rds.amazonaws.com \
+  --port 3306 \
+  --region us-east-1 \
+  --username db_user)
+
+mysql -h mydb.abcd.us-east-1.rds.amazonaws.com \
+  -P 3306 --user=db_user --password=$TOKEN \
+  --enable-cleartext-plugin
+```
+
+- **RDS Proxy 함께 쓰면** Secrets Manager 로 완전 secretless
+- 토큰 15분 유효
+- **Connection rate limit**: IAM auth 는 무겁게 인증. 초당 200 초과는 문제
+
+## Extended Support (2024~)
+
+EOL 이후에도 유료 지속 지원. 예:
+- MySQL 5.7 EOL 이후 3년 Extended
+- PostgreSQL 12 EOL 이후 3년
+
+**요금**: engine hour 요금이 2-3배. 마이그레이션 유도가 목적.
+
+## RDS Custom
+
+Oracle / SQL Server 를 위한 hybrid. OS + DB engine 접근 가능 (SSH 등). 관리 자동화 일부 + 사용자 통제 일부. Legacy 앱 이관에 유용.
+
+## 보안
+
+- **VPC**: 반드시 (public 노출 옵션 있지만 강력 비권장)
+- **Encryption**: KMS at rest (기본 활성 권장)
+- **TLS in transit**: 강제 가능 (`rds.force_ssl` 등)
+- **KMS 키 rotation**
+- **IAM auth** (위 참조)
+- **Secrets Manager 통합**: 자동 rotation
+- **Audit logging**: CloudWatch Logs
+- **Deletion Protection**: 실수 삭제 방지
+
+## 파라미터 그룹
+
+DB 파라미터 관리. Cluster 나 인스턴스에 attach.
+
+```bash
+# 예: MySQL innodb_buffer_pool_size 조정
+aws rds modify-db-parameter-group \
+  --db-parameter-group-name my-mysql-params \
+  --parameters "ParameterName=innodb_buffer_pool_size,ParameterValue=1073741824,ApplyMethod=pending-reboot"
+```
+
+- **Default parameter group**: 수정 불가
+- **Custom parameter group**: 사용자 정의
+
+## Option Group (Oracle, SQL Server)
+
+라이선스, 옵션 (SQL Server Audit, Oracle APEX 등) 관리.
+
+## Maintenance Window
+
+주간 30분. AWS 가 minor version upgrade, patch 적용.
+
+## 모니터링 지표
+
+CloudWatch:
+- `CPUUtilization`, `FreeableMemory`, `FreeStorageSpace`
+- `DatabaseConnections`, `ReadIOPS`, `WriteIOPS`
+- `ReadLatency`, `WriteLatency`
+- `ReplicaLag` (read replica)
+- `BurstBalance` (t 시리즈)
+
+**Alert 필수**: FreeStorageSpace, CPU 지속 90%+, ReplicaLag.
+
+## Common Anti-Pattern
+
+### 1. Public 노출
+
+`PubliclyAccessible = true` + Security Group 0.0.0.0/0. 최악.
+
+### 2. 백업 비활성화
+
+`backup-retention-period 0`. 실수 시 복구 불가.
+
+### 3. Multi-AZ 안 함
+
+프로덕션에서 반드시 활성. Failover 없이 AZ 장애 = downtime.
+
+### 4. Connection 관리 안 함
+
+DB 최대 연결 수 관리 없이 client 방치 -> `too many connections`. RDS Proxy 또는 client-side pool (pgbouncer, HikariCP).
+
+### 5. Storage 급증 방치
+
+Storage autoscaling + FreeStorageSpace 알람. 소진 시 DB stop.
+
+## 함정
+
+> [!WARNING]
+> **Multi-AZ 표준 인스턴스는 read replica 아님**. Standby 접근 불가. Read scale 하려면 별도 read replica 또는 Multi-AZ Cluster mode.
+
+> [!CAUTION]
+> **Storage 축소 불가**. 100 -> 50 GB 는 새 DB 로 복원해야. 초기 크기 신중.
+
+> [!WARNING]
+> **Reserved Instance 잘못 사면 낭비**. On-demand 로 사용 패턴 검증 후 RI.
+
+> [!IMPORTANT]
+> **Blue/Green switchover 는 원본 blue 유지**. 몇 시간 안 삭제해 롤백 가능. 하지만 요금 두 배.
+
+> [!CAUTION]
+> **Snapshot restore 는 새 endpoint**. DNS 변경 필요. Route53 alias 로 완화.
+
+> [!WARNING]
+> **Extended Support 요금 폭탄**. EOL 근접 엔진은 미리 업그레이드.
+
+## RDS vs Aurora 결정 트리
+
+- Oracle / SQL Server / Db2 필요 -> **RDS**
+- MySQL / PostgreSQL, small workload, 비용 우선 -> **RDS**
+- 고성능 / 고가용성 / 15+ replica / global -> **Aurora**
+- Serverless / spiky workload -> **Aurora Serverless v2**
+- Multi-region low-latency / DR -> **Aurora Global Database**
+- Truly serverless multi-region strong consistency -> **Aurora DSQL** (2024+ preview/GA)
+
+## RDS vs 다른 관리형 DB
+
+| DB | 강점 | 언제 |
+|:---|:---|:---|
+| **RDS** | 6 엔진, 성숙 | 표준 관계형 |
+| **Aurora** | 성능, 확장 | 대규모 MySQL/PG |
+| **DynamoDB** | Key-value, single-digit ms | NoSQL, 서버리스 |
+| **[[aws-neptune|Neptune]]** | 그래프 | 관계 지향 |
+| **[[aws-documentdb|DocumentDB]]** | 문서 | MongoDB 이관 |
+| **[[aws-redshift|Redshift]]** | 분석 | OLAP |
+
+## 관련 위키
+
+- [[aws-rds-multi-az|RDS Multi-AZ]] - HA 심화
+- [[aws-neptune|Neptune]] - 그래프 대안
+- [[aws-documentdb|DocumentDB]] - 문서 대안
+- [[aws-redshift|Redshift]] - 분석 대안
+- [[aws-s3|S3]] - Snapshot export
+- [[aws-iam|IAM]] - IAM database authentication
+- [[aws-kms|KMS]] - 저장 암호화
+- [[aws-secrets-manager|Secrets Manager]] - credential rotation
+- [[aws-vpc|VPC]] - 네트워크
+- [[aws-cloudwatch|CloudWatch]] - 모니터링
+- [[aws-lambda|Lambda]] - RDS Proxy 조합
+- [[mvcc|MVCC]] - 트랜잭션 배경

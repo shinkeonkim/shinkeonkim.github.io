@@ -1,0 +1,396 @@
+---
+title: "[Kubernetes] Labels & Selectors"
+aliases:
+  - "Kubernetes Labels"
+  - "Kubernetes Selectors"
+  - "k8s labels"
+  - "k8s annotations"
+  - "matchLabels"
+  - "matchExpressions"
+  - "labelSelector"
+  - "라벨 셀렉터"
+  - "쿠버네티스 라벨"
+tags: [kubernetes, labels, selectors, annotations, metadata]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Kubernetes Labels and Selectors"
+    url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/"
+  - title: "Kubernetes Annotations"
+    url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/"
+  - title: "Recommended Labels"
+    url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/"
+---
+
+## 정의
+
+**Labels** 는 리소스에 붙이는 key-value **분류 태그** 입니다. 사람과 컨트롤러가 리소스를 조직하고 선택할 때 사용합니다. **Selectors** 는 label 조합으로 대상 리소스를 지정하는 쿼리 문법입니다. **Annotations** 는 label 과 유사한 key-value 이지만 selector 대상이 아닌 도구/사람이 참조할 메타데이터입니다.
+
+## Label 기본
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    app: web
+    tier: frontend
+    version: v1.2.3
+    environment: production
+    team: platform
+    owner: alice
+spec:
+  ...
+```
+
+### 규칙
+
+- **Key**: 최대 63자. Prefix `example.com/` 형태 (선택).
+  - Prefix: DNS subdomain (`kubernetes.io/`, `app.kubernetes.io/`, `example.com/`)
+  - Name: `[a-z0-9A-Z]` + `-`, `_`, `.` (첫/끝은 alphanumeric)
+- **Value**: 최대 63자. 위와 같은 규칙 (빈 문자열도 가능).
+- **Case-sensitive**.
+
+### 예약된 prefix
+
+- `kubernetes.io/` , `k8s.io/` : 시스템 사용, 사용자 금지
+- `app.kubernetes.io/` : 권장 표준 (아래 참조)
+
+## 권장 라벨 (recommended labels)
+
+Kubernetes 공식 권장:
+
+```yaml
+labels:
+  app.kubernetes.io/name: myapp             # 앱 이름
+  app.kubernetes.io/instance: myapp-prod    # 특정 인스턴스
+  app.kubernetes.io/version: "1.2.3"        # 버전 (문자열로!)
+  app.kubernetes.io/component: frontend     # 역할
+  app.kubernetes.io/part-of: my-system      # 상위 시스템
+  app.kubernetes.io/managed-by: helm         # 관리 도구 (helm, kustomize, terraform)
+```
+
+이를 지키면 Helm, Grafana, Prometheus, Argo 등이 자동으로 그룹핑.
+
+## Selector
+
+두 종류:
+
+### 1. Equality-based
+
+```
+key = value
+key != value
+```
+
+예: `environment=production`, `tier!=frontend`.
+
+### 2. Set-based
+
+```
+key in (v1, v2, v3)
+key notin (v1, v2)
+key             # key 존재
+!key            # key 부재
+```
+
+예: `environment in (staging, production)`, `!experimental`.
+
+### 조합
+
+콤마로 AND:
+
+```
+environment=production, tier=frontend, version notin (v0.9, v1.0)
+```
+
+**OR 는 selector 자체에서 지원 안 함**. 필요하면 여러 selector 로 별도 처리.
+
+## 사용 사례
+
+### kubectl 필터
+
+```bash
+kubectl get pods -l app=web
+kubectl get pods -l app=web,tier=frontend
+kubectl get pods -l 'environment in (dev, staging)'
+kubectl get pods -l '!experimental'
+kubectl get all -l app.kubernetes.io/instance=myapp-prod
+kubectl delete pods -l tier=canary
+```
+
+### Deployment / ReplicaSet
+
+Deployment 는 어느 Pod 을 관리할지 selector 로 지정:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [frontend]
+  template:
+    metadata:
+      labels:
+        app: web
+        tier: frontend
+    spec:
+      ...
+```
+
+**중요**: `spec.template.metadata.labels` 는 반드시 `spec.selector.matchLabels` 를 **포함** 해야 함. 안 그러면 controller 가 자기 Pod 을 못 관리.
+
+`selector` 는 **immutable** (한 번 만들면 수정 불가).
+
+### Service 라우팅
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+    tier: frontend
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+`app=web, tier=frontend` 라벨을 가진 Pod 으로 트래픽 분산.
+
+### NetworkPolicy
+
+```yaml
+podSelector:
+  matchLabels:
+    app: web
+ingress:
+  - from:
+      - podSelector:
+          matchLabels:
+            app: gateway
+      - namespaceSelector:
+          matchLabels:
+            environment: production
+```
+
+### Node Selector / Affinity
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  nodeSelector:
+    disktype: ssd
+    gpu: nvidia
+```
+
+또는 더 강력한 [[k8s-scheduling|Node Affinity]]:
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: disktype
+              operator: In
+              values: [ssd, nvme]
+```
+
+### HPA
+
+```yaml
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+```
+
+또는 selector 로 여러 대상.
+
+## Annotations
+
+Label 과 유사하지만 **selector 로 사용되지 않음**. 도구/사람이 참조하는 메타데이터.
+
+```yaml
+metadata:
+  annotations:
+    kubernetes.io/change-cause: "Upgraded nginx to 1.27"
+    deployment.kubernetes.io/revision: "5"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    example.com/git-commit: "abc123"
+    example.com/owner: "alice@example.com"
+    example.com/documentation: "https://wiki/..."
+```
+
+### 특징
+
+- Value 는 임의 문자열, **길이 상한 없음** (실제로는 etcd 상한 1 MB)
+- 여러 도구 (Ingress controller, monitoring, deployment tool) 가 참조
+- Kubectl `rollout history` 는 `kubernetes.io/change-cause` annotation 표시
+
+## Label 조작
+
+### 추가 / 갱신
+
+```bash
+kubectl label pod my-pod environment=production
+kubectl label pod my-pod environment=staging --overwrite
+kubectl label pods -l app=web version=v1.2.3
+```
+
+### 삭제
+
+```bash
+kubectl label pod my-pod environment-   # 뒤에 하이픈
+```
+
+## 자주 쓰는 라벨 패턴
+
+### 환경 태깅
+
+```yaml
+labels:
+  environment: production
+  region: us-east-1
+  cluster: prod-us-east
+```
+
+### 배포 track (canary)
+
+```yaml
+labels:
+  app: web
+  track: stable
+---
+labels:
+  app: web
+  track: canary
+```
+
+Service 는 `app: web` 으로 두 track 모두 선택. Weight-based routing 은 [[k8s-service-mesh|Service Mesh]] 나 [[k8s-ingress|Ingress]] 로.
+
+### Blue/Green
+
+```yaml
+labels:
+  app: web
+  color: blue
+---
+labels:
+  app: web
+  color: green
+```
+
+Service selector 를 `color: blue` -> `color: green` 으로 전환하여 스위칭.
+
+### Cost allocation
+
+```yaml
+labels:
+  cost-center: engineering
+  cost-project: web-platform
+  cost-owner: alice
+```
+
+Kubecost, OpenCost 등이 이 라벨로 비용 분석.
+
+## Label vs Annotation vs Selector
+
+| 항목 | Label | Annotation | Selector |
+|:---|:---|:---|:---|
+| **용도** | 분류, 조직 | 도구 참조 메타 | Label 쿼리 |
+| **길이 제한** | 63자 | 상한 없음 (etcd 1 MB) | - |
+| **Selector 대상** | ✓ | ✗ | - |
+| **사용자 검색** | ✓ | 제한적 | - |
+| **예** | `app=web` | `nginx.ingress.../rewrite-target` | `app=web,tier=frontend` |
+
+**규칙**:
+- 선택하고 검색할 것 -> **Label**
+- 도구가 참조할 값 -> **Annotation**
+
+## Label 로 인한 문제
+
+### 실수: template.labels 와 selector 불일치
+
+```yaml
+spec:
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: WEB   # 대소문자 다름! (실제로는 매칭 실패)
+```
+
+Controller 가 template 의 Pod 을 못 관리 -> 무한 Pod 생성.
+
+### selector immutable
+
+```yaml
+# 초기
+selector:
+  matchLabels:
+    app: web
+
+# 나중
+selector:
+  matchLabels:
+    app: my-web   # 오류: selector immutable
+```
+
+Deployment 를 삭제하고 재생성해야 함.
+
+### Owner reference vs label
+
+Kubernetes 는 리소스 관리에 **owner reference** (metadata.ownerReferences) 도 사용. Selector 는 논리 쿼리, owner reference 는 실제 소속. Deployment 가 ReplicaSet 을 만들면 owner reference 설정.
+
+## 함정
+
+> [!WARNING]
+> **selector 는 immutable**. Deployment 의 spec.selector 를 바꾸려면 재생성 필요.
+
+> [!CAUTION]
+> **`version: 1.2.3`** (숫자) 는 YAML 파서가 float 로 오해. `version: "1.2.3"` (문자열).
+
+> [!WARNING]
+> **오래된 라벨 정리 안 하면 selector 오작동**. 예: 예전 replica 가 남아 새 selector 에 매칭되어 트래픽 유입.
+
+> [!IMPORTANT]
+> **Label 개수 제한**. 실질적으로 리소스당 라벨 <20 개 권장 (etcd 성능).
+
+> [!CAUTION]
+> **Annotation 을 검색에 쓰지 마세요**. selector 대상 아님. 대량 데이터 (base64 인코딩된 secret 등) 는 절대 annotation 에 넣지 말 것.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[k8s-pod|Pod]]
+- [[k8s-deployment|Deployment]] - selector 사용
+- [[k8s-service|Service]] - selector 로 pod 선택
+- [[k8s-network-policy|NetworkPolicy]] - podSelector, namespaceSelector
+- [[k8s-scheduling|Scheduling]] - nodeSelector, nodeAffinity
+- [[k8s-namespace|Namespace]] - namespace 라벨
+- [[k8s-hpa-vpa|HPA]]
+- [[kubectl|kubectl]] - `-l` 필터
+- [[helm|Helm]] - 라벨 자동 삽입

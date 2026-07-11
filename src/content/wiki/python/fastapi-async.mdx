@@ -1,0 +1,291 @@
+---
+title: "[FastAPI] Async / Sync Endpoints"
+aliases:
+  - "FastAPI Async"
+  - "FastAPI async def"
+  - "FastAPI sync def"
+  - "run_in_threadpool"
+  - "async endpoint"
+  - "FastAPI 비동기"
+  - "FastAPI 이벤트 루프"
+tags: [python, fastapi, async, asyncio, concurrency]
+category: python
+updated: 2026-07-07
+references:
+  - title: "FastAPI async/await"
+    url: "https://fastapi.tiangolo.com/async/"
+  - title: "Starlette run_in_threadpool"
+    url: "https://www.starlette.io/threads/"
+  - title: "AnyIO"
+    url: "https://anyio.readthedocs.io/"
+  - title: "asyncio"
+    url: "https://docs.python.org/3/library/asyncio.html"
+---
+
+## 정의
+
+FastAPI 는 **ASGI 프레임워크** 이므로 endpoint 를 `async def` 로 정의해 이벤트 루프에서 실행하거나, `def` 로 정의해 스레드풀에서 실행할 수 있습니다. 어느 쪽을 선택하는지가 성능과 정확성 모두에 큰 영향을 미칩니다.
+
+## async def vs def
+
+```python
+@app.get("/sync")
+def sync_endpoint():
+    # 스레드풀 (기본 40 워커) 에서 실행
+    return blocking_operation()
+
+@app.get("/async")
+async def async_endpoint():
+    # 이벤트 루프에서 실행
+    return await async_operation()
+```
+
+### 결정 트리
+
+- **`await` 할 것이 있음 (async DB, async HTTP)**: `async def`
+- **Blocking I/O 만 있음 (sync ORM, requests, 파일 IO)**: `def`
+- **CPU-bound 계산**: `def` (스레드풀 이용, GIL 은 문제지만 이벤트 루프는 안 막음) or 별도 프로세스풀
+
+## 잘못된 조합의 위험
+
+### 위험 1: `async def` 안의 blocking I/O
+
+```python
+import time
+import requests
+
+@app.get("/danger1")
+async def danger1():
+    time.sleep(1)                    # 이벤트 루프 1초 정지 (모든 요청 대기)
+    return requests.get("...").json()  # 마찬가지 정지
+```
+
+이벤트 루프는 **모든 요청을 처리하는 단일 스레드**. 여기서 blocking 하면 모든 요청이 대기. p99 latency 급등.
+
+### 위험 2: `def` 안의 async 코드
+
+```python
+@app.get("/danger2")
+def danger2():
+    result = asyncio.run(some_coro())   # 새 이벤트 루프 생성, 매 요청마다 비용
+    return result
+```
+
+`asyncio.run` 은 새 루프. 이미 부모 프로세스에 루프가 있는데 별도로 만들어 리소스 낭비. 아예 `async def` 로 바꾸는 게 맞음.
+
+### 올바른 조합
+
+```python
+@app.get("/sync")
+def sync_ep():
+    return sync_db.query(User).all()   # 스레드풀에서 blocking
+
+@app.get("/async")
+async def async_ep(db: Annotated[AsyncSession, Depends(get_async_db)]):
+    result = await db.execute(select(User))
+    return result.scalars().all()
+```
+
+## run_in_threadpool 브릿지
+
+`async def` 안에서 blocking 함수를 호출해야 할 때:
+
+```python
+from fastapi.concurrency import run_in_threadpool
+
+@app.get("/mixed")
+async def mixed_ep():
+    async_data = await fetch_async()
+    blocking_data = await run_in_threadpool(blocking_function)
+    return {"a": async_data, "b": blocking_data}
+```
+
+`run_in_threadpool` 은 함수를 default thread pool (AnyIO 기반) 에서 실행하고 결과를 await 가능한 형태로 반환. 이벤트 루프 blocking 없음.
+
+## 스레드풀 크기
+
+기본은 40 워커 (Starlette + AnyIO). CPU 코어 수에 무관.
+
+```python
+import anyio
+
+@app.on_event("startup")
+async def resize_threadpool():
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 100
+```
+
+또는 lifespan:
+
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = 100
+    yield
+
+app = FastAPI(lifespan=lifespan)
+```
+
+## Dependency 도 async / sync
+
+Dependency 도 함수든 async 함수든 가능. FastAPI 가 알아서 처리.
+
+```python
+def get_db():                # sync dep
+    db = SessionLocal()
+    try: yield db
+    finally: db.close()
+
+async def get_async_db():    # async dep
+    async with AsyncSessionLocal() as db:
+        yield db
+```
+
+## Async DB (SQLAlchemy 2.0)
+
+```python
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+
+engine = create_async_engine("postgresql+asyncpg://...")
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+async def get_async_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+@app.get("/users/{id}")
+async def read_user(
+    id: int,
+    db: Annotated[AsyncSession, Depends(get_async_db)],
+):
+    result = await db.execute(select(User).where(User.id == id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(404)
+    return user
+```
+
+## Async HTTP client (httpx)
+
+```python
+import httpx
+
+async def get_http_client() -> httpx.AsyncClient:
+    async with httpx.AsyncClient(timeout=10) as client:
+        yield client
+
+@app.get("/external/{id}")
+async def call_external(
+    id: int,
+    client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+):
+    resp = await client.get(f"https://api.example.com/{id}")
+    return resp.json()
+```
+
+**성능 팁**: `AsyncClient` 를 lifespan 에서 하나 만들어 dependency 로 재사용 (매 요청 새 클라이언트 생성 회피). Connection pooling.
+
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.http = httpx.AsyncClient(timeout=10)
+    yield
+    await app.state.http.aclose()
+
+async def get_http() -> httpx.AsyncClient:
+    return app.state.http
+```
+
+## asyncio.gather 로 병렬 요청
+
+```python
+import asyncio
+
+@app.get("/aggregate")
+async def aggregate(client: Annotated[httpx.AsyncClient, Depends(get_http)]):
+    a_task = client.get("https://a")
+    b_task = client.get("https://b")
+    c_task = client.get("https://c")
+    a, b, c = await asyncio.gather(a_task, b_task, c_task)
+    return {"a": a.json(), "b": b.json(), "c": c.json()}
+```
+
+세 요청을 병렬로. 순차 대비 3배 빠름 (외부 latency 지배 시).
+
+## CPU-bound 처리
+
+CPU-bound 작업은 `def` + threadpool 이 아니라 **process pool** 이 정답. GIL 회피.
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+import asyncio
+
+process_pool = ProcessPoolExecutor(max_workers=4)
+
+async def heavy_compute(x: int) -> int:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(process_pool, cpu_heavy_fn, x)
+
+@app.get("/compute/{x}")
+async def compute(x: int):
+    return await heavy_compute(x)
+```
+
+또는 [[aws-lambda|Lambda]] 로 오프로드.
+
+## AnyIO 를 통한 크로스 백엔드
+
+Starlette 는 [AnyIO](https://anyio.readthedocs.io/) 를 통해 asyncio + trio 모두 지원. FastAPI 의 default 는 asyncio. Trio 사용은 드묾.
+
+## 언제 어느 것을?
+
+| 상황 | 권장 |
+|:---|:---|
+| Async DB (SQLAlchemy 2.0 async, Tortoise, Motor) | `async def` |
+| Sync DB (전통 SQLAlchemy, Django ORM) | `def` |
+| Async HTTP (httpx, aiohttp) | `async def` |
+| Sync HTTP (requests) | `def` (또는 httpx.Client) |
+| 파일 IO (동기) | `def` 또는 `async def` + `run_in_threadpool` |
+| WebSocket | `async def` (Starlette 요구) |
+| BackgroundTasks | 함수 시그니처는 자유롭게 |
+| CPU 계산 | `def` + process pool |
+| 캐시 조회 (Redis async) | `async def` |
+
+## 성능 벤치마크 감
+
+- Async ORM + async HTTP: 최대 처리량 (수천 RPS/instance)
+- Sync ORM + async endpoint: 스레드풀 병목, 40 워커 상한
+- Sync ORM + sync endpoint: 스레드풀 병목, 40 워커 상한 (같은 임계)
+- Async endpoint + blocking call in threadpool: 정상 처리
+
+## 함정
+
+> [!WARNING]
+> **`async def` 안에서 절대 `time.sleep`, `requests.get`, sync ORM 호출 금지**. 이벤트 루프 정지 = p99 폭발.
+
+> [!CAUTION]
+> **스레드풀 default 40 은 sync endpoint 병목**. 동시 sync 요청이 40 을 넘으면 나머지는 대기. 스레드풀 크기 조정 또는 async 로 이행.
+
+> [!WARNING]
+> **`asyncio.run` 을 endpoint 안에서 호출하지 마세요**. 이미 있는 루프와 충돌. 그냥 `async def` 로 만들거나 `run_in_threadpool` 사용.
+
+> [!IMPORTANT]
+> **AsyncSession commit/rollback**. `async with` 로 세션을 감싸고 반드시 명시적으로 `await session.commit()`. Yield 방식 dependency 에서 `expire_on_commit=False` 를 잊으면 응답 직렬화 시 lazy load 로 async 오류.
+
+> [!CAUTION]
+> **Middleware 는 async 로 작성**. Sync middleware 는 자동으로 스레드풀에 넣기지만 별도 오버헤드.
+
+## 관련 위키
+
+- [[fastapi|FastAPI]] - 상위 개요
+- [[fastapi-dependency-injection|FastAPI DI]] - async / sync dep
+- [[fastapi-middleware|FastAPI Middleware]] - async middleware
+- [[fastapi-background-tasks|FastAPI Background Tasks]] - 응답 후 실행
+- [[py-asyncio|asyncio]] - 이벤트 루프 근간
+- [[py-asyncio-full|asyncio 심화]]
+- [[py-concurrent-futures|concurrent.futures]] - Process/Thread pool
+- [[py-async-generator|async generator]]

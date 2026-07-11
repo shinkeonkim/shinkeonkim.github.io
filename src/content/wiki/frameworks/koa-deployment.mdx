@@ -1,0 +1,491 @@
+---
+title: "[Koa] Deployment (PM2, Docker, Kubernetes)"
+aliases:
+  - "Koa Deployment"
+  - "Koa PM2"
+  - "Koa Docker"
+  - "Koa Kubernetes"
+  - "Koa 배포"
+  - "Koa production"
+tags: [koa, deployment, docker, kubernetes, pm2]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "Node.js Deployment"
+    url: "https://nodejs.org/en/docs/guides/nodejs-docker-webapp"
+  - title: "PM2"
+    url: "https://pm2.keymetrics.io/"
+  - title: "Koa Graceful Shutdown"
+    url: "https://github.com/koajs/koa/wiki/Deployment-Tips"
+---
+
+## 정의
+
+**Koa Deployment** 는 Node.js 프로덕션 배포의 표준 도구 (Docker, Kubernetes, PM2) + Koa 특화 고려사항 (graceful shutdown, `app.proxy`, error handling) 을 조합합니다.
+
+## Production 준비
+
+### `app.proxy = true`
+
+리버스 프록시 (nginx, ALB) 뒤 배포 시:
+
+```javascript
+app.proxy = true;
+```
+
+- `ctx.ip` 가 `X-Forwarded-For` 첫 값
+- `ctx.protocol` 이 `X-Forwarded-Proto` 반영
+- `ctx.host` 가 `X-Forwarded-Host` 반영
+
+**주의**: proxy 를 신뢰할 수 있는 환경만. 인터넷 노출 서비스에 `app.proxy = true` 를 그냥 켜면 IP spoofing 가능. Nginx 앞에 CF 등이 있으면 chain 개수 관리.
+
+### Environment
+
+```javascript
+if (process.env.NODE_ENV !== 'production') {
+  // dev-only middleware (logger, hot reload)
+}
+
+app.env = process.env.NODE_ENV;
+```
+
+### Signed cookies
+
+```javascript
+app.keys = [process.env.COOKIE_KEY_1, process.env.COOKIE_KEY_2];
+```
+
+## Graceful Shutdown
+
+```javascript
+const server = app.listen(3000);
+
+let shuttingDown = false;
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down`);
+
+  server.close(async (err) => {
+    if (err) {
+      console.error(err);
+      process.exit(1);
+    }
+    // DB, Redis, message queue 등 close
+    await db.disconnect();
+    await redis.quit();
+    console.log('Graceful shutdown complete');
+    process.exit(0);
+  });
+
+  // Force exit after 30s
+  setTimeout(() => {
+    console.error('Timeout, force exit');
+    process.exit(1);
+  }, 30_000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+```
+
+**주의**: `server.close()` 는 새 요청 accept 중지 + 진행 중 요청 완료 대기. `close()` 콜백은 keepalive connection 이 닫혀야 호출.
+
+`stoppable`, `terminus` 라이브러리 대안:
+
+```bash
+npm i @godaddy/terminus
+```
+
+```javascript
+const {createTerminus} = require('@godaddy/terminus');
+
+createTerminus(server, {
+  signal: 'SIGTERM',
+  timeout: 30000,
+  onSignal: async () => {
+    await db.disconnect();
+  },
+  healthChecks: {
+    '/health/ready': async () => {
+      await db.ping();
+    },
+  },
+});
+```
+
+## Health Check
+
+```javascript
+router.get('/health/live', async (ctx) => {
+  ctx.body = {status: 'ok'};
+});
+
+router.get('/health/ready', async (ctx) => {
+  try {
+    await db.query('SELECT 1');
+    ctx.body = {status: 'ready'};
+  } catch (err) {
+    ctx.status = 503;
+    ctx.body = {status: 'not ready', error: err.message};
+  }
+});
+```
+
+- **liveness**: 앱 프로세스 살아있는가
+- **readiness**: 요청 처리 준비 완료 (DB 연결 등)
+
+## Logging
+
+### 개발
+
+```javascript
+if (process.env.NODE_ENV !== 'production') {
+  app.use(require('koa-logger')());
+}
+```
+
+### 프로덕션 (JSON)
+
+```bash
+npm i pino koa-pino-logger
+```
+
+```javascript
+const pino = require('pino');
+const pinoLogger = require('koa-pino-logger');
+
+const logger = pino({level: 'info', redact: ['req.headers.authorization']});
+
+app.use(pinoLogger({logger}));
+
+// 사용
+app.use(async (ctx, next) => {
+  ctx.log.info({userId: ctx.state.user?.id}, 'processing');
+  await next();
+});
+```
+
+### 로그 필드 관용
+
+- `time`, `level`, `msg`
+- `req`: method, url, headers (redacted), remoteAddr
+- `res`: statusCode, headers
+- `responseTime`, `requestId`
+- `err`: message, stack (dev 만)
+
+## Sentry / OpenTelemetry
+
+### Sentry
+
+```bash
+npm i @sentry/node
+```
+
+```javascript
+const Sentry = require('@sentry/node');
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  tracesSampleRate: 0.1,
+});
+
+// Error middleware
+app.use(async (ctx, next) => {
+  try { await next(); } catch (err) {
+    Sentry.withScope((scope) => {
+      scope.setTag('path', ctx.path);
+      scope.setUser({id: ctx.state.user?.id});
+      Sentry.captureException(err);
+    });
+    throw err;
+  }
+});
+```
+
+### OpenTelemetry
+
+```bash
+npm i @opentelemetry/api @opentelemetry/sdk-node \
+  @opentelemetry/auto-instrumentations-node \
+  @opentelemetry/exporter-trace-otlp-http
+```
+
+```javascript
+// tracing.js
+const {NodeSDK} = require('@opentelemetry/sdk-node');
+const {getNodeAutoInstrumentations} = require('@opentelemetry/auto-instrumentations-node');
+const {OTLPTraceExporter} = require('@opentelemetry/exporter-trace-otlp-http');
+
+const sdk = new NodeSDK({
+  traceExporter: new OTLPTraceExporter({url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT}),
+  instrumentations: [getNodeAutoInstrumentations()],
+});
+
+sdk.start();
+```
+
+`server.js` 최상단에 `require('./tracing')` (모든 import 이전).
+
+## Dockerfile (multi-stage)
+
+```dockerfile
+# --- builder ---
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+# 프로덕션 의존성만 재설치
+RUN npm ci --omit=dev && npm cache clean --force
+
+# --- runtime ---
+FROM node:20-alpine
+WORKDIR /app
+
+RUN addgroup -g 1001 -S app && adduser -S app -u 1001
+
+COPY --from=builder --chown=app:app /app/node_modules ./node_modules
+COPY --chown=app:app package*.json ./
+COPY --chown=app:app src ./src
+
+USER app
+
+EXPOSE 3000
+
+CMD ["node", "src/server.js"]
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s \
+  CMD wget --spider -q http://localhost:3000/health/live || exit 1
+```
+
+### `.dockerignore`
+
+```
+node_modules
+.git
+.env
+.env.*
+*.md
+test
+coverage
+Dockerfile
+.gitignore
+.vscode
+.idea
+```
+
+## PM2
+
+VM 배포용. K8s 는 kubelet 이 대체.
+
+```bash
+npm i -g pm2
+```
+
+```javascript
+// ecosystem.config.js
+module.exports = {
+  apps: [{
+    name: 'myapp',
+    script: 'src/server.js',
+    instances: 'max',           // = CPU 개수
+    exec_mode: 'cluster',
+    env_production: {
+      NODE_ENV: 'production',
+      PORT: 3000,
+    },
+    max_memory_restart: '1G',
+    kill_timeout: 30000,          // graceful timeout
+    listen_timeout: 10000,
+    wait_ready: true,             // process.send('ready') 대기
+    error_file: '/var/log/myapp/error.log',
+    out_file: '/var/log/myapp/out.log',
+    log_date_format: 'YYYY-MM-DD HH:mm:ss',
+  }],
+};
+```
+
+```javascript
+// server.js
+const server = app.listen(port, () => {
+  if (process.send) process.send('ready');   // PM2 알림
+});
+```
+
+```bash
+pm2 start ecosystem.config.js --env production
+pm2 status
+pm2 logs myapp
+pm2 reload myapp             # zero-downtime
+pm2 startup                   # systemd 등록
+pm2 save
+```
+
+## Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: myapp}
+  template:
+    metadata:
+      labels: {app: myapp}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: app
+          image: myrepo/myapp:v1.0
+          ports: [{containerPort: 3000}]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: myapp, key: db-url}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          livenessProbe:
+            httpGet: {path: /health/live, port: 3000}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /health/ready, port: 3000}
+            periodSeconds: 5
+          startupProbe:
+            httpGet: {path: /health/live, port: 3000}
+            failureThreshold: 30
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+```
+
+## Reverse Proxy (nginx)
+
+```nginx
+upstream koa_app {
+  server 127.0.0.1:3000;
+  keepalive 32;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name api.example.com;
+
+  ssl_certificate /etc/ssl/cert.pem;
+  ssl_certificate_key /etc/ssl/key.pem;
+
+  client_max_body_size 10M;
+
+  location / {
+    proxy_pass http://koa_app;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 60s;
+  }
+}
+```
+
+## Cluster mode (Node built-in)
+
+```javascript
+const cluster = require('cluster');
+const os = require('os');
+
+if (cluster.isPrimary) {
+  const workers = os.cpus().length;
+  for (let i = 0; i < workers; i++) cluster.fork();
+
+  cluster.on('exit', (worker) => {
+    console.log(`Worker ${worker.process.pid} died, restarting`);
+    cluster.fork();
+  });
+} else {
+  require('./server');
+}
+```
+
+PM2 가 이 관리를 대신함.
+
+## Environment 관리
+
+```bash
+npm i dotenv
+```
+
+```javascript
+require('dotenv').config();
+```
+
+Kubernetes 나 Docker Compose 는 env 를 컨테이너에 주입. `.env` 는 dev 만.
+
+Config schema:
+
+```bash
+npm i zod
+```
+
+```javascript
+const {z} = require('zod');
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test']),
+  PORT: z.string().transform(Number).default('3000'),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+});
+
+const env = envSchema.parse(process.env);
+```
+
+앱 시작 시 검증.
+
+## 함정
+
+> [!WARNING]
+> **Graceful shutdown 안 하면 in-flight 요청 손실**. SIGTERM handler + server.close 필수.
+
+> [!CAUTION]
+> **`app.proxy = true` 를 프록시 없는 환경에 켜면** IP spoofing 위험. `X-Forwarded-For` 를 client 가 임의로 설정.
+
+> [!WARNING]
+> **Stack trace 프로덕션 노출 금지**. Error middleware 에서 NODE_ENV 분기.
+
+> [!IMPORTANT]
+> **`terminationGracePeriodSeconds` > shutdown 완료 시간**. K8s 강제 종료 방지.
+
+> [!CAUTION]
+> **Node dependency alpine 문제**. Native module (bcrypt, prisma) 는 alpine + musl 별도 빌드. multi-stage 로 안전.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-middleware|Koa Middleware]] - Error middleware
+- [[koa-error-handling|Koa Error Handling]]
+- [[koa-testing|Koa Testing]]
+- [[koa-router|Koa Router]]
+- [[kubernetes|Kubernetes]]
+- [[k8s-deployment|K8s Deployment]]
+- [[k8s-service|K8s Service]]
+- [[container-image-best-practices|Container Image Best Practices]]
+- [[oci-image|OCI Image]]
+- [[nestjs-deployment|NestJS Deployment]] - 대비
+- [[fastapi-deployment|FastAPI Deployment]] - 대비

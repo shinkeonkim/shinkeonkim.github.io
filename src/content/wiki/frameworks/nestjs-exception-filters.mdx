@@ -1,0 +1,367 @@
+---
+title: "[NestJS] Exception Filters"
+aliases:
+  - "NestJS Exception Filter"
+  - "NestJS Exception Filters"
+  - "@Catch decorator"
+  - "HttpExceptionFilter"
+  - "AllExceptionsFilter"
+  - "HttpException"
+  - "NestJS 예외 필터"
+tags: [nestjs, exception, error-handling]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Exception Filters"
+    url: "https://docs.nestjs.com/exception-filters"
+  - title: "NestJS Built-in HTTP Exceptions"
+    url: "https://docs.nestjs.com/exception-filters#built-in-http-exceptions"
+---
+
+## 정의
+
+**NestJS Exception Filter** 는 애플리케이션에서 발생한 예외를 catch 하여 클라이언트에게 응답 형식을 통일합니다. `@Catch()` 데코레이터로 어떤 예외를 처리할지 지정합니다. **처리 안 된 예외**는 built-in filter 가 500 응답으로 처리하지만, 커스텀 filter 로 로깅, 형식 변환, exception mapping 을 구현합니다.
+
+## Built-in Exceptions
+
+```typescript
+import {
+  BadRequestException,          // 400
+  UnauthorizedException,        // 401
+  NotFoundException,             // 404
+  ForbiddenException,            // 403
+  NotAcceptableException,        // 406
+  RequestTimeoutException,       // 408
+  ConflictException,             // 409
+  GoneException,                 // 410
+  PayloadTooLargeException,      // 413
+  UnsupportedMediaTypeException, // 415
+  UnprocessableEntityException,  // 422
+  InternalServerErrorException,  // 500
+  NotImplementedException,       // 501
+  BadGatewayException,           // 502
+  ServiceUnavailableException,   // 503
+  GatewayTimeoutException,       // 504
+} from '@nestjs/common';
+
+throw new NotFoundException('User not found');
+throw new BadRequestException({
+  message: 'Invalid input',
+  code: 'INVALID_INPUT',
+  details: {field: 'email'},
+});
+```
+
+Nest 는 이를 다음과 같이 응답:
+
+```json
+{
+  "statusCode": 404,
+  "message": "User not found",
+  "error": "Not Found"
+}
+```
+
+## Custom Exception Filter
+
+```typescript
+import { ExceptionFilter, Catch, ArgumentsHost, HttpException } from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Catch(HttpException)
+export class HttpExceptionFilter implements ExceptionFilter {
+  catch(exception: HttpException, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    const res = ctx.getResponse<Response>();
+    const req = ctx.getRequest<Request>();
+    const status = exception.getStatus();
+    const message = exception.getResponse();
+
+    res.status(status).json({
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: req.url,
+      message: typeof message === 'string' ? message : (message as any).message,
+    });
+  }
+}
+```
+
+## `@Catch()` 인자
+
+```typescript
+@Catch()                          // 모든 예외
+@Catch(HttpException)             // HttpException 만
+@Catch(BadRequestException, NotFoundException)   // 여러 개
+@Catch(PrismaClientKnownRequestError)   // 외부 예외
+```
+
+## 부착 방법
+
+### Method / Controller
+
+```typescript
+@Get()
+@UseFilters(HttpExceptionFilter)
+find() { ... }
+
+@Controller('users')
+@UseFilters(HttpExceptionFilter)
+export class UsersController { ... }
+```
+
+### Global
+
+```typescript
+// main.ts
+app.useGlobalFilters(new HttpExceptionFilter());
+
+// 또는 module (DI 지원)
+import { APP_FILTER } from '@nestjs/core';
+
+@Module({
+  providers: [
+    { provide: APP_FILTER, useClass: HttpExceptionFilter },
+  ],
+})
+export class AppModule {}
+```
+
+## All Exceptions Filter
+
+가장 넓은 catch. 마지막 방어선.
+
+```typescript
+import { Catch, ArgumentsHost, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
+
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger('AllExceptionsFilter');
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const res = ctx.getResponse();
+    const req = ctx.getRequest();
+
+    const status = exception instanceof HttpException
+      ? exception.getStatus()
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    const message = exception instanceof HttpException
+      ? exception.getResponse()
+      : (exception as Error)?.message || 'Internal server error';
+
+    this.logger.error({
+      message,
+      stack: (exception as Error)?.stack,
+      path: req.url,
+      method: req.method,
+    });
+
+    res.status(status).json({
+      statusCode: status,
+      timestamp: new Date().toISOString(),
+      path: req.url,
+      message,
+    });
+  }
+}
+```
+
+## Filter 순서
+
+여러 filter 를 사용 시:
+- **`@Catch(SpecificException)`** 이 먼저
+- **`@Catch()`** 는 fallback
+
+```typescript
+@Controller()
+@UseFilters(BusinessLogicFilter, HttpExceptionFilter, AllExceptionsFilter)
+```
+
+**주의**: 실제 실행은 스택 형태. 위에서부터 매칭.
+
+## Business Exception 패턴
+
+도메인 특화 예외를 정의하고 filter 에서 매핑.
+
+```typescript
+// domain/exceptions/user-already-exists.exception.ts
+export class UserAlreadyExistsError extends Error {
+  constructor(email: string) {
+    super(`User with email ${email} already exists`);
+    this.name = 'UserAlreadyExistsError';
+  }
+}
+
+// business.filter.ts
+@Catch(UserAlreadyExistsError)
+export class UserAlreadyExistsFilter implements ExceptionFilter {
+  catch(exception: UserAlreadyExistsError, host: ArgumentsHost) {
+    const res = host.switchToHttp().getResponse();
+    res.status(409).json({
+      statusCode: 409,
+      error: 'CONFLICT',
+      code: 'USER_ALREADY_EXISTS',
+      message: exception.message,
+    });
+  }
+}
+```
+
+## Prisma / TypeORM 예외 매핑
+
+### Prisma
+
+```typescript
+import { Catch, ArgumentsHost, ExceptionFilter, HttpStatus } from '@nestjs/common';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+
+@Catch(PrismaClientKnownRequestError)
+export class PrismaExceptionFilter implements ExceptionFilter {
+  catch(exception: PrismaClientKnownRequestError, host: ArgumentsHost) {
+    const res = host.switchToHttp().getResponse();
+
+    let status = HttpStatus.INTERNAL_SERVER_ERROR;
+    let message = 'Database error';
+
+    switch (exception.code) {
+      case 'P2002':   // Unique constraint
+        status = HttpStatus.CONFLICT;
+        message = 'Resource already exists';
+        break;
+      case 'P2025':   // Not found
+        status = HttpStatus.NOT_FOUND;
+        message = 'Resource not found';
+        break;
+      case 'P2003':   // Foreign key
+        status = HttpStatus.BAD_REQUEST;
+        message = 'Foreign key constraint failed';
+        break;
+    }
+
+    res.status(status).json({
+      statusCode: status,
+      code: exception.code,
+      message,
+    });
+  }
+}
+```
+
+### TypeORM
+
+```typescript
+import { QueryFailedError } from 'typeorm';
+
+@Catch(QueryFailedError)
+export class QueryFailedFilter implements ExceptionFilter {
+  catch(exception: QueryFailedError, host: ArgumentsHost) {
+    // ...
+  }
+}
+```
+
+## Filter + Logging + Sentry
+
+```typescript
+import * as Sentry from '@sentry/node';
+
+@Catch()
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger('AllExceptionsFilter');
+
+  catch(exception: unknown, host: ArgumentsHost) {
+    const status = exception instanceof HttpException
+      ? exception.getStatus()
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    if (status >= 500) {
+      Sentry.captureException(exception);
+      this.logger.error(exception);
+    }
+
+    // ...respond
+  }
+}
+```
+
+## WebSocket / GraphQL / RPC
+
+`ArgumentsHost` 로 컨텍스트 전환:
+
+```typescript
+@Catch()
+export class WsExceptionFilter implements ExceptionFilter {
+  catch(exception: unknown, host: ArgumentsHost) {
+    const type = host.getType();
+
+    if (type === 'ws') {
+      const client = host.switchToWs().getClient();
+      client.emit('error', {message: (exception as Error).message});
+    } else if (type === 'http') {
+      // HTTP 응답
+    }
+  }
+}
+```
+
+## v11: Intrinsic Exception
+
+NestJS 11 에서 도입. 시스템 예외를 표시:
+
+```typescript
+throw new IntrinsicException('Internal error');
+```
+
+내부 오류를 사용자에 노출 X 계층 분리.
+
+## Validation Filter (예외 응답 형식 커스텀)
+
+```typescript
+import { HttpException, HttpStatus, ValidationError } from '@nestjs/common';
+
+class ValidationException extends HttpException {
+  constructor(errors: ValidationError[]) {
+    super({
+      statusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+      error: 'Validation Failed',
+      errors: flatten(errors),
+    }, HttpStatus.UNPROCESSABLE_ENTITY);
+  }
+}
+
+// main.ts
+app.useGlobalPipes(new ValidationPipe({
+  exceptionFactory: (errors) => new ValidationException(errors),
+}));
+```
+
+## 함정
+
+> [!WARNING]
+> **`@Catch()` (empty) + 다른 filter 순서**. Empty catch 가 먼저 오면 모든 예외 잡아서 다른 filter 실행 안 됨.
+
+> [!CAUTION]
+> **`throw` 대신 return error object 하지 마세요**. NestJS 는 exception 기반. Return 은 200 처리.
+
+> [!WARNING]
+> **Async filter 실수**. `catch` 는 sync 인 것처럼 보이지만 async 가능. Await 로 처리.
+
+> [!IMPORTANT]
+> **Global filter 는 DI 필요 시 `APP_FILTER` provider**. `useGlobalFilters()` 는 DI 없음.
+
+> [!CAUTION]
+> **에러 상세를 클라이언트에 노출 위험**. Stack trace, DB error message 등 감출 것.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-controllers|Controllers]] - `@UseFilters()`
+- [[nestjs-pipes|Pipes]] - validation 예외
+- [[nestjs-guards|Guards]] - unauthorized 예외
+- [[nestjs-interceptors|Interceptors]] - exception mapping
+- [[nestjs-middleware|Middleware]]
+- [[nestjs-modules|Modules]]
+- [[nestjs-testing|Testing]] - filter 테스트
+- [[fastapi-middleware|FastAPI Middleware]] - exception handler

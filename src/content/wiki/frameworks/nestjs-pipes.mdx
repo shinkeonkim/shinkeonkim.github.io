@@ -1,0 +1,440 @@
+---
+title: "[NestJS] Pipes (Validation, Transformation)"
+aliases:
+  - "NestJS Pipe"
+  - "NestJS Pipes"
+  - "ValidationPipe"
+  - "ParseIntPipe"
+  - "ParseUUIDPipe"
+  - "ParseDatePipe"
+  - "class-validator"
+  - "class-transformer"
+  - "NestJS 검증"
+tags: [nestjs, pipe, validation, transformation]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Pipes"
+    url: "https://docs.nestjs.com/pipes"
+  - title: "NestJS Validation"
+    url: "https://docs.nestjs.com/techniques/validation"
+  - title: "class-validator"
+    url: "https://github.com/typestack/class-validator"
+  - title: "class-transformer"
+    url: "https://github.com/typestack/class-transformer"
+---
+
+## 정의
+
+**NestJS Pipe** 는 controller method 로 들어가는 인자를 **변환 (transformation)** 하거나 **검증 (validation)** 하는 클래스입니다. Guard/Interceptor 이후, handler 이전에 실행됩니다. 두 가지 관용:
+
+- **변환**: `ParseIntPipe` (string -> number)
+- **검증**: `ValidationPipe` (DTO 검증)
+
+## 내장 Pipe
+
+```typescript
+import {
+  ParseIntPipe,
+  ParseFloatPipe,
+  ParseBoolPipe,
+  ParseArrayPipe,
+  ParseUUIDPipe,
+  ParseDatePipe,     // v11 신규
+  ParseEnumPipe,
+  DefaultValuePipe,
+  ValidationPipe,
+} from '@nestjs/common';
+
+@Get(':id')
+find(@Param('id', ParseIntPipe) id: number) { ... }
+
+@Get()
+list(
+  @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+  @Query('active', new DefaultValuePipe(true), ParseBoolPipe) active: boolean,
+) { ... }
+
+@Get(':uuid')
+findByUuid(@Param('uuid', ParseUUIDPipe) uuid: string) { ... }
+
+@Get()
+byDate(@Query('date', ParseDatePipe) date: Date) { ... }
+
+@Get()
+byIds(
+  @Query('ids', new ParseArrayPipe({items: Number, separator: ','}))
+  ids: number[],
+) { ... }
+```
+
+파싱 실패 시 자동 400 BadRequest.
+
+## ValidationPipe (DTO 검증)
+
+class-validator + class-transformer 필요:
+
+```bash
+npm i class-validator class-transformer
+```
+
+### 전역 활성화
+
+```typescript
+// main.ts
+app.useGlobalPipes(new ValidationPipe({
+  whitelist: true,               // DTO 에 없는 필드 제거
+  forbidNonWhitelisted: true,    // 있으면 오류 (선택)
+  transform: true,                // 자동 변환 (string -> number 등)
+  transformOptions: {
+    enableImplicitConversion: true,
+  },
+}));
+```
+
+### DTO 정의
+
+```typescript
+import {
+  IsEmail,
+  IsInt,
+  IsString,
+  IsOptional,
+  MinLength,
+  MaxLength,
+  Min,
+  Max,
+  IsEnum,
+  IsDate,
+  ValidateNested,
+  IsArray,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+export enum Role {
+  Admin = 'admin',
+  User = 'user',
+  Guest = 'guest',
+}
+
+export class CreateUserDto {
+  @IsEmail()
+  email: string;
+
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  password: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(50)
+  name: string;
+
+  @IsInt()
+  @Min(0)
+  @Max(150)
+  age: number;
+
+  @IsEnum(Role)
+  role: Role;
+
+  @IsDate()
+  @Type(() => Date)               // string -> Date 자동 변환
+  birthDate: Date;
+
+  @IsOptional()
+  @IsString()
+  bio?: string;
+
+  @ValidateNested()
+  @Type(() => AddressDto)
+  address: AddressDto;
+
+  @IsArray()
+  @IsString({each: true})
+  @ArrayMinSize(1)
+  tags: string[];
+}
+```
+
+### 사용
+
+```typescript
+@Post()
+create(@Body() dto: CreateUserDto) {
+  // 이미 validated + transformed
+  // birthDate 는 Date 인스턴스
+  // ...
+}
+```
+
+검증 실패 시 자동 400:
+
+```json
+{
+  "statusCode": 400,
+  "message": [
+    "email must be an email",
+    "password must be longer than or equal to 8 characters"
+  ],
+  "error": "Bad Request"
+}
+```
+
+## Query DTO 검증
+
+```typescript
+export class ListUsersQuery {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @IsOptional()
+  page?: number = 1;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  limit?: number = 10;
+
+  @IsOptional()
+  @IsEnum(['asc', 'desc'])
+  order?: 'asc' | 'desc' = 'desc';
+}
+```
+
+`@Type(() => Number)` 는 `class-transformer` 로 string -> number.
+
+## Custom Pipe
+
+```typescript
+import { PipeTransform, Injectable, ArgumentMetadata, BadRequestException } from '@nestjs/common';
+
+@Injectable()
+export class TrimPipe implements PipeTransform<string, string> {
+  transform(value: string, metadata: ArgumentMetadata): string {
+    if (typeof value !== 'string') return value;
+    return value.trim();
+  }
+}
+
+@Injectable()
+export class ParsePositiveIntPipe implements PipeTransform<string, number> {
+  transform(value: string): number {
+    const n = parseInt(value, 10);
+    if (isNaN(n) || n <= 0) {
+      throw new BadRequestException('Must be a positive integer');
+    }
+    return n;
+  }
+}
+```
+
+## Pipe 부착 방법
+
+### Parameter
+
+```typescript
+@Get(':id')
+find(@Param('id', ParseIntPipe) id: number) { ... }
+
+// 옵션 있는 pipe
+@Get(':id')
+find(
+  @Param('id', new ParseIntPipe({errorHttpStatusCode: HttpStatus.NOT_ACCEPTABLE}))
+  id: number,
+) { ... }
+
+// 여러 pipe (순서대로)
+@Get()
+list(@Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number) { ... }
+```
+
+### Method
+
+```typescript
+@Post()
+@UsePipes(new ValidationPipe({transform: true}))
+create(@Body() dto: CreateUserDto) { ... }
+```
+
+### Controller
+
+```typescript
+@Controller('users')
+@UsePipes(new ValidationPipe())
+export class UsersController { ... }
+```
+
+### Global
+
+```typescript
+// main.ts
+app.useGlobalPipes(new ValidationPipe({...}));
+
+// 또는 module
+@Module({
+  providers: [
+    { provide: APP_PIPE, useClass: ValidationPipe },
+  ],
+})
+export class AppModule {}
+```
+
+## Transform 옵션
+
+`@Type()` 없이 자동 변환:
+
+```typescript
+new ValidationPipe({
+  transform: true,
+  transformOptions: {
+    enableImplicitConversion: true,   // TS 타입 기반 자동 변환
+  },
+})
+```
+
+이제 `page: number` 필드가 string 으로 들어와도 자동으로 Number. 위험도 있음 (`"abc"` -> `NaN`).
+
+## Whitelist / ForbidNonWhitelisted
+
+```typescript
+new ValidationPipe({
+  whitelist: true,             // DTO 에 없는 필드 자동 제거
+  forbidNonWhitelisted: true,  // 있으면 오류
+})
+```
+
+- **whitelist**: 안전 (extra 필드 무시)
+- **forbidNonWhitelisted**: 엄격 (스키마 강제, 오탈자 방지)
+
+## Nested Validation
+
+```typescript
+export class AddressDto {
+  @IsString() city: string;
+  @IsString() zipCode: string;
+}
+
+export class CreateUserDto {
+  @IsEmail() email: string;
+
+  @ValidateNested()
+  @Type(() => AddressDto)
+  address: AddressDto;
+
+  @IsArray()
+  @ValidateNested({each: true})
+  @Type(() => AddressDto)
+  addresses: AddressDto[];
+}
+```
+
+## Groups / Conditional
+
+```typescript
+export class UpdateUserDto {
+  @IsOptional()
+  @IsEmail({}, {groups: ['update']})
+  email?: string;
+}
+
+new ValidationPipe({groups: ['update']})
+```
+
+## Async Custom Validator
+
+```typescript
+import { registerDecorator, ValidationOptions, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator';
+
+@ValidatorConstraint({name: 'IsEmailUnique', async: true})
+export class IsEmailUniqueConstraint implements ValidatorConstraintInterface {
+  constructor(private usersService: UsersService) {}
+  async validate(email: string) {
+    const exists = await this.usersService.emailExists(email);
+    return !exists;
+  }
+}
+
+export function IsEmailUnique(options?: ValidationOptions) {
+  return function(object: object, propertyName: string) {
+    registerDecorator({
+      target: object.constructor,
+      propertyName,
+      options,
+      validator: IsEmailUniqueConstraint,
+    });
+  };
+}
+```
+
+**주의**: Async custom validator 는 useContainer 설정 필요.
+
+## Zod 대체
+
+`class-validator` 대신 `zod` 사용 가능. NestJS 는 `nestjs-zod` 등 통합 라이브러리.
+
+```typescript
+import { z } from 'zod';
+import { createZodDto } from 'nestjs-zod';
+
+const CreateUserSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  age: z.number().int().min(0).max(150),
+});
+
+export class CreateUserDto extends createZodDto(CreateUserSchema) {}
+```
+
+TypeScript 타입 자동 추론. 런타임 검증.
+
+## v11 신규: ParseDatePipe
+
+```typescript
+@Get()
+byDate(@Query('date', new ParseDatePipe()) date: Date) { ... }
+
+// 옵션
+@Get()
+byDate(
+  @Query('date', new ParseDatePipe({
+    optional: true,
+    default: () => new Date(),
+  }))
+  date: Date,
+) { ... }
+```
+
+ISO 8601 문자열 -> Date. 실패 시 400.
+
+## 함정
+
+> [!WARNING]
+> **`ValidationPipe` global 등록 안 하면 DTO 검증 안 됨**. main.ts 에 반드시.
+
+> [!CAUTION]
+> **`transform: false` 상태에서 `@Type()` 무력**. transform 필수.
+
+> [!WARNING]
+> **`class-validator` metadata 필요**. `reflect-metadata` import + tsconfig `emitDecoratorMetadata: true`.
+
+> [!IMPORTANT]
+> **Nested DTO 는 `@ValidateNested()` + `@Type()` 필수**. 안 하면 nested 는 검증 skip.
+
+> [!CAUTION]
+> **`enableImplicitConversion` 은 위험할 수도**. `age: number` 필드에 `"abc"` 오면 `NaN`. 명시적 `@Type(() => Number)` 가 안전.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-controllers|Controllers]] - `@UsePipes()`
+- [[nestjs-guards|Guards]] - 이전 단계
+- [[nestjs-interceptors|Interceptors]]
+- [[nestjs-exception-filters|Exception Filters]] - 검증 실패 처리
+- [[nestjs-modules|Modules]]
+- [[nestjs-providers|Providers]]
+- [[fastapi-pydantic|FastAPI Pydantic]] - 대비
+- [[ts-decorators|TypeScript Decorators]]

@@ -1,0 +1,407 @@
+---
+title: "kubectl"
+aliases:
+  - "kubectl"
+  - "kube control"
+  - "k8s CLI"
+  - "Kubernetes CLI"
+  - "kubectl commands"
+  - "kubectl config"
+  - "kubectl 사용법"
+tags: [kubernetes, cli, tool]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "kubectl Reference"
+    url: "https://kubernetes.io/docs/reference/kubectl/"
+  - title: "kubectl Cheat Sheet"
+    url: "https://kubernetes.io/docs/reference/kubectl/quick-reference/"
+  - title: "kubectx / kubens"
+    url: "https://github.com/ahmetb/kubectx"
+  - title: "krew Plugin Manager"
+    url: "https://krew.sigs.k8s.io/"
+---
+
+## 정의
+
+**kubectl** 은 Kubernetes API 를 명령줄에서 조작하는 공식 CLI 입니다. kube-apiserver 와 통신해 리소스를 조회, 생성, 수정, 삭제하고, 로그/exec/포트포워딩 같은 상호작용을 제공합니다.
+
+## 설치 & 설정
+
+### 설치
+
+```bash
+# macOS
+brew install kubectl
+# 또는
+brew install kubernetes-cli
+
+# Linux
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# Windows
+choco install kubernetes-cli
+```
+
+### kubeconfig
+
+`~/.kube/config` 파일. 여러 클러스터/context 정보.
+
+```yaml
+apiVersion: v1
+kind: Config
+clusters:
+  - name: prod
+    cluster:
+      server: https://api.prod.example.com
+      certificate-authority-data: <base64>
+users:
+  - name: alice
+    user:
+      client-certificate-data: <base64>
+      client-key-data: <base64>
+      # 또는
+      token: <bearer-token>
+      # 또는
+      exec:
+        apiVersion: client.authentication.k8s.io/v1beta1
+        command: aws
+        args: ["eks", "get-token", "--cluster-name", "prod"]
+contexts:
+  - name: alice@prod
+    context:
+      cluster: prod
+      user: alice
+      namespace: default
+current-context: alice@prod
+```
+
+## 기본 명령
+
+### CRUD
+
+```bash
+# 리소스 조회
+kubectl get pods
+kubectl get all -n prod
+kubectl get pod <name> -o yaml
+kubectl get pod <name> -o json
+kubectl get pods -l app=web -o wide
+kubectl get pods --sort-by=.metadata.creationTimestamp
+
+# 자세한 정보
+kubectl describe pod <name>
+kubectl describe node <name>
+
+# 생성/갱신 (선언적)
+kubectl apply -f deployment.yaml
+kubectl apply -f ./manifests/     # 디렉토리 전체
+kubectl apply -k ./overlays/prod/  # kustomize
+
+# 생성 (명령형)
+kubectl create namespace dev
+kubectl create deployment web --image=nginx:1.27 --replicas=3
+kubectl create secret generic db --from-literal=password=secret
+
+# 실행 명령형
+kubectl run tmp --image=busybox --rm -it --restart=Never -- /bin/sh
+
+# 편집 (직접, 지양)
+kubectl edit deployment web
+
+# 삭제
+kubectl delete pod <name>
+kubectl delete -f deployment.yaml
+kubectl delete deployment,service --all -n dev
+```
+
+### apply vs create vs replace
+
+- **`apply`** (선언적, 권장): 최종 상태 지정. 3-way merge (last-applied annotation + live + config).
+- **`create`** (명령형): 없으면 생성, 있으면 오류.
+- **`replace`** (명령형): 완전 교체. `--force` 로 삭제 + 생성.
+
+### Rollout
+
+```bash
+kubectl rollout status deployment/web
+kubectl rollout history deployment/web
+kubectl rollout undo deployment/web
+kubectl rollout undo deployment/web --to-revision=3
+kubectl rollout restart deployment/web    # 모든 pod 재시작
+
+# 상태
+kubectl rollout pause deployment/web
+kubectl rollout resume deployment/web
+```
+
+### Scaling
+
+```bash
+kubectl scale deployment web --replicas=5
+kubectl scale --replicas=3 -f deployment.yaml
+kubectl autoscale deployment web --min=2 --max=10 --cpu-percent=80
+```
+
+## Context / Namespace
+
+### Context 전환
+
+```bash
+kubectl config get-contexts
+kubectl config current-context
+kubectl config use-context prod-cluster
+
+# 편의 도구
+kubectx prod-cluster        # ahmetb/kubectx
+```
+
+### Namespace 전환
+
+```bash
+kubectl config set-context --current --namespace=prod
+
+# 편의 도구
+kubens prod
+
+# 특정 명령만
+kubectl get pods -n prod
+```
+
+## Output 형식
+
+```bash
+kubectl get pods -o wide             # 추가 정보
+kubectl get pod <name> -o yaml       # YAML
+kubectl get pod <name> -o json       # JSON
+kubectl get pods -o name             # 이름만
+kubectl get pods -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName
+
+# JSONPath
+kubectl get pods -o jsonpath='{.items[*].metadata.name}'
+kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
+
+# jq 조합
+kubectl get pods -o json | jq '.items[] | select(.status.phase != "Running") | .metadata.name'
+```
+
+## Label / Field selector
+
+```bash
+# Label selector
+kubectl get pods -l app=web
+kubectl get pods -l 'environment in (dev, staging)'
+kubectl get pods -l '!experimental'
+
+# Field selector
+kubectl get pods --field-selector status.phase=Running
+kubectl get pods --field-selector spec.nodeName=node1
+kubectl get events --field-selector involvedObject.name=<pod>
+
+# 조합
+kubectl get pods -l app=web --field-selector status.phase=Failed -n prod
+```
+
+## Logs
+
+```bash
+kubectl logs <pod>
+kubectl logs <pod> -c <container>            # multi-container
+kubectl logs <pod> --previous                 # 이전 컨테이너 (crashed)
+kubectl logs <pod> --follow                   # 실시간
+kubectl logs <pod> --tail=100
+kubectl logs <pod> --since=1h
+kubectl logs -l app=web --all-containers=true --tail=50
+kubectl logs -l app=web --max-log-requests=20   # 최대 pod 수
+```
+
+## Exec / Port-forward / Copy
+
+```bash
+# Exec
+kubectl exec -it <pod> -- /bin/sh
+kubectl exec -it <pod> -c <container> -- bash
+kubectl exec <pod> -- ls /var/log
+
+# Port-forward (로컬 -> pod)
+kubectl port-forward pod/<pod> 8080:80
+kubectl port-forward service/<svc> 5000:5000
+kubectl port-forward deployment/web 3000:8080
+
+# Copy 파일
+kubectl cp <pod>:/etc/config.yaml ./local-config.yaml
+kubectl cp ./local-file.tgz <ns>/<pod>:/tmp/
+```
+
+## Debug
+
+```bash
+# Ephemeral container (K8s 1.25+)
+kubectl debug -it <pod> --image=busybox --target=<container>
+kubectl debug <pod> --copy-to=<pod>-debug --set-image=<container>=busybox
+
+# Node debug
+kubectl debug node/<node> -it --image=ubuntu
+
+# 임시 pod (테스트)
+kubectl run tmp --rm -it --image=nicolaka/netshoot -- /bin/bash
+```
+
+자세한 것은 [[k8s-debugging|Debugging]] 참조.
+
+## 리소스 사용량
+
+```bash
+# metrics-server 필요
+kubectl top nodes
+kubectl top pods -n <ns>
+kubectl top pod --containers -n <ns>
+kubectl top pod --sort-by=cpu
+```
+
+## Diff
+
+```bash
+kubectl diff -f deployment.yaml     # 적용 전 차이 확인
+kubectl diff -k ./overlays/prod
+```
+
+## Wait
+
+```bash
+kubectl wait --for=condition=Ready pod/<name> --timeout=60s
+kubectl wait --for=condition=Available deployment/web --timeout=5m
+kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 deployment/web
+kubectl wait --for=delete pod/<name>
+```
+
+CI/CD 스크립트에서 유용.
+
+## Cluster info
+
+```bash
+kubectl cluster-info
+kubectl cluster-info dump   # 방대한 진단
+kubectl api-resources        # 지원 리소스 목록
+kubectl api-versions          # API 버전
+kubectl version --short
+```
+
+## 컨텍스트 이해에 유용한 명령
+
+```bash
+# 지원 필드 확인
+kubectl explain pod
+kubectl explain pod.spec.containers
+kubectl explain pod --recursive
+kubectl explain pod.spec.containers.resources
+
+# 이벤트
+kubectl get events --sort-by=.metadata.creationTimestamp
+kubectl events --for pod/<name>    # v1.31+
+```
+
+## Plugins (krew)
+
+Plugin manager. Extra 명령 설치.
+
+```bash
+# 설치
+(
+  set -x; cd "$(mktemp -d)" &&
+  OS="$(uname | tr '[:upper:]' '[:lower:]')" &&
+  ARCH="$(uname -m | sed -e 's/x86_64/amd64/')" &&
+  KREW="krew-${OS}_${ARCH}" &&
+  curl -fsSLO "https://github.com/kubernetes-sigs/krew/releases/latest/download/${KREW}.tar.gz" &&
+  tar zxvf "${KREW}.tar.gz" &&
+  ./"${KREW}" install krew
+)
+
+# PATH
+export PATH="${KREW_ROOT:-$HOME/.krew}/bin:$PATH"
+
+# 사용
+kubectl krew install neat        # kubectl-neat (YAML 정리)
+kubectl krew install ctx         # kubectl-ctx (context 전환)
+kubectl krew install ns          # kubectl-ns (namespace 전환)
+kubectl krew install tree        # kubectl-tree (owner reference tree)
+kubectl krew install stern       # 로그 tail
+```
+
+## 자주 쓰는 플러그인
+
+- **kubectx / kubens**: context / namespace 전환
+- **stern**: 여러 pod 로그
+- **kubectl-tree**: owner 관계 표시
+- **kubectl-neat**: `managedFields` 등 노이즈 제거
+- **kubectl-node-shell**: 노드에 shell (SSH 없이)
+- **kubectl-view-secret**: secret decode
+- **kubectl-lineage**: 리소스 계보
+
+## Bash 완성
+
+```bash
+source <(kubectl completion bash)   # bash
+source <(kubectl completion zsh)     # zsh
+
+# alias
+alias k=kubectl
+complete -F __start_kubectl k
+```
+
+## kubectl.kubernetes.io/last-applied-configuration
+
+`apply` 는 이전에 적용한 config 를 annotation 에 저장. 3-way merge 에 사용. 손으로 수정하면 다음 apply 시 오해.
+
+`kubectl-neat` 로 이 annotation 제거하고 저장:
+
+```bash
+kubectl get deployment web -o yaml | kubectl neat > clean.yaml
+```
+
+## Dry run
+
+```bash
+kubectl apply -f deployment.yaml --dry-run=client    # 로컬만 검증
+kubectl apply -f deployment.yaml --dry-run=server    # 서버 admission 통과
+
+# YAML 생성만 (실제 적용 X)
+kubectl create deployment web --image=nginx --dry-run=client -o yaml > deployment.yaml
+```
+
+## Server-side apply
+
+```bash
+kubectl apply --server-side -f manifest.yaml
+```
+
+전통적 (client-side) apply 는 `last-applied-configuration` annotation 을 사용. Server-side apply 는 field ownership 를 서버가 관리. GitOps + operator 조합에 유리.
+
+## 함정
+
+> [!WARNING]
+> **`kubectl edit` 남용**. 클러스터 상태와 git 이 어긋남. GitOps 위반.
+
+> [!CAUTION]
+> **`kubectl delete --all`**. Namespace 전체 삭제 확인 없이. 항상 `--dry-run=client` 로 먼저.
+
+> [!WARNING]
+> **kubectl 버전 skew**. Client 와 cluster 버전 차이가 크면 명령 불일치. K8s 공식 지원은 ±1 버전.
+
+> [!IMPORTANT]
+> **`kubeconfig` 여러 개**. `KUBECONFIG=$HOME/.kube/config:$HOME/.kube/prod.config` 처럼 병합.
+
+> [!CAUTION]
+> **`kubectl apply` 는 관리 field 만 갱신**. 다른 도구 (operator) 가 만든 필드는 건드리지 않음. 예상 밖 결과 시 diff 확인.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[k8s-architecture|Architecture]] - apiserver
+- [[k8s-debugging|Debugging]] - kubectl debug
+- [[k8s-labels-selectors|Labels & Selectors]] - `-l` 필터
+- [[k8s-namespace|Namespace]] - context namespace
+- [[k8s-rbac|RBAC]] - kubectl 권한
+- [[k8s-kustomize|Kustomize]] - `kubectl apply -k`
+- [[helm|Helm]]

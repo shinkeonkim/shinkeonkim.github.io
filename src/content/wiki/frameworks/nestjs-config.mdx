@@ -1,0 +1,376 @@
+---
+title: "[NestJS] Config (Environment, Validation)"
+aliases:
+  - "NestJS Config"
+  - "@nestjs/config"
+  - "ConfigService"
+  - "Joi validation"
+  - "NestJS 환경변수"
+  - "NestJS dotenv"
+tags: [nestjs, config, environment, dotenv]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Configuration"
+    url: "https://docs.nestjs.com/techniques/configuration"
+  - title: "@nestjs/config"
+    url: "https://github.com/nestjs/config"
+  - title: "Joi"
+    url: "https://joi.dev/"
+  - title: "dotenv"
+    url: "https://github.com/motdotla/dotenv"
+---
+
+## 정의
+
+**NestJS Config** 는 `@nestjs/config` 패키지로 환경변수를 관리합니다. `.env` 파일 로딩, TypeScript type-safe access, 검증 (Joi/Zod), 여러 환경 (dev/stg/prod) 지원. Global module 로 등록해 어디서든 주입.
+
+## 설치
+
+```bash
+npm i @nestjs/config
+```
+
+## 기본 사용
+
+### AppModule
+
+```typescript
+import { ConfigModule } from '@nestjs/config';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,           // 다른 module 에 import 없이도 사용
+      envFilePath: '.env',
+      cache: true,               // 값 캐시 (성능)
+      expandVariables: true,     // ${VAR} 확장
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### 사용
+
+```typescript
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class MyService {
+  constructor(private config: ConfigService) {}
+
+  someMethod() {
+    const dbUrl = this.config.get<string>('DATABASE_URL');
+    const port = this.config.get<number>('PORT', 3000);   // 기본값
+    const isProduction = this.config.get<string>('NODE_ENV') === 'production';
+  }
+}
+```
+
+## 여러 .env 파일
+
+```typescript
+ConfigModule.forRoot({
+  envFilePath: [
+    `.env.${process.env.NODE_ENV}.local`,
+    `.env.${process.env.NODE_ENV}`,
+    '.env.local',
+    '.env',
+  ],
+});
+```
+
+우선순위: 첫 번째 파일 값이 우선.
+
+## Type Safety
+
+기본 `get()` 은 loose. 타입 명시 필요:
+
+```typescript
+const port = this.config.get<number>('PORT');   // 타입은 지정하지만 실제는 string
+const port = Number(this.config.get('PORT'));    // 명시적 변환
+```
+
+## Validation (Joi)
+
+배포 시점에 필수 값 검증.
+
+```bash
+npm i joi
+```
+
+```typescript
+import * as Joi from 'joi';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validationSchema: Joi.object({
+        NODE_ENV: Joi.string()
+          .valid('development', 'production', 'test', 'staging')
+          .default('development'),
+        PORT: Joi.number().default(3000),
+        DATABASE_URL: Joi.string().required(),
+        JWT_SECRET: Joi.string().required().min(32),
+        REDIS_HOST: Joi.string().default('localhost'),
+        REDIS_PORT: Joi.number().default(6379),
+        LOG_LEVEL: Joi.string()
+          .valid('error', 'warn', 'info', 'debug')
+          .default('info'),
+      }),
+      validationOptions: {
+        allowUnknown: true,   // 미명시 env 허용 (안 하면 오류)
+        abortEarly: false,     // 모든 오류 표시
+      },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+앱 시작 시 검증 실패 -> immediate error message.
+
+## Zod 대안
+
+```bash
+npm i zod
+```
+
+```typescript
+import { z } from 'zod';
+
+const configSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test', 'staging']),
+  PORT: z.string().transform(Number),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+});
+
+type ConfigType = z.infer<typeof configSchema>;
+
+ConfigModule.forRoot({
+  validate: (config) => configSchema.parse(config),
+});
+```
+
+## Custom Configuration (namespace)
+
+큰 앱은 config 를 여러 파일로 분리:
+
+```typescript
+// config/database.config.ts
+import { registerAs } from '@nestjs/config';
+
+export default registerAs('database', () => ({
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT, 10) || 5432,
+  username: process.env.DB_USERNAME,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  pool: {
+    max: parseInt(process.env.DB_POOL_MAX, 10) || 10,
+    idleTimeout: 30000,
+  },
+}));
+
+// config/redis.config.ts
+export default registerAs('redis', () => ({
+  host: process.env.REDIS_HOST,
+  port: parseInt(process.env.REDIS_PORT, 10) || 6379,
+  password: process.env.REDIS_PASSWORD,
+}));
+
+// config/app.config.ts
+export default registerAs('app', () => ({
+  name: process.env.APP_NAME || 'my-app',
+  port: parseInt(process.env.PORT, 10) || 3000,
+  environment: process.env.NODE_ENV,
+  version: process.env.APP_VERSION,
+}));
+```
+
+`AppModule`:
+
+```typescript
+import databaseConfig from './config/database.config';
+import redisConfig from './config/redis.config';
+import appConfig from './config/app.config';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [databaseConfig, redisConfig, appConfig],
+      validationSchema: Joi.object({...}),
+    }),
+  ],
+})
+```
+
+### 사용
+
+```typescript
+// namespaced access
+const dbConfig = this.config.get('database');
+const dbHost = this.config.get('database.host');
+const poolMax = this.config.get<number>('database.pool.max');
+```
+
+### Type-safe namespace
+
+```typescript
+type DatabaseConfig = ConfigType<typeof databaseConfig>;
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @Inject(databaseConfig.KEY)
+    private db: DatabaseConfig,
+  ) {}
+
+  async connect() {
+    console.log(this.db.host);   // typed
+  }
+}
+```
+
+## Async Loading (Vault, AWS Parameter Store)
+
+`.env` 대신 외부 secret store 에서:
+
+```typescript
+ConfigModule.forRoot({
+  isGlobal: true,
+  load: [async () => {
+    const secrets = await getFromVault();
+    return {
+      DATABASE_URL: secrets.dbUrl,
+      JWT_SECRET: secrets.jwtSecret,
+    };
+  }],
+});
+```
+
+**주의**: async config 는 앱 부트스트랩 지연. Fallback / caching 필요.
+
+## AWS SSM Parameter Store 예
+
+```typescript
+import { SSMClient, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
+
+async function loadFromSSM(): Promise<Record<string, string>> {
+  const client = new SSMClient({region: 'us-east-1'});
+  const command = new GetParametersByPathCommand({
+    Path: `/myapp/${process.env.NODE_ENV}/`,
+    WithDecryption: true,
+    Recursive: true,
+  });
+  const response = await client.send(command);
+  const result: Record<string, string> = {};
+  for (const param of response.Parameters || []) {
+    const key = param.Name.split('/').pop().toUpperCase();
+    result[key] = param.Value;
+  }
+  return result;
+}
+```
+
+## Variable Expansion
+
+```
+# .env
+BASE_URL=https://api.example.com
+USERS_ENDPOINT=${BASE_URL}/users
+POSTS_ENDPOINT=${BASE_URL}/posts
+```
+
+```typescript
+ConfigModule.forRoot({
+  expandVariables: true,
+});
+```
+
+## 계층: env -> config file -> defaults
+
+```typescript
+// config/default.config.ts
+export default {
+  cache: {
+    ttl: 60,
+    max: 1000,
+  },
+};
+
+// config/production.config.ts
+export default {
+  cache: {
+    ttl: 3600,
+  },
+};
+
+// 병합 로직
+```
+
+이 패턴은 표준화 안 됨. `nest-config` 같은 별도 패키지 검토.
+
+## Feature Config
+
+한 모듈만 사용:
+
+```typescript
+// UsersModule
+@Module({
+  imports: [
+    ConfigModule.forFeature(usersConfig),
+  ],
+})
+```
+
+`isGlobal: false` (기본) 로 다른 module 에서 격리.
+
+## 프로덕션 관용
+
+### 12-Factor App
+
+- 환경변수로 config
+- 코드에 secret 없음
+- 환경별 파일 (`.env.dev`, `.env.prod`) 지양, 환경변수 직접
+
+### secret 관리
+
+- **Kubernetes**: Secret + ExternalSecrets Operator
+- **AWS**: Secrets Manager, SSM Parameter Store, KMS
+- **Vault**: HashiCorp Vault
+- **Doppler / 1Password / Infisical**: SaaS
+
+Docker/K8s 에서는 `.env` 파일 대신 환경변수 마운트.
+
+## 함정
+
+> [!WARNING]
+> **`.env` 파일 git 커밋 금지**. `.gitignore` 필수. 실수로 커밋 시 secret rotation.
+
+> [!CAUTION]
+> **`process.env.X` 는 항상 string**. 숫자, boolean 은 명시적 변환.
+
+> [!WARNING]
+> **Validation 없으면 조용히 실패**. 필수 env 누락되면 undefined 로 부팅 후 나중 오류.
+
+> [!IMPORTANT]
+> **`isGlobal: true` 남용**. Global 은 어디서든 주입 가능. Feature config 는 격리가 나음.
+
+> [!CAUTION]
+> **Test 에서 config 격리**. `process.env` 조작은 다른 test 로 leak. `beforeEach` 에서 restore.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-modules|Modules]] - Dynamic module
+- [[nestjs-database|Database]] - DB config
+- [[nestjs-deployment|Deployment]] - env 주입
+- [[nestjs-testing|Testing]]
+- [[nestjs-microservices|Microservices]] - broker config
+- [[fastapi-pydantic|Pydantic Settings]] - 대비
+- [[flask-app-factory|Flask Config]] - 대비

@@ -1,0 +1,422 @@
+---
+title: "[Flask] Deployment (WSGI, Gunicorn, uWSGI, Docker)"
+aliases:
+  - "Flask Deployment"
+  - "Flask 배포"
+  - "Flask Gunicorn"
+  - "Flask uWSGI"
+  - "Flask Docker"
+  - "WSGI 배포"
+  - "Flask 프로덕션"
+  - "ProxyFix"
+tags: [python, flask, deployment, wsgi, gunicorn, docker]
+category: python
+updated: 2026-07-07
+references:
+  - title: "Flask Deployment"
+    url: "https://flask.palletsprojects.com/en/latest/deploying/"
+  - title: "Gunicorn"
+    url: "https://docs.gunicorn.org/"
+  - title: "uWSGI"
+    url: "https://uwsgi-docs.readthedocs.io/"
+  - title: "Werkzeug ProxyFix"
+    url: "https://werkzeug.palletsprojects.com/en/latest/middleware/proxy_fix/"
+---
+
+## 정의
+
+Flask 는 WSGI 앱. 프로덕션 배포는 **WSGI 서버 (Gunicorn, uWSGI, gevent) + 리버스 프록시 (Nginx, ALB) + 컨테이너 (Docker) + 오케스트레이터 (Kubernetes/ECS)** 계층으로 구성됩니다. 내장 개발 서버 (`app.run`) 은 절대 프로덕션 노출 금지.
+
+## 구성 계층
+
+```
+[Client]
+   ↓ HTTPS
+[Load Balancer / CDN (ALB, CloudFront, Nginx)]
+   ↓ HTTP
+[WSGI 서버 (Gunicorn / uWSGI)]
+   ↓ 프로세스 워커
+[Flask WSGI 앱]
+```
+
+## 왜 개발 서버는 안 되는가
+
+`app.run(debug=True)` 는 Werkzeug 개발 서버.
+
+- **Single-threaded** (기본): 동시 요청 처리 불가
+- **debug=True 는 원격 코드 실행 취약점**
+- **성능 최적화 안 됨**
+- **Graceful shutdown 미지원**
+- **`FLASK_DEBUG=1` + `PIN` 없이 노출** = 서버 완전 장악 가능
+
+## Gunicorn (권장)
+
+pre-fork 워커 모델. Python WSGI 서버의 사실상 표준.
+
+```bash
+pip install gunicorn
+```
+
+```bash
+gunicorn myapp:create_app\(\) \
+  --workers 4 \
+  --worker-class sync \
+  --bind 0.0.0.0:8000 \
+  --timeout 60 \
+  --graceful-timeout 30 \
+  --keep-alive 5 \
+  --max-requests 10000 \
+  --max-requests-jitter 100 \
+  --access-logfile - \
+  --error-logfile - \
+  --log-level info
+```
+
+### Worker 수
+
+일반 공식: **`workers = 2 * cores + 1`** (I/O bound). 조정 후 실제 부하로 조정.
+
+메모리도 고려: 각 worker 는 프로세스 -> 앱 메모리 × workers.
+
+### Worker class
+
+- **`sync`** (기본): 요청당 하나. 표준.
+- **`gthread`**: 각 worker 안에 여러 스레드. I/O bound 유리.
+- **`gevent`**: 그린 스레드 (monkey patching). 매우 많은 동시 연결.
+- **`eventlet`**: gevent 유사.
+
+```bash
+gunicorn myapp:create_app\(\) --worker-class gthread --workers 4 --threads 4
+# 총 동시 요청 = 4 * 4 = 16
+```
+
+### Timeout
+
+- **`--timeout 60`**: worker 가 60초 응답 못 하면 kill. 정상값이지만 큰 파일 다운로드/업로드는 늘리기.
+- **`--graceful-timeout 30`**: SIGTERM 후 in-flight 요청 완료 대기.
+
+### max-requests
+
+메모리 leak 완화. worker 가 N 요청 처리 후 재시작.
+
+```bash
+--max-requests 10000 --max-requests-jitter 100
+```
+
+Jitter 는 재시작 시점 랜덤화로 동시 재시작 방지.
+
+## uWSGI (대안)
+
+기능 방대, 설정 복잡. 대규모 배포에서 여전히 쓰임.
+
+```ini
+# uwsgi.ini
+[uwsgi]
+module = myapp:create_app()
+processes = 4
+threads = 2
+socket = 0.0.0.0:8000
+harakiri = 60          # timeout
+max-requests = 5000
+vacuum = true
+die-on-term = true
+```
+
+```bash
+uwsgi --ini uwsgi.ini
+```
+
+**Pros**: 매우 많은 튜닝 옵션, 여러 언어 지원
+**Cons**: 배우기 어려움, 최근 커뮤니티 활성도 감소 (Gunicorn 우세)
+
+## 리버스 프록시 (Nginx)
+
+```nginx
+upstream flask_app {
+    server 127.0.0.1:8000;
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name app.example.com;
+
+    ssl_certificate /etc/ssl/cert.pem;
+    ssl_certificate_key /etc/ssl/key.pem;
+
+    client_max_body_size 10M;
+    keepalive_timeout 65;
+
+    location /static/ {
+        alias /var/www/myapp/static/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location / {
+        proxy_pass http://flask_app;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_read_timeout 60s;
+    }
+}
+```
+
+## ProxyFix (X-Forwarded-* 신뢰)
+
+리버스 프록시 뒤에서 실제 client IP, scheme (http/https), host 를 제대로 인식하려면:
+
+```python
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app.wsgi_app = ProxyFix(
+    app.wsgi_app,
+    x_for=1,        # X-Forwarded-For 신뢰 개수
+    x_proto=1,      # X-Forwarded-Proto
+    x_host=1,       # X-Forwarded-Host
+    x_prefix=1,     # X-Forwarded-Prefix (subpath)
+)
+```
+
+- `x_for=1`: 프록시 하나만 신뢰. 여러 프록시 (ALB + CloudFront) 는 개수 증가.
+- 이 미들웨어 없이는 `request.remote_addr` 이 프록시 IP 만 반환.
+- **잘못 신뢰하면 IP 스푸핑 가능**. 실제 신뢰할 프록시 개수 정확히.
+
+## Docker
+
+### 기본 Dockerfile
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv && \
+    uv sync --frozen --no-dev
+
+COPY src /app/src
+
+RUN useradd -m -u 1000 app && chown -R app:app /app
+USER app
+
+EXPOSE 8000
+
+CMD ["uv", "run", "gunicorn", \
+     "myapp:create_app()", \
+     "--workers", "4", \
+     "--bind", "0.0.0.0:8000", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
+```
+
+### Multi-stage build
+
+```dockerfile
+FROM python:3.12-slim AS builder
+WORKDIR /app
+RUN pip install uv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libpq5 && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/.venv /app/.venv
+COPY src /app/src
+ENV PATH="/app/.venv/bin:$PATH"
+
+RUN useradd -m -u 1000 app && chown -R app:app /app
+USER app
+
+CMD ["gunicorn", "myapp:create_app()", "--workers", "4", "--bind", "0.0.0.0:8000"]
+```
+
+## Kubernetes 배포
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: myapp}
+  template:
+    metadata:
+      labels: {app: myapp}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: app
+          image: myrepo/myapp:1.0
+          ports: [{containerPort: 8000}]
+          env:
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: myapp-secrets, key: secret-key}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: myapp-secrets, key: db-url}
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: 2, memory: 2Gi}
+          livenessProbe:
+            httpGet: {path: /health/live, port: 8000}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /health/ready, port: 8000}
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+```
+
+Health check endpoint:
+
+```python
+@app.get("/health/live")
+def live():
+    return "ok"
+
+@app.get("/health/ready")
+def ready():
+    try:
+        db.session.execute(text("SELECT 1"))
+        return "ok"
+    except Exception:
+        return "not ready", 503
+```
+
+## Signal handling
+
+Gunicorn signal:
+
+- **SIGTERM**: graceful shutdown (기본 K8s 종료)
+- **SIGINT** (Ctrl+C): graceful shutdown
+- **SIGQUIT**: 즉시 종료
+- **SIGHUP**: reload workers
+
+`terminationGracePeriodSeconds` > gunicorn `--graceful-timeout` 이어야 in-flight 요청 완료.
+
+## 로깅
+
+### 구조화 로그 (JSON)
+
+```python
+import logging
+from pythonjsonlogger import jsonlogger
+
+def setup_logging(app):
+    handler = logging.StreamHandler()
+    handler.setFormatter(jsonlogger.JsonFormatter(
+        "%(asctime)s %(name)s %(levelname)s %(message)s"
+    ))
+    app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+```
+
+Gunicorn access log 도 커스터마이제이션:
+
+```python
+# gunicorn.conf.py
+import json
+
+def json_access_log_format(record):
+    return json.dumps({
+        "method": record.request_line.split()[0],
+        "path": record.request_line.split()[1],
+        "status": record.status_code,
+        "response_time": record.response_time,
+    })
+
+# gunicorn --access-logformat '{}' --logger-class 'gunicorn.glogging.Logger'
+```
+
+### Sentry, OpenTelemetry
+
+```python
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+
+sentry_sdk.init(
+    dsn="https://xxx@sentry.io/yyy",
+    integrations=[FlaskIntegration(), SqlalchemyIntegration()],
+    traces_sample_rate=0.1,
+    profiles_sample_rate=0.1,
+)
+```
+
+## 정적 파일
+
+프로덕션에서 Flask 가 정적 파일 서빙하지 마세요. Nginx 나 CDN (CloudFront) 에서 서빙.
+
+Whitenoise (덜 권장, 소규모):
+
+```python
+from whitenoise import WhiteNoise
+app.wsgi_app = WhiteNoise(app.wsgi_app, root="static/")
+```
+
+## 환경 변수 & Secrets
+
+```python
+class Config:
+    SECRET_KEY = os.environ["SECRET_KEY"]
+    DATABASE_URL = os.environ["DATABASE_URL"]
+```
+
+Kubernetes Secret, AWS Secrets Manager, Vault 등에서 주입. Docker 이미지에 secret 굽지 마세요.
+
+## 성능 튜닝 체크리스트
+
+1. **Worker 수 = 2×CPU + 1** 부터 시작, 부하 관찰 후 조정
+2. **`--max-requests`** 로 memory leak 완화
+3. **DB connection pool**: SQLALCHEMY_ENGINE_OPTIONS 에 `pool_size`, `max_overflow`, `pool_recycle`
+4. **정적 파일은 CDN/Nginx**
+5. **캐시** ([[flask-extensions|Flask-Caching]]) Redis
+6. **N+1 쿼리** 해결: SQLAlchemy `joinedload`, `selectinload`
+7. **Gzip**: Nginx 에서 활성화 (Flask 에서 X)
+8. **HTTP/2**: Nginx 에서 종단
+
+## 함정
+
+> [!WARNING]
+> **`app.run(debug=True)` 프로덕션 노출 금지**. RCE 취약점.
+
+> [!CAUTION]
+> **ProxyFix 개수 신중하게**. 잘못 신뢰하면 IP 스푸핑. 실제 프록시 개수 정확히.
+
+> [!WARNING]
+> **Sync worker 로 sync DB + sync HTTP client 사용 시** 요청당 한 워커 점유. 동시 처리량이 (workers × threads) 한계. gthread 나 gevent 로 확장.
+
+> [!IMPORTANT]
+> **Graceful shutdown 순서**: LB 에서 제거 -> in-flight 요청 완료 -> DB 세션 정리 -> 프로세스 종료. K8s preStop `sleep 5` 은 LB 등록 해제 대기.
+
+> [!CAUTION]
+> **정적 파일을 Flask 로 서빙하면 앱이 병목**. Gunicorn worker 하나가 CSS/JS 다운로드 처리하는 낭비. Nginx / CloudFront.
+
+## 관련 위키
+
+- [[flask|Flask]] - 상위 개요
+- [[flask-app-factory|Flask App Factory]] - Gunicorn 진입점
+- [[flask-blueprints|Flask Blueprints]]
+- [[flask-request-response|Flask Request/Response]] - ProxyFix
+- [[flask-extensions|Flask Extensions]] - 캐시, CORS
+- [[flask-testing|Flask Testing]]
+- [[aws-ecs-fargate|ECS Fargate]] - 컨테이너 배포
+- [[aws-eks|EKS]]
+- [[aws-alb-nlb|ALB/NLB]]
+- [[container-image-best-practices|Container Image Best Practices]]
+- [[fastapi-deployment|FastAPI Deployment]] - 대비

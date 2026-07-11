@@ -1,0 +1,446 @@
+---
+title: "[NestJS] Testing (Jest, Supertest, e2e)"
+aliases:
+  - "NestJS Testing"
+  - "NestJS Jest"
+  - "NestJS Supertest"
+  - "Test.createTestingModule"
+  - "NestJS e2e test"
+  - "NestJS 테스트"
+tags: [nestjs, testing, jest, e2e]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Testing"
+    url: "https://docs.nestjs.com/fundamentals/testing"
+  - title: "Jest Documentation"
+    url: "https://jestjs.io/"
+  - title: "Supertest"
+    url: "https://github.com/ladjs/supertest"
+---
+
+## 정의
+
+**NestJS Testing** 은 Jest (기본) + Supertest 조합으로 unit test 와 e2e test 를 지원합니다. `@nestjs/testing` 의 `Test.createTestingModule` 로 module 을 격리된 형태로 만들고, provider 를 mock 으로 교체합니다.
+
+## Unit Test 기본
+
+```typescript
+// users.service.spec.ts
+import { Test, TestingModule } from '@nestjs/testing';
+import { UsersService } from './users.service';
+import { UsersRepository } from './users.repository';
+
+describe('UsersService', () => {
+  let service: UsersService;
+  let repo: jest.Mocked<UsersRepository>;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UsersService,
+        {
+          provide: UsersRepository,
+          useValue: {
+            findAll: jest.fn(),
+            findOne: jest.fn(),
+            create: jest.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get<UsersService>(UsersService);
+    repo = module.get(UsersRepository);
+  });
+
+  it('should be defined', () => {
+    expect(service).toBeDefined();
+  });
+
+  it('findAll returns users', async () => {
+    repo.findAll.mockResolvedValue([{id: 1, name: 'kim'}]);
+    const result = await service.findAll();
+    expect(result).toEqual([{id: 1, name: 'kim'}]);
+    expect(repo.findAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('create throws on duplicate email', async () => {
+    repo.create.mockRejectedValue(new UserAlreadyExistsError('a@b.com'));
+    await expect(
+      service.create({email: 'a@b.com', name: 'kim'})
+    ).rejects.toThrow(UserAlreadyExistsError);
+  });
+});
+```
+
+## Controller Test
+
+```typescript
+// users.controller.spec.ts
+describe('UsersController', () => {
+  let controller: UsersController;
+  let service: jest.Mocked<UsersService>;
+
+  beforeEach(async () => {
+    const module = await Test.createTestingModule({
+      controllers: [UsersController],
+      providers: [
+        {
+          provide: UsersService,
+          useValue: {
+            findAll: jest.fn(),
+            findOne: jest.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    controller = module.get(UsersController);
+    service = module.get(UsersService);
+  });
+
+  it('GET /users returns all users', async () => {
+    service.findAll.mockResolvedValue([{id: 1, name: 'kim'}]);
+    const result = await controller.findAll();
+    expect(result).toHaveLength(1);
+  });
+});
+```
+
+Controller test 는 unit test 지만 실제 HTTP 는 안 거침 (그건 e2e).
+
+## E2E Test
+
+실제 HTTP 요청을 보내 응답 검증. Nest 앱 실체 사용.
+
+```typescript
+// test/app.e2e-spec.ts
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import * as request from 'supertest';
+import { AppModule } from '../src/app.module';
+
+describe('AppController (e2e)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleFixture.createNestApplication();
+    app.useGlobalPipes(new ValidationPipe({whitelist: true, transform: true}));
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('/ (GET)', () => {
+    return request(app.getHttpServer())
+      .get('/')
+      .expect(200)
+      .expect('Hello World!');
+  });
+
+  it('POST /users creates user', () => {
+    return request(app.getHttpServer())
+      .post('/users')
+      .send({email: 'a@b.com', password: 'secret123', name: 'kim'})
+      .expect(201)
+      .expect(res => {
+        expect(res.body.id).toBeDefined();
+        expect(res.body.email).toBe('a@b.com');
+      });
+  });
+
+  it('POST /users returns 400 on invalid input', () => {
+    return request(app.getHttpServer())
+      .post('/users')
+      .send({email: 'not-an-email'})
+      .expect(400);
+  });
+});
+```
+
+## Provider override
+
+E2E 에서 특정 provider 만 mock:
+
+```typescript
+const moduleFixture = await Test.createTestingModule({
+  imports: [AppModule],
+})
+  .overrideProvider(EmailService)
+  .useValue({send: jest.fn().mockResolvedValue(true)})
+  .overrideProvider(getRepositoryToken(User))
+  .useValue({find: jest.fn(), save: jest.fn()})
+  .overrideGuard(JwtAuthGuard)
+  .useValue({canActivate: jest.fn().mockReturnValue(true)})
+  .compile();
+```
+
+- `overrideProvider`
+- `overrideGuard`
+- `overrideInterceptor`
+- `overridePipe`
+- `overrideFilter`
+
+## DB 격리
+
+### 패턴 1: SQLite in-memory
+
+```typescript
+// test.module.ts
+TypeOrmModule.forRoot({
+  type: 'sqlite',
+  database: ':memory:',
+  entities: [User, Order],
+  synchronize: true,
+})
+```
+
+빠름, 격리 완벽. PostgreSQL-specific 기능은 불가.
+
+### 패턴 2: PostgreSQL + transaction rollback
+
+```typescript
+let queryRunner: QueryRunner;
+
+beforeEach(async () => {
+  queryRunner = dataSource.createQueryRunner();
+  await queryRunner.connect();
+  await queryRunner.startTransaction();
+});
+
+afterEach(async () => {
+  await queryRunner.rollbackTransaction();
+  await queryRunner.release();
+});
+```
+
+### 패턴 3: Testcontainers
+
+```typescript
+import { PostgreSqlContainer } from '@testcontainers/postgresql';
+
+let container: StartedPostgreSqlContainer;
+
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16').start();
+  process.env.DATABASE_URL = container.getConnectionUri();
+}, 60000);
+
+afterAll(async () => {
+  await container.stop();
+});
+```
+
+프로덕션 DB 와 동일 환경. Docker 필요.
+
+## Fixture / Seed
+
+```typescript
+async function seedUser(prisma: PrismaService, override: Partial<User> = {}) {
+  return prisma.user.create({
+    data: {
+      email: `test-${Date.now()}@example.com`,
+      name: 'Test User',
+      password: 'hashed',
+      ...override,
+    },
+  });
+}
+
+it('finds seeded user', async () => {
+  const user = await seedUser(prisma);
+  const result = await service.findOne(user.id);
+  expect(result.email).toBe(user.email);
+});
+```
+
+## Mocking 패턴
+
+### jest.spyOn
+
+```typescript
+const spy = jest.spyOn(service, 'sendEmail').mockResolvedValue(true);
+await service.notify(user);
+expect(spy).toHaveBeenCalledWith(user.email);
+```
+
+### jest.mock (모듈 전체)
+
+```typescript
+jest.mock('nodemailer', () => ({
+  createTransport: () => ({
+    sendMail: jest.fn().mockResolvedValue(true),
+  }),
+}));
+```
+
+### MSW (외부 HTTP mock)
+
+```bash
+npm i -D msw
+```
+
+```typescript
+import { setupServer } from 'msw/node';
+import { http, HttpResponse } from 'msw';
+
+const server = setupServer(
+  http.get('https://api.example.com/users/:id', ({params}) => {
+    return HttpResponse.json({id: params.id, name: 'kim'});
+  }),
+);
+
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+```
+
+## Guards 테스트
+
+Guard 자체를 직접 테스트:
+
+```typescript
+describe('JwtAuthGuard', () => {
+  let guard: JwtAuthGuard;
+  let jwtService: jest.Mocked<JwtService>;
+
+  beforeEach(async () => {
+    const module = await Test.createTestingModule({
+      providers: [
+        JwtAuthGuard,
+        {provide: JwtService, useValue: {verifyAsync: jest.fn()}},
+      ],
+    }).compile();
+
+    guard = module.get(JwtAuthGuard);
+    jwtService = module.get(JwtService);
+  });
+
+  it('returns true for valid token', async () => {
+    jwtService.verifyAsync.mockResolvedValue({sub: 1});
+    const context = createMockExecutionContext({
+      headers: {authorization: 'Bearer token'},
+    });
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+  });
+});
+```
+
+`createMockExecutionContext` 는 자체 헬퍼:
+
+```typescript
+function createMockExecutionContext(req: Partial<Request>): ExecutionContext {
+  return {
+    switchToHttp: () => ({
+      getRequest: () => req,
+    }),
+  } as any;
+}
+```
+
+## Pipe 테스트
+
+```typescript
+const pipe = new ValidationPipe({transform: true, whitelist: true});
+const dto = {email: 'not-an-email'};
+
+await expect(
+  pipe.transform(dto, {type: 'body', metatype: CreateUserDto})
+).rejects.toThrow(BadRequestException);
+```
+
+## Coverage
+
+```bash
+npm run test:cov
+```
+
+`jest.config.js`:
+
+```javascript
+module.exports = {
+  moduleFileExtensions: ['js', 'json', 'ts'],
+  rootDir: '.',
+  testRegex: '.*\\.spec\\.ts$',
+  transform: {'^.+\\.(t|j)s$': 'ts-jest'},
+  collectCoverageFrom: ['**/*.(t|j)s'],
+  coverageDirectory: '../coverage',
+  coverageThreshold: {
+    global: {
+      statements: 80,
+      branches: 75,
+      functions: 80,
+      lines: 80,
+    },
+  },
+};
+```
+
+## CI 통합 예시 (GitHub Actions)
+
+```yaml
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:cov
+      - run: npm run test:e2e
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+```
+
+## 함정
+
+> [!WARNING]
+> **E2E test 에서 `useGlobalPipes/Filters/Guards` 등록 안 하면 main.ts 와 다른 동작**. Test 도 명시적으로 등록.
+
+> [!CAUTION]
+> **테스트 격리**. DB, cache, external service 를 각 test 별로 reset. 아니면 flaky.
+
+> [!WARNING]
+> **`process.env` 조작**. `beforeEach` 에서 backup, `afterEach` 에서 복원. 아니면 다른 test 로 leak.
+
+> [!IMPORTANT]
+> **Jest module reset**. `jest.resetModules()` 로 module cache clear. Global state 있는 경우 필수.
+
+> [!CAUTION]
+> **Async assertion**. `await expect(...).rejects.toThrow()` 형태. `expect(...).toThrow()` 는 sync.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-modules|Modules]] - Test 대상
+- [[nestjs-controllers|Controllers]]
+- [[nestjs-providers|Providers]] - override
+- [[nestjs-guards|Guards]] - overrideGuard
+- [[nestjs-database|Database]] - DB 격리
+- [[fastapi-testing|FastAPI Testing]] - 대비
+- [[flask-testing|Flask Testing]] - 대비

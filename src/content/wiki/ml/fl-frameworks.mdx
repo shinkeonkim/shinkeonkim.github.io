@@ -1,0 +1,306 @@
+---
+title: "[FL] Frameworks (Flower, TFF, NVFlare, FATE, PySyft)"
+aliases:
+  - "FL Frameworks"
+  - "Flower framework"
+  - "Flower FL"
+  - "TensorFlow Federated"
+  - "TFF"
+  - "NVFlare"
+  - "NVIDIA FLARE"
+  - "FATE framework"
+  - "PySyft"
+  - "OpenMined"
+  - "FedML"
+  - "연합 학습 프레임워크"
+tags: [ml, federated-learning, framework, tooling]
+category: ml
+updated: 2026-07-07
+references:
+  - title: "Flower: A Friendly Federated Learning Framework"
+    url: "https://arxiv.org/abs/2007.14390"
+    author: "Beutel et al., 2020"
+  - title: "Flower Documentation"
+    url: "https://flower.ai/docs/framework/"
+  - title: "TensorFlow Federated"
+    url: "https://www.tensorflow.org/federated"
+  - title: "NVIDIA FLARE"
+    url: "https://github.com/NVIDIA/NVFlare"
+  - title: "FATE (Federated AI Technology Enabler)"
+    url: "https://fate.fedai.org/"
+  - title: "OpenMined PySyft"
+    url: "https://github.com/OpenMined/PySyft"
+  - title: "FedML"
+    url: "https://fedml.ai/"
+---
+
+## 정의
+
+**연합 학습 프레임워크** 는 서버-클라이언트 통신, 집계 알고리즘, 프라이버시 도구, 시뮬레이션 환경, 실 배포 인프라를 제공하는 라이브러리/플랫폼입니다. 알고리즘을 직접 구현하지 않고 **자기 모델 학습 로직만 작성** 하면 프레임워크가 나머지를 담당합니다.
+
+주요 프레임워크 5개 (Flower, TFF, NVFlare, FATE, PySyft) 와 신진 (FedML, OpenFL) 을 비교합니다.
+
+## 프레임워크 요약 비교
+
+| 프레임워크 | 개발/유지 | 언어 | 프레임워크 애그노스틱 | 실 배포 | 시뮬레이션 | 프라이버시 도구 |
+|:---|:---|:---|:---:|:---|:---|:---|
+| **Flower** | Adap (스타트업) + 커뮤니티 | Python | ✓ (PyTorch/TF/JAX/HF) | 강함 | ✓ | SecAgg, DP 통합 |
+| **TFF** | Google | Python | X (TF 위주) | 시뮬레이션 위주 | 매우 강함 | 강함 (Google TFF Analytics) |
+| **NVFlare** | NVIDIA | Python | ✓ | 강함 (Clara) | ✓ | HE, DP, PSI |
+| **FATE** | WeBank | Python + Scala | 부분 | 매우 강함 (프로덕션) | ✓ | HE, MPC 강함 |
+| **PySyft** | OpenMined | Python | ✓ (PyTorch/TF) | 중간 | ✓ | HE, MPC, DP 통합 |
+| **FedML** | FedML Inc. | Python | ✓ | 강함 | 강함 | 통합 |
+
+## Flower (권장 진입점)
+
+### 특징
+
+- **가벼운 API**, "가장 사용하기 쉬운 FL 프레임워크" 평판
+- 완전 **프레임워크 애그노스틱**: PyTorch, TensorFlow, JAX, scikit-learn, HuggingFace 다 붙음
+- 시뮬레이션과 실 배포가 **같은 코드**
+- 200+ 학술 논문에 채택, 산업 사례 증가
+
+### 코드 뼈대
+
+**Client**:
+
+```python
+import flwr as fl
+
+class MyClient(fl.client.NumPyClient):
+    def get_parameters(self, config):
+        return [p.detach().cpu().numpy() for p in model.parameters()]
+
+    def set_parameters(self, parameters):
+        for p, new in zip(model.parameters(), parameters):
+            p.data = torch.tensor(new)
+
+    def fit(self, parameters, config):
+        self.set_parameters(parameters)
+        train(model, train_loader, epochs=config["local_epochs"])
+        return self.get_parameters({}), len(train_dataset), {}
+
+    def evaluate(self, parameters, config):
+        self.set_parameters(parameters)
+        loss, acc = evaluate(model, val_loader)
+        return float(loss), len(val_dataset), {"accuracy": acc}
+
+fl.client.start_numpy_client(server_address="server:8080", client=MyClient())
+```
+
+**Server**:
+
+```python
+strategy = fl.server.strategy.FedAvg(
+    fraction_fit=0.1,
+    min_fit_clients=10,
+    min_available_clients=100,
+    on_fit_config_fn=lambda rnd: {"local_epochs": 1},
+)
+
+fl.server.start_server(
+    server_address="0.0.0.0:8080",
+    config=fl.server.ServerConfig(num_rounds=200),
+    strategy=strategy,
+)
+```
+
+### 지원 전략
+
+`FedAvg`, `FedProx`, `FedYogi`, `FedAdam`, `FedAdagrad`, `SCAFFOLD`, `FedMedian`, `Krum`, `FaultTolerantFedAvg`, custom strategy 상속.
+
+### 시뮬레이션
+
+`flwr.simulation.start_simulation` 으로 단일 프로세스에서 수백 클라이언트 병렬 시뮬레이션 (Ray backend). 대규모 시뮬레이션에도 강함.
+
+### 강점
+
+- 진입 장벽 낮음
+- 프로덕션 배포 (mobile SDK, edge) 사례 다수
+- 활발한 커뮤니티, 문서 우수
+
+### 약점
+
+- HE / MPC 는 자체 제공 X, 다른 라이브러리 (CrypTen, TenSEAL) 와 통합 필요
+- 시각화/모니터링 UI 는 별도 (외부 tool 필요)
+
+## TensorFlow Federated (TFF)
+
+### 특징
+
+- **Google 개발**, 학술 연구 및 시뮬레이션의 사실상 표준
+- 두 계층 API: **Federated Core (저수준)** + **Federated Learning API (고수준)**
+- TF eager mode + XLA 컴파일, 매우 빠른 시뮬레이션
+- **Federated Analytics** (평균, 히스토그램 등 통계 연산도 연합) 강력
+
+### 코드 예시
+
+```python
+import tensorflow_federated as tff
+
+def create_model():
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(128, activation="relu"),
+        tf.keras.layers.Dense(10),
+    ])
+
+def model_fn():
+    return tff.learning.models.from_keras_model(
+        create_model(),
+        input_spec=input_spec,
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[tf.keras.metrics.SparseCategoricalAccuracy()],
+    )
+
+trainer = tff.learning.algorithms.build_weighted_fed_avg(
+    model_fn,
+    client_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=0.02),
+    server_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=1.0),
+)
+
+state = trainer.initialize()
+for round_num in range(NUM_ROUNDS):
+    result = trainer.next(state, sampled_client_data)
+    state = result.state
+    print(f"Round {round_num}: {result.metrics}")
+```
+
+### 강점
+
+- 시뮬레이션 성능 최상급
+- Google Analytics DP 도구 성숙
+- TFF Analytics 는 다른 프레임워크에 없는 강점
+
+### 약점
+
+- **실 배포 지원 약함**. 시뮬레이션 편중.
+- TF-heavy: PyTorch 사용자에겐 접근성 낮음
+- API 학습 곡선 있음 (federated computation, TFF type system)
+
+**결론**: Google 스타일 연구용. 배포는 다른 프레임워크 병행.
+
+## NVIDIA FLARE (NVFlare)
+
+### 특징
+
+- **Cross-silo 프로덕션 지향**. NVIDIA Clara (의료) 에서 검증
+- **워크플로 지향**: SAG (Scatter and Gather), CyclicController 등 orchestration
+- **강한 프라이버시 툴**: HE (TenSEAL), DP, PSI (Private Set Intersection)
+- **모니터링** (TensorBoard, MLflow) 통합
+- Multi-org deployment (여러 회사가 협력)
+
+### 강점
+
+- 의료/금융 실 배포 사례 (병원간, 은행간)
+- 프라이버시 도구 통합 최상급
+- Job / workflow 관리 성숙
+
+### 약점
+
+- Cross-device (수백만 모바일) 시나리오는 아님
+- 진입 장벽 (연구자에게는 복잡)
+
+**대표 사용처**: 다기관 의료 학습, 금융 컨소시엄.
+
+## FATE (Federated AI Technology Enabler)
+
+### 특징
+
+- **WeBank (중국)** 주도, cross-silo 산업 배포에서 압도적
+- Multi-Party Computation (MPC), Homomorphic Encryption 이 first-class
+- **FederatedML**: FL 알고리즘 대규모 라이브러리
+- **FATEFlow**: workflow, **FATEBoard**: 시각화, **FATE-Serving**: 배포
+- 스칼라 + 파이썬 + Spark 백엔드로 대규모 데이터에 강함
+
+### 강점
+
+- MPC/HE 통합이 가장 완성도 높음
+- 대규모 데이터 (수백 GB+) 처리
+- 배포 도구 (dashboard, monitoring) 완비
+
+### 약점
+
+- 학습 곡선 가파름
+- 문서 대부분 중국어 (영어 자료 상대적으로 부족)
+- 스타트업 규모에는 무거움
+
+**대표 사용처**: 금융 컨소시엄, 대형 헬스케어.
+
+## PySyft (OpenMined)
+
+### 특징
+
+- **오픈소스 커뮤니티 (OpenMined)** 주도
+- **프라이버시 우선**: HE, MPC, DP 통합
+- **PySyft + PyGrid** 구조: SDK + 서버
+- PyTorch, TensorFlow 지원
+
+### 강점
+
+- 프라이버시 도구 종합
+- 활발한 오픈소스 커뮤니티
+- 교육 리소스 풍부 (강좌, 튜토리얼)
+
+### 약점
+
+- 아키텍처 변경이 잦아 프로덕션 사용에는 신중 필요
+- 성능 최적화가 후순위 (연구/교육 편중)
+
+**대표 사용처**: 프라이버시 연구, 교육.
+
+## FedML
+
+### 특징
+
+- **FedML Inc.** 학술 + 산업 겸용
+- **FedML-Nexus AI**: 학술 실험 + 산업 배포 통합 플랫폼
+- 다양한 topology (star, ring, hierarchical) 지원
+- Cross-silo + cross-device + IoT 모두
+
+### 강점
+
+- 다양한 시나리오 커버
+- LLM/멀티모달 FL 초기 지원
+
+### 약점
+
+- 상대적으로 신생 (2021~), 성숙도 아직
+
+## 프레임워크 선택 가이드
+
+| 상황 | 권장 |
+|:---|:---|
+| 학습/연구, 빠른 프로토타입 | **Flower** or **TFF** |
+| PyTorch 워크로드, 실 배포 계획 | **Flower** |
+| Google 스타일 연구, 시뮬레이션 극대화 | **TFF** |
+| 다기관 의료/금융, 프라이버시 필수 | **NVFlare** or **FATE** |
+| 프라이버시 도구 강력 | **PySyft** or **FATE** |
+| 모바일 SDK, edge | **Flower** |
+| 대규모 산업 배포 (수 GB+ 데이터) | **FATE** |
+
+## Aggregation 알고리즘 지원 (공통)
+
+대부분 프레임워크가 `FedAvg`, `FedProx`, `FedYogi/Adam`, `SCAFFOLD`, robust aggregation (Median, Trimmed Mean, Krum) 은 built-in. Personalized FL (pFedMe, Ditto) 은 프레임워크별 지원 편차. Custom strategy 상속으로 대체 가능.
+
+## 함정
+
+> [!WARNING]
+> **시뮬레이션과 실 배포는 다릅니다**. 시뮬레이션에서 좋은 알고리즘이 실 환경 (네트워크 불안정, 클라이언트 dropout) 에서는 실패할 수 있음. 반드시 실 배포 시나리오 테스트.
+
+> [!CAUTION]
+> **프라이버시 툴은 사용법을 잘못 쓰면 프라이버시가 없습니다**. DP epsilon, HE parameter 를 이해하지 않고 default 만 쓰면 정량 보장 없음.
+
+> [!WARNING]
+> **성능 튜닝**. 프레임워크마다 통신 프로토콜, 직렬화, 배치 처리가 다름. 실 부하 벤치마크 필수.
+
+> [!IMPORTANT]
+> **버전 호환성**. Flower 는 stable API 이지만 TFF/PySyft 는 breaking change 잦음. 프로덕션은 pin 필수.
+
+## 관련 위키
+
+- [[federated-learning|Federated Learning]] - 상위 개념
+- [[fedavg|FedAvg]] - 대부분 프레임워크의 기본 전략
+- [[fl-non-iid|Non-IID Data in FL]] - 알고리즘 선택 배경
+- [[secure-aggregation|Secure Aggregation]] - 프레임워크 통합
+- [[personalized-fl|Personalized FL]] - 프레임워크별 지원 편차
+- [[differential-privacy|Differential Privacy]] - DP 통합

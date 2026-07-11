@@ -1,0 +1,356 @@
+---
+title: "[Koa] Body Parsing"
+aliases:
+  - "Koa Body"
+  - "Koa Body Parsing"
+  - "@koa/bodyparser"
+  - "koa-body"
+  - "koa-bodyparser"
+  - "koa multer"
+  - "koa 파일 업로드"
+tags: [koa, body, parser, multipart, upload]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "@koa/bodyparser"
+    url: "https://github.com/koajs/bodyparser"
+  - title: "koa-body"
+    url: "https://github.com/koajs/koa-body"
+  - title: "@koa/multer"
+    url: "https://github.com/koajs/multer"
+---
+
+## 정의
+
+**Koa Body Parsing** 은 HTTP 요청 body 를 파싱해 `ctx.request.body` 에 사용 가능한 형태로 만드는 미들웨어입니다. Koa 코어는 body parser 를 포함하지 않으므로 별도 설치가 필요합니다.
+
+## 옵션
+
+| 패키지 | 특성 | 언제 |
+|:---|:---|:---|
+| **`@koa/bodyparser`** | 공식, JSON/form/text | 대부분 |
+| **`koa-body`** | JSON/form/text + multipart 통합 | 파일 업로드 함께 |
+| **`koa-bodyparser`** | 오래된 사실상 표준 | 기존 코드 |
+| **`@koa/multer`** | multipart only (multer 위) | 파일 업로드 특화 |
+| **`raw-body`** | 저수준 원본 buffer | 커스텀 파싱 |
+
+## @koa/bodyparser (권장)
+
+```bash
+npm i @koa/bodyparser
+```
+
+```javascript
+const bodyParser = require('@koa/bodyparser');
+
+app.use(bodyParser());
+```
+
+### 옵션
+
+```javascript
+app.use(bodyParser({
+  patchNode: false,
+  patchKoa: true,
+  jsonLimit: '1mb',        // JSON 크기 제한
+  formLimit: '56kb',
+  textLimit: '1mb',
+  encoding: 'utf-8',
+  extendTypes: {
+    json: ['application/x-javascript'],
+    text: ['text/xml'],
+    form: [],
+  },
+  parsedMethods: ['POST', 'PUT', 'PATCH', 'DELETE'],
+  detectJSON: (ctx) => /\.json$/.test(ctx.path),
+  strict: true,             // JSON: 배열/객체만 허용
+  enableTypes: ['json', 'form', 'text'],
+  onerror: (err, ctx) => {
+    ctx.throw('body parse error', 422);
+  },
+}));
+```
+
+### 사용
+
+```javascript
+router.post('/users', async (ctx) => {
+  const {email, name} = ctx.request.body;   // JSON, form 모두 여기
+  // ...
+});
+```
+
+## 지원 Content-Type
+
+### application/json
+
+```bash
+curl -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "a@b.com", "name": "kim"}'
+```
+
+```javascript
+ctx.request.body;   // {email: 'a@b.com', name: 'kim'}
+```
+
+### application/x-www-form-urlencoded
+
+```bash
+curl -X POST http://localhost:3000/users \
+  -d "email=a@b.com&name=kim"
+```
+
+```javascript
+ctx.request.body;   // {email: 'a@b.com', name: 'kim'}
+```
+
+### text/plain
+
+```bash
+curl -X POST http://localhost:3000/log \
+  -H "Content-Type: text/plain" \
+  --data-binary "raw text"
+```
+
+```javascript
+ctx.request.body;   // 'raw text'
+```
+
+### multipart/form-data (파일 업로드)
+
+`@koa/bodyparser` 는 multipart 를 지원하지 않음. `koa-body` 또는 `@koa/multer`.
+
+## koa-body (multipart 포함)
+
+```bash
+npm i koa-body
+```
+
+```javascript
+const { koaBody } = require('koa-body');
+
+app.use(koaBody({
+  multipart: true,
+  formidable: {
+    uploadDir: '/tmp/uploads',
+    maxFileSize: 200 * 1024 * 1024,   // 200 MB
+    keepExtensions: true,
+  },
+  jsonLimit: '10mb',
+  urlencoded: true,
+  text: true,
+}));
+```
+
+### 파일 업로드
+
+```javascript
+router.post('/upload', async (ctx) => {
+  const file = ctx.request.files.upload;
+  console.log(file.name);       // 'photo.jpg'
+  console.log(file.path);       // '/tmp/uploads/upload_xxx.jpg'
+  console.log(file.size);
+  console.log(file.type);       // 'image/jpeg'
+
+  // 파일 이동
+  const fs = require('fs');
+  fs.renameSync(file.path, `/uploads/${Date.now()}-${file.name}`);
+
+  ctx.body = {ok: true};
+});
+```
+
+### 여러 파일
+
+```html
+<form enctype="multipart/form-data" method="post">
+  <input type="file" name="images" multiple>
+</form>
+```
+
+```javascript
+router.post('/upload', async (ctx) => {
+  const files = ctx.request.files.images;
+  const list = Array.isArray(files) ? files : [files];
+
+  for (const file of list) {
+    // ...
+  }
+});
+```
+
+## @koa/multer
+
+Express 의 multer 를 Koa 로. 세밀한 파일 처리:
+
+```bash
+npm i @koa/multer
+```
+
+```javascript
+const multer = require('@koa/multer');
+const path = require('path');
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, '/uploads/'),
+  filename: (req, file, cb) => {
+    const uniq = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, uniq + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: {fileSize: 10 * 1024 * 1024},
+  fileFilter: (req, file, cb) => {
+    if (!/\.(jpe?g|png|gif)$/.test(file.originalname)) {
+      return cb(new Error('Invalid file type'));
+    }
+    cb(null, true);
+  },
+});
+
+// 단일
+router.post('/avatar', upload.single('avatar'), async (ctx) => {
+  ctx.body = {filename: ctx.file.filename};
+});
+
+// 여러
+router.post('/gallery', upload.array('photos', 5), async (ctx) => {
+  ctx.body = {count: ctx.files.length};
+});
+```
+
+## Raw body 접근
+
+파싱 전 raw buffer 가 필요한 경우 (webhook 서명 검증 등):
+
+```bash
+npm i raw-body
+```
+
+```javascript
+const getRawBody = require('raw-body');
+
+app.use(async (ctx, next) => {
+  if (ctx.path === '/webhook') {
+    ctx.request.rawBody = await getRawBody(ctx.req, {
+      length: ctx.length,
+      limit: '1mb',
+      encoding: ctx.charset,
+    });
+    // parsed body 는 별도로
+    ctx.request.body = JSON.parse(ctx.request.rawBody);
+  } else {
+    // ...
+  }
+  await next();
+});
+```
+
+Stripe / GitHub webhook 검증:
+
+```javascript
+const signature = ctx.get('X-Stripe-Signature');
+if (!verifySignature(ctx.request.rawBody, signature, secret)) {
+  ctx.throw(400);
+}
+```
+
+## Streaming (큰 파일)
+
+파싱 없이 stream 그대로:
+
+```javascript
+const fs = require('fs');
+const { pipeline } = require('stream/promises');
+
+router.post('/upload-stream', async (ctx) => {
+  const stream = ctx.req;
+  const output = fs.createWriteStream(`/uploads/${Date.now()}.bin`);
+  await pipeline(stream, output);
+  ctx.body = {ok: true};
+});
+```
+
+Body parser 를 이 endpoint 에서는 스킵해야 함 (아니면 이미 body 읽혀서 stream empty):
+
+```javascript
+app.use(async (ctx, next) => {
+  if (ctx.path === '/upload-stream') return next();
+  return bodyParser()(ctx, next);
+});
+```
+
+## 검증 (Zod)
+
+Koa 는 native validation 없음. Zod 등 활용:
+
+```javascript
+const {z} = require('zod');
+
+const CreateUserSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  age: z.number().int().min(0).max(150),
+});
+
+router.post('/users', async (ctx) => {
+  const parseResult = CreateUserSchema.safeParse(ctx.request.body);
+  if (!parseResult.success) {
+    ctx.throw(400, {errors: parseResult.error.errors});
+  }
+  const data = parseResult.data;   // typed
+  // ...
+});
+```
+
+### 미들웨어로 재사용
+
+```javascript
+function validate(schema) {
+  return async (ctx, next) => {
+    const result = schema.safeParse(ctx.request.body);
+    if (!result.success) ctx.throw(400, JSON.stringify(result.error));
+    ctx.state.validated = result.data;
+    await next();
+  };
+}
+
+router.post('/users', validate(CreateUserSchema), async (ctx) => {
+  const data = ctx.state.validated;
+  // ...
+});
+```
+
+## Compression 처리
+
+`Content-Encoding: gzip/deflate` 자동 처리는 built-in. `@koa/bodyparser` 는 native support.
+
+## 함정
+
+> [!WARNING]
+> **`ctx.request.body` 는 parser 뒤에서만**. Parser 앞 미들웨어에서는 undefined.
+
+> [!CAUTION]
+> **파일 크기 제한 안 걸면 메모리 폭주**. 반드시 `limit`.
+
+> [!WARNING]
+> **`ctx.req` 를 stream 으로 소비한 후 body parser 사용 불가**. Stream 은 한 번만 읽힘.
+
+> [!IMPORTANT]
+> **Raw body 는 서명 검증에 필수**. Webhook 은 반드시 raw 로 검증.
+
+> [!CAUTION]
+> **`koa-body` vs `@koa/bodyparser`** 중 하나만. 둘 다 등록하면 충돌.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-context|Koa Context]] - ctx.request.body
+- [[koa-middleware|Koa Middleware]] - Parser 순서
+- [[koa-router|Koa Router]] - route handler 에서 사용
+- [[koa-error-handling|Koa Error Handling]]
+- [[nestjs-pipes|NestJS Pipes]] - 대비 검증
+- [[fastapi-pydantic|FastAPI Pydantic]] - 대비 검증

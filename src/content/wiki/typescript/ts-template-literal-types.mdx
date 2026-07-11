@@ -1,0 +1,250 @@
+---
+title: "[TypeScript] Template Literal Types"
+aliases:
+  - "TypeScript Template Literal Types"
+  - "TS Template Literal Types"
+  - "TypeScript string manipulation"
+  - "Uppercase"
+  - "Lowercase"
+  - "Capitalize"
+  - "Uncapitalize"
+  - "template string types"
+tags: [typescript, types, template-literal, string-manipulation]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Template Literal Types"
+    url: "https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html"
+---
+
+## 정의
+
+**Template Literal Type** 은 TypeScript 4.1 에서 도입된 문법으로, JavaScript template literal 처럼 백틱과 `${...}` 를 이용해 **타입 레벨** 에서 문자열을 조합/조작합니다. Union 분배, 내장 문자열 utility, mapped type / conditional type 조합으로 강력한 정적 계산이 가능합니다.
+
+## 기본
+
+```typescript
+type World = "world";
+type Greeting = `hello ${World}`;   // "hello world"
+
+type Cardinal = "north" | "south" | "east" | "west";
+type Quadrant = `${Cardinal}-${Cardinal}`;
+// = "north-north" | "north-south" | ... 총 16개
+```
+
+Union 안에서 자동 분배 (cartesian product).
+
+## 내장 문자열 utility
+
+- **`Uppercase<S>`**
+- **`Lowercase<S>`**
+- **`Capitalize<S>`**: 첫 글자 대문자
+- **`Uncapitalize<S>`**: 첫 글자 소문자
+
+```typescript
+type A = Uppercase<"hello">;      // "HELLO"
+type B = Lowercase<"HELLO">;       // "hello"
+type C = Capitalize<"hello">;      // "Hello"
+type D = Uncapitalize<"Hello">;    // "hello"
+```
+
+## Event Handler 이름
+
+```typescript
+type EventName<T extends string> = `on${Capitalize<T>}`;
+
+type A = EventName<"click">;       // "onClick"
+type B = EventName<"mouseover">;    // "onMouseover"
+```
+
+Mapped 와 조합:
+
+```typescript
+type EventHandlers<E extends string> = {
+  [K in E as `on${Capitalize<K>}`]: (e: Event) => void;
+};
+
+type Handlers = EventHandlers<"click" | "hover" | "submit">;
+// = {onClick: (e: Event) => void; onHover: ...; onSubmit: ...}
+```
+
+## URL / Route 타이핑
+
+```typescript
+type Route = `/users/${string}` | `/posts/${number}`;
+
+const r1: Route = "/users/kim";        // OK
+const r2: Route = "/posts/42";          // OK
+const r3: Route = "/comments/1";        // 오류
+```
+
+### Path parameter 추출
+
+```typescript
+type ExtractParams<S extends string> =
+  S extends `${string}:${infer P}/${infer R}`
+    ? P | ExtractParams<R>
+    : S extends `${string}:${infer P}`
+    ? P
+    : never;
+
+type A = ExtractParams<"/users/:id/posts/:postId">;
+// = "id" | "postId"
+
+type RouteParams<S extends string> = {
+  [K in ExtractParams<S>]: string;
+};
+
+type P = RouteParams<"/users/:id/posts/:postId">;
+// = {id: string; postId: string}
+```
+
+Type-safe routing 의 기반.
+
+## Case conversion
+
+### SnakeToCamel
+
+```typescript
+type SnakeToCamel<S extends string> =
+  S extends `${infer H}_${infer R}`
+    ? `${H}${Capitalize<SnakeToCamel<R>>}`
+    : S;
+
+type A = SnakeToCamel<"user_id">;           // "userId"
+type B = SnakeToCamel<"created_at_utc">;     // "createdAtUtc"
+```
+
+### CamelToSnake
+
+```typescript
+type CamelToSnake<S extends string> =
+  S extends `${infer H}${infer T}`
+    ? T extends Uncapitalize<T>
+      ? `${Uncapitalize<H>}${CamelToSnake<T>}`
+      : `${Uncapitalize<H>}_${CamelToSnake<T>}`
+    : S;
+
+type A = CamelToSnake<"userId">;     // "user_id"
+type B = CamelToSnake<"getName">;     // "get_name"
+```
+
+### KebabCase, ScreamingSnake 등
+
+`type-fest` 라이브러리에 이미 정의되어 있음. 재발명하기보다는 lookup.
+
+## Numeric parsing
+
+```typescript
+type ParseInt<S extends string> =
+  S extends `${infer N extends number}` ? N : never;
+
+type A = ParseInt<"42">;    // 42
+type B = ParseInt<"3.14">;   // 3.14
+type C = ParseInt<"foo">;    // never
+```
+
+TypeScript 4.8+ 에서 `${infer N extends number}` 문법으로 문자열을 숫자로 파싱 가능.
+
+## String Split
+
+```typescript
+type Split<S extends string, D extends string> =
+  S extends `${infer H}${D}${infer R}` ? [H, ...Split<R, D>] : [S];
+
+type A = Split<"a,b,c", ",">;    // ["a", "b", "c"]
+type B = Split<"1.2.3", ".">;    // ["1", "2", "3"]
+```
+
+## String Join
+
+```typescript
+type Join<T extends string[], D extends string> =
+  T extends [] ? "" :
+  T extends [infer F extends string] ? F :
+  T extends [infer F extends string, ...infer R extends string[]]
+    ? `${F}${D}${Join<R, D>}`
+    : never;
+
+type A = Join<["a", "b", "c"], "-">;   // "a-b-c"
+```
+
+## 실전: CSS unit
+
+```typescript
+type CssUnit = "px" | "em" | "rem" | "%" | "vh" | "vw";
+type CssValue = `${number}${CssUnit}` | `${number}` | "auto" | "inherit";
+
+const v1: CssValue = "10px";      // OK
+const v2: CssValue = "auto";       // OK
+const v3: CssValue = "10bar";      // 오류
+```
+
+## 실전: Environment variable
+
+```typescript
+type EnvKey = `NEXT_PUBLIC_${string}`;
+
+function getEnv<K extends EnvKey>(key: K): string | undefined {
+  return process.env[key];
+}
+
+getEnv("NEXT_PUBLIC_API_URL");   // OK
+getEnv("DATABASE_URL");           // 오류
+```
+
+## 실전: SQL 유사
+
+```typescript
+type SqlWhere<T> = {
+  [K in keyof T]?: T[K] | `${string}${T[K] extends string ? "LIKE" : ""}${string}`;
+};
+
+// ... 실용성 낮음, 예시 정도
+```
+
+## Distributive with template literal
+
+```typescript
+type Prefix<S extends string> = `prefix_${S}`;
+
+type A = Prefix<"a" | "b" | "c">;   // "prefix_a" | "prefix_b" | "prefix_c"
+```
+
+Union 이 자동 분배되어 각 요소에 대해 template 적용.
+
+## Cartesian product
+
+```typescript
+type Combinations<A extends string, B extends string> = `${A}-${B}`;
+
+type A = Combinations<"foo" | "bar", "1" | "2">;
+// = "foo-1" | "foo-2" | "bar-1" | "bar-2"
+```
+
+## 함정
+
+> [!WARNING]
+> **재귀 depth 제한** (50 정도). 매우 긴 문자열 파싱은 실패.
+
+> [!CAUTION]
+> **`${string}`** 은 모든 문자열 매칭. Loose 함. `${number}` 로 명시하는 편이 안전.
+
+> [!WARNING]
+> **`Capitalize<T>` 는 T 가 string 이어야 함**. `Capitalize<string & K>` 로 좁힘.
+
+> [!IMPORTANT]
+> **성능**. 대규모 template literal type 은 컴파일 시간 급증. Alias 로 캐시.
+
+> [!CAUTION]
+> **Runtime 에는 없음**. Template literal type 은 컴파일 시만. 실제 문자열 조작은 JavaScript 로.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-conditional-types|Conditional Types]] - Template + conditional
+- [[ts-mapped-types|Mapped Types]] - 키 조작
+- [[ts-utility-types|Utility Types]] - Uppercase, Lowercase, ...
+- [[ts-generics|Generics]]
+- [[ts-type-aliases|Type Aliases]]
+- [[ts-narrowing|Type Narrowing]]

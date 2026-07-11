@@ -1,0 +1,478 @@
+---
+title: "[NestJS] Providers & Dependency Injection"
+aliases:
+  - "NestJS Providers"
+  - "NestJS Dependency Injection"
+  - "NestJS DI"
+  - "@Injectable decorator"
+  - "@Inject decorator"
+  - "useValue useFactory useClass"
+  - "Provider Scope"
+  - "REQUEST scope"
+  - "NestJS 의존성 주입"
+tags: [nestjs, providers, dependency-injection, di]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Providers"
+    url: "https://docs.nestjs.com/providers"
+  - title: "NestJS Custom Providers"
+    url: "https://docs.nestjs.com/fundamentals/custom-providers"
+  - title: "NestJS Provider Scopes"
+    url: "https://docs.nestjs.com/fundamentals/injection-scopes"
+  - title: "NestJS Async Providers"
+    url: "https://docs.nestjs.com/fundamentals/async-providers"
+---
+
+## 정의
+
+**NestJS Provider** 는 `@Injectable()` 데코레이터가 붙은 클래스 (또는 값/factory) 로, DI container 에 등록되어 다른 클래스에 주입됩니다. Service, Repository, Factory, Helper 등이 모두 provider 입니다. **Constructor injection** 이 기본.
+
+## 왜 DI 인가
+
+수동 초기화 없이 필요한 의존성을 주입:
+
+```typescript
+// DI 없이
+class UsersController {
+  private service = new UsersService(new UsersRepo(new PrismaClient()));
+}
+
+// DI
+@Controller('users')
+class UsersController {
+  constructor(private service: UsersService) {}
+}
+```
+
+- **Testability**: mock 주입 쉬움
+- **가독성**: 의존성 명시
+- **재사용**: singleton 자동
+- **loose coupling**: 인터페이스 기반
+
+## Injectable Service
+
+```typescript
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class UsersService {
+  constructor(
+    private readonly repo: UsersRepository,
+    private readonly logger: LoggerService,
+  ) {}
+
+  async findAll() {
+    this.logger.log('finding all users');
+    return this.repo.findAll();
+  }
+}
+```
+
+Module 에 등록:
+
+```typescript
+@Module({
+  providers: [UsersService, UsersRepository, LoggerService],
+  exports: [UsersService],
+})
+export class UsersModule {}
+```
+
+## 기본 등록 형태
+
+```typescript
+providers: [UsersService]
+```
+
+는 축약형:
+
+```typescript
+providers: [
+  {
+    provide: UsersService,     // 토큰 (클래스 이름)
+    useClass: UsersService,    // 실제 클래스
+  },
+]
+```
+
+## Custom Provider
+
+### `useClass` - 다른 클래스로 대체
+
+```typescript
+providers: [
+  {
+    provide: LoggerService,
+    useClass: process.env.NODE_ENV === 'production'
+      ? ProductionLogger
+      : DevLogger,
+  },
+]
+```
+
+Injectable 은 `LoggerService` 지만 실제로는 env 에 따라 다른 구현.
+
+### `useValue` - 고정 값
+
+```typescript
+const mockUsersService = {
+  findAll: () => [{id: 1, name: 'kim'}],
+};
+
+providers: [
+  {
+    provide: UsersService,
+    useValue: mockUsersService,
+  },
+]
+```
+
+테스트 mock 이나 상수 config 에 유용.
+
+### `useFactory` - Factory 함수
+
+```typescript
+providers: [
+  {
+    provide: 'DATABASE_CONNECTION',
+    useFactory: async (config: ConfigService) => {
+      const client = new PrismaClient({
+        datasources: {db: {url: config.get('DATABASE_URL')}}
+      });
+      await client.$connect();
+      return client;
+    },
+    inject: [ConfigService],   // factory 인자
+  },
+]
+```
+
+Async 도 OK. `inject` 배열 순서 == factory 인자 순서.
+
+### `useExisting` - alias
+
+```typescript
+providers: [
+  LoggerService,
+  {
+    provide: 'ALIAS_LOGGER',
+    useExisting: LoggerService,
+  },
+]
+```
+
+## Non-Class Token
+
+Class 가 아닌 값 (문자열, symbol) 을 토큰으로:
+
+```typescript
+export const DATABASE_CONNECTION = 'DATABASE_CONNECTION';
+
+providers: [
+  {
+    provide: DATABASE_CONNECTION,
+    useFactory: () => new PrismaClient(),
+  },
+]
+
+// 주입 시
+@Injectable()
+export class UsersRepo {
+  constructor(
+    @Inject(DATABASE_CONNECTION) private db: PrismaClient,
+  ) {}
+}
+```
+
+TypeScript 는 어떤 타입인지 몰라 `@Inject()` 명시. Symbol 도 가능:
+
+```typescript
+export const DATABASE_CONNECTION = Symbol('DATABASE_CONNECTION');
+```
+
+Class 를 그대로 토큰으로 쓰면 `@Inject()` 필요 없음 (TypeScript 가 메타데이터 저장).
+
+## Provider Scope
+
+기본은 **Singleton** (앱 한 개). 다른 scope:
+
+```typescript
+import { Injectable, Scope } from '@nestjs/common';
+
+@Injectable({ scope: Scope.DEFAULT })      // singleton (default)
+@Injectable({ scope: Scope.REQUEST })      // 요청마다 새 instance
+@Injectable({ scope: Scope.TRANSIENT })    // 주입마다 새 instance
+export class MyService {}
+```
+
+### REQUEST scope
+
+각 HTTP 요청마다 새 instance. Request context 접근 가능.
+
+```typescript
+import { Injectable, Scope, Inject } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import { Request } from 'express';
+
+@Injectable({ scope: Scope.REQUEST })
+export class RequestContextService {
+  constructor(@Inject(REQUEST) private request: Request) {}
+
+  getUserId(): string {
+    return this.request.user.id;
+  }
+}
+```
+
+**주의**: REQUEST scope provider 를 주입받는 상위 provider 도 자동으로 REQUEST scope. **성능 오버헤드** (요청마다 인스턴스 생성 + injection graph 재구성). 꼭 필요할 때만.
+
+### TRANSIENT
+
+주입될 때마다 새 instance. Consumer 별 독립 상태.
+
+```typescript
+@Injectable({ scope: Scope.TRANSIENT })
+export class Counter {
+  private count = 0;
+  increment() { return ++this.count; }
+}
+
+// UserService.counter 와 OrderService.counter 는 다른 인스턴스
+```
+
+## Optional Injection
+
+```typescript
+import { Optional } from '@nestjs/common';
+
+@Injectable()
+export class MyService {
+  constructor(
+    @Optional() @Inject('OPTIONAL_TOKEN') private optional?: string,
+  ) {}
+}
+```
+
+주입 못 하면 undefined.
+
+## Async Provider
+
+DB 연결 등 초기화가 async 인 경우:
+
+```typescript
+{
+  provide: 'DATABASE',
+  useFactory: async () => {
+    const conn = await connectToDb();
+    return conn;
+  },
+}
+```
+
+`AppModule` 이 초기화 완료된 후 앱 시작.
+
+## Circular Dependency
+
+Provider A -> B -> A -> `forwardRef`:
+
+```typescript
+@Injectable()
+export class AService {
+  constructor(
+    @Inject(forwardRef(() => BService))
+    private bService: BService,
+  ) {}
+}
+
+@Injectable()
+export class BService {
+  constructor(
+    @Inject(forwardRef(() => AService))
+    private aService: AService,
+  ) {}
+}
+```
+
+Refactoring 가 나은 편이 대부분.
+
+## Repository 패턴
+
+```typescript
+// users.repository.ts
+@Injectable()
+export class UsersRepository {
+  constructor(private prisma: PrismaService) {}
+
+  async findAll() {
+    return this.prisma.user.findMany();
+  }
+
+  async findOne(id: string) {
+    return this.prisma.user.findUnique({where: {id}});
+  }
+
+  async create(data: CreateUserDto) {
+    return this.prisma.user.create({data});
+  }
+}
+```
+
+Service 가 repo 를 주입:
+
+```typescript
+@Injectable()
+export class UsersService {
+  constructor(private repo: UsersRepository) {}
+
+  async findAll() {
+    return this.repo.findAll();
+  }
+}
+```
+
+## Multi-Provider (여러 값 배열)
+
+여러 인스턴스를 하나의 토큰 배열로:
+
+```typescript
+export const HANDLER = 'HANDLER';
+
+providers: [
+  {provide: HANDLER, useClass: HandlerA, multi: true} as any,   // Nest 는 표준 multi 없음
+  {provide: HANDLER, useClass: HandlerB, multi: true} as any,
+]
+```
+
+**NestJS 는 표준 multi-provider 없음** (Angular 에는 있음). 대신 배열 provider:
+
+```typescript
+providers: [
+  HandlerA,
+  HandlerB,
+  {
+    provide: 'HANDLERS',
+    useFactory: (a: HandlerA, b: HandlerB) => [a, b],
+    inject: [HandlerA, HandlerB],
+  },
+]
+```
+
+## Lifecycle Hook
+
+Provider 도 module 처럼:
+
+```typescript
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+
+@Injectable()
+export class DatabaseService implements OnModuleInit, OnModuleDestroy {
+  async onModuleInit() {
+    await this.connect();
+  }
+
+  async onModuleDestroy() {
+    await this.disconnect();
+  }
+}
+```
+
+## 실전 패턴
+
+### Config injection
+
+```typescript
+@Injectable()
+export class ApiClient {
+  private baseUrl: string;
+
+  constructor(private config: ConfigService) {
+    this.baseUrl = this.config.get('API_URL');
+  }
+}
+```
+
+### 여러 구현 선택
+
+```typescript
+@Module({
+  providers: [
+    {
+      provide: 'PAYMENT_GATEWAY',
+      useClass: process.env.PAYMENT === 'stripe' ? StripeGateway : PayPalGateway,
+    },
+  ],
+  exports: ['PAYMENT_GATEWAY'],
+})
+export class PaymentModule {}
+```
+
+### Strategy Pattern
+
+```typescript
+interface EmailSender {
+  send(to: string, subject: string, body: string): Promise<void>;
+}
+
+@Injectable() class SendGridSender implements EmailSender { ... }
+@Injectable() class SmtpSender implements EmailSender { ... }
+
+@Module({
+  providers: [
+    {
+      provide: 'EMAIL_SENDER',
+      useClass: SendGridSender,
+    },
+  ],
+  exports: ['EMAIL_SENDER'],
+})
+export class EmailModule {}
+```
+
+## Testing DI
+
+```typescript
+const module = await Test.createTestingModule({
+  providers: [
+    UsersService,
+    {
+      provide: UsersRepository,
+      useValue: {
+        findAll: jest.fn().mockResolvedValue([{id: 1, name: 'kim'}]),
+      },
+    },
+  ],
+}).compile();
+
+const service = module.get<UsersService>(UsersService);
+```
+
+자세한 것은 [[nestjs-testing|NestJS Testing]] 참조.
+
+## 함정
+
+> [!WARNING]
+> **REQUEST scope 의 성능 비용**. 매 요청 인스턴스 생성 + graph 재구성. Global logger, tracing 에는 다른 방식 (AsyncLocalStorage) 검토.
+
+> [!CAUTION]
+> **`@Inject()` 누락**. String/Symbol 토큰 사용 시 `@Inject()` 명시 필수. Class 는 자동.
+
+> [!WARNING]
+> **Circular dependency 는 refactor 신호**. `forwardRef` 는 응급.
+
+> [!IMPORTANT]
+> **`useFactory` 의 `inject` 순서**. inject 배열 순서 == factory 인자 순서.
+
+> [!CAUTION]
+> **Module 에 provider 안 등록하면 UNKNOWN_DEPENDENCIES 오류**. 오류 메시지의 module 이름 확인.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-modules|Modules]] - Provider 등록
+- [[nestjs-controllers|Controllers]] - Service 주입
+- [[nestjs-config|Config]] - Config provider
+- [[nestjs-database|Database]] - Custom async provider
+- [[nestjs-testing|Testing]] - DI override
+- [[fastapi-dependency-injection|FastAPI DI]] - 대비
+- [[ts-decorators|TypeScript Decorators]]

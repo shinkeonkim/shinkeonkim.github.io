@@ -1,0 +1,456 @@
+---
+title: "[Kubernetes] Kustomize"
+aliases:
+  - "Kustomize"
+  - "kubectl kustomize"
+  - "kustomization.yaml"
+  - "kustomize base overlay"
+  - "kustomize patch"
+  - "쿠버네티스 kustomize"
+tags: [kubernetes, kustomize, config, gitops]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Kustomize Documentation"
+    url: "https://kustomize.io/"
+  - title: "Kubernetes Kustomize"
+    url: "https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/"
+  - title: "Kustomize GitHub"
+    url: "https://github.com/kubernetes-sigs/kustomize"
+---
+
+## 정의
+
+**Kustomize** 는 Kubernetes manifests 를 **템플릿 없이** overlay 방식으로 커스터마이제이션하는 도구입니다. `kubectl` v1.14+ 에 내장 (`kubectl apply -k`). YAML 을 그대로 두고, base + overlay 로 환경별 (dev/stg/prod) 차이만 표현합니다.
+
+## 왜 Kustomize 인가
+
+### Helm 과 대비
+
+Helm 은 **템플릿 엔진** (Go template). YAML 에 `{{ .Values.replicas }}` 같은 placeholder.
+
+**단점**:
+- YAML 이 진짜 YAML 이 아님 (템플릿 언어 삽입)
+- 파싱 오류 디버깅 힘듦
+- Values.yaml 이 실질적으로 스키마 없는 dict
+
+Kustomize 는 **순수 YAML**. Patch/overlay 로 조합.
+
+**단점**:
+- 로직 (조건, 반복) 표현 어려움
+- 복잡한 시나리오에 부담
+- Helm 만큼 배포자 (user) 친화적이지 않음
+
+**결론**:
+- 자체 앱, 환경별 배포 -> **Kustomize** 자연스러움
+- 외부 배포 대상 라이브러리 (Redis, Postgres, Prometheus) -> **Helm** 우세
+- 조합 가능 (Helm chart 를 Kustomize 로 후처리)
+
+## 기본 구조
+
+```
+kustomize-project/
+├── base/
+│   ├── kustomization.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── configmap.yaml
+└── overlays/
+    ├── dev/
+    │   ├── kustomization.yaml
+    │   ├── replica-patch.yaml
+    │   └── env-patch.yaml
+    ├── staging/
+    │   ├── kustomization.yaml
+    │   └── replica-patch.yaml
+    └── prod/
+        ├── kustomization.yaml
+        ├── replica-patch.yaml
+        └── resources-patch.yaml
+```
+
+## Base
+
+**Base** 는 공통 리소스.
+
+**`base/kustomization.yaml`**:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - configmap.yaml
+
+commonLabels:
+  app: web
+  managed-by: kustomize
+
+commonAnnotations:
+  team: platform
+```
+
+**`base/deployment.yaml`**:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: myapp:1.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_ENV
+              value: development
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+```
+
+## Overlay
+
+**`overlays/prod/kustomization.yaml`**:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: prod                    # 모든 리소스가 prod namespace 에
+
+resources:
+  - ../../base                     # base 참조
+
+commonLabels:
+  environment: production
+
+patches:
+  - path: replica-patch.yaml
+  - path: resources-patch.yaml
+    target:
+      kind: Deployment
+
+images:
+  - name: myapp
+    newTag: 1.5.0                  # image tag 교체
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - APP_ENV=production
+      - LOG_LEVEL=info
+
+secretGenerator:
+  - name: db-secret
+    literals:
+      - password=prod-secret-value
+
+replicas:
+  - name: web
+    count: 5
+```
+
+## Patch 종류
+
+### 1. Strategic Merge Patch (기본)
+
+YAML 조각을 base 위에 얹음. K8s API 지식 활용.
+
+**`replica-patch.yaml`**:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 5
+```
+
+Deployment.spec.replicas 만 5 로 override.
+
+### 2. JSON Patch (RFC 6902)
+
+경로 기반 수정. 세밀 제어.
+
+```yaml
+patches:
+  - target:
+      kind: Deployment
+      name: web
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 5
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: FEATURE_FLAG
+          value: "true"
+      - op: remove
+        path: /spec/template/spec/containers/0/env/0
+```
+
+### 3. Container 수준 patch
+
+```yaml
+patches:
+  - target:
+      kind: Deployment
+      name: web
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: web
+      spec:
+        template:
+          spec:
+            containers:
+              - name: web
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 512Mi
+                  limits:
+                    cpu: 2
+                    memory: 2Gi
+```
+
+## Generator
+
+### ConfigMap
+
+```yaml
+configMapGenerator:
+  - name: app-config
+    literals:
+      - APP_ENV=production
+      - LOG_LEVEL=info
+    files:
+      - config.json
+      - nginx.conf
+    envs:
+      - .env.prod
+```
+
+생성된 ConfigMap 이름에 **hash suffix** 자동 추가 (`app-config-abc123`). 값 변경 시 새 hash -> Pod 자동 재배포.
+
+### Secret
+
+```yaml
+secretGenerator:
+  - name: db-secret
+    literals:
+      - username=admin
+      - password=secret
+    type: Opaque
+```
+
+**주의**: literals 는 kustomization.yaml 안에 평문. Git 에 커밋 금지. Sealed Secrets, SOPS, external secrets 로 대체.
+
+## Image 변경
+
+```yaml
+images:
+  - name: myapp                  # base 의 이미지 이름
+    newName: registry.example.com/myapp
+    newTag: 1.5.0
+  - name: nginx
+    newName: nginx
+    digest: sha256:abc...
+```
+
+컨테이너 spec 을 손대지 않고 tag/registry 만 override.
+
+## Namespace 지정
+
+```yaml
+namespace: prod
+```
+
+Overlay 안 모든 namespaced 리소스가 이 namespace 로.
+
+## Name Prefix / Suffix
+
+```yaml
+namePrefix: prod-
+nameSuffix: -v2
+```
+
+`web` -> `prod-web-v2`.
+
+## Component (v3.7+)
+
+재사용 가능한 조합. 라이브러리 성격.
+
+**`components/monitoring/kustomization.yaml`**:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      kind: Deployment
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: dummy
+      spec:
+        template:
+          metadata:
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "9090"
+```
+
+Overlay 에서 사용:
+
+```yaml
+components:
+  - ../../components/monitoring
+```
+
+## 여러 base
+
+```yaml
+resources:
+  - ../base/deployment
+  - ../base/service
+  - ../base/configmap
+
+# 또는
+bases:                       # deprecated in favor of resources
+  - ../base
+```
+
+## 빌드 & 적용
+
+```bash
+# 렌더링만 (확인용)
+kubectl kustomize overlays/prod/
+kustomize build overlays/prod/
+
+# 적용
+kubectl apply -k overlays/prod/
+
+# Diff
+kubectl diff -k overlays/prod/
+
+# 삭제
+kubectl delete -k overlays/prod/
+```
+
+## 실전 워크플로
+
+### 앱 배포
+
+```
+myapp/
+├── base/
+│   ├── kustomization.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── ingress.yaml
+└── overlays/
+    ├── dev/
+    │   └── kustomization.yaml     # dev namespace, small resources
+    ├── staging/
+    │   └── kustomization.yaml     # stg namespace, prod-like
+    └── prod/
+        ├── kustomization.yaml
+        ├── hpa.yaml                # prod 만 HPA
+        └── pdb.yaml
+```
+
+### Multi-cluster
+
+```
+myapp/
+├── base/
+└── overlays/
+    ├── us-east-1/
+    │   ├── prod/
+    │   ├── staging/
+    └── eu-west-1/
+        ├── prod/
+        └── staging/
+```
+
+### Helm chart post-processing
+
+Helm chart 를 base 로:
+
+```yaml
+helmCharts:
+  - name: nginx-ingress
+    repo: https://kubernetes.github.io/ingress-nginx
+    version: 4.11.0
+    releaseName: ingress-nginx
+    namespace: ingress-nginx
+    valuesInline:
+      controller:
+        replicaCount: 3
+
+patches:
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ingress-nginx-controller
+      spec:
+        template:
+          spec:
+            nodeSelector:
+              node-role: ingress
+```
+
+## Kustomize + GitOps
+
+- **[[argocd|ArgoCD]]**: Native Kustomize 지원. Application 리소스에 kustomize path 지정.
+- **Flux**: Kustomization CRD (Flux 의 K CRD 는 kustomize 를 wrap).
+
+## 함정
+
+> [!WARNING]
+> **Secret literal 을 git 에 커밋 금지**. Sealed Secrets, SOPS, ExternalSecrets 로.
+
+> [!CAUTION]
+> **Generator hash 는 값 기반**. 같은 값 = 같은 hash = 같은 이름. Rolling update 유발하려면 값 실제 변경.
+
+> [!WARNING]
+> **overlay 에서 base 리소스 순서**. 여러 base 상속 시 순서에 따라 patch 결과 달라짐.
+
+> [!IMPORTANT]
+> **`kubectl kustomize` 로 렌더링 후 확인**. 예상과 다르면 patch 로직 재검토.
+
+> [!CAUTION]
+> **JSON Patch path 오타**. `/spec/template/spec/containers/0/name` 등 인덱스 실수 흔함. 정확 지정.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[kubectl|kubectl]] - `-k` 옵션
+- [[helm|Helm]] - 대비 도구
+- [[argocd|ArgoCD]] - GitOps + Kustomize
+- [[k8s-configmap-secret|ConfigMap / Secret]] - Generator
+- [[k8s-namespace|Namespace]] - overlay 별 ns
+- [[gitops-patterns|GitOps Patterns]]

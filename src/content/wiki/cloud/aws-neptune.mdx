@@ -1,0 +1,338 @@
+---
+title: "[AWS] Amazon Neptune"
+aliases:
+  - "AWS Neptune"
+  - "Amazon Neptune"
+  - "Neptune"
+  - "Neptune Database"
+  - "Neptune Analytics"
+  - "Neptune Serverless"
+  - "Neptune Global Database"
+  - "Gremlin AWS"
+  - "openCypher AWS"
+  - "SPARQL AWS"
+  - "Amazon 그래프 데이터베이스"
+tags: [aws, cloud, database, graph-database, gremlin, opencypher, sparql]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "Amazon Neptune User Guide"
+    url: "https://docs.aws.amazon.com/neptune/latest/userguide/intro.html"
+  - title: "Amazon Neptune Analytics User Guide"
+    url: "https://docs.aws.amazon.com/neptune-analytics/latest/userguide/what-is-neptune-analytics.html"
+  - title: "Neptune Analytics Graph Algorithms"
+    url: "https://docs.aws.amazon.com/neptune-analytics/latest/userguide/algorithms.html"
+  - title: "Neptune Serverless"
+    url: "https://docs.aws.amazon.com/neptune/latest/userguide/neptune-serverless.html"
+  - title: "Apache TinkerPop Gremlin"
+    url: "https://tinkerpop.apache.org/gremlin.html"
+  - title: "openCypher"
+    url: "https://opencypher.org/"
+---
+
+## 정의
+
+**Amazon Neptune** 은 AWS 가 관리하는 **그래프 데이터베이스** 서비스입니다. 두 데이터 모델과 세 쿼리 언어를 모두 지원합니다.
+
+- **Property Graph** 모델: **Gremlin (Apache TinkerPop)**, **openCypher**
+- **RDF** 모델: **SPARQL 1.1**
+
+두 개의 별도 제품군:
+- **Neptune Database**: 트랜잭션/OLTP 그래프 워크로드 (2018 GA)
+- **Neptune Analytics**: 분석/알고리즘 워크로드 (2024 GA), 인메모리 최적화, 25+ 내장 알고리즘, 벡터 검색
+
+## 왜 그래프 DB 인가
+
+관계 자체가 데이터의 핵심인 도메인:
+
+- **소셜 네트워크**: 친구/팔로우/공통 관심
+- **추천**: 사용자-상품, collaborative filtering
+- **사기 탐지**: 트랜잭션 그래프에서 이상 패턴 검출
+- **지식 그래프**: 개체 + 관계 + 속성 (Wikidata 스타일)
+- **네트워크 라우팅**: 최단 경로, 통신망
+- **생명과학**: 유전자, 단백질 상호작용
+- **아이덴티티 그래프**: 마케팅, MDM
+- **RAG 지식 그래프** (GraphRAG, 2024~): LLM + 그래프
+
+RDB 의 `JOIN` 이 여러 겹 필요한 관계 조회를, 그래프 traversal 로 자연스럽게 표현.
+
+## 두 데이터 모델
+
+### Property Graph (LPG)
+
+Node (vertex) + Edge (relationship) 에 **key-value property**.
+
+```
+(User {id: 1, name: 'kim'}) -[LIKES {since: 2023}]-> (Movie {id: 42, title: 'Dune'})
+```
+
+Gremlin / openCypher 로 조회.
+
+### RDF (Resource Description Framework)
+
+**Triple** (subject, predicate, object). W3C 표준. 시맨틱 웹.
+
+```
+<http://ex.com/user/1>  <http://ex.com/likes>  <http://ex.com/movie/42>
+```
+
+SPARQL 로 조회.
+
+Neptune 은 두 모델을 **같은 클러스터에서 병존** 가능합니다.
+
+## 쿼리 언어 예시
+
+### Gremlin
+
+```groovy
+// 사용자 1 이 좋아하는 영화들
+g.V().hasLabel('User').has('id', 1)
+     .out('LIKES').hasLabel('Movie')
+     .values('title')
+
+// 사용자 1 이 좋아하는 영화를 좋아하는 다른 사용자 (친구 추천)
+g.V().hasLabel('User').has('id', 1)
+     .out('LIKES').in('LIKES')
+     .where(neq(V().hasLabel('User').has('id', 1)))
+     .valueMap()
+
+// 최단 경로
+g.V(user1).repeat(both().simplePath()).until(hasId(user2))
+          .path().limit(1)
+```
+
+### openCypher
+
+```cypher
+// 사용자 1 이 좋아하는 영화들
+MATCH (u:User {id: 1})-[:LIKES]->(m:Movie)
+RETURN m.title
+
+// 친구 추천
+MATCH (u1:User {id: 1})-[:LIKES]->(m:Movie)<-[:LIKES]-(u2:User)
+WHERE u1 <> u2
+RETURN u2.name, count(m) AS shared
+ORDER BY shared DESC LIMIT 10
+
+// 최단 경로
+MATCH p = shortestPath((u1:User {id: 1})-[*]-(u2:User {id: 999}))
+RETURN p
+```
+
+### SPARQL
+
+```sparql
+PREFIX ex: <http://ex.com/>
+
+SELECT ?movie ?title
+WHERE {
+  ex:user1 ex:likes ?movie .
+  ?movie ex:title ?title .
+}
+
+# 친구 추천
+SELECT ?friend ?name (COUNT(?movie) AS ?shared)
+WHERE {
+  ex:user1 ex:likes ?movie .
+  ?friend ex:likes ?movie .
+  ?friend ex:name ?name .
+  FILTER (?friend != ex:user1)
+}
+GROUP BY ?friend ?name
+ORDER BY DESC(?shared)
+LIMIT 10
+```
+
+## Neptune Database 아키텍처
+
+```
+Writer instance ──┐
+                   ├── Neptune Cluster ── Shared Cluster Storage (auto-replicate 6 copies × 3 AZ)
+Reader instances ─┘
+```
+
+- **Cluster storage**: 여러 AZ 에 자동 복제. Compute 와 분리.
+- **1 Writer + 최대 15 Readers**
+- **인스턴스 유형**: db.t4g, db.r5, db.r6g, db.r6i, db.x2g, db.serverless
+- **자동 백업**: continuous, PITR (Point-in-time recovery)
+- **암호화**: KMS at rest, TLS in transit
+- **VPC**: Private only (public endpoint 없음)
+
+## Neptune Serverless
+
+Auto-scaling on-demand. 최소 1.0 NCU (Neptune Capacity Unit) ~ 최대 128 NCU.
+
+```yaml
+DBCluster:
+  ServerlessV2ScalingConfiguration:
+    MinCapacity: 1.0
+    MaxCapacity: 16.0
+```
+
+- **작은 워크로드 / 스파이키** 유리
+- **유휴 시 최소 비용** (0 은 아님, 최소 1 NCU)
+- Provisioned 와 mix 가능 (하이브리드)
+
+## Global Database
+
+여러 리전에 replica. 재해복구 + 저지연 read.
+
+- **Primary region**: read/write
+- **Secondary regions** (최대 5): read-only, < 1s replication lag 목표
+- 페일오버 시 secondary 를 primary 로 승격
+
+## Neptune Analytics (2024 GA)
+
+**Analytics** 는 별도 서비스 (`neptune-graph`). Database 와 다른 endpoint, IAM, API.
+
+### 특징
+
+- **인메모리 최적화**: 대규모 traversal 도 빠름
+- **25+ 내장 알고리즘**: openCypher `CALL` procedure 로
+- **openCypher only** (Gremlin/SPARQL 미지원)
+- **Vector Similarity Search** (embedding 통합)
+- **StartImportTask API**: S3 에서 대용량 대량 로드
+
+### 알고리즘 카테고리
+
+1. **Path finding** (BFS, shortestPath, allShortestPaths, singleSourceShortestPath)
+2. **Centrality** (PageRank + `personalization`, betweenness, degree, closeness)
+3. **Similarity** (Jaccard, overlap, cosine)
+4. **Clustering / Community detection** (Louvain, weakly/strongly connected components, label propagation)
+5. **Vector Similarity** (`vectors.byEmbedding`, `vectors.topK.byNode`)
+
+### 예: 미국 알래스카 지역 top 10 공항 (PageRank)
+
+```cypher
+CALL neptune.algo.pageRank.stream({
+  edgeWeightProperty: "distance",
+  maxIterations: 100
+})
+YIELD node, rank
+WHERE node.region = 'US-AK'
+RETURN node.iata AS airport, rank
+ORDER BY rank DESC LIMIT 10
+```
+
+### 언제 Analytics vs Database?
+
+| 축 | Database | Analytics |
+|:---|:---|:---|
+| **워크로드** | OLTP, 트랜잭션 | 분석, 알고리즘 |
+| **쿼리 언어** | Gremlin + openCypher + SPARQL | openCypher only |
+| **데이터 크기** | 매우 큼 (스토리지 무제한) | 인메모리 (수십 TB 정도) |
+| **업데이트** | 실시간 (write endpoint) | 대량 import 위주 |
+| **알고리즘** | 별도 구현 필요 | 내장 25+ |
+| **비용 모델** | Instance-hour | m-NCU |
+
+**하이브리드**: Database 에서 원본 유지, 분석 시 Analytics 로 스냅샷/import.
+
+## GraphRAG (2024~)
+
+**Bedrock Knowledge Bases + Neptune Analytics** 통합으로 그래프 기반 RAG.
+
+일반 벡터 RAG 의 한계:
+- 관계가 여러 단계인 질문 어려움 (multi-hop)
+- 개체 disambiguation 부족
+
+GraphRAG:
+1. 문서에서 개체 + 관계 추출 (LLM)
+2. Neptune 에 저장 (지식 그래프)
+3. 질의 시 그래프 + 벡터 조합 검색
+4. LLM 이 그래프 컨텍스트 활용
+
+자세한 것은 [[aws-bedrock|Bedrock]] Managed Knowledge Base + Neptune backend 참조.
+
+## 데이터 로딩
+
+### Bulk Load (S3)
+
+큰 데이터셋은 S3 -> Neptune Loader:
+
+```bash
+curl -X POST https://your-neptune-endpoint:8182/loader \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source": "s3://bucket/data/",
+    "format": "csv",
+    "iamRoleArn": "arn:aws:iam::...:role/NeptuneLoadRole",
+    "region": "us-east-1",
+    "parallelism": "MEDIUM"
+  }'
+```
+
+Format: `csv` (Gremlin/openCypher), `rdfxml`, `nquads`, `ntriples`, `turtle`, `opencypher`.
+
+### 스트리밍
+
+- **Kinesis Data Streams -> Lambda -> Neptune** 패턴
+- 실시간 이벤트 -> 그래프 갱신
+
+### Neptune Streams
+
+Neptune 의 변경 로그를 스트림으로 노출. CDC (Change Data Capture) 유사.
+
+## 데이터 모델링 팁
+
+### Property Graph
+
+- **Vertex label** = entity type (`User`, `Product`)
+- **Edge label** = relationship type (동사 형태 관용, `PURCHASED`, `FOLLOWS`)
+- **Vertex property**: 단순 (id, name, attributes)
+- **Edge property**: 관계의 메타데이터 (timestamp, weight)
+- **Reified edge**: 관계 자체가 개체 (예: 리뷰) -> 노드로
+
+### RDF
+
+- **URI** 로 identity (`http://ex.com/user/1`)
+- **Prefix** 표기법 (`ex:user1`)
+- 표준 ontology 재사용 (FOAF, Dublin Core, schema.org)
+
+### 관용
+
+- **관계는 방향성 명확히** (Gremlin 은 방향 있음)
+- **초강한 vertex (super node)** 주의: edge 수백만 개 넣지 말 것 (traversal 병목)
+- **인덱스**: property key 별 자동 인덱스, 하지만 range query 는 별도 설계
+
+## 함정
+
+> [!WARNING]
+> **Neptune 은 인터넷 접근 불가**. VPC 안에서만. VPC endpoint 또는 bastion 필요.
+
+> [!CAUTION]
+> **Gremlin vs openCypher vs SPARQL 성능 다름**. 같은 데이터, 같은 논리라도 언어별 최적화 정도 다름. 벤치마크.
+
+> [!WARNING]
+> **Neptune Analytics 는 별도 서비스**. Database 와 API/endpoint/과금 분리. 마이그레이션 계획 필요.
+
+> [!IMPORTANT]
+> **큰 그래프 traversal 은 시간초과**. 쿼리 타임아웃 (기본 120s) 조정, LIMIT 사용, 인덱스 활용.
+
+> [!CAUTION]
+> **Super node** 문제. 한 노드에 edge 수백만 개면 traversal 이 폭발. 데이터 모델링에서 회피.
+
+> [!WARNING]
+> **Serverless 최소 요금 1 NCU**. 완전 유휴에도 청구. 저사용 워크로드 검토 후 결정.
+
+## Neptune vs 다른 그래프 DB
+
+| DB | 강점 | 약점 |
+|:---|:---|:---|
+| **Neptune** | 관리형, 3 언어 지원, GraphRAG 통합 | AWS 종속 |
+| **Neo4j** | 커뮤니티 압도적, Cypher 원조 | 자체 관리 부담 (또는 AuraDB) |
+| **JanusGraph** | 오픈소스, 다양한 백엔드 | 성능/운영 부담 |
+| **TigerGraph** | 성능 최상급 | 상용 라이선스 |
+| **ArangoDB** | Multi-model (그래프 + 문서) | 그래프 특화 아님 |
+| **Memgraph** | 인메모리, 빠름 | 신생 |
+
+## 관련 위키
+
+- [[aws-rds|RDS]] - 관계형 대안
+- [[aws-documentdb|DocumentDB]] - 문서 DB
+- [[aws-redshift|Redshift]] - 분석 대안
+- [[aws-bedrock|Bedrock]] - GraphRAG 통합
+- [[aws-s3-vectors|S3 Vectors]] - 벡터 저장 대안
+- [[aws-iam|IAM]] - Neptune 접근 제어
+- [[aws-vpc|VPC]] - Private 네트워크
+- [[aws-kms|KMS]] - 저장 암호화
+- [[llm-rag|LLM RAG]] - GraphRAG 배경

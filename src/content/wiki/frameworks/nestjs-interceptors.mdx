@@ -1,0 +1,334 @@
+---
+title: "[NestJS] Interceptors"
+aliases:
+  - "NestJS Interceptor"
+  - "NestJS Interceptors"
+  - "@UseInterceptors"
+  - "CallHandler"
+  - "CacheInterceptor"
+  - "ClassSerializerInterceptor"
+  - "LoggingInterceptor"
+  - "NestJS 인터셉터"
+tags: [nestjs, interceptor, aop, cross-cutting]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Interceptors"
+    url: "https://docs.nestjs.com/interceptors"
+  - title: "NestJS Caching"
+    url: "https://docs.nestjs.com/techniques/caching"
+  - title: "class-transformer"
+    url: "https://github.com/typestack/class-transformer"
+---
+
+## 정의
+
+**NestJS Interceptor** 는 요청 처리 전/후에 로직을 삽입하는 클래스입니다. AOP (Aspect-Oriented Programming) 패턴의 구현체로, 로깅, 캐싱, 응답 변환, 예외 매핑, RxJS operator 활용 등에 사용합니다.
+
+## 기본 구조
+
+```typescript
+import { Injectable, NestInterceptor, ExecutionContext, CallHandler } from '@nestjs/common';
+import { Observable } from 'rxjs';
+import { tap } from 'rxjs/operators';
+
+@Injectable()
+export class LoggingInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const start = Date.now();
+    return next.handle().pipe(
+      tap(() => console.log(`Duration: ${Date.now() - start}ms`)),
+    );
+  }
+}
+```
+
+- **`intercept(context, next)`**: 요청 처리 전 로직
+- **`next.handle()`**: 실제 route handler (Observable 반환)
+- **RxJS operators** (`tap`, `map`, `catchError`, `timeout`) 로 파이프라인 구성
+
+## 부착 방법
+
+### Method
+
+```typescript
+@Get()
+@UseInterceptors(LoggingInterceptor)
+findAll() { ... }
+```
+
+### Controller
+
+```typescript
+@Controller('users')
+@UseInterceptors(LoggingInterceptor)
+export class UsersController { ... }
+```
+
+### Global
+
+```typescript
+// main.ts
+app.useGlobalInterceptors(new LoggingInterceptor());
+
+// 또는 module (DI 지원)
+import { APP_INTERCEPTOR } from '@nestjs/core';
+
+@Module({
+  providers: [
+    { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+  ],
+})
+export class AppModule {}
+```
+
+## 주요 사용 사례
+
+### 1. Logging
+
+```typescript
+@Injectable()
+export class LoggingInterceptor implements NestInterceptor {
+  private readonly logger = new Logger('LoggingInterceptor');
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const req = context.switchToHttp().getRequest();
+    const {method, url} = req;
+    const start = Date.now();
+
+    this.logger.log(`${method} ${url}`);
+
+    return next.handle().pipe(
+      tap({
+        next: () => {
+          const duration = Date.now() - start;
+          this.logger.log(`${method} ${url} ${duration}ms`);
+        },
+        error: (err) => {
+          const duration = Date.now() - start;
+          this.logger.error(`${method} ${url} ${duration}ms - ${err.message}`);
+        },
+      }),
+    );
+  }
+}
+```
+
+### 2. Response Transformation
+
+응답을 일관된 wrapper 형식으로:
+
+```typescript
+interface Response<T> {
+  data: T;
+  timestamp: string;
+  path: string;
+}
+
+@Injectable()
+export class TransformInterceptor<T> implements NestInterceptor<T, Response<T>> {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<Response<T>> {
+    const req = context.switchToHttp().getRequest();
+    return next.handle().pipe(
+      map(data => ({
+        data,
+        timestamp: new Date().toISOString(),
+        path: req.url,
+      })),
+    );
+  }
+}
+```
+
+### 3. Cache
+
+```typescript
+@Injectable()
+export class CacheInterceptor implements NestInterceptor {
+  constructor(
+    @Inject(CACHE_MANAGER) private cache: Cache,
+  ) {}
+
+  async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<any>> {
+    const req = context.switchToHttp().getRequest();
+    const key = `${req.method}:${req.url}`;
+
+    const cached = await this.cache.get(key);
+    if (cached) return of(cached);
+
+    return next.handle().pipe(
+      tap(async (data) => {
+        await this.cache.set(key, data, 60);
+      }),
+    );
+  }
+}
+```
+
+`@nestjs/cache-manager` 의 내장 `CacheInterceptor` 활용 관용.
+
+### 4. Timeout
+
+```typescript
+import { timeout, catchError, TimeoutError } from 'rxjs/operators';
+import { throwError } from 'rxjs';
+
+@Injectable()
+export class TimeoutInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    return next.handle().pipe(
+      timeout(5000),
+      catchError(err => {
+        if (err instanceof TimeoutError) {
+          return throwError(() => new RequestTimeoutException());
+        }
+        return throwError(() => err);
+      }),
+    );
+  }
+}
+```
+
+### 5. Class Serialization
+
+`ClassSerializerInterceptor` (내장) 는 `@Exclude()`, `@Expose()` 데코레이터 기반 응답 필터.
+
+```typescript
+import { Exclude, Expose } from 'class-transformer';
+
+export class UserEntity {
+  id: number;
+  email: string;
+
+  @Exclude()
+  password: string;
+
+  @Expose({groups: ['admin']})
+  role: string;
+
+  constructor(partial: Partial<UserEntity>) {
+    Object.assign(this, partial);
+  }
+}
+```
+
+```typescript
+@Controller('users')
+@UseInterceptors(ClassSerializerInterceptor)
+export class UsersController {
+  @Get(':id')
+  async findOne(@Param('id') id: string) {
+    return new UserEntity(await this.service.findOne(id));
+    // password 자동 제외
+  }
+}
+```
+
+### 6. Exception Mapping
+
+```typescript
+@Injectable()
+export class ExceptionMapInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    return next.handle().pipe(
+      catchError(err => {
+        if (err instanceof PrismaClientKnownRequestError) {
+          if (err.code === 'P2002') {
+            return throwError(() => new ConflictException('Duplicate entry'));
+          }
+          if (err.code === 'P2025') {
+            return throwError(() => new NotFoundException('Not found'));
+          }
+        }
+        return throwError(() => err);
+      }),
+    );
+  }
+}
+```
+
+## Interceptor 순서
+
+여러 개는 nested 실행:
+
+```typescript
+@UseInterceptors(A, B, C)
+```
+
+- 요청: A -> B -> C -> handler
+- 응답: handler -> C -> B -> A
+
+`tap` 등 side effect 순서 주의.
+
+## Async Interceptor
+
+```typescript
+async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<any>> {
+  const user = await this.userService.findByToken(...);
+  return next.handle();
+}
+```
+
+Promise 도 리턴 가능. Nest 가 자동 unwrap.
+
+## Global 등록 순서
+
+Guards -> Interceptors (before) -> Pipes -> Handler -> Interceptors (after) -> Exception Filters
+
+**Guards** 가 먼저 실행. Interceptor 는 `next.handle()` 전후로 감쌈.
+
+## 실전 조합
+
+### API 응답 통일 + 로깅 + timeout
+
+```typescript
+// main.ts
+app.useGlobalInterceptors(
+  new LoggingInterceptor(),
+  new TimeoutInterceptor(),
+  new TransformInterceptor(),
+);
+```
+
+또는 module 로:
+
+```typescript
+@Module({
+  providers: [
+    { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: TimeoutInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
+  ],
+})
+export class AppModule {}
+```
+
+## 함정
+
+> [!WARNING]
+> **`ClassSerializerInterceptor` + Fastify**. Fastify 는 기본 JSON.stringify 성능이 매우 빠른데, class-transformer 를 거치면 오히려 느려질 수 있음. 벤치마크.
+
+> [!CAUTION]
+> **Interceptor 안에서 응답 조작**. `map()` 으로 새 객체 반환 필수. 원본 mutate 는 side effect.
+
+> [!WARNING]
+> **`@Res()` 사용 endpoint 에는 interceptor after 로직 안 실행**. `passthrough: true` 로 우회 가능.
+
+> [!IMPORTANT]
+> **Global interceptor 에서 특정 route 우회**. Reflector + custom decorator (`@SkipInterceptor()`) 로.
+
+> [!CAUTION]
+> **RxJS 학습 부담**. `tap`, `map`, `catchError`, `throwError` 는 기본. 복잡한 파이프는 이해하기 어려움.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-controllers|Controllers]]
+- [[nestjs-guards|Guards]] - 이전 단계
+- [[nestjs-pipes|Pipes]] - 다음 단계
+- [[nestjs-exception-filters|Exception Filters]] - 예외 처리
+- [[nestjs-middleware|Middleware]]
+- [[nestjs-modules|Modules]]
+- [[nestjs-providers|Providers]]
+- [[fastapi-middleware|FastAPI Middleware]] - 대비
+- [[koa-middleware|Koa Middleware]] - 대비 (onion model)

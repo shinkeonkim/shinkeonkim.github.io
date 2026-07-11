@@ -1,0 +1,300 @@
+---
+title: "[Kubernetes] Init Containers & Sidecar Containers"
+aliases:
+  - "Init Containers"
+  - "Sidecar Containers"
+  - "k8s init container"
+  - "k8s sidecar"
+  - "native sidecar"
+  - "restartPolicy Always init"
+  - "k8s 1.29 sidecar"
+  - "k8s 1.33 sidecar GA"
+  - "쿠버네티스 사이드카"
+  - "쿠버네티스 init 컨테이너"
+tags: [kubernetes, pod, init-container, sidecar]
+category: kubernetes
+updated: 2026-07-07
+references:
+  - title: "Kubernetes Init Containers"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/init-containers/"
+  - title: "Kubernetes Sidecar Containers (GA v1.33)"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/"
+  - title: "Adopting Sidecar Containers Tutorial"
+    url: "https://kubernetes.io/docs/tutorials/configuration/pod-sidecar-containers/"
+  - title: "KEP-753: Sidecar Containers"
+    url: "https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/753-sidecar-containers"
+---
+
+## 정의
+
+**Init Containers** 는 Pod 의 메인 컨테이너보다 먼저 실행되어 초기화 작업을 완료하고 종료되는 컨테이너입니다.
+
+**Sidecar Containers** 는 메인 컨테이너와 함께 실행되며 로깅/모니터링/프록시 등 부가 기능을 제공하는 컨테이너입니다. Kubernetes v1.33 (2025-04) 에서 **native sidecar** 지원이 GA 되어 (`restartPolicy: Always` 를 `initContainers` 에 지정) 기존 pattern 이 표준화되었습니다.
+
+## Init Container
+
+### 특징
+
+- **순차 실행**: `spec.initContainers` 순서대로. 하나가 성공해야 다음 시작.
+- **완료 후 종료**: exit code 0 이면 성공. 실패면 Pod 재시작 정책에 따라 처리.
+- **메인 컨테이너와 이미지 분리** 가능: 초기화 도구는 초기화 이미지에.
+- **네트워크/볼륨 공유**: 메인과 같은 network namespace, 같은 volume.
+
+### 사용 사례
+
+1. **DB migration**: 앱 시작 전 `alembic upgrade`, `rails db:migrate`
+2. **설정 파일 생성**: 원격 config service 에서 fetch 후 configMap/emptyDir 에 저장
+3. **의존 서비스 대기**: `wait-for-it db:5432` 로 DB ready 확인
+4. **secret 처리**: KMS 에서 decrypt 후 emptyDir 에
+5. **Git clone**: 코드 저장소 clone
+
+### 예시
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web
+spec:
+  initContainers:
+    - name: wait-for-db
+      image: busybox:1.36
+      command: ['sh', '-c', 'until nc -z db 5432; do sleep 1; done']
+    - name: migrate
+      image: myapp:1.0
+      command: ['python', 'manage.py', 'migrate']
+      envFrom:
+        - secretRef:
+            name: db-secret
+  containers:
+    - name: web
+      image: myapp:1.0
+      ports: [{containerPort: 8000}]
+```
+
+`wait-for-db` -> `migrate` -> `web` 순.
+
+### 리소스 계산
+
+Pod 의 effective request/limit 은:
+
+$$
+\max(\sum \text{main container requests}, \max \text{init container requests})
+$$
+
+Init container 는 순차 실행이라 동시에 존재하지 않지만, 스케줄러는 가장 큰 init container 도 감안하여 예약.
+
+Sidecar (native) 는 `initContainers` 에 있지만 **동시 실행** 이라 합산.
+
+## Native Sidecar (v1.29 beta -> v1.33 GA)
+
+### 배경
+
+전통적 sidecar 는 `containers[]` 에 넣었지만 여러 문제:
+
+1. **시작 순서 불안정**: Pod 시작 시 sidecar 와 main 이 동시 시작. Main 이 sidecar 필요 (예: log shipper) 하면 race.
+2. **종료 순서 불안정**: Pod 종료 시 sidecar 가 main 보다 먼저 죽을 수 있음. Log 유실.
+3. **Job 문제**: Sidecar 가 계속 돌면 Job 이 완료되지 않음. Workaround 로 self-kill 신호 등 복잡.
+
+### 해결
+
+**Native sidecar** 는 `initContainers` 에 넣되 `restartPolicy: Always`:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web
+spec:
+  initContainers:
+    - name: log-agent           # native sidecar
+      image: fluent/fluent-bit:3
+      restartPolicy: Always      # 이것이 핵심
+      volumeMounts:
+        - name: logs
+          mountPath: /var/log
+    - name: db-migrator          # 전통 init container
+      image: myapp:1.0
+      command: ['python', 'manage.py', 'migrate']
+  containers:
+    - name: web
+      image: myapp:1.0
+      volumeMounts:
+        - name: logs
+          mountPath: /var/log
+  volumes:
+    - name: logs
+      emptyDir: {}
+```
+
+### Native sidecar 이점
+
+1. **명확한 시작 순서**: sidecar 가 `started` 상태되면 다음 init container 시작. Sidecar 준비 후 main 이 시작.
+2. **명확한 종료 순서**: main 이 완전히 종료된 후 sidecar 에 SIGTERM. 로그/메트릭 유실 없음.
+3. **Job 호환**: `restartPolicy: Never/OnFailure` Job 에서 sidecar 가 완료를 막지 않음.
+4. **Probe 지원**: liveness/readiness/startup probe 를 sidecar 에도.
+
+### 언제 어느 것을?
+
+| 유형 | `containers[]` | `initContainers[]` restartPolicy 없음 | `initContainers[]` restartPolicy: Always |
+|:---|:---|:---|:---|
+| **메인 앱** | ✓ | ✗ | ✗ |
+| **초기화 (완료 지향)** | ✗ | ✓ | ✗ |
+| **Sidecar (병렬 실행)** | 예전 | ✗ | ✓ (권장) |
+
+## 주요 sidecar 패턴
+
+### 1. Log agent
+
+Fluent Bit 이 앱 로그를 수집해 원격 저장소로.
+
+```yaml
+initContainers:
+  - name: fluent-bit
+    image: fluent/fluent-bit:3
+    restartPolicy: Always
+    volumeMounts:
+      - name: logs
+        mountPath: /logs
+      - name: config
+        mountPath: /fluent-bit/etc
+```
+
+### 2. Metrics exporter
+
+Prometheus exporter 를 sidecar 로.
+
+```yaml
+initContainers:
+  - name: postgres-exporter
+    image: prometheuscommunity/postgres-exporter:v0.15
+    restartPolicy: Always
+    env:
+      - name: DATA_SOURCE_NAME
+        value: "postgres://user:pass@localhost:5432/postgres?sslmode=disable"
+    ports:
+      - containerPort: 9187
+```
+
+### 3. Service mesh proxy (Envoy)
+
+Istio, Linkerd 는 Envoy/linkerd-proxy 를 sidecar 로 auto-inject. Native sidecar 로 이관 진행 중.
+
+### 4. Config reload
+
+Config file 변경 감지 -> 앱에 SIGHUP.
+
+### 5. Secret rotation
+
+Vault agent injector, secrets-store-csi-driver.
+
+## Probe 통합
+
+Init container (native sidecar) 도 probe 지원 (v1.28+):
+
+```yaml
+initContainers:
+  - name: log-agent
+    image: fluent/fluent-bit:3
+    restartPolicy: Always
+    startupProbe:
+      httpGet:
+        path: /api/v1/health
+        port: 2020
+      failureThreshold: 30
+      periodSeconds: 2
+    livenessProbe:
+      httpGet:
+        path: /api/v1/health
+        port: 2020
+```
+
+Sidecar 가 `started` 상태 되면 다음 init 또는 main 시작.
+
+## Migration Guide
+
+기존 `containers[]` sidecar 를 native 로 옮기려면:
+
+**Before**:
+
+```yaml
+containers:
+  - name: web
+    image: myapp:1.0
+  - name: log-agent
+    image: fluent/fluent-bit:3
+```
+
+**After**:
+
+```yaml
+initContainers:
+  - name: log-agent
+    image: fluent/fluent-bit:3
+    restartPolicy: Always
+containers:
+  - name: web
+    image: myapp:1.0
+```
+
+**주의**:
+- 클러스터 버전이 v1.29+ (feature gate) 또는 v1.33+ (GA) 이어야 함.
+- 자동 injector (Istio, Fluent Bit operator) 가 이미 native sidecar 지원하는지 확인.
+
+## Init container Anti-pattern
+
+### 앱을 init 로 (X)
+
+```yaml
+initContainers:
+  - name: web         # 앱 자체
+    image: myapp:1.0
+    command: ['python', 'app.py']   # 계속 실행
+```
+
+Init 는 완료 지향. Long-running 을 넣으면 Pod 이 절대 Ready 안 됨.
+
+### 초기화를 앱 안에서 (△)
+
+```yaml
+containers:
+  - name: web
+    image: myapp:1.0
+    command: ['sh', '-c', 'migrate && python app.py']   # 하나로
+```
+
+작동은 하지만:
+- 앱 이미지에 migration 도구 포함 필요
+- Migration 실패 시 앱 재시작 loop
+- 로그 구분 어려움
+
+Init container 로 분리하는 편이 관용.
+
+## 함정
+
+> [!WARNING]
+> **Native sidecar 는 클러스터 v1.29+ 필수**. 오래된 클러스터에서는 `restartPolicy: Always` 가 조용히 무시되어 Pod 시작 실패.
+
+> [!CAUTION]
+> **Init container 실패는 Pod 실패로 카운트**. `restartPolicy: OnFailure/Always` 라도 backoff 후 재시작. Init 가 무한 실패하면 CrashLoopBackoff.
+
+> [!WARNING]
+> **Init container 도 리소스 요청 필요**. 안 걸면 BestEffort QoS -> 노드 압박 시 evict.
+
+> [!IMPORTANT]
+> **Sidecar 이미지 크기**. Main + sidecar 합쳐 이미지 pull 시간 증가. 이미지 최적화.
+
+> [!CAUTION]
+> **Init 에서 network 접근 시 CNI 준비 여부**. CNI 가 준비되기 전에 init 실행 가능성. 짧은 backoff + retry.
+
+## 관련 위키
+
+- [[kubernetes|Kubernetes]] - 상위 개요
+- [[k8s-pod|Pod]] - init/sidecar 컨테이너 정의
+- [[k8s-deployment|Deployment]]
+- [[k8s-job-cronjob|Job / CronJob]] - Native sidecar 특히 유용
+- [[k8s-configmap-secret|ConfigMap / Secret]] - 초기화 대상
+- [[k8s-resource-management|Resource Management]] - init request 계산
+- [[k8s-service-mesh|Service Mesh]] - Envoy sidecar
+- [[opentelemetry|OpenTelemetry]] - Collector sidecar
+- [[prometheus|Prometheus]] - Exporter sidecar

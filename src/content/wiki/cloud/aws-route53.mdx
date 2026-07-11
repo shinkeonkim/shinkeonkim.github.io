@@ -1,126 +1,439 @@
 ---
-title: "[AWS] Route 53: DNS, routing policies, health checks"
-aliases: ["Route 53", "Route53", "DNS", "weighted routing", "latency routing", "failover routing", "geolocation"]
-tags: [aws, route53, dns, network, cloud]
+title: "[AWS] Route 53"
+aliases:
+  - "AWS Route 53"
+  - "Route 53"
+  - "Route53"
+  - "AWS DNS"
+  - "Route 53 Resolver"
+  - "Private Hosted Zone"
+  - "weighted routing"
+  - "latency routing"
+  - "failover routing"
+  - "geolocation routing"
+  - "Route 53 health check"
+  - "DNSSEC AWS"
+  - "AWS 도메인"
+tags: [aws, cloud, network, dns, route53]
 category: cloud
-updated: 2026-06-25
+updated: 2026-07-07
 references:
-  - title: "Route 53 Developer Guide"
+  - title: "Amazon Route 53 Developer Guide"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html"
+  - title: "Route 53 Resolver"
+    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver.html"
+  - title: "Route 53 Routing Policies"
+    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html"
+  - title: "Route 53 DNSSEC"
+    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-configuring-dnssec.html"
+  - title: "Route 53 Application Recovery Controller"
+    url: "https://docs.aws.amazon.com/r53recovery/latest/dg/what-is-route-53-recovery.html"
 ---
 
 ## 정의
 
-**Route 53** = AWS 의 *글로벌 DNS + health check + 라우팅 정책*. 단순 DNS 뿐 아니라 *글로벌 트래픽 분산*.
+**Amazon Route 53** 는 AWS 의 **highly available, scalable Domain Name System (DNS) 웹 서비스** 입니다. 이름은 DNS 표준 포트 (53) 에서 왔습니다. 단순 DNS 리졸브를 넘어:
 
-## Hosted Zone
+- **도메인 등록 (registrar)**
+- **DNS 라우팅** (7가지 정책)
+- **Health check** 기반 자동 페일오버
+- **Private hosted zone** (VPC 내부 DNS)
+- **Route 53 Resolver** (하이브리드 DNS)
+- **DNSSEC** 서명
+- **Application Recovery Controller** (multi-region DR)
 
-```
-Hosted Zone: example.com
-└── Record:
-    A      api.example.com   →  192.0.2.1
-    CNAME  www.example.com   →  example.com
-    MX     example.com       →  mail.example.com
-    TXT    _verification     →  "google-site-verification=..."
-```
+100% SLA 를 유지하는 유일한 AWS 서비스.
 
-## Alias Record (AWS 전용)
-
-```
-A alias api.example.com → AWS Load Balancer (xx.amazonaws.com)
-```
-
-CNAME 보다:
-
-- *root domain 가능* (CNAME 은 root 불가)
-- *무료 query*
-- *IP 자동 갱신*
-
-## 라우팅 정책 7가지
-
-```mermaid
-flowchart TB
-    Q[Routing Policy]
-    Q --> Simple[Simple]
-    Q --> Weighted[Weighted<br/>10% canary]
-    Q --> Latency[Latency<br/>가장 빠른 region]
-    Q --> Failover[Failover<br/>primary + secondary]
-    Q --> Geo[Geolocation<br/>국가별]
-    Q --> GeoProx[Geoproximity<br/>바이어스 적용]
-    Q --> MV[Multi-Value Answer<br/>여러 IP 반환]
-```
-
-### Weighted (Canary)
-
-```
-api.example.com (200)
-  → 10% → 신 ALB
-  → 90% → 옛 ALB
-```
-
-### Latency-Based
+## 핵심 개념
 
 ```mermaid
 flowchart LR
-    Client[Asia 사용자] -->|DNS query| R53[Route 53]
-    R53 -->|measure latency| Asian[Asia ALB]
-    R53 -->|measure| US[US ALB]
-    R53 -->|measure| EU[EU ALB]
-    R53 -->|가장 빠른 = Asia| Client
-    Client --> Asian
+  U[사용자] -->|DNS query| R53[Route 53]
+  R53 --> HZ[Hosted Zone]
+  HZ --> R1[Record: A, CNAME, ...]
+  R1 --> HC[Health Check]
+  HC --> Endpoint[ALB / EC2 / S3 / ...]
 ```
 
-### Failover
+## Hosted Zone
+
+도메인의 record 집합.
+
+### Public Hosted Zone
+
+인터넷 공개 도메인:
 
 ```
-primary: api-prod.example.com (health check)
-secondary: api-dr.example.com (health check)
+Hosted Zone: example.com
+├── A       api.example.com          → ALB (alias)
+├── AAAA    api.example.com          → ALB IPv6 (alias)
+├── CNAME   www.example.com          → example.com
+├── MX      example.com              → mail.google.com (priority 10)
+├── TXT     _dmarc.example.com       → "v=DMARC1; p=reject; ..."
+├── TXT     example.com              → "v=spf1 include:_spf.google.com ~all"
+└── NS/SOA                            → (Route 53 자동)
 ```
 
-primary unhealthy → secondary 자동 응답.
+### Private Hosted Zone
+
+특정 VPC 내부에서만 resolve. 내부 서비스 이름 관리:
+
+```yaml
+HostedZone:
+  Name: internal.local
+  VPCs:
+    - Id: vpc-0abc
+      Region: us-east-1
+    - Id: vpc-0def
+      Region: us-east-1
+```
+
+`db.internal.local` 이 VPC 안에서 RDS endpoint 로 resolve.
+
+## Record 유형
+
+| Type | 용도 |
+|:---|:---|
+| **A** | IPv4 주소 |
+| **AAAA** | IPv6 주소 |
+| **CNAME** | 다른 이름 alias (root 도메인 불가) |
+| **Alias** | AWS 리소스 alias (root 도메인 가능, 무료 쿼리) |
+| **MX** | Mail server (priority + name) |
+| **TXT** | 임의 텍스트 (SPF, DKIM, DMARC, 인증) |
+| **NS** | Name server |
+| **SOA** | Start of Authority |
+| **PTR** | Reverse DNS |
+| **SRV** | Service (host, port) |
+| **CAA** | Certificate Authority Authorization |
+| **NAPTR** | Naming Authority Pointer |
+| **DS** | DNSSEC delegation signer |
+
+## Alias Record (AWS 전용)
+
+CNAME 대체. **root 도메인 (`example.com`) 을 AWS 리소스에 매핑** 가능.
+
+```
+example.com   ALIAS -> d1234.cloudfront.net
+example.com   ALIAS -> my-alb-123.us-east-1.elb.amazonaws.com
+example.com   ALIAS -> my-bucket.s3-website-us-east-1.amazonaws.com
+```
+
+**장점**:
+- Root 도메인 매핑 (CNAME 불가)
+- **쿼리 무료** (CNAME 은 유료)
+- Target IP 자동 갱신
+- Health check 자동 연계 (일부)
+
+**지원 target**: CloudFront, ELB (ALB/NLB), S3 static website, API Gateway, VPC Endpoint, Global Accelerator, App Runner, Elastic Beanstalk, 다른 Route 53 record.
+
+## 라우팅 정책 (7가지)
+
+### 1. Simple
+
+가장 단순. 하나의 record.
+
+```
+api.example.com   A   192.0.2.1
+```
+
+여러 값 있으면 랜덤 순서로 반환 (client 가 첫 값 시도).
+
+### 2. Weighted
+
+가중치 기반 분배. **Canary, A/B testing** 에 활용.
+
+```
+api.example.com   A   10.0.0.1   weight: 90   set_id: prod
+api.example.com   A   10.0.0.2   weight: 10   set_id: canary
+```
+
+90 : 10 비율로 응답. 트래픽 이관에 유용.
+
+### 3. Latency-Based
+
+각 사용자에게 **가장 낮은 지연** 을 기대하는 리전 반환.
+
+```
+api.example.com   A   ALB-us-east-1  latency: us-east-1
+api.example.com   A   ALB-eu-west-1  latency: eu-west-1
+api.example.com   A   ALB-ap-northeast-1  latency: ap-northeast-1
+```
+
+사용자 위치에서 각 리전까지의 latency 측정 -> 최소 반환.
+
+### 4. Failover
+
+Primary + Secondary. Health check 로 자동 전환.
+
+```
+api.example.com   A   primary-endpoint   failover: PRIMARY   health_check: hc-1
+api.example.com   A   backup-endpoint    failover: SECONDARY health_check: hc-2
+```
+
+Primary 의 health check unhealthy -> secondary 응답.
+
+### 5. Geolocation
+
+**사용자 위치 (국가/대륙)** 기반. 컴플라이언스 (지역별 규제), 지역화된 컨텐츠에 활용.
+
+```
+example.com   A   ip-de   geo: DE
+example.com   A   ip-fr   geo: FR
+example.com   A   ip-eu   geo: EU  (nation-level 매치 실패 시 대륙)
+example.com   A   ip-default   geo: *  (fallback)
+```
+
+**주의**: 지연이 아니라 위치 기반. 미국 사용자는 무조건 미국 endpoint.
+
+### 6. Geoproximity
+
+지리적 거리 + 사용자 정의 bias. **Traffic Flow (visual editor) 필요**.
+
+```
+example.com  A  ip-us  region: us-east-1  bias: 0
+example.com  A  ip-eu  region: eu-west-1  bias: 50   ← 유리하게 (더 넓은 커버)
+```
+
+Bias 로 특정 리소스에 트래픽 확대/축소.
+
+### 7. Multi-Value Answer
+
+**여러 IP 반환** + health check 활성 endpoint 만. Simple 의 health-check-aware 확장.
+
+```
+api.example.com   A   10.0.0.1   MV   hc: hc-1
+api.example.com   A   10.0.0.2   MV   hc: hc-2
+api.example.com   A   10.0.0.3   MV   hc: hc-3
+```
+
+Client 는 여러 IP 중 하나 시도 (round-robin 유사).
+
+**주의**: ELB 를 대체하지 않음. Client-side round-robin 만.
 
 ## Health Check
+
+DNS 쿼리 응답을 실제 endpoint 상태에 연동.
+
+### 유형
+
+- **Endpoint check**: HTTP/HTTPS/TCP 로 endpoint 상태 확인
+- **Calculated check**: 여러 health check 결과의 AND/OR
+- **CloudWatch alarm check**: CloudWatch alarm state 연동
+
+### 옵션
 
 ```yaml
 HealthCheck:
   Type: HTTPS
   ResourcePath: /health
   FullyQualifiedDomainName: api.example.com
-  RequestInterval: 30
-  FailureThreshold: 3
-  Regions: [us-east-1, us-west-2, ap-northeast-1]  # 다중 region 동시 체크
+  Port: 443
+  RequestInterval: 30           # 초 (10 또는 30)
+  FailureThreshold: 3            # 연속 실패 몇 번에 unhealthy
+  Regions:                        # 8 개 리전에서 동시 체크
+    - us-east-1
+    - us-west-2
+    - ap-northeast-1
+  MeasureLatency: true            # CloudWatch 에 latency 로그
+  Inverted: false
+  Disabled: false
 ```
 
-3개 region 의 *과반* 이상 unhealthy → unhealthy 판정.
+**과반 이상 리전에서 unhealthy = 최종 unhealthy 판정**. 오탐 방지.
+
+### Fast health check
+
+`RequestInterval: 10` (10초 간격, 3배 요금).
+
+## Traffic Flow (Visual policy)
+
+여러 라우팅 정책을 트리로 조합. 예:
+
+```
+Root: Latency-based
+  ├── us-east-1: Weighted (90/10 blue/green)
+  ├── eu-west-1: Failover (primary/DR)
+  └── default: Geolocation
+```
+
+Visual editor 로 편집. 큰 조직의 복잡한 DNS 관리에 활용.
+
+## Route 53 Resolver
+
+**하이브리드 DNS** (VPC ↔ 온프레미스).
+
+### Inbound Endpoint
+
+**On-prem -> AWS DNS** 조회 (예: `db.internal.local` on-prem 에서 조회).
+
+```
+On-prem DNS server → Inbound Endpoint IP (Route 53 Resolver) → Private Hosted Zone
+```
+
+### Outbound Endpoint
+
+**AWS -> On-prem DNS** 조회 (예: `mainframe.corp.local` VPC 에서 조회).
+
+```
+VPC EC2 → Outbound Endpoint → On-prem DNS server
+```
+
+**Forwarding rules** 로 특정 도메인만 on-prem 로:
+
+```
+Domain: corp.local  → forward to on-prem DNS 10.0.0.10
+Domain: internal.local → resolve locally (Route 53)
+```
+
+### DNS Firewall
+
+악성 도메인 차단 (malware, phishing). 도메인 리스트 (Managed 또는 사용자 정의) 기반 block/alert.
+
+### Resolver Query Logging
+
+DNS 쿼리 로그 -> CloudWatch Logs, S3, Kinesis.
 
 ## DNSSEC
 
+**DNS 응답에 디지털 서명**. Cache poisoning 방어.
+
 ```bash
-aws route53 enable-hosted-zone-dnssec --hosted-zone-id Z0123
+aws route53 enable-hosted-zone-dnssec --hosted-zone-id Z0abc
 ```
 
-DNS 응답에 *디지털 서명* → DNS 위조 (cache poisoning) 방어.
+- KSK (Key Signing Key) + ZSK (Zone Signing Key) 자동 관리
+- KMS 로 KSK 보관
+- 부모 도메인 (`.com`) 에 DS record 등록 필요 (registrar 에서)
+- 활성 후 rollback 어려움 (부모 zone 도 관리 필요)
 
-## Private Hosted Zone
+## Application Recovery Controller (ARC)
+
+**Multi-region DR 조율**. Route 53 record 를 애플리케이션 수준으로 관리.
+
+- **Cell**: DR 단위 (region + AZ)
+- **Cluster**: Cell 그룹
+- **Readiness Check**: Cell 이 트래픽 받을 준비 상태
+- **Routing Control**: DNS record on/off 스위치
+
+Multi-region 앱의 failover 를 안전하게. 값비싼 서비스 (5+ 노드 클러스터).
+
+## 도메인 등록 (Registrar)
+
+```bash
+aws route53domains register-domain \
+  --domain-name example.com \
+  --duration-in-years 1 \
+  --admin-contact ... \
+  --registrant-contact ... \
+  --tech-contact ...
+```
+
+- 유명 TLD 대부분 지원 (`.com`, `.net`, `.org`, `.io`, `.dev` 등)
+- 자동 갱신
+- WHOIS privacy 무료 (일부 TLD)
+- Registry lock (도난 방지)
+
+**주의**: Registrar 서비스와 Hosted Zone 은 별개. 도메인 register 안 해도 hosted zone 만 사용 가능 (다른 registrar 의 nameserver 를 Route 53 로 지정).
+
+## 프라이빗 DNS + PrivateLink
+
+Private Hosted Zone + [[aws-privatelink|PrivateLink]] Interface Endpoint 조합:
 
 ```
-domain: internal.local
-visibility: VPC associated
+Interface Endpoint (com.amazonaws.us-east-1.s3)
+   ↓ Private DNS enabled
+표준 S3 endpoint (s3.us-east-1.amazonaws.com) 이 Endpoint private IP 로 resolve
 ```
 
-VPC 안에서만 resolve. 내부 service 명명에 활용.
+앱 코드 변경 없이 인터넷 우회.
 
-## 흔한 함정
+## 성능
+
+- **글로벌 anycast**: 200+ edge location
+- **평균 응답**: 수십 ms
+- **가용성 SLA**: 100% (다운타임 인정 안 함)
+
+## 요금
+
+- **Hosted zone**: 시간당 (약 0.50 USD/월/zone)
+- **쿼리**: 100만 쿼리당 (~0.40 USD)
+- **Alias 쿼리 (AWS 리소스 target)**: 무료
+- **Health check**: 인스턴스당 시간당 (~0.50 USD/월)
+- **Fast health check** (10s): 3배
+- **Domain registration**: TLD 별
+- **DNS Firewall**: 규칙당 + 쿼리당
+
+## 실전 패턴
+
+### 1. Blue/Green 배포
+
+```
+api.example.com   ALIAS   ALB-blue    weight: 100
+api.example.com   ALIAS   ALB-green   weight: 0
+
+# Green 검증 완료 시
+api.example.com   ALIAS   ALB-blue    weight: 0
+api.example.com   ALIAS   ALB-green   weight: 100
+```
+
+### 2. Multi-region active-active
+
+```
+api.example.com   ALIAS   ALB-us-east-1  latency
+api.example.com   ALIAS   ALB-eu-west-1  latency
+api.example.com   ALIAS   ALB-ap-northeast-1  latency
+```
+
++ health check 로 unhealthy 리전 자동 제외.
+
+### 3. Failover with warm standby
+
+```
+api.example.com  ALIAS  ALB-primary    failover: PRIMARY   health_check
+api.example.com  ALIAS  ALB-secondary  failover: SECONDARY health_check
+```
+
+Secondary 는 최소 replica 로 웜 유지, primary 다운 시 DNS TTL 후 자동 전환.
+
+### 4. 지역별 컨텐츠
+
+```
+example.com  A  ip-de   geo: DE
+example.com  A  ip-us   geo: US
+example.com  A  ip-*    geo: default
+```
+
+## 함정
 
 > [!WARNING]
-> 1. **TTL 너무 큼** = failover 시 *옛 IP 캐시* → 다운타임 길음. 일반 60s.
-> 2. **CNAME root domain 시도** = 거절. *Alias* 또는 *redirect (CloudFront)*.
-> 3. **Health check 의 IP-only** = TLS 검증 안 됨. HTTPS health check 권장.
-> 4. **다중 region failover 의 *RTO*** = TTL + health check interval. 분 단위 가능.
+> **CNAME 은 root 도메인 (`example.com`) 불가**. Alias 사용.
+
+> [!CAUTION]
+> **TTL 너무 크면 failover 지연**. Failover record 는 TTL 60s 관용.
+
+> [!WARNING]
+> **Health check 는 endpoint 를 지속 호출**. `/health` 는 lightweight 하게 (DB 조회 X). 무거우면 endpoint 부하.
+
+> [!IMPORTANT]
+> **DNSSEC 활성 후 rollback 위험**. 부모 zone DS record 관리 필요.
+
+> [!CAUTION]
+> **Multi-Value 는 ELB 대체 아님**. 라우팅만 도움. Load balancing 은 ELB 로.
+
+> [!WARNING]
+> **Private Hosted Zone 은 VPC `enableDnsSupport` + `enableDnsHostnames` 활성 필수**.
+
+> [!IMPORTANT]
+> **Alias record 는 target 이 같은 계정만**. Cross-account 는 CNAME.
 
 ## 관련 위키
 
-- [[network-dns]]
-- [[aws-alb-nlb]]
-- [[aws-cloudfront-cdn]]
-- [[aws-vpc]]
+- [[aws-privatelink|PrivateLink]] - Private DNS 조합
+- [[aws-vpc|VPC]] - Private Hosted Zone
+- [[aws-direct-connect|Direct Connect]] - Hybrid DNS
+- [[aws-alb-nlb|ALB/NLB]] - Alias target
+- [[aws-cloudfront-cdn|CloudFront]] - Alias target
+- [[aws-s3|S3]] - Website hosting alias
+- [[aws-cloudwatch|CloudWatch]] - Health check alarm
+- [[network-dns|DNS]] - DNS 프로토콜 배경
+- [[aws-iam|IAM]] - Route 53 접근 제어

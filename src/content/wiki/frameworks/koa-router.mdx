@@ -1,0 +1,391 @@
+---
+title: "[Koa] Router (@koa/router)"
+aliases:
+  - "Koa Router"
+  - "@koa/router"
+  - "koa-router"
+  - "koa router"
+  - "koa route"
+  - "Koa 라우팅"
+tags: [koa, router, routing]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "@koa/router"
+    url: "https://github.com/koajs/router"
+  - title: "path-to-regexp"
+    url: "https://github.com/pillarjs/path-to-regexp"
+---
+
+## 정의
+
+**@koa/router** 는 Koa 의 공식 라우터입니다. Koa 코어는 라우팅을 제공하지 않으므로 별도 설치가 필요합니다. Express 스타일 라우팅 (HTTP method + URL) 을 지원하며, `path-to-regexp` 로 파라미터 매칭합니다.
+
+## 설치
+
+```bash
+npm i @koa/router
+```
+
+## 기본
+
+```javascript
+const Koa = require('koa');
+const Router = require('@koa/router');
+
+const app = new Koa();
+const router = new Router();
+
+router.get('/', async (ctx) => {
+  ctx.body = 'Home';
+});
+
+router.get('/users/:id', async (ctx) => {
+  ctx.body = { id: ctx.params.id };
+});
+
+router.post('/users', async (ctx) => {
+  ctx.body = ctx.request.body;
+});
+
+app
+  .use(router.routes())
+  .use(router.allowedMethods());
+
+app.listen(3000);
+```
+
+- **`router.routes()`**: HTTP 요청을 매칭 후 handler 실행
+- **`router.allowedMethods()`**: 405 Method Not Allowed 지원
+
+## HTTP Methods
+
+```javascript
+router.get('/path', handler);
+router.post('/path', handler);
+router.put('/path', handler);
+router.patch('/path', handler);
+router.delete('/path', handler);
+router.head('/path', handler);
+router.options('/path', handler);
+router.all('/path', handler);       // 모든 method
+```
+
+## Path Parameters
+
+```javascript
+router.get('/users/:id', async (ctx) => {
+  ctx.params.id;
+});
+
+router.get('/users/:userId/posts/:postId', async (ctx) => {
+  ctx.params.userId;
+  ctx.params.postId;
+});
+```
+
+### Optional parameter
+
+```javascript
+router.get('/users/:id?', async (ctx) => {
+  // /users -> id undefined
+  // /users/1 -> id '1'
+});
+```
+
+### Regex
+
+```javascript
+router.get('/users/:id(\\d+)', async (ctx) => {
+  // id 는 숫자만
+});
+```
+
+### Wildcard
+
+```javascript
+router.get('/files/(.*)', async (ctx) => {
+  const path = ctx.params[0];
+});
+```
+
+## Query Parameters
+
+Koa 자체가 자동 파싱:
+
+```javascript
+router.get('/search', async (ctx) => {
+  ctx.query.q;
+  ctx.query.page;
+});
+// GET /search?q=koa&page=2  ->  {q: 'koa', page: '2'}
+```
+
+## Router Middleware
+
+Handler 전에 미들웨어 실행:
+
+```javascript
+async function requireAuth(ctx, next) {
+  if (!ctx.state.user) ctx.throw(401);
+  await next();
+}
+
+router.get('/me', requireAuth, async (ctx) => {
+  ctx.body = ctx.state.user;
+});
+
+// 여러 미들웨어
+router.get('/admin', requireAuth, requireAdmin, async (ctx) => {
+  ctx.body = 'admin dashboard';
+});
+```
+
+### Router.use()
+
+Router 전체에 미들웨어:
+
+```javascript
+router.use(async (ctx, next) => {
+  console.log(`${ctx.method} ${ctx.path}`);
+  await next();
+});
+
+router.use('/admin', requireAdmin);   // 특정 prefix 만
+
+router.use(['/admin', '/dashboard'], requireAuth);
+```
+
+## Router Prefix
+
+```javascript
+const router = new Router({prefix: '/api/v1'});
+
+router.get('/users', async (ctx) => {
+  // 실제 URL: /api/v1/users
+});
+```
+
+## Nested Router
+
+```javascript
+const rootRouter = new Router();
+const usersRouter = new Router({prefix: '/users'});
+const postsRouter = new Router({prefix: '/posts'});
+
+usersRouter.get('/', async (ctx) => { ... });
+usersRouter.get('/:id', async (ctx) => { ... });
+
+postsRouter.get('/', async (ctx) => { ... });
+
+rootRouter.use(usersRouter.routes(), usersRouter.allowedMethods());
+rootRouter.use(postsRouter.routes(), postsRouter.allowedMethods());
+
+app.use(rootRouter.routes()).use(rootRouter.allowedMethods());
+```
+
+## Named Route
+
+```javascript
+router.get('user-detail', '/users/:id', async (ctx) => { ... });
+
+// URL 생성
+router.url('user-detail', {id: 42});   // '/users/42'
+router.url('user-detail', {id: 42}, {query: {tab: 'profile'}});   
+// '/users/42?tab=profile'
+```
+
+Template 렌더링, redirect 에 유용.
+
+## Route parameters middleware
+
+특정 param 이 있을 때 미리 처리:
+
+```javascript
+router.param('user', async (id, ctx, next) => {
+  ctx.state.user = await getUserById(id);
+  if (!ctx.state.user) ctx.throw(404);
+  await next();
+});
+
+router.get('/users/:user', async (ctx) => {
+  ctx.body = ctx.state.user;
+});
+
+router.get('/users/:user/posts', async (ctx) => {
+  ctx.body = await getPostsByUser(ctx.state.user.id);
+});
+```
+
+## Router 파일 분할
+
+```javascript
+// routes/users.js
+const Router = require('@koa/router');
+const router = new Router({prefix: '/users'});
+const controller = require('../controllers/users');
+
+router.get('/', controller.list);
+router.get('/:id', controller.get);
+router.post('/', controller.create);
+router.patch('/:id', controller.update);
+router.delete('/:id', controller.delete);
+
+module.exports = router;
+```
+
+```javascript
+// routes/index.js
+const Router = require('@koa/router');
+const usersRouter = require('./users');
+const postsRouter = require('./posts');
+
+const router = new Router();
+
+router.use(usersRouter.routes(), usersRouter.allowedMethods());
+router.use(postsRouter.routes(), postsRouter.allowedMethods());
+
+module.exports = router;
+```
+
+```javascript
+// app.js
+const router = require('./routes');
+app.use(router.routes()).use(router.allowedMethods());
+```
+
+## Controller 패턴
+
+```javascript
+// controllers/users.js
+async function list(ctx) {
+  ctx.body = await User.findAll();
+}
+
+async function get(ctx) {
+  const user = await User.findById(ctx.params.id);
+  ctx.assert(user, 404, 'Not found');
+  ctx.body = user;
+}
+
+async function create(ctx) {
+  const {email, name} = ctx.request.body;
+  ctx.assert(email && name, 400);
+  const user = await User.create({email, name});
+  ctx.status = 201;
+  ctx.body = user;
+}
+
+async function update(ctx) {
+  const user = await User.findByIdAndUpdate(ctx.params.id, ctx.request.body);
+  ctx.body = user;
+}
+
+async function del(ctx) {
+  await User.findByIdAndDelete(ctx.params.id);
+  ctx.status = 204;
+}
+
+module.exports = {list, get, create, update, delete: del};
+```
+
+## `allowedMethods()`
+
+정의된 route 의 method 를 관리:
+
+- **Method Not Allowed (405)**: 정의된 path 인데 wrong method
+- **Not Implemented (501)**: 서버가 지원 안 함
+- **OPTIONS**: 자동 응답 (Allow 헤더)
+
+```javascript
+app.use(router.routes()).use(router.allowedMethods({
+  throw: true,       // exception 던짐 (직접 handle 가능)
+  notImplemented: () => new NotImplementedError(),
+  methodNotAllowed: () => new MethodNotAllowedError(),
+}));
+```
+
+## Route 순서
+
+Koa router 는 **정의 순서** 로 매칭:
+
+```javascript
+router.get('/users/me', ...);        // 구체적 먼저
+router.get('/users/:id', ...);
+```
+
+`/users/:id` 를 먼저 정의하면 `/users/me` 를 id="me" 로 잡아버림.
+
+## OPTIONS / CORS
+
+```javascript
+const cors = require('@koa/cors');
+
+app.use(cors({
+  origin: 'https://app.example.com',
+  credentials: true,
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+}));
+
+app.use(router.routes()).use(router.allowedMethods());
+```
+
+## Match 정보
+
+```javascript
+router.get('/users/:id', async (ctx) => {
+  console.log(ctx.matched);   // 매칭된 route 목록
+  console.log(ctx._matchedRouteName);   // named route
+});
+```
+
+## Redirect
+
+```javascript
+router.redirect('/old', '/new', 301);
+```
+
+## Version 라우팅
+
+Router prefix 또는 header 기반:
+
+```javascript
+const v1 = new Router({prefix: '/api/v1'});
+const v2 = new Router({prefix: '/api/v2'});
+
+v1.get('/users', v1Controller.list);
+v2.get('/users', v2Controller.list);
+
+app.use(v1.routes());
+app.use(v2.routes());
+```
+
+## 함정
+
+> [!WARNING]
+> **Route 순서 실수**. `/users/:id` 를 `/users/me` 보다 먼저 정의하면 `/users/me` 를 id="me" 로 매치. 항상 구체적 route 를 먼저.
+
+> [!CAUTION]
+> **`router.routes()` 를 여러 번 호출** 하면 동일 route 여러 번 등록. 한 번만.
+
+> [!WARNING]
+> **`allowedMethods()` 없으면 잘못된 method 요청이 404**. 405 로 응답하려면 반드시 등록.
+
+> [!IMPORTANT]
+> **`router.get('name', '/path', handler)`** vs `router.get('/path', handler)`. Named vs unnamed.
+
+> [!CAUTION]
+> **Nested router 시 prefix 이중 적용**. Root router prefix + sub router prefix.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-context|Koa Context]] - ctx.params, ctx.query
+- [[koa-middleware|Koa Middleware]] - Router.use()
+- [[koa-body|Koa Body Parsing]] - request body
+- [[koa-error-handling|Koa Error Handling]]
+- [[koa-testing|Koa Testing]]
+- [[nestjs-controllers|NestJS Controllers]] - 대비
+- [[fastapi-routing|FastAPI Routing]] - 대비
+- [[flask-routing|Flask Routing]] - 대비

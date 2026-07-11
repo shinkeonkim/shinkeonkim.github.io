@@ -1,0 +1,377 @@
+---
+title: "[TypeScript] Modules (import/export, moduleResolution)"
+aliases:
+  - "TypeScript Modules"
+  - "TS Modules"
+  - "TypeScript import"
+  - "TypeScript export"
+  - "moduleResolution"
+  - "nodenext"
+  - "verbatimModuleSyntax"
+  - "TS 모듈"
+  - "isolatedModules"
+tags: [typescript, modules, esm, cjs]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Modules"
+    url: "https://www.typescriptlang.org/docs/handbook/2/modules.html"
+  - title: "TypeScript ModuleResolution"
+    url: "https://www.typescriptlang.org/docs/handbook/module-resolution.html"
+  - title: "TypeScript 5.0 verbatimModuleSyntax"
+    url: "https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html#verbatimmodulesyntax"
+---
+
+## 정의
+
+TypeScript 모듈 시스템은 **ES Modules (ESM)** 를 기본 언어 모델로 삼되, **CommonJS (CJS)** 를 상호운용성 (interop) 계층으로 지원합니다. `moduleResolution` 옵션이 어떻게 파일을 찾을지, `module` 이 어떻게 emit 할지를 결정하며, TypeScript 5.0 의 `verbatimModuleSyntax` 는 마술을 최소화합니다.
+
+## import / export 기본
+
+### Named export
+
+```typescript
+// utils.ts
+export function add(a: number, b: number): number { return a + b; }
+export function sub(a: number, b: number): number { return a - b; }
+export const PI = 3.14;
+
+// main.ts
+import {add, sub, PI} from "./utils";
+```
+
+### Default export
+
+```typescript
+// user.ts
+export default class User {
+  constructor(public name: string) {}
+}
+
+// main.ts
+import User from "./user";
+```
+
+**default 는 남용 지양**. Named export 가 명확 (rename 안전, tree-shaking 좋음).
+
+### Re-export
+
+```typescript
+// index.ts (barrel)
+export * from "./utils";
+export * from "./models";
+export {default as User} from "./user";
+export type {ApiResponse} from "./types";
+```
+
+### Namespace import
+
+```typescript
+import * as utils from "./utils";
+utils.add(1, 2);
+```
+
+### Side effect import
+
+```typescript
+import "./polyfill";   // 부수효과만
+```
+
+## Type-only import / export
+
+Type 만 import 하면 컴파일 시 제거됨 -> 런타임 부담 없음.
+
+```typescript
+import type {User} from "./types";
+import type {ApiResponse, ApiError} from "./api";
+
+// 함수 안에서 타입만 사용
+function process(u: User): string {
+  return u.name;
+}
+```
+
+혼합:
+
+```typescript
+import {logger, type LoggerOptions} from "./logger";
+```
+
+### `verbatimModuleSyntax: true` (TS 5.0+)
+
+TS 5.0+ 권장. `type` 없는 import 는 실제 런타임에 유지, `type` 은 제거. 마술 없음.
+
+```typescript
+// verbatimModuleSyntax: true
+import {LoggerOptions} from "./logger";       // LoggerOptions 가 값이면 유지, 타입만이면 오류
+import type {LoggerOptions} from "./logger";  // 확실히 타입만
+```
+
+## 모듈 형식 (module)
+
+`tsconfig.json` 의 `module` 옵션은 emit 형식:
+
+| 값 | emit |
+|:---|:---|
+| `commonjs` | `require`, `module.exports` |
+| `esnext` / `es2020` / `es2022` | ES modules (`import`, `export`) |
+| `nodenext` / `node16` | 파일 확장자 / package.json 에 따라 자동 |
+| `amd`, `umd`, `system` | 브라우저 legacy |
+| `preserve` (TS 5.4+) | 원본 그대로 (esbuild 등에게 위임) |
+
+## 모듈 해석 (moduleResolution)
+
+파일 경로를 어떻게 찾을지:
+
+| 값 | 특성 |
+|:---|:---|
+| `node` (legacy) | Node.js require 알고리즘 (CJS) |
+| `node16` / `nodenext` | Node 16+ ESM 지원 (package.json `type`, `exports` 존중) |
+| `bundler` (TS 5.0+) | 번들러 (Webpack, Vite, esbuild) 규칙, ESM 형식 파일 확장자 없음 |
+| `classic` (legacy) | 매우 오래된 스타일, 사용 안 함 |
+
+### `bundler` (권장, 웹앱)
+
+Vite, Next.js, Webpack, esbuild 등이 실제 해석. TS 는 검사만.
+
+```json
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,     // .ts 확장자 명시 허용
+    "noEmit": true                            // 번들러가 emit
+  }
+}
+```
+
+### `nodenext` (Node.js 앱)
+
+Node.js 16+ 의 실제 ESM 규칙 준수:
+
+- `.mjs` / `.cjs` 확장자
+- `package.json` 의 `"type": "module"` / `"type": "commonjs"`
+- `exports` 필드 (conditional exports)
+- ESM 에서는 **파일 확장자 명시 필수** (`import "./util.js"`, 실제 파일은 `.ts` 여도 `.js`)
+
+```json
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext"
+  }
+}
+```
+
+## `.js` 확장자 문제
+
+`nodenext` / `node16` 하에서 ESM import 는 **컴파일된 파일 이름 (`.js`)** 을 참조:
+
+```typescript
+// src/main.ts
+import {util} from "./util.js";   // 실제 파일은 util.ts, 컴파일 후 util.js
+
+// 아래는 오류
+import {util} from "./util";
+import {util} from "./util.ts";
+```
+
+TypeScript 5.0+ `allowImportingTsExtensions` 로 `.ts` 도 명시 가능 (하지만 emit 은 안 함, 번들러에게 위임).
+
+## Path Aliases (`paths`)
+
+```json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"]
+    }
+  }
+}
+```
+
+```typescript
+import {Button} from "@/components/Button";
+import type {User} from "@/types";
+```
+
+**중요**: TypeScript 는 검사만. 런타임 (또는 번들러) 도 같은 alias 해석 필요:
+
+- Vite: `resolve.alias` 자동으로 tsconfig 읽음 (`vite-tsconfig-paths` 플러그인)
+- Webpack: `resolve.alias` 수동
+- Next.js: `tsconfig.json` 자동
+- Node.js (러ntime): `tsconfig-paths` 폴리필 필요
+
+## `isolatedModules`
+
+```json
+{"isolatedModules": true}
+```
+
+각 파일이 독립적으로 컴파일 가능해야 함 (esbuild/swc/Babel 이 파일 단위로 트랜스파일 하기 때문). 활성화 시:
+
+- **`const enum`** 사용 시 오류 (다른 파일에서 참조 불가) -> Union literal 로 대체
+- **default export re-export**: `export {default} from "./x"` 는 OK, `export default from "./x"` 는 불가
+- **네임스페이스 (`namespace`) 로 인한 컴파일 부작용** 감지
+
+**관용**: `isolatedModules: true` 는 프로덕션 필수.
+
+## `esModuleInterop`
+
+CJS 모듈을 ESM 스타일로 import 하도록:
+
+```json
+{"esModuleInterop": true}
+```
+
+```typescript
+// esModuleInterop: false
+import * as express from "express";
+const app = express();   // 오류: express 는 default export 아님
+
+// esModuleInterop: true
+import express from "express";
+const app = express();   // OK, TypeScript 가 자동 wrap
+```
+
+## `allowSyntheticDefaultImports`
+
+`esModuleInterop` 을 활성화하면 자동. 명시적으로 켤 수도.
+
+## Namespace (legacy)
+
+```typescript
+namespace Utils {
+  export function add(a: number, b: number): number { return a + b; }
+}
+
+Utils.add(1, 2);
+```
+
+**Deprecated 스타일**. ES modules 등장 이전의 module 시스템. 새 코드에서는 사용 안 함.
+
+## Module 안의 Ambient Declaration
+
+```typescript
+// global.d.ts
+declare global {
+  interface Window {
+    myGlobal: string;
+  }
+}
+
+// 사용
+window.myGlobal;
+```
+
+Ambient 는 [[ts-declaration-files|Declaration Files]] 참조.
+
+## `import.meta`
+
+ESM 의 표준. Module URL 등 접근.
+
+```typescript
+console.log(import.meta.url);   // "file:///.../main.js"
+
+// Node.js ESM
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}
+```
+
+Vite:
+
+```typescript
+if (import.meta.env.DEV) { ... }
+if (import.meta.hot) { ... }   // HMR
+```
+
+## Dynamic import
+
+```typescript
+const module = await import("./heavy");
+module.foo();
+```
+
+Code splitting 의 기본. Type:
+
+```typescript
+type ModuleType = typeof import("./heavy");
+const module: ModuleType = await import("./heavy");
+```
+
+## 실전 tsconfig (2026 표준)
+
+### Bundler (Web app, Next.js, Vite)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM"],
+    "paths": {"@/*": ["src/*"]}
+  },
+  "include": ["src/**/*"]
+}
+```
+
+### Node.js (backend, CLI)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "declaration": true,
+    "sourceMap": true,
+    "lib": ["ES2022"]
+  },
+  "include": ["src/**/*"]
+}
+```
+
+## 함정
+
+> [!WARNING]
+> **`nodenext` 하에서 확장자 필수**. `import "./util"` 은 오류. `import "./util.js"`. 이는 TS 컴파일 후 `.js` 파일을 찾기 때문.
+
+> [!CAUTION]
+> **`isolatedModules` 없이 esbuild/swc 사용 위험**. Const enum, namespace 등이 조용히 잘못 컴파일.
+
+> [!WARNING]
+> **`paths` 는 runtime 해석에 자동 반영 안 됨**. 번들러 / Node.js 도 같은 alias 해석 지원 필요.
+
+> [!IMPORTANT]
+> **`verbatimModuleSyntax` 를 켜세요**. TS 5.0+ 강력 권장. Emit 결과의 예측성 향상.
+
+> [!CAUTION]
+> **CJS <-> ESM 경계**. Node.js 에서 CJS 파일이 ESM import 하려면 dynamic import 필요. `require("esm-only-package")` 는 오류.
+
+> [!WARNING]
+> **Barrel file (`index.ts`) 남용**. Tree-shaking 저해, 빌드 느려짐, 순환 import. 큰 앱에서는 지양.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-strict-mode|Strict Mode]] - tsconfig 옵션들
+- [[ts-declaration-files|Declaration Files]] - .d.ts
+- [[ts-decorators|Decorators]] - reflect-metadata import
+- [[js-es-modules|ES Modules]] - JavaScript ESM

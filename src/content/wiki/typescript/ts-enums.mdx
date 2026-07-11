@@ -1,0 +1,344 @@
+---
+title: "[TypeScript] Enums"
+aliases:
+  - "TypeScript Enum"
+  - "TypeScript Enums"
+  - "TS enum"
+  - "numeric enum"
+  - "string enum"
+  - "const enum"
+  - "TypeScript 열거형"
+  - "TS enum vs union"
+tags: [typescript, enum, types]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Enums"
+    url: "https://www.typescriptlang.org/docs/handbook/enums.html"
+  - title: "Effective TypeScript - Use enum members carefully"
+    url: "https://effectivetypescript.com/"
+---
+
+## 정의
+
+**Enum** 은 여러 관련 상수를 하나의 이름 아래 그룹화하는 TypeScript 기능입니다. Numeric enum, string enum, const enum, heterogeneous enum 등 여러 변종이 있으며, 최근에는 **enum 을 지양하고 union literal 이나 `as const` 객체를 쓰는 편이 관용** 이 되고 있습니다.
+
+## Numeric Enum
+
+기본 형태. 값이 정수로 자동 할당.
+
+```typescript
+enum Direction {
+  Up,       // 0
+  Down,     // 1
+  Left,     // 2
+  Right,    // 3
+}
+
+const d = Direction.Up;   // 0
+```
+
+명시적 값:
+
+```typescript
+enum Status {
+  OK = 200,
+  BadRequest = 400,
+  Unauthorized = 401,
+  NotFound = 404,
+  ServerError = 500,
+}
+```
+
+### Reverse mapping
+
+Numeric enum 은 값 -> 이름 역방향도 자동 생성:
+
+```typescript
+console.log(Status[200]);   // "OK"
+console.log(Status[404]);   // "NotFound"
+```
+
+컴파일된 JS:
+
+```javascript
+var Status;
+(function (Status) {
+    Status[Status["OK"] = 200] = "OK";
+    Status[Status["BadRequest"] = 400] = "BadRequest";
+})(Status || (Status = {}));
+```
+
+## String Enum
+
+값이 문자열. Reverse mapping 없음.
+
+```typescript
+enum Direction {
+  Up = "UP",
+  Down = "DOWN",
+  Left = "LEFT",
+  Right = "RIGHT",
+}
+
+console.log(Direction.Up);      // "UP"
+console.log(Direction["UP"]);    // undefined (reverse mapping 없음)
+```
+
+**디버깅** 시 값이 명시적이라 numeric enum 보다 유리.
+
+## Heterogeneous Enum
+
+숫자/문자열 혼합. 실전에서 지양.
+
+```typescript
+enum Mixed {
+  A = 1,
+  B = "yes",
+}
+```
+
+## Const Enum
+
+`const enum` 은 컴파일 시 **inline** 됩니다. 런타임 객체가 없음.
+
+```typescript
+const enum Direction {
+  Up,
+  Down,
+  Left,
+  Right,
+}
+
+const d = Direction.Up;
+```
+
+컴파일 결과:
+
+```javascript
+const d = 0 /* Direction.Up */;
+```
+
+**Pros**:
+- 런타임 오버헤드 없음
+- 트리 셰이킹 우수
+
+**Cons**:
+- **`isolatedModules: true`** 하에서 사용 불가 (esbuild/swc/Babel 이 파일 단위 트랜스파일이라 다른 파일의 const enum 참조 불가)
+- 라이브러리 배포 시 문제 (사용자가 참조 불가)
+
+**결론**: 모던 프로젝트에서는 사실상 사용 불가. `as const` 객체가 대안.
+
+## Computed Members
+
+```typescript
+enum FileAccess {
+  None,
+  Read = 1 << 1,        // 2
+  Write = 1 << 2,        // 4
+  ReadWrite = Read | Write,   // 6
+  Length = "abc".length,       // 3 (compile-time computed)
+}
+```
+
+Bitwise flag 에 유용하지만 코드 리뷰가 힘들어짐.
+
+## Enum 의 문제점
+
+### 1. `isolatedModules` 하에서 `const enum` 불가
+
+esbuild, swc, Babel 이 fail. 모던 툴체인에서 큰 제약.
+
+### 2. Numeric enum 은 타입 안전성이 부족
+
+```typescript
+enum Direction { Up, Down }
+
+function move(d: Direction): void { ... }
+
+move(Direction.Up);   // OK
+move(100);             // 오류 아님! (numeric 이면 any number 허용될 수 있음)
+```
+
+TypeScript 5.0+ 부터는 조금 더 엄격해졌지만 여전히 함정 존재.
+
+### 3. Reverse mapping 은 종종 유출
+
+Numeric enum 의 reverse mapping 은 원치 않을 때가 많음.
+
+```typescript
+const values = Object.values(Status);
+// = ["OK", "BadRequest", ..., 200, 400, ...]  (문자열 + 숫자)
+```
+
+### 4. 트리 셰이킹 실패
+
+일반 enum (non-const) 은 런타임 객체를 만들어 트리 셰이킹 안 됨. 큰 enum 은 번들 크기 증가.
+
+## 대안 1: Union Literal
+
+가장 간단하고 관용적:
+
+```typescript
+type Direction = "up" | "down" | "left" | "right";
+
+function move(d: Direction): void { ... }
+
+move("up");         // OK
+move("northwest");  // 오류
+
+// Exhaustive check
+function opposite(d: Direction): Direction {
+  switch (d) {
+    case "up": return "down";
+    case "down": return "up";
+    case "left": return "right";
+    case "right": return "left";
+  }
+}
+```
+
+**Pros**:
+- 런타임 오버헤드 없음 (그냥 문자열)
+- Structural typing 과 잘 맞음
+- `isolatedModules` OK
+- 트리 셰이킹 완벽
+
+**Cons**:
+- 값 목록을 조회하기 힘듦 (`Object.values(enum)` 대안이 없음)
+
+## 대안 2: `as const` Object
+
+값 목록도 필요하면:
+
+```typescript
+const Direction = {
+  Up: "up",
+  Down: "down",
+  Left: "left",
+  Right: "right",
+} as const;
+
+type Direction = typeof Direction[keyof typeof Direction];
+// = "up" | "down" | "left" | "right"
+
+function move(d: Direction): void { ... }
+
+move(Direction.Up);   // OK
+move("up");            // OK
+
+// 값 열거
+Object.values(Direction);   // ["up", "down", "left", "right"]
+```
+
+**Pros**:
+- 런타임 객체 존재 (`Object.keys`, `Object.values`)
+- 타입 안전 (union 로 좁혀짐)
+- `as const` 로 정확한 리터럴 타입
+- `isolatedModules` OK
+- 트리 셰이킹 OK (import 되지 않으면 제거)
+
+**Cons**:
+- 코드가 살짝 장황
+
+이 방식이 **2020년대 관용의 정답**.
+
+## Union + Object 실전 예시
+
+```typescript
+export const HTTP_STATUS = {
+  OK: 200,
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  NOT_FOUND: 404,
+  SERVER_ERROR: 500,
+} as const;
+
+export type HttpStatus = typeof HTTP_STATUS[keyof typeof HTTP_STATUS];
+// = 200 | 400 | 401 | 404 | 500
+
+function respond(status: HttpStatus): void { ... }
+respond(HTTP_STATUS.OK);   // OK
+respond(200);               // OK (literal 이라)
+respond(300);               // 오류
+```
+
+## Union + Function 헬퍼
+
+```typescript
+export type Role = "admin" | "editor" | "viewer";
+
+export const ROLES: Role[] = ["admin", "editor", "viewer"];
+
+export function isRole(x: unknown): x is Role {
+  return typeof x === "string" && ROLES.includes(x as Role);
+}
+```
+
+## Enum 유지가 여전히 나은 케이스
+
+- **legacy 프로젝트** 이미 enum 다수 사용 중
+- **NestJS / Angular** 데코레이터와 결합
+- **양방향 매핑** (numeric <-> string 이름) 이 자주 필요
+- **Bitwise flag** (실전에서는 여전히 유용)
+
+## Enum 리팩토링
+
+```typescript
+// Before
+enum Direction { Up, Down, Left, Right }
+
+// After (마이그레이션)
+export const Direction = {
+  Up: 0,
+  Down: 1,
+  Left: 2,
+  Right: 3,
+} as const;
+export type Direction = typeof Direction[keyof typeof Direction];
+```
+
+이 이전은 usage 코드 변경 없이 진행 (`Direction.Up` 그대로 작동).
+
+## Enum 을 iterable 로 만들기
+
+```typescript
+enum Direction { Up, Down, Left, Right }
+
+const directions = Object.values(Direction).filter(
+  v => typeof v === "number"
+) as Direction[];
+
+for (const d of directions) {
+  console.log(d);
+}
+```
+
+이 필터가 필요한 이유가 numeric enum 의 reverse mapping 때문. 그래서 `as const` 객체가 더 깔끔.
+
+## 함정
+
+> [!WARNING]
+> **`isolatedModules` 하에서 `const enum` 오류**. esbuild, Vite, Next.js 대부분에서 사용 불가.
+
+> [!CAUTION]
+> **Numeric enum 은 임의 숫자 허용 위험**. TS 5.0+ 개선되었지만 완전히 안전한 것은 아님.
+
+> [!WARNING]
+> **Enum 을 export 하는 라이브러리**. 사용자의 프로젝트에서 다르게 취급될 수 있음 (const enum 의 문제). String union 이 안전한 API.
+
+> [!IMPORTANT]
+> **새 코드는 `as const` object 또는 union literal**. Enum 은 legacy / 특수 케이스만.
+
+> [!CAUTION]
+> **Reverse mapping 유출**. `Object.values(numericEnum)` 는 값 + 이름 모두. 필터 필요.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-union-intersection|Union / Intersection]] - Literal union
+- [[ts-primitive-types|Primitive Types]] - Literal type
+- [[ts-type-aliases|Type Aliases]] - as const
+- [[ts-modules|Modules]] - isolatedModules
+- [[ts-strict-mode|Strict Mode]]
+- [[ts-narrowing|Type Narrowing]] - Exhaustive check

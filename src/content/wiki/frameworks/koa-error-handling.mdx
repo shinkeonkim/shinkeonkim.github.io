@@ -1,0 +1,369 @@
+---
+title: "[Koa] Error Handling"
+aliases:
+  - "Koa Error Handling"
+  - "ctx.throw"
+  - "ctx.assert"
+  - "koa error middleware"
+  - "koa app.on error"
+  - "Koa 에러 처리"
+  - "http-errors koa"
+tags: [koa, error, exception, http-errors]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "Koa Error Handling"
+    url: "https://github.com/koajs/koa/wiki/Error-Handling"
+  - title: "http-errors"
+    url: "https://github.com/jshttp/http-errors"
+---
+
+## 정의
+
+**Koa Error Handling** 은 미들웨어 chain 에서 발생한 예외를 catch 하여 응답을 정형화하는 패턴입니다. Koa 는 자동 error handler 를 제공하지만, 프로덕션은 대개 커스텀 error middleware + `app.on('error')` 로직을 조합합니다.
+
+## 기본: try/catch middleware
+
+가장 관용적 패턴. 모든 미들웨어의 최외곽.
+
+```javascript
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    ctx.status = err.status || err.statusCode || 500;
+    ctx.body = {
+      error: err.message,
+      ...(process.env.NODE_ENV !== 'production' && {stack: err.stack}),
+    };
+    ctx.app.emit('error', err, ctx);
+  }
+});
+```
+
+`app.on('error')` 는 로깅/외부 알림 (Sentry) 용:
+
+```javascript
+app.on('error', (err, ctx) => {
+  logger.error({err, url: ctx?.url});
+  Sentry.captureException(err);
+});
+```
+
+## `ctx.throw()`
+
+`http-errors` 기반 예외 발생. Status + message + properties:
+
+```javascript
+ctx.throw(400);                              // 400 Bad Request
+ctx.throw(400, 'Missing email');
+ctx.throw(404, 'User not found');
+ctx.throw(422, 'Validation failed', {
+  field: 'email',
+  code: 'INVALID_EMAIL',
+});
+```
+
+Error 객체 자체:
+
+```javascript
+const err = new Error('boom');
+err.status = 400;
+throw err;
+```
+
+## `ctx.assert()`
+
+Truthy 검사 + 실패 시 throw:
+
+```javascript
+ctx.assert(user, 401, 'Login required');
+ctx.assert(id, 400, 'ID required');
+ctx.assert(admin, 403);
+```
+
+`assert(user, 401)` == `if (!user) ctx.throw(401)`.
+
+## Async error
+
+Async middleware 에서 `throw` 는 자동으로 upstream 으로. `await` 없이 던지면 위험:
+
+```javascript
+// BAD
+app.use(async (ctx, next) => {
+  await next();
+});
+
+app.use(async (ctx) => {
+  someAsyncFn().catch(err => { throw err; });   // upstream 안 감
+});
+```
+
+`await` 을 반드시:
+
+```javascript
+app.use(async (ctx) => {
+  await someAsyncFn();   // 실패 시 자동 upstream
+});
+```
+
+## 응답 형식 통일
+
+```javascript
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    const status = err.status || err.statusCode || 500;
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    ctx.status = status;
+    ctx.body = {
+      error: {
+        code: err.code || (status === 500 ? 'INTERNAL' : 'ERROR'),
+        message: (isProduction && status === 500) ? 'Internal Server Error' : err.message,
+        ...(err.details && {details: err.details}),
+        ...(!isProduction && {stack: err.stack}),
+      },
+      timestamp: new Date().toISOString(),
+      path: ctx.path,
+      requestId: ctx.state.requestId,
+    };
+
+    if (status >= 500) {
+      ctx.app.emit('error', err, ctx);
+    }
+  }
+});
+```
+
+## Custom Error class
+
+```javascript
+class DomainError extends Error {
+  constructor(code, message, status = 400, details) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.details = details;
+    this.name = 'DomainError';
+  }
+}
+
+class UserNotFoundError extends DomainError {
+  constructor(id) {
+    super('USER_NOT_FOUND', `User ${id} not found`, 404);
+    this.userId = id;
+  }
+}
+
+// 사용
+router.get('/users/:id', async (ctx) => {
+  const user = await User.findById(ctx.params.id);
+  if (!user) throw new UserNotFoundError(ctx.params.id);
+  ctx.body = user;
+});
+```
+
+Error middleware 에서 특정 error 매핑:
+
+```javascript
+if (err instanceof PrismaClientKnownRequestError) {
+  if (err.code === 'P2002') {
+    ctx.status = 409;
+    ctx.body = {error: 'Duplicate entry'};
+    return;
+  }
+}
+```
+
+## Validation error (Zod)
+
+```javascript
+const {ZodError} = require('zod');
+
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    if (err instanceof ZodError) {
+      ctx.status = 400;
+      ctx.body = {
+        error: 'Validation failed',
+        details: err.errors,
+      };
+      return;
+    }
+    throw err;   // 다음 handler 로
+  }
+});
+```
+
+## 404 처리
+
+Router 가 매칭 실패 시 default 로 404. 커스텀:
+
+```javascript
+app.use(async (ctx, next) => {
+  await next();
+  if (ctx.status === 404 && !ctx.body) {
+    ctx.body = {error: 'Not found', path: ctx.path};
+  }
+});
+```
+
+또는 router 뒤에 catch-all:
+
+```javascript
+app.use(router.routes());
+app.use(router.allowedMethods());
+app.use(async (ctx) => {
+  ctx.status = 404;
+  ctx.body = {error: 'Not found'};
+});
+```
+
+## `app.on('error')`
+
+Middleware chain 안 오류 + Koa 자체 오류 모두 emit.
+
+```javascript
+app.on('error', (err, ctx) => {
+  // ctx 는 있을 수도 없을 수도 (chain 밖 에러는 없음)
+  const info = {
+    err: {
+      message: err.message,
+      code: err.code,
+      status: err.status,
+      stack: err.stack,
+    },
+    request: ctx ? {
+      method: ctx.method,
+      url: ctx.url,
+      headers: ctx.headers,
+      ip: ctx.ip,
+    } : null,
+  };
+  logger.error(info);
+});
+```
+
+## Unhandled Rejection / Uncaught Exception
+
+Middleware 밖 에러 (setTimeout, background task):
+
+```javascript
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection:', reason);
+  Sentry.captureException(reason);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught Exception:', err);
+  Sentry.captureException(err);
+  // 프로세스 재시작 권장 (일관 상태 보장 불가)
+  process.exit(1);
+});
+```
+
+## Client 오류 vs Server 오류
+
+- **4xx (client)**: 로그 낮은 level. Alert X.
+- **5xx (server)**: 로그 error level. Alert O.
+
+```javascript
+if (status >= 500) {
+  logger.error({err});
+  Sentry.captureException(err);
+} else {
+  logger.warn({err});
+}
+```
+
+## Timeout
+
+```javascript
+const timeout = require('koa-timeout-v2');
+app.use(timeout(30000, {status: 408}));
+```
+
+Long-running handler 는 별도 (queue 로 오프로드).
+
+## Error middleware 순서
+
+**최외곽에** (첫 미들웨어). 그래야 downstream 모든 에러 catch.
+
+```javascript
+app.use(errorMiddleware);      // 1
+app.use(logger);                // 2
+app.use(bodyParser());          // 3
+app.use(auth);                  // 4
+app.use(router.routes());       // 5
+```
+
+## Multiple error handlers
+
+에러 종류별로:
+
+```javascript
+// Layer 1: Domain errors
+app.use(async (ctx, next) => {
+  try { await next(); } catch (err) {
+    if (err instanceof DomainError) {
+      ctx.status = err.status;
+      ctx.body = {code: err.code, message: err.message};
+      return;
+    }
+    throw err;
+  }
+});
+
+// Layer 2: Validation errors
+app.use(async (ctx, next) => {
+  try { await next(); } catch (err) {
+    if (err instanceof ZodError) {
+      ctx.status = 400;
+      ctx.body = {errors: err.errors};
+      return;
+    }
+    throw err;
+  }
+});
+
+// Layer 3: Fallback (unknown)
+app.use(async (ctx, next) => {
+  try { await next(); } catch (err) {
+    ctx.status = 500;
+    ctx.body = {error: 'Internal Server Error'};
+    ctx.app.emit('error', err, ctx);
+  }
+});
+```
+
+## 함정
+
+> [!WARNING]
+> **Error middleware 를 마지막에 등록하면 못 잡음**. 반드시 첫 번째.
+
+> [!CAUTION]
+> **Async 안 `throw` 는 promise rejection**. `await` 없이 next 하면 lost.
+
+> [!WARNING]
+> **Prod 에서 stack trace 노출 위험**. Env 로 분기.
+
+> [!IMPORTANT]
+> **`ctx.throw()` vs custom Error**. throw 는 `http-errors` 기반. Custom error 는 별도 인스턴스. Middleware 에서 두 유형 모두 처리.
+
+> [!CAUTION]
+> **`ctx.body` 를 error middleware 앞 에서 세팅 후 throw** = ctx.body 유지 X. Downstream 이 override.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-middleware|Koa Middleware]] - Error middleware 순서
+- [[koa-context|Koa Context]] - ctx.throw
+- [[koa-router|Koa Router]]
+- [[koa-body|Koa Body Parsing]]
+- [[koa-testing|Koa Testing]] - error 테스트
+- [[nestjs-exception-filters|NestJS Exception Filters]] - 대비
+- [[fastapi-middleware|FastAPI Middleware]] - exception_handler 대비

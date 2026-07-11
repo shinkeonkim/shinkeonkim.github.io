@@ -1,0 +1,252 @@
+---
+title: "[AWS] ECR (Elastic Container Registry)"
+aliases:
+  - "AWS ECR"
+  - "ECR"
+  - "Elastic Container Registry"
+  - "ECR Public"
+  - "ECR Private"
+  - "amazon ecr"
+tags: [aws, cloud, container, registry, oci]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "Amazon ECR User Guide"
+    url: "https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html"
+  - title: "ECR Pull Through Cache"
+    url: "https://docs.aws.amazon.com/AmazonECR/latest/userguide/pull-through-cache.html"
+  - title: "ECR Image Scanning (Enhanced with Inspector)"
+    url: "https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-scanning-enhanced.html"
+---
+
+## 정의
+
+**Amazon Elastic Container Registry (ECR)** 는 AWS 가 관리하는 **OCI 컨테이너 이미지 및 Helm chart 레지스트리** 입니다. Docker 레지스트리 HTTP API v2 호환이라 `docker push` / `docker pull` 이 그대로 작동하며, IAM 로 접근을 제어합니다.
+
+ECR 은 크게 세 종류로 나뉩니다.
+
+- **ECR Private**: 계정/리전 스코프의 프라이빗 레지스트리 (기본)
+- **ECR Public**: `public.ecr.aws` 도메인의 공개 레지스트리 (Docker Hub 대안)
+- **ECR Pull Through Cache**: 외부 레지스트리 (Docker Hub, GHCR, Quay, k8s.io, GitLab, Azure ACR) 를 자동 캐싱
+
+## 왜 필요한가
+
+- **IAM 통합**: Docker Hub 토큰 대신 AWS 자격증명으로 pull/push
+- **VPC 엔드포인트**: Private VPC 에서 인터넷 우회 없이 이미지 pull
+- **암호화**: KMS 로 저장 시 암호화, TLS 로 전송 암호화
+- **취약점 스캔**: 자동/수동 스캐닝 (Basic + Enhanced with Amazon Inspector)
+- **Lifecycle policy**: 오래된 이미지 자동 정리
+- **저지연 pull**: 같은 리전 EC2/EKS/ECS 에서 pull 시 사실상 인트라리전 대역폭
+- **Docker Hub rate limit 회피**: Pull Through Cache 로 대체
+
+## 리소스 구조
+
+```
+Registry (AWS 계정 x 리전 = 1개)
+ └─ Repository (여러 개, 이름은 슬래시 포함 가능)
+     └─ Image tag (mutable 또는 immutable)
+         └─ Manifest (single arch 또는 multi-arch index)
+             └─ Blob (layer, config)
+```
+
+레지스트리 URL 형식: `<account-id>.dkr.ecr.<region>.amazonaws.com`
+
+예: `123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/my-app:v1.2`
+
+## 인증 (Login)
+
+ECR 은 **short-lived 토큰** (기본 12시간) 방식입니다. IAM 자격증명 -> ECR 토큰 -> Docker 로그인.
+
+```bash
+aws ecr get-login-password --region ap-northeast-2 \
+  | docker login --username AWS \
+                 --password-stdin 123456789012.dkr.ecr.ap-northeast-2.amazonaws.com
+```
+
+**ECR Public** 은 별도 엔드포인트:
+
+```bash
+aws ecr-public get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin public.ecr.aws
+```
+
+CI 환경에서는 `aws-actions/amazon-ecr-login` GitHub Action, Kubernetes 는 **ECR Credential Helper** 나 **IRSA/EKS Pod Identity** 로 자동화합니다.
+
+## Push / Pull
+
+```bash
+# 태깅
+docker tag my-app:latest \
+  123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/my-app:v1.2
+
+# 푸시
+docker push 123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/my-app:v1.2
+
+# 풀
+docker pull 123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/my-app:v1.2
+```
+
+## Repository 생성 옵션
+
+| 옵션 | 설명 | 관용 |
+|:---|:---|:---|
+| `tagImmutability` | tag 재할당 금지 | `IMMUTABLE` 권장 (프로덕션) |
+| `imageScanningConfiguration` | 자동 취약점 스캔 | `scanOnPush: true` |
+| `encryptionConfiguration` | 저장 암호화 | `KMS` (compliance 요구 시) |
+| `lifecyclePolicy` | 오래된 이미지 정리 | 필수 (비용/공간 관리) |
+
+Tag immutable 을 켜면 `docker push` 로 같은 태그 덮어쓰기가 실패합니다. `latest` 를 유일 태그로 쓰는 관행을 강제로 못 하게 만들어, git SHA 나 semver 태깅을 유도합니다.
+
+## Lifecycle Policy 예시
+
+**`untagged` 이미지 7일 후 삭제, `v` prefix 태그는 최근 30개만 유지**:
+
+```json
+{
+  "rules": [
+    {
+      "rulePriority": 1,
+      "description": "Delete untagged images older than 7 days",
+      "selection": {
+        "tagStatus": "untagged",
+        "countType": "sinceImagePushed",
+        "countUnit": "days",
+        "countNumber": 7
+      },
+      "action": {"type": "expire"}
+    },
+    {
+      "rulePriority": 2,
+      "description": "Keep last 30 versioned images",
+      "selection": {
+        "tagStatus": "tagged",
+        "tagPrefixList": ["v"],
+        "countType": "imageCountMoreThan",
+        "countNumber": 30
+      },
+      "action": {"type": "expire"}
+    }
+  ]
+}
+```
+
+## 이미지 스캐닝
+
+### Basic scanning
+
+CVE 스캔. `scanOnPush=true` 로 push 시 자동 실행 + `StartImageScan` 으로 수동. 결과는 `DescribeImageScanFindings` 로 조회. Amazon 자체 vulnerability DB 사용.
+
+### Enhanced scanning (Amazon Inspector)
+
+- **지속적 모니터링**: 새 CVE 가 공개되면 기존 이미지도 자동 재평가
+- **더 넓은 커버리지**: OS 패키지 + 프로그래밍 언어 dependency (Python, Node, Java, Go, Ruby, Rust, .NET)
+- **CVSS 점수 + 심각도** 및 EventBridge 알람 통합
+- **Repository 단위 활성화**
+
+Enhanced 는 Inspector 요금이 별도 발생합니다.
+
+## Pull Through Cache
+
+외부 레지스트리를 캐시하여 pull rate limit 을 우회합니다.
+
+```bash
+aws ecr create-pull-through-cache-rule \
+  --ecr-repository-prefix docker-hub \
+  --upstream-registry-url registry-1.docker.io \
+  --credential-arn arn:aws:secretsmanager:...:secret:dockerhub-token
+```
+
+지원 upstream (2026 기준):
+- Docker Hub (`registry-1.docker.io`, 인증 시 secret 필요)
+- GitHub Container Registry (`ghcr.io`)
+- Quay (`quay.io`)
+- GitLab Container Registry
+- k8s.io (`registry.k8s.io`)
+- Azure Container Registry (`.azurecr.io`)
+- 기타 ECR public (`public.ecr.aws`)
+
+Pull 시 최초에는 upstream 에서 다운받고 이후는 ECR 캐시에서 서빙. Rate limit 이 원인인 pipeline 실패를 근본 차단합니다.
+
+## Replication
+
+레지스트리 단위 rule 로 여러 리전 / 계정에 자동 복제.
+
+- **Cross-region**: 재해복구, 사용자 가까운 리전 배포
+- **Cross-account**: 조직 내 계정 (dev/stg/prd) 간 이미지 승격 파이프라인
+
+Rule 은 필터 (repository 이름 prefix 등) 로 범위를 좁힐 수 있습니다.
+
+## IAM 권한 예시
+
+**Pull 만 허용**:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage"
+    ],
+    "Resource": "*"
+  }]
+}
+```
+
+`ecr:GetAuthorizationToken` 은 리소스 레벨이 아니라 계정 전역만 가능 (모든 리소스에 `*`).
+
+Repository policy (레지스트리 리소스 정책) 로 cross-account push/pull 도 가능. EKS Pod 는 [[aws-iam|IAM]] roles for service accounts (IRSA) 나 EKS Pod Identity 로 노드 credential 없이 pull.
+
+## VPC 엔드포인트
+
+Private 서브넷의 EC2/EKS/ECS 는 두 개의 인터페이스 엔드포인트가 필요:
+
+- `com.amazonaws.<region>.ecr.api` (제어 플레인)
+- `com.amazonaws.<region>.ecr.dkr` (레지스트리 데이터 플레인)
+
+레이어 스토리지가 S3 에 있어서 **S3 gateway endpoint** 도 필요합니다. 세 개 세팅 후 인터넷 게이트웨이 없이도 pull 가능.
+
+## 가격 (2026 기준 개요)
+
+- **저장**: 리전 별 GB-월 (0.10 USD/GB-월 근방)
+- **데이터 전송**: 같은 리전 EC2/EKS/ECS 로 pull 은 무료. 인터넷 outbound 는 표준 EC2 요금.
+- **Enhanced scanning**: Inspector 요금 (per-scan 또는 per-image)
+- **ECR Public**: pull 은 무료 (unauthenticated 도), push 는 계정별 free tier 후 저장 요금
+
+## ECS/EKS 와의 조합
+
+- **[[aws-ecs-fargate|ECS Fargate]]**: `image` 필드에 ECR URL. Fargate task 실행 IAM role 에 pull 권한 필요.
+- **EKS**: `imagePullSecrets` 없이 IRSA / Pod Identity 만으로 pull.
+- **Lambda container image**: ECR 만 지원. `ImageUri` 로 참조. Layer 크기 제한 (10 GB).
+- **CodeBuild / CodePipeline**: `AmazonEC2ContainerRegistryPowerUser` 정책으로 자동 push.
+
+## 함정
+
+> [!WARNING]
+> **`latest` 태그를 프로덕션에서 참조하면 위험**합니다. Immutable 태그 (git SHA, semver) 를 사용하고, `latest` 는 alias 로만 활용.
+
+> [!CAUTION]
+> **Lifecycle policy 를 안 걸면 저장 비용이 무한 증가** 합니다. 특히 CI 에서 매 커밋 push 시 수천 개 이미지가 쌓입니다.
+
+> [!WARNING]
+> **Cross-region pull 은 데이터 전송 요금** 이 붙습니다. Replication 을 걸어 소비하는 리전에 로컬 복제본을 두는 편이 저렴.
+
+> [!IMPORTANT]
+> **ECR 토큰은 12시간 만료**. Long-running job 이 pull 재시도할 때 토큰 만료 -> 실패. Kubernetes 는 kubelet 이 자동 갱신하지만, 자체 스크립트는 refresh 로직 필요.
+
+> [!CAUTION]
+> **이미지 크기 제한**: 이미지당 layer 최대 크기 제한, 이미지 총 크기 제한 등이 존재. 특히 [[aws-lambda|Lambda]] container 는 10 GB / 250 MB unzipped 제한.
+
+## 관련 위키
+
+- [[aws-ecs-fargate|ECS Fargate]] - ECR 이미지의 주요 소비자
+- [[aws-ecs|ECS]] - EC2 기반 컨테이너 오케스트레이터
+- [[aws-lambda|Lambda]] - container image 지원 (ECR 만)
+- [[aws-iam|IAM]] - ECR 접근 제어
+- [[aws-kms|KMS]] - 저장 암호화
+- [[aws-eks|EKS]] - Kubernetes 에서의 pull 패턴
+- [[oci-image|OCI Image]] - ECR 이 저장하는 이미지 스펙
+- [[container-image-best-practices|Container Image Best Practices]] - 이미지 최적화

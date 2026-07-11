@@ -1,0 +1,430 @@
+---
+title: "[Koa] Testing (Supertest, Jest, Vitest)"
+aliases:
+  - "Koa Testing"
+  - "Koa Jest"
+  - "Koa Supertest"
+  - "Koa Vitest"
+  - "Koa 테스트"
+tags: [koa, testing, supertest, jest]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "Supertest"
+    url: "https://github.com/ladjs/supertest"
+  - title: "Jest"
+    url: "https://jestjs.io/"
+  - title: "Vitest"
+    url: "https://vitest.dev/"
+---
+
+## 정의
+
+**Koa Testing** 은 `Supertest` (HTTP 호출) + `Jest`/`Vitest` (assertions/runner) 조합이 표준입니다. `app.callback()` 을 Supertest 에 전달하면 실제 HTTP 서버 없이 요청/응답 검증 가능.
+
+## 설치
+
+```bash
+npm i -D jest supertest
+# 또는
+npm i -D vitest supertest
+```
+
+## 기본 예시
+
+```javascript
+// app.js
+const Koa = require('koa');
+const Router = require('@koa/router');
+const bodyParser = require('@koa/bodyparser');
+
+function createApp() {
+  const app = new Koa();
+  const router = new Router();
+
+  router.get('/', async (ctx) => {
+    ctx.body = 'Hello';
+  });
+
+  router.get('/users/:id', async (ctx) => {
+    ctx.body = {id: ctx.params.id};
+  });
+
+  router.post('/users', async (ctx) => {
+    ctx.assert(ctx.request.body.email, 400, 'email required');
+    ctx.status = 201;
+    ctx.body = ctx.request.body;
+  });
+
+  app.use(bodyParser());
+  app.use(router.routes()).use(router.allowedMethods());
+
+  return app;
+}
+
+module.exports = createApp;
+```
+
+```javascript
+// app.test.js
+const request = require('supertest');
+const createApp = require('./app');
+
+describe('App', () => {
+  let app;
+
+  beforeEach(() => {
+    app = createApp();
+  });
+
+  it('GET / returns Hello', async () => {
+    const res = await request(app.callback())
+      .get('/')
+      .expect(200);
+    expect(res.text).toBe('Hello');
+  });
+
+  it('GET /users/:id returns id', async () => {
+    const res = await request(app.callback())
+      .get('/users/42')
+      .expect(200)
+      .expect('Content-Type', /json/);
+    expect(res.body).toEqual({id: '42'});
+  });
+
+  it('POST /users creates user', async () => {
+    const res = await request(app.callback())
+      .post('/users')
+      .send({email: 'a@b.com', name: 'kim'})
+      .expect(201);
+    expect(res.body.email).toBe('a@b.com');
+  });
+
+  it('POST /users returns 400 without email', async () => {
+    await request(app.callback())
+      .post('/users')
+      .send({name: 'kim'})
+      .expect(400);
+  });
+});
+```
+
+## Supertest API
+
+```javascript
+request(app.callback())
+  .get('/users?page=1&limit=10')
+  .set('Authorization', 'Bearer token')
+  .set('Accept', 'application/json')
+  .expect(200)
+  .expect('Content-Type', /json/)
+  .expect('X-Custom', 'value')
+  .expect((res) => {
+    expect(res.body.length).toBe(10);
+  });
+
+// POST with body
+request(app.callback())
+  .post('/users')
+  .send({email: 'a@b.com'})     // JSON 자동
+  .expect(201);
+
+// Form data
+request(app.callback())
+  .post('/form')
+  .type('form')
+  .send({name: 'kim', email: 'a@b.com'});
+
+// File upload
+request(app.callback())
+  .post('/upload')
+  .attach('file', './test/fixtures/photo.jpg');
+
+// Multiple fields
+request(app.callback())
+  .post('/upload')
+  .field('name', 'Test')
+  .attach('file', 'test.jpg');
+
+// Cookies
+request(app.callback())
+  .get('/me')
+  .set('Cookie', 'session=abc');
+```
+
+## Middleware 단위 테스트
+
+Middleware 를 직접 호출:
+
+```javascript
+const requestId = require('./middleware/request-id');
+
+it('sets X-Request-Id', async () => {
+  const ctx = {
+    set: jest.fn(),
+    get: jest.fn().mockReturnValue(''),
+    state: {},
+  };
+  const next = jest.fn();
+
+  await requestId()(ctx, next);
+
+  expect(ctx.state.requestId).toBeDefined();
+  expect(ctx.set).toHaveBeenCalledWith('X-Request-Id', expect.any(String));
+  expect(next).toHaveBeenCalled();
+});
+```
+
+Mock ctx 는 필요한 필드만 채움.
+
+## 인증 mocking
+
+```javascript
+async function mockAuth(user) {
+  return async (ctx, next) => {
+    ctx.state.user = user;
+    await next();
+  };
+}
+
+// 테스트에서 app 재구성
+function testApp(overrides = {}) {
+  const app = createApp();
+  if (overrides.user) {
+    app.middleware.unshift(mockAuth(overrides.user));
+  }
+  return app;
+}
+
+it('GET /me returns current user', async () => {
+  const app = testApp({user: {id: 1, name: 'kim'}});
+  const res = await request(app.callback())
+    .get('/me')
+    .expect(200);
+  expect(res.body.id).toBe(1);
+});
+```
+
+## DB 격리
+
+### SQLite in-memory (Prisma)
+
+```javascript
+process.env.DATABASE_URL = 'file::memory:?cache=shared';
+
+beforeAll(async () => {
+  await runMigrations();
+});
+```
+
+### Testcontainers (PostgreSQL)
+
+```javascript
+const {PostgreSqlContainer} = require('@testcontainers/postgresql');
+
+let container, db;
+
+beforeAll(async () => {
+  container = await new PostgreSqlContainer('postgres:16').start();
+  process.env.DATABASE_URL = container.getConnectionUri();
+  db = require('./db');
+  await db.migrate();
+}, 60000);
+
+afterAll(async () => {
+  await db.disconnect();
+  await container.stop();
+});
+```
+
+### Transaction rollback per test
+
+```javascript
+let tx;
+
+beforeEach(async () => {
+  tx = await db.startTransaction();
+});
+
+afterEach(async () => {
+  await tx.rollback();
+});
+```
+
+## Snapshot testing
+
+```javascript
+it('GET /users matches snapshot', async () => {
+  const res = await request(app.callback())
+    .get('/users')
+    .expect(200);
+  expect(res.body).toMatchSnapshot();
+});
+```
+
+## HTTP mocking (외부 API)
+
+`nock`:
+
+```bash
+npm i -D nock
+```
+
+```javascript
+const nock = require('nock');
+
+beforeEach(() => {
+  nock.disableNetConnect();
+  nock.enableNetConnect('127.0.0.1');
+});
+
+afterEach(() => {
+  nock.cleanAll();
+});
+
+it('handles external API', async () => {
+  nock('https://api.external.com')
+    .get('/data/42')
+    .reply(200, {value: 'test'});
+
+  const res = await request(app.callback())
+    .get('/proxy/42')
+    .expect(200);
+  expect(res.body.value).toBe('test');
+});
+```
+
+또는 MSW.
+
+## Error path 테스트
+
+```javascript
+it('returns 404 for missing user', async () => {
+  const res = await request(app.callback())
+    .get('/users/999')
+    .expect(404);
+  expect(res.body.error.code).toBe('USER_NOT_FOUND');
+});
+
+it('returns 400 on invalid body', async () => {
+  await request(app.callback())
+    .post('/users')
+    .send({email: 'not-an-email'})
+    .expect(400);
+});
+
+it('logs 500 errors', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation();
+
+  // Endpoint 가 throw 하도록
+  await request(app.callback())
+    .get('/error')
+    .expect(500);
+
+  expect(errorSpy).toHaveBeenCalled();
+  errorSpy.mockRestore();
+});
+```
+
+## Environment 격리
+
+```javascript
+const originalEnv = process.env.NODE_ENV;
+
+beforeEach(() => {
+  process.env.NODE_ENV = 'test';
+});
+
+afterEach(() => {
+  process.env.NODE_ENV = originalEnv;
+});
+```
+
+## E2E vs Unit
+
+- **Unit**: middleware, controller 함수를 직접 mock ctx 로 테스트
+- **Integration**: `app.callback()` + Supertest 로 HTTP 요청 시뮬레이션
+- **E2E**: 실제 서버 기동 + 실제 DB (또는 testcontainers)
+
+Koa 는 `app.callback()` 이 실 HTTP 서버 없이 요청 처리 가능해 integration test 가 매우 빠릅니다.
+
+## CI 통합 (GitHub Actions)
+
+```yaml
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test -- --coverage
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+```
+
+## Vitest (더 빠름, ESM 우선)
+
+```javascript
+// vitest.config.js
+export default {
+  test: {
+    environment: 'node',
+    globals: true,
+    coverage: {
+      reporter: ['text', 'html'],
+      exclude: ['**/node_modules/**', '**/*.test.js'],
+    },
+  },
+};
+
+// test 는 Jest 와 거의 동일 API
+import {describe, it, expect, beforeEach, vi} from 'vitest';
+import request from 'supertest';
+```
+
+## 함정
+
+> [!WARNING]
+> **`app.listen()` 후 close 안 하면 test 종료 안 됨**. `app.callback()` 을 supertest 에 넘기면 자동. 직접 listen 은 afterAll 에서 close.
+
+> [!CAUTION]
+> **DB 상태 leak**. 각 테스트 후 rollback 또는 truncate.
+
+> [!WARNING]
+> **`process.env` 조작**. Test 간 leak. beforeEach 에서 backup, afterEach 에서 restore.
+
+> [!IMPORTANT]
+> **Middleware order 는 test 에도 영향**. Auth mock 을 잘못된 위치에 삽입하면 실제 auth 안 우회.
+
+> [!CAUTION]
+> **Async assertion**. `expect(promise).resolves` / `.rejects` 형태.
+
+## 관련 위키
+
+- [[koajs|Koa.js]] - 상위 개요
+- [[koa-middleware|Koa Middleware]]
+- [[koa-router|Koa Router]]
+- [[koa-context|Koa Context]]
+- [[koa-body|Koa Body Parsing]]
+- [[koa-error-handling|Koa Error Handling]]
+- [[koa-deployment|Koa Deployment]]
+- [[nestjs-testing|NestJS Testing]] - 대비
+- [[fastapi-testing|FastAPI Testing]]
+- [[flask-testing|Flask Testing]]

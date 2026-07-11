@@ -1,0 +1,283 @@
+---
+title: "[AWS] ECS (Elastic Container Service)"
+aliases:
+  - "AWS ECS"
+  - "ECS"
+  - "Elastic Container Service"
+  - "amazon ecs"
+  - "ECS on EC2"
+  - "ECS Anywhere"
+  - "ECS Service Connect"
+tags: [aws, cloud, container, orchestration]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "Amazon ECS Developer Guide"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html"
+  - title: "ECS Service Connect"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect.html"
+  - title: "ECS Best Practices Guide"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/intro.html"
+  - title: "ECS Blueprints"
+    url: "https://github.com/aws-ia/ecs-blueprints"
+---
+
+## 정의
+
+**Amazon Elastic Container Service (ECS)** 는 AWS 가 관리하는 **컨테이너 오케스트레이터** 입니다. Task definition (컨테이너 스펙) 을 정의하고 Service (원하는 replica 수, 로드밸런서 연결, 배포 정책) 로 실행하면, ECS control plane 이 EC2 노드 또는 Fargate 위에 컨테이너를 배치합니다.
+
+**Kubernetes 를 원하지 않는 팀** 을 위한 AWS 네이티브 대안. Kubernetes API 를 배우지 않아도 되고, IAM/CloudWatch/ALB/VPC 와의 통합이 유일한 신경 씀거리입니다.
+
+## 실행 모드
+
+| 모드 | 인프라 관리 | 언제 |
+|:---|:---|:---|
+| **[[aws-ecs-fargate|Fargate]]** | 서버리스 (AWS 관리) | 노드 관리 싫음, 스파이키 워크로드 |
+| **EC2** | 자체 EC2 클러스터 | GPU/많은 리소스 세밀 제어, cost-per-hour 최적화 |
+| **ECS Anywhere** | 온프레미스/타 클라우드 | 하이브리드, 마이그레이션 |
+| **External** (EXTERNAL launch type) | 커스텀 인프라 | ECS API 만 재사용 |
+
+이 문서는 주로 **EC2 launch type + 공통 개념** 에 초점을 둡니다. Fargate 는 별도 [[aws-ecs-fargate|ECS Fargate]] 위키 참조.
+
+## 리소스 계층
+
+```
+Cluster (논리적 컨테이너 그룹, IAM 스코프)
+ ├─ Container Instance (EC2 노드) or Fargate capacity
+ ├─ Task Definition (버전 관리되는 컨테이너 스펙)
+ ├─ Task (task definition 의 실행 인스턴스)
+ └─ Service (Task 의 desired count 를 유지하며 배포/재시작)
+```
+
+## Task Definition
+
+컨테이너의 실행 스펙. Kubernetes 의 Pod spec 유사.
+
+```json
+{
+  "family": "web",
+  "containerDefinitions": [{
+    "name": "app",
+    "image": "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/app:v1.0",
+    "cpu": 512,
+    "memory": 1024,
+    "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
+    "essential": true,
+    "environment": [{"name": "APP_ENV", "value": "prod"}],
+    "secrets": [{
+      "name": "DB_PASSWORD",
+      "valueFrom": "arn:aws:secretsmanager:...:secret:prod/db-XYZ"
+    }],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/web",
+        "awslogs-region": "ap-northeast-2",
+        "awslogs-stream-prefix": "app"
+      }
+    }
+  }],
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::...:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::...:role/appTaskRole"
+}
+```
+
+핵심 IAM role 두 개:
+
+- **executionRoleArn**: ECS agent 가 ECR pull, Secrets Manager fetch, CloudWatch Logs write 용
+- **taskRoleArn**: 컨테이너 코드가 AWS API 호출용
+
+## Network Mode
+
+| 모드 | 특성 | 언제 |
+|:---|:---|:---|
+| **awsvpc** | Task 가 자체 ENI + IP | Fargate 필수, EC2 권장. Security Group 을 task 단위 |
+| **bridge** | Docker bridge 네트워크 | 여러 컨테이너 static port | Legacy |
+| **host** | 호스트 네트워크 스택 공유 | 최대 성능, 포트 충돌 위험 |
+| **none** | 네트워크 없음 | 배치 워크로드 |
+
+`awsvpc` 가 사실상 표준. Fargate 는 `awsvpc` 만 지원.
+
+## Service
+
+Task 의 desired count 를 유지하고 자동 재시작/배포를 수행.
+
+```yaml
+serviceName: web
+cluster: prod
+taskDefinition: web:42
+desiredCount: 3
+launchType: EC2   # 또는 FARGATE
+deploymentConfiguration:
+  minimumHealthyPercent: 100
+  maximumPercent: 200
+  deploymentCircuitBreaker:
+    enable: true
+    rollback: true
+loadBalancers:
+  - targetGroupArn: arn:aws:elasticloadbalancing:...
+    containerName: app
+    containerPort: 8080
+placementStrategy:
+  - type: spread
+    field: attribute:ecs.availability-zone
+  - type: binpack
+    field: memory
+```
+
+- **deploymentCircuitBreaker**: 배포 중 healthy 로 넘어가지 않으면 자동 롤백
+- **placementStrategy**: spread (AZ 분산), binpack (리소스 밀집), random
+
+## 배포 방식
+
+### Rolling update (기본)
+
+기존 task 를 새 task 로 순차 교체. `minimumHealthyPercent` (예: 100) 와 `maximumPercent` (예: 200) 로 배포 속도 제어. 200/100 이면 새 task 를 먼저 띄우고 기존을 죽여 다운타임 없음.
+
+### Blue/Green with CodeDeploy
+
+CodeDeploy 통합. 두 대체 target group 을 오가며 즉시/타임드 shift.
+
+- **Canary 10/90 (5분)**: 10% 트래픽으로 5분 관찰 후 나머지 전환
+- **Linear 10 (1분)**: 매분 10%씩 점진 이동
+- **AllAtOnce**: 즉시 전환
+
+### External deployment
+
+CD 도구 (Argo, Harness, Jenkins) 가 task 를 직접 관리. ECS Service 는 desired count 만 유지.
+
+## Auto Scaling
+
+**Application Auto Scaling** 이 ECS Service 의 desired count 를 조절합니다. 세 종류:
+
+- **Target Tracking**: `TargetValue` (예: CPU 60%) 만 지정. 알아서 scale in/out
+- **Step Scaling**: CloudWatch alarm 기반 계단식
+- **Scheduled**: 시간대 기반 (예: 09:00 에 desired=10)
+
+EC2 launch type 은 노드도 확장해야 합니다. **Capacity Provider** 로 ECS <-> Auto Scaling Group 연계:
+
+```yaml
+capacityProviders: [prod-cp]
+defaultCapacityProviderStrategy:
+  - capacityProvider: prod-cp
+    weight: 1
+    base: 0
+```
+
+**Managed Scaling** 을 켜면 ECS 가 필요한 task 수를 계산해 ASG 의 desired 를 직접 조정합니다. 사용자는 CP 만 지정.
+
+## Service Connect (2022~)
+
+ECS 네이티브 **서비스 메시** (light-weight). Cloud Map 에 자동 등록되는 DNS + Envoy sidecar 로 mTLS, retry, timeout, telemetry 제공.
+
+```yaml
+serviceConnectConfiguration:
+  enabled: true
+  namespace: prod.local
+  services:
+    - portName: http
+      clientAliases:
+        - port: 80
+          dnsName: web
+```
+
+다른 서비스에서 `http://web:80` 으로 호출. Cloud Map DNS + Envoy 가 자동 로드밸런싱. App Mesh 의 후계자.
+
+## Task Definition 저장소 배포
+
+### awslogs (CloudWatch Logs)
+
+기본. `awslogs-group`, `awslogs-region`, `awslogs-stream-prefix` 지정. 큰 볼륨은 비용 주의.
+
+### FireLens (Fluent Bit / Fluentd)
+
+Sidecar 컨테이너로 로그를 수집해 원하는 곳 (Elasticsearch, S3, Splunk, Datadog) 으로 라우팅. `logConfiguration.logDriver: awsfirelens`.
+
+## Storage
+
+- **Bind mount** (EC2 host path): 재시작 시 유지 안 됨
+- **Docker volume** (EC2): 노드 재사용 시 유지
+- **EFS**: task 재시작/이동에도 유지, 다중 task 공유. `mountPoints` + `volumes` 에 `efsVolumeConfiguration`
+- **FSx for Lustre, Windows FSx**: Windows/HPC 특화
+
+## Fargate vs EC2 트레이드오프
+
+| 기준 | EC2 | Fargate |
+|:---|:---|:---|
+| **가격 (지속 부하)** | 저렴 (RI/SP + Spot 활용) | 비쌈 |
+| **가격 (스파이키)** | 유휴 노드 비용 | 유리 (실행 초 단위) |
+| **컨테이너 시작 시간** | 빠름 (이미지 캐시) | 느림 (콜드) |
+| **GPU** | O (p, g 인스턴스) | 제한 (일부 리전) |
+| **커스텀 커널** | O | X |
+| **컨테이너 밀도** | 노드 리소스 최대 활용 | task 별 격리 |
+| **관리 부담** | 노드 패치, ASG | 없음 |
+| **DaemonSet 스타일** | 지원 (`DAEMON` scheduling) | 지원 안 함 |
+
+**하이브리드**: 서비스별 CP 를 다르게 두어 base load 는 EC2 SP, burst 는 Fargate Spot.
+
+## ECS Exec
+
+Task 안에서 shell 을 실행. `docker exec` 유사.
+
+```bash
+aws ecs execute-command \
+  --cluster prod \
+  --task 1234abcd \
+  --container app \
+  --interactive \
+  --command "/bin/sh"
+```
+
+Task role 에 `ssmmessages:*` 권한 + service 생성 시 `--enable-execute-command` 필요. Kubernetes 의 `kubectl exec` 대체.
+
+## Task Placement
+
+EC2 launch type 만 해당.
+
+- **Placement Strategy**: `spread`, `binpack`, `random`
+- **Placement Constraint**: `distinctInstance` (한 노드 한 task), `memberOf` (attribute 매칭)
+
+예: **GPU 노드에만** placement:
+
+```yaml
+placementConstraints:
+  - type: memberOf
+    expression: "attribute:accelerator == gpu"
+```
+
+## Deployment Circuit Breaker
+
+배포가 실패 (healthCheck fail, task exit) 를 감지하면 이전 task definition 으로 자동 롤백. 2020년 도입 후 프로덕션 기본값처럼 쓰입니다.
+
+## 함정
+
+> [!WARNING]
+> **Task role 과 execution role 을 혼동** 하면 이미지 pull 실패 또는 앱의 AWS SDK 호출 실패. Execution role 은 ECR/Secrets/Logs 용, Task role 은 앱 코드용.
+
+> [!CAUTION]
+> **awsvpc + Public IP 없이 인터넷 접근** 하려면 NAT Gateway 또는 VPC endpoint. Fargate 의 `assignPublicIp: ENABLED` 는 편하지만 비용/보안 문제. 프로덕션은 프라이빗 서브넷 + NAT.
+
+> [!WARNING]
+> **CloudWatch Logs 비용** 은 무시 못 함. 디버그 로그를 그대로 흘리면 로그 요금이 컴퓨트 요금보다 커질 수 있음. FireLens 로 저비용 저장소 (S3) 병행.
+
+> [!IMPORTANT]
+> **컨테이너 이미지가 크면 배포가 늦어집니다**. 특히 Fargate 는 콜드 시작에 이미지 pull 이 포함. multi-stage build + [[container-image-best-practices|이미지 최적화]] 로 <100 MB 목표.
+
+> [!CAUTION]
+> **Task 개수 제한**. Region/account 별 running task 상한과 service 당 desired count 상한이 있어, 대규모 배포 전 Service Quotas 확인.
+
+## 관련 위키
+
+- [[aws-ecs-fargate|ECS Fargate]] - 서버리스 실행 모드 심화
+- [[aws-ecr|ECR]] - 이미지 저장소
+- [[aws-iam|IAM]] - Task/execution role
+- [[aws-alb-nlb|ALB/NLB]] - Service target group 통합
+- [[aws-cloudwatch|CloudWatch]] - Logs + Metrics
+- [[aws-auto-scaling|Auto Scaling]] - Application Auto Scaling 통합
+- [[aws-eks|EKS]] - Kubernetes 대안
+- [[aws-vpc|VPC]] - awsvpc mode 네트워킹
+- [[container-image-best-practices|Container Image Best Practices]]

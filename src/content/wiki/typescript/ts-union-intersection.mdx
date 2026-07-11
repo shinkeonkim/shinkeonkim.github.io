@@ -1,0 +1,341 @@
+---
+title: "[TypeScript] Union & Intersection Types"
+aliases:
+  - "TypeScript Union Type"
+  - "TypeScript Intersection Type"
+  - "TS Union"
+  - "TS Intersection"
+  - "discriminated union"
+  - "tagged union"
+  - "TypeScript 유니온"
+  - "TypeScript 인터섹션"
+tags: [typescript, types, union, intersection]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Unions and Intersections"
+    url: "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#union-types"
+  - title: "TypeScript Handbook - Discriminated Unions"
+    url: "https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions"
+---
+
+## 정의
+
+- **Union Type** (`A | B`): A 이거나 B (또는 둘 다) 인 값
+- **Intersection Type** (`A & B`): A 이면서 B 인 값
+
+두 조합은 TypeScript 의 타입 시스템에서 가장 자주 쓰이는 도구입니다.
+
+## Union Type
+
+```typescript
+let id: string | number = "abc";
+id = 42;
+id = true;    // 오류
+
+function print(v: string | number): void {
+  console.log(v);
+}
+```
+
+### Union 사용 시 narrowing 필요
+
+```typescript
+function print(v: string | number): void {
+  v.toUpperCase();          // 오류: number 에는 없음
+
+  if (typeof v === "string") {
+    v.toUpperCase();        // OK: string 으로 좁혀짐
+  } else {
+    v.toFixed(2);           // OK: number
+  }
+}
+```
+
+자세한 것은 [[ts-narrowing|Type Narrowing]] 참조.
+
+### Union 의 공통 부분
+
+여러 타입의 공통 필드/메서드만 union 그 자체에서 접근 가능:
+
+```typescript
+type Cat = {name: string; meow(): void};
+type Dog = {name: string; bark(): void};
+
+function greet(pet: Cat | Dog): void {
+  console.log(pet.name);   // OK: 둘 다 name 가짐
+  pet.meow();               // 오류: Dog 에는 meow 없음
+}
+```
+
+## Discriminated Union (Tagged Union)
+
+Union 의 각 case 에 **공통 리터럴 필드 (discriminant)** 를 두어 TypeScript 가 case 별로 정확히 좁힘:
+
+```typescript
+type Shape =
+  | {kind: "circle"; radius: number}
+  | {kind: "square"; side: number}
+  | {kind: "rectangle"; width: number; height: number};
+
+function area(s: Shape): number {
+  switch (s.kind) {
+    case "circle":
+      return Math.PI * s.radius ** 2;       // s: {kind: "circle", radius: number}
+    case "square":
+      return s.side ** 2;                    // s: {kind: "square", side: number}
+    case "rectangle":
+      return s.width * s.height;             // s: {kind: "rectangle", ...}
+  }
+}
+```
+
+### Exhaustive check (never)
+
+```typescript
+function area(s: Shape): number {
+  switch (s.kind) {
+    case "circle": return Math.PI * s.radius ** 2;
+    case "square": return s.side ** 2;
+    case "rectangle": return s.width * s.height;
+    default:
+      const _exhaustive: never = s;
+      return _exhaustive;
+  }
+}
+
+// 새 case 추가 시
+type Shape = ... | {kind: "triangle"; base: number; height: number};
+
+// _exhaustive: never = s  ->  s 가 triangle 이라 never 에 할당 불가 = 컴파일 오류
+```
+
+새 case 를 놓치지 않게 하는 강력한 패턴.
+
+### Result / Either
+
+```typescript
+type Result<T, E = Error> =
+  | {ok: true; value: T}
+  | {ok: false; error: E};
+
+async function fetchUser(id: number): Promise<Result<User>> {
+  try {
+    const user = await api.getUser(id);
+    return {ok: true, value: user};
+  } catch (e) {
+    return {ok: false, error: e as Error};
+  }
+}
+
+const r = await fetchUser(1);
+if (r.ok) {
+  console.log(r.value.name);   // r: {ok: true, value: User}
+} else {
+  console.error(r.error);       // r: {ok: false, error: Error}
+}
+```
+
+Rust 의 Result 패턴을 그대로.
+
+## Intersection Type
+
+```typescript
+type Named = {name: string};
+type Aged = {age: number};
+
+type Person = Named & Aged;
+
+const p: Person = {name: "kim", age: 30};
+```
+
+### 여러 interface 병합
+
+```typescript
+interface HasId {id: number}
+interface HasCreatedAt {createdAt: Date}
+interface HasName {name: string}
+
+type Entity = HasId & HasCreatedAt & HasName;
+```
+
+### Mixin 스타일
+
+```typescript
+type Loggable = {log(): void};
+type Cacheable = {cache(): void};
+
+class Service implements Loggable & Cacheable {
+  log(): void { ... }
+  cache(): void { ... }
+}
+```
+
+## Intersection with union
+
+```typescript
+type A = {x: number} | {y: number};
+type B = {z: number};
+
+type C = A & B;
+// = ({x: number} & {z: number}) | ({y: number} & {z: number})
+// = {x: number, z: number} | {y: number, z: number}
+```
+
+Distributive.
+
+## 함정: 충돌하는 필드
+
+```typescript
+type A = {value: string};
+type B = {value: number};
+
+type C = A & B;    // C.value: string & number = never
+const c: C = {value: "hi"};    // 오류 (never 에 할당 불가)
+```
+
+같은 필드 이름에 호환 안 되는 타입이 있으면 `never`.
+
+## Union vs Intersection 의미론
+
+**Union (`|`)**:
+- 값 관점: A 값들의 집합 ∪ B 값들의 집합
+- 타입 관점: A 이거나 B (알려진 것보다 적은 정보)
+- 접근: 공통 필드만 안전
+
+**Intersection (`&`)**:
+- 값 관점: A 값들의 집합 ∩ B 값들의 집합
+- 타입 관점: A 이면서 B (더 많은 정보)
+- 접근: A 의 모든 것 + B 의 모든 것
+
+**직관 정리**:
+- 개인 = 학생 ∨ 회사원 (union)
+- 학생회장 = 학생 ∧ 리더 (intersection)
+
+## 함수 매개변수의 union / intersection
+
+**Contravariance**: 매개변수는 반전됨.
+
+```typescript
+type F1 = (x: string) => void;
+type F2 = (x: number) => void;
+
+type Both1 = F1 | F2;    // (x: string) => void  |  (x: number) => void
+type Both2 = F1 & F2;    // (x: string & number) => void = (x: never) => void
+```
+
+`&` 로 조합된 함수는 **더 넓은 인자** 를 받아야 함 (실제 호출 가능한 값이 좁아짐).
+
+**리턴 타입은 covariance**:
+
+```typescript
+type G1 = () => {a: number};
+type G2 = () => {b: string};
+
+type Return1 = G1 | G2;      // () => {a: number} | () => {b: string}
+type Return2 = G1 & G2;      // () => {a: number} & {b: string} = {a, b}
+```
+
+## Nullable 패턴
+
+```typescript
+type Nullable<T> = T | null;
+type Optional<T> = T | undefined;
+type Maybe<T> = T | null | undefined;
+```
+
+```typescript
+function parseId(s: string): Maybe<number> {
+  const n = parseInt(s, 10);
+  return isNaN(n) ? null : n;
+}
+```
+
+## `keyof` union
+
+`keyof T` 는 T 의 필드 이름 union:
+
+```typescript
+type User = {id: number; name: string; email: string};
+type UserKeys = keyof User;    // "id" | "name" | "email"
+
+function get<K extends UserKeys>(user: User, key: K): User[K] {
+  return user[key];
+}
+```
+
+## 실전: State machine
+
+```typescript
+type State =
+  | {status: "idle"}
+  | {status: "loading"; requestId: string}
+  | {status: "success"; data: string}
+  | {status: "error"; error: Error};
+
+function reducer(state: State, action: Action): State {
+  switch (state.status) {
+    case "idle":
+      if (action.type === "fetch") {
+        return {status: "loading", requestId: action.id};
+      }
+      return state;
+    case "loading":
+      if (action.type === "success") {
+        return {status: "success", data: action.data};
+      }
+      if (action.type === "fail") {
+        return {status: "error", error: action.error};
+      }
+      return state;
+    // ...
+  }
+}
+```
+
+각 status 별로 접근 가능한 필드가 자동으로 좁혀짐.
+
+## 실전: Options 병합
+
+```typescript
+type BaseOptions = {name: string};
+type WithTimeout = {timeout: number};
+type WithRetry = {retry: number; retryDelay: number};
+
+type Options =
+  | BaseOptions
+  | (BaseOptions & WithTimeout)
+  | (BaseOptions & WithRetry)
+  | (BaseOptions & WithTimeout & WithRetry);
+
+// 또는 단순화
+type Options = BaseOptions & Partial<WithTimeout> & Partial<WithRetry>;
+```
+
+## 함정
+
+> [!WARNING]
+> **Discriminant 없는 union 은 좁히기 어려움**. `A | B` 두 shape 이 겹치면 typeof 로 안 됨. Discriminant field (kind, type) 추가가 관용.
+
+> [!CAUTION]
+> **`{value: string} & {value: number}` = never**. 호환 안 되는 필드 병합은 never. 실수로 발생하면 조용히 오류.
+
+> [!WARNING]
+> **Union 분배 (`extends`)**. `T extends U ? X : Y` 에서 T 가 union 이면 자동 분배. 원치 않으면 `[T] extends [U]` 로 tuple.
+
+> [!IMPORTANT]
+> **Function overload 대신 union**. 매개변수가 여러 타입이면 union 시그니처 하나로 표현 가능한 경우 많음.
+
+> [!CAUTION]
+> **Intersection 은 나열 순서와 무관**. `A & B` = `B & A`. 필드 충돌 시 우측이 이긴다고 오해 금물.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-narrowing|Type Narrowing]] - Union 좁히기
+- [[ts-type-aliases|Type Aliases]] - Union / Intersection 정의
+- [[ts-interfaces|Interfaces]] - 대비 개념
+- [[ts-generics|Generics]] - Union constraint
+- [[ts-conditional-types|Conditional Types]] - Union 분배
+- [[ts-mapped-types|Mapped Types]] - keyof union
+- [[ts-utility-types|Utility Types]] - Union 유틸리티

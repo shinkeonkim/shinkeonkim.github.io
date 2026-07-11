@@ -1,0 +1,354 @@
+---
+title: "[NestJS] Middleware"
+aliases:
+  - "NestJS Middleware"
+  - "NestFactory Middleware"
+  - "MiddlewareConsumer"
+  - "NestJS 미들웨어"
+  - "helmet nestjs"
+  - "cors nestjs"
+tags: [nestjs, middleware, express]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Middleware"
+    url: "https://docs.nestjs.com/middleware"
+  - title: "NestJS Security (Helmet, CORS)"
+    url: "https://docs.nestjs.com/security/helmet"
+---
+
+## 정의
+
+**NestJS Middleware** 는 route handler 실행 이전, Guard 도 실행되기 전에 실행되는 함수/클래스입니다. Express/Fastify 표준 middleware 를 그대로 사용할 수 있는 지점입니다. 요청 body 파싱, 로깅, session, cookie, CORS, helmet 등.
+
+## Middleware 순서 (전체 lifecycle)
+
+1. **Middleware** ← 여기
+2. Guard
+3. Interceptor (before)
+4. Pipe
+5. Controller handler
+6. Interceptor (after)
+7. Exception filter
+
+Middleware 는 raw `req`, `res` 만 접근. NestJS 컨텍스트 (`ExecutionContext`) 없음.
+
+## 클래스 스타일
+
+```typescript
+import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Request, Response, NextFunction } from 'express';
+
+@Injectable()
+export class LoggerMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    console.log(`${req.method} ${req.url}`);
+    next();
+  }
+}
+```
+
+## 함수 스타일
+
+```typescript
+export function logger(req: Request, res: Response, next: NextFunction) {
+  console.log(`${req.method} ${req.url}`);
+  next();
+}
+```
+
+**차이**:
+- 클래스: DI 가능 (`@Injectable()`)
+- 함수: DI 불가, 간단
+
+## Module 에서 등록
+
+`configure()` 메서드에서:
+
+```typescript
+import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
+
+@Module({
+  controllers: [UsersController],
+  providers: [UsersService],
+})
+export class UsersModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(LoggerMiddleware)
+      .forRoutes(UsersController);
+  }
+}
+```
+
+## forRoutes 옵션
+
+### Controller 이름
+
+```typescript
+consumer.apply(LoggerMiddleware).forRoutes(UsersController, OrdersController);
+```
+
+### URL path
+
+```typescript
+consumer.apply(LoggerMiddleware).forRoutes('users');
+consumer.apply(LoggerMiddleware).forRoutes('users/*');
+```
+
+### Method + path 객체
+
+```typescript
+import { RequestMethod } from '@nestjs/common';
+
+consumer.apply(LoggerMiddleware).forRoutes(
+  { path: 'users', method: RequestMethod.GET },
+  { path: 'users', method: RequestMethod.POST },
+);
+```
+
+### 모든 route
+
+```typescript
+consumer.apply(LoggerMiddleware).forRoutes('*');
+```
+
+## exclude
+
+```typescript
+consumer
+  .apply(LoggerMiddleware)
+  .exclude(
+    { path: 'health', method: RequestMethod.GET },
+    { path: 'metrics', method: RequestMethod.GET },
+    'admin/*',
+  )
+  .forRoutes('*');
+```
+
+## 여러 middleware
+
+```typescript
+consumer
+  .apply(LoggerMiddleware, RequestIdMiddleware, SecurityMiddleware)
+  .forRoutes('*');
+```
+
+## Global Middleware
+
+`main.ts` 에서:
+
+```typescript
+// main.ts
+import * as express from 'express';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.use(express.json({limit: '1mb'}));
+  app.use(logger);   // 함수 middleware
+  await app.listen(3000);
+}
+```
+
+**주의**: `app.use()` 로 등록한 middleware 는 controller 스코프 밖. `MiddlewareConsumer` 는 route 별 세밀.
+
+## Common Middleware 통합
+
+### CORS
+
+```typescript
+// main.ts
+app.enableCors({
+  origin: ['https://app.example.com'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true,
+});
+```
+
+또는:
+
+```typescript
+import * as cors from 'cors';
+app.use(cors({ ... }));
+```
+
+### Helmet
+
+```bash
+npm i helmet
+```
+
+```typescript
+import helmet from 'helmet';
+app.use(helmet());
+```
+
+- CSP, XSS-Protection, X-Frame-Options 등 자동
+
+### Body Parser
+
+Express 는 기본 body parser 포함. Fastify 는:
+
+```typescript
+// main.ts
+app.useGlobalPipes(new ValidationPipe());   // DTO 검증
+```
+
+Multer (파일 업로드):
+
+```bash
+npm i @nestjs/platform-express multer
+```
+
+```typescript
+import { FileInterceptor } from '@nestjs/platform-express';
+import { UploadedFile, UseInterceptors } from '@nestjs/common';
+
+@Post('upload')
+@UseInterceptors(FileInterceptor('file'))
+upload(@UploadedFile() file: Express.Multer.File) { ... }
+```
+
+### Session
+
+```bash
+npm i express-session
+npm i @types/express-session -D
+```
+
+```typescript
+import * as session from 'express-session';
+
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 3600 * 1000,
+  },
+}));
+```
+
+### Cookie Parser
+
+```bash
+npm i cookie-parser
+```
+
+```typescript
+import * as cookieParser from 'cookie-parser';
+app.use(cookieParser());
+```
+
+### Compression
+
+```bash
+npm i compression
+```
+
+```typescript
+import * as compression from 'compression';
+app.use(compression());
+```
+
+## Request ID (분산 트레이싱)
+
+```typescript
+import { v4 as uuidv4 } from 'uuid';
+
+@Injectable()
+export class RequestIdMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    const reqId = (req.headers['x-request-id'] as string) || uuidv4();
+    req['requestId'] = reqId;
+    res.setHeader('X-Request-Id', reqId);
+    next();
+  }
+}
+```
+
+Interceptor 에서도 접근:
+
+```typescript
+const req = context.switchToHttp().getRequest();
+const reqId = req.requestId;
+```
+
+## Rate Limiter (Middleware 대안: Guard)
+
+```bash
+npm i @nestjs/throttler
+```
+
+```typescript
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+
+@Module({
+  imports: [ThrottlerModule.forRoot([{ttl: 60000, limit: 100}])],
+  providers: [{provide: APP_GUARD, useClass: ThrottlerGuard}],
+})
+```
+
+Guard 로 처리하는 편이 관용. Middleware 는 인프라 (nginx, ALB) 로 처리.
+
+## Middleware 안에서 DI
+
+```typescript
+@Injectable()
+export class AuthMiddleware implements NestMiddleware {
+  constructor(private authService: AuthService) {}
+
+  async use(req: Request, res: Response, next: NextFunction) {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (token) {
+      req['user'] = await this.authService.verify(token);
+    }
+    next();
+  }
+}
+```
+
+**주의**: 인증은 Middleware 보다 [[nestjs-guards|Guard]] 가 관용. Guard 는 예외 던지기, decorator 지원, ExecutionContext 등이 유리.
+
+## Fastify 와의 차이
+
+Fastify 는 Express middleware 와 호환 아님. Fastify plugin 을 사용해야 함:
+
+```typescript
+import { fastifyHelmet } from '@fastify/helmet';
+import { fastifyCors } from '@fastify/cors';
+
+await app.register(fastifyHelmet);
+await app.register(fastifyCors);
+```
+
+## 함정
+
+> [!WARNING]
+> **Middleware 는 Guard 보다 먼저**. 인증을 middleware 로 하면 `@Public()` 데코레이터 활용 못 함. Guard 로 이관.
+
+> [!CAUTION]
+> **`next()` 안 호출** 하면 요청 hanging. 조건 분기에서 조심.
+
+> [!WARNING]
+> **Fastify 에서 Express middleware 오작동**. 예: `express-session` 은 Fastify 에서 작동 X. `@fastify/session`.
+
+> [!IMPORTANT]
+> **`app.use()` 는 global, MiddlewareConsumer 는 route 별**. 둘의 역할 구분.
+
+> [!CAUTION]
+> **Middleware DI 순서**. `configure()` 는 module 로딩 시점에 실행. Async 초기화 필요 시 dynamic module.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-modules|Modules]] - configure(consumer)
+- [[nestjs-controllers|Controllers]] - forRoutes 대상
+- [[nestjs-guards|Guards]] - 인증 대안
+- [[nestjs-interceptors|Interceptors]] - 다음 단계
+- [[nestjs-pipes|Pipes]]
+- [[fastapi-middleware|FastAPI Middleware]] - 대비
+- [[koa-middleware|Koa Middleware]] - 대비 (onion model)
+- [[flask-request-response|Flask before_request]] - 대비

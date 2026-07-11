@@ -1,0 +1,290 @@
+---
+title: "[TypeScript] Mapped Types"
+aliases:
+  - "TypeScript Mapped Types"
+  - "TS Mapped Types"
+  - "keyof mapping"
+  - "key remapping"
+  - "as clause"
+  - "TS 매핑 타입"
+tags: [typescript, types, mapped, advanced]
+category: typescript
+updated: 2026-07-07
+references:
+  - title: "TypeScript Handbook - Mapped Types"
+    url: "https://www.typescriptlang.org/docs/handbook/2/mapped-types.html"
+---
+
+## 정의
+
+**Mapped Type** 은 기존 타입의 각 필드를 순회 (`[K in keyof T]`) 하며 새 타입을 생성하는 문법입니다. `readonly`, `?` modifier 를 붙이거나 제거 (`-readonly`, `-?`) 하고, `as` clause 로 키 이름을 재작명할 수 있습니다.
+
+## 기본 구조
+
+```typescript
+type MappedType<T> = {
+  [K in keyof T]: T[K];
+};
+```
+
+이는 T 를 그대로 복사. 여기에 변형을 추가:
+
+```typescript
+type ReadOnly<T> = {
+  readonly [K in keyof T]: T[K];
+};
+
+type Optional<T> = {
+  [K in keyof T]?: T[K];
+};
+
+type Nullable<T> = {
+  [K in keyof T]: T[K] | null;
+};
+
+type Stringified<T> = {
+  [K in keyof T]: string;
+};
+```
+
+## Modifier 추가/제거
+
+### `readonly` / `-readonly`
+
+```typescript
+type Immutable<T> = {readonly [K in keyof T]: T[K]};
+type Mutable<T> = {-readonly [K in keyof T]: T[K]};
+
+type A = Immutable<{x: number}>;   // {readonly x: number}
+type B = Mutable<A>;                // {x: number}
+```
+
+### `?` / `-?`
+
+```typescript
+type Partial<T> = {[K in keyof T]?: T[K]};
+type Required<T> = {[K in keyof T]-?: T[K]};
+
+type A = Partial<{x: number}>;     // {x?: number}
+type B = Required<A>;               // {x: number}
+```
+
+## Key remapping (`as`)
+
+TypeScript 4.1+ 부터 키 이름 재작명 가능.
+
+```typescript
+type Prefixed<T> = {
+  [K in keyof T as `get_${string & K}`]: () => T[K];
+};
+
+type User = {id: number; name: string};
+type UserGetters = Prefixed<User>;
+// = {get_id: () => number; get_name: () => string}
+```
+
+### 조건부 키 필터
+
+`never` 반환 시 필드 제거:
+
+```typescript
+type OmitNever<T> = {
+  [K in keyof T as T[K] extends never ? never : K]: T[K];
+};
+
+type A = {x: number; y: never; z: string};
+type B = OmitNever<A>;   // {x: number; z: string}
+```
+
+### 필드 이름으로 필터
+
+```typescript
+type OnlyEndingWithId<T> = {
+  [K in keyof T as K extends `${string}Id` ? K : never]: T[K];
+};
+
+type A = {name: string; userId: number; postId: number; active: boolean};
+type B = OnlyEndingWithId<A>;   // {userId: number; postId: number}
+```
+
+## 값 타입으로 필터
+
+```typescript
+type PickByValue<T, V> = {
+  [K in keyof T as T[K] extends V ? K : never]: T[K];
+};
+
+type A = {id: number; name: string; age: number; active: boolean};
+type B = PickByValue<A, number>;   // {id: number; age: number}
+```
+
+## `as const` 와 결합
+
+```typescript
+const CONFIG = {host: "localhost", port: 8080} as const;
+type Config = typeof CONFIG;       // {readonly host: "localhost"; readonly port: 8080}
+type Keys = keyof Config;           // "host" | "port"
+type Values = Config[Keys];         // "localhost" | 8080
+```
+
+## 여러 필드에서 유래한 타입
+
+```typescript
+type MakeGetterSetter<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K];
+} & {
+  [K in keyof T as `set${Capitalize<string & K>}`]: (v: T[K]) => void;
+};
+
+type User = {name: string; age: number};
+type UserAccessors = MakeGetterSetter<User>;
+// = {getName: () => string; getAge: () => number;
+//    setName: (v: string) => void; setAge: (v: number) => void}
+```
+
+## Deep transformation
+
+### DeepReadonly
+
+```typescript
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object
+    ? DeepReadonly<T[K]>
+    : T[K];
+};
+
+type A = {user: {name: string; age: number}};
+type B = DeepReadonly<A>;
+// = {readonly user: {readonly name: string; readonly age: number}}
+```
+
+### DeepPartial
+
+```typescript
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+```
+
+### DeepReplace type
+
+```typescript
+type Replace<T, From, To> = {
+  [K in keyof T]: T[K] extends From ? To :
+    T[K] extends object ? Replace<T[K], From, To> :
+    T[K];
+};
+
+type A = {a: number; b: {c: number; d: string}};
+type B = Replace<A, number, string>;
+// = {a: string; b: {c: string; d: string}}
+```
+
+## Union 을 union of key 로
+
+```typescript
+type ToKeyValueUnion<T> = {
+  [K in keyof T]: {key: K; value: T[K]};
+}[keyof T];
+
+type User = {id: number; name: string; email: string};
+type Entry = ToKeyValueUnion<User>;
+// = {key: "id"; value: number}
+//   | {key: "name"; value: string}
+//   | {key: "email"; value: string}
+```
+
+`[keyof T]` 인덱싱으로 union 화.
+
+## Enum 뒤집기
+
+```typescript
+type Reverse<T> = {
+  [K in keyof T as T[K] extends string | number ? T[K] : never]: K;
+};
+
+const COLORS = {RED: "red", GREEN: "green", BLUE: "blue"} as const;
+type Colors = typeof COLORS;
+type Reversed = Reverse<Colors>;
+// = {red: "RED"; green: "GREEN"; blue: "BLUE"}
+```
+
+## Tuple 매핑
+
+```typescript
+type MapTuple<T extends any[], U> = {
+  [K in keyof T]: U;
+};
+
+type A = MapTuple<[1, 2, 3], string>;   // [string, string, string]
+
+type NullableTuple<T extends any[]> = {
+  [K in keyof T]: T[K] | null;
+};
+
+type B = NullableTuple<[string, number]>;   // [string | null, number | null]
+```
+
+Tuple 도 keyof 대상. keyof `[1, 2, 3]` 은 `"0" | "1" | "2" | "length" | ...` 를 포함.
+
+## 실전: form 스키마
+
+```typescript
+type FormSchema<T> = {
+  [K in keyof T]: {
+    label: string;
+    type: T[K] extends boolean ? "checkbox" :
+          T[K] extends number ? "number" :
+          T[K] extends Date ? "date" :
+          "text";
+    required: T[K] extends undefined ? false : true;
+    default?: T[K];
+  };
+};
+
+type User = {name: string; age: number; admin?: boolean; birth: Date};
+type UserForm = FormSchema<User>;
+```
+
+## 실전: SQL row -> object
+
+```typescript
+type SnakeToCamel<S extends string> =
+  S extends `${infer H}_${infer R}` ? `${H}${Capitalize<SnakeToCamel<R>>}` : S;
+
+type CamelKeys<T> = {
+  [K in keyof T as SnakeToCamel<string & K>]: T[K];
+};
+
+type Row = {user_id: number; created_at: Date; is_active: boolean};
+type Camel = CamelKeys<Row>;
+// = {userId: number; createdAt: Date; isActive: boolean}
+```
+
+## 함정
+
+> [!WARNING]
+> **`[K in keyof T]` 는 keyof T 를 매번 재계산**. 성능 이슈 시 alias 로 저장.
+
+> [!CAUTION]
+> **`as never` 로 필드 제거는 조건적**. Non-conditional 에서는 무의미.
+
+> [!WARNING]
+> **DeepReadonly 는 primitive 를 만나면 정지**. Array/Function 처리에 주의 (Array 는 object 로 매칭됨 -> 원치 않은 결과 가능).
+
+> [!IMPORTANT]
+> **`keyof T` 는 string | number | symbol**. 문자열 조작 (template literal) 시 `string & K` 로 좁혀야 함.
+
+> [!CAUTION]
+> **재귀 depth**. DeepReadonly 등 재귀는 TypeScript 제한 (50 단계) 에 걸릴 수 있음.
+
+## 관련 위키
+
+- [[typescript|TypeScript]] - 상위 개요
+- [[ts-conditional-types|Conditional Types]] - Mapped 와 조합
+- [[ts-template-literal-types|Template Literal Types]] - 키 조작
+- [[ts-utility-types|Utility Types]] - Mapped 로 구현
+- [[ts-generics|Generics]] - Generic mapped
+- [[ts-type-aliases|Type Aliases]]
+- [[ts-interfaces|Interfaces]] - keyof
+- [[ts-narrowing|Type Narrowing]]

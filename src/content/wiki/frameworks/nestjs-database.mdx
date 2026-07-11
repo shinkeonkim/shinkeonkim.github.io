@@ -1,0 +1,520 @@
+---
+title: "[NestJS] Database (TypeORM, Prisma, Mongoose, Drizzle)"
+aliases:
+  - "NestJS Database"
+  - "NestJS TypeORM"
+  - "NestJS Prisma"
+  - "NestJS Mongoose"
+  - "NestJS Drizzle"
+  - "NestJS 데이터베이스"
+  - "PrismaService"
+tags: [nestjs, database, orm, typeorm, prisma, mongoose]
+category: frameworks
+updated: 2026-07-07
+references:
+  - title: "NestJS Database"
+    url: "https://docs.nestjs.com/techniques/database"
+  - title: "TypeORM"
+    url: "https://typeorm.io/"
+  - title: "Prisma"
+    url: "https://www.prisma.io/"
+  - title: "Mongoose"
+    url: "https://mongoosejs.com/"
+  - title: "Drizzle ORM"
+    url: "https://orm.drizzle.team/"
+---
+
+## 정의
+
+**NestJS Database** 통합은 여러 ORM/ODM 을 module 로 감싸 DI + 트랜잭션 + 마이그레이션을 관용화합니다. 주요 선택지: **TypeORM** (성숙), **Prisma** (모던, DX 우수), **Mongoose** (MongoDB), **Drizzle** (경량 TS 우선).
+
+## 선택 가이드
+
+| 도구 | 강점 | 약점 | 언제 |
+|:---|:---|:---|:---|
+| **Prisma** | 모던 DX, type-safe, 마이그레이션 우수 | 별도 schema.prisma 파일, prisma client 크기 큼 | 새 프로젝트 |
+| **TypeORM** | 성숙, 방대한 기능 | 유지보수 활성도 논란, decorator hell | Legacy 유지 |
+| **Drizzle** | 가벼움, TS-first, SQL 그대로 | 신생, 기능 축적 중 | Edge, serverless |
+| **Mongoose** | MongoDB 사실상 표준 | MongoDB 만 | MongoDB 워크로드 |
+| **Sequelize** | 오래됨, 안정 | 타입 지원 약함 | 기존 코드 유지 |
+
+## Prisma 통합 (권장)
+
+### 설치
+
+```bash
+npm i prisma @prisma/client
+npx prisma init
+```
+
+`schema.prisma`:
+
+```prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  name      String
+  posts     Post[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Post {
+  id       Int    @id @default(autoincrement())
+  title    String
+  body     String
+  authorId Int
+  author   User   @relation(fields: [authorId], references: [id])
+}
+```
+
+### 마이그레이션
+
+```bash
+npx prisma migrate dev --name init
+npx prisma generate
+```
+
+### PrismaService
+
+```typescript
+// prisma/prisma.service.ts
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  async onModuleInit() {
+    await this.$connect();
+  }
+
+  async onModuleDestroy() {
+    await this.$disconnect();
+  }
+}
+```
+
+### PrismaModule
+
+```typescript
+// prisma/prisma.module.ts
+import { Global, Module } from '@nestjs/common';
+import { PrismaService } from './prisma.service';
+
+@Global()
+@Module({
+  providers: [PrismaService],
+  exports: [PrismaService],
+})
+export class PrismaModule {}
+```
+
+### 사용
+
+```typescript
+// users/users.service.ts
+@Injectable()
+export class UsersService {
+  constructor(private prisma: PrismaService) {}
+
+  async findAll() {
+    return this.prisma.user.findMany({include: {posts: true}});
+  }
+
+  async findOne(id: number) {
+    return this.prisma.user.findUnique({where: {id}});
+  }
+
+  async create(data: {email: string; name: string}) {
+    return this.prisma.user.create({data});
+  }
+
+  async update(id: number, data: Partial<{email: string; name: string}>) {
+    return this.prisma.user.update({where: {id}, data});
+  }
+
+  async delete(id: number) {
+    return this.prisma.user.delete({where: {id}});
+  }
+}
+```
+
+### 트랜잭션
+
+```typescript
+// Interactive
+async transferMoney(fromId: number, toId: number, amount: number) {
+  return this.prisma.$transaction(async (tx) => {
+    await tx.account.update({
+      where: {id: fromId},
+      data: {balance: {decrement: amount}},
+    });
+    await tx.account.update({
+      where: {id: toId},
+      data: {balance: {increment: amount}},
+    });
+  });
+}
+
+// Sequential
+await this.prisma.$transaction([
+  this.prisma.user.create({data: userData}),
+  this.prisma.log.create({data: logData}),
+]);
+```
+
+## TypeORM 통합
+
+### 설치
+
+```bash
+npm i @nestjs/typeorm typeorm pg
+```
+
+### Module 등록
+
+```typescript
+// app.module.ts
+import { TypeOrmModule } from '@nestjs/typeorm';
+
+@Module({
+  imports: [
+    TypeOrmModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        type: 'postgres',
+        host: config.get('DB_HOST'),
+        port: config.get('DB_PORT'),
+        username: config.get('DB_USERNAME'),
+        password: config.get('DB_PASSWORD'),
+        database: config.get('DB_NAME'),
+        entities: [User, Post],
+        synchronize: false,   // 프로덕션 false, dev 만 true
+        migrations: ['dist/migrations/*.js'],
+        migrationsRun: true,
+      }),
+    }),
+    UsersModule,
+  ],
+})
+export class AppModule {}
+```
+
+### Entity
+
+```typescript
+import { Entity, PrimaryGeneratedColumn, Column, OneToMany, ManyToOne, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+
+@Entity('users')
+export class User {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({unique: true})
+  email: string;
+
+  @Column()
+  name: string;
+
+  @OneToMany(() => Post, post => post.author)
+  posts: Post[];
+
+  @CreateDateColumn()
+  createdAt: Date;
+
+  @UpdateDateColumn()
+  updatedAt: Date;
+}
+```
+
+### Repository
+
+```typescript
+// users.module.ts
+@Module({
+  imports: [TypeOrmModule.forFeature([User])],
+  providers: [UsersService],
+  controllers: [UsersController],
+})
+export class UsersModule {}
+
+// users.service.ts
+@Injectable()
+export class UsersService {
+  constructor(
+    @InjectRepository(User) private usersRepo: Repository<User>,
+  ) {}
+
+  async findAll(): Promise<User[]> {
+    return this.usersRepo.find({relations: {posts: true}});
+  }
+
+  async findOne(id: number): Promise<User | null> {
+    return this.usersRepo.findOne({where: {id}});
+  }
+
+  async create(dto: CreateUserDto): Promise<User> {
+    const user = this.usersRepo.create(dto);
+    return this.usersRepo.save(user);
+  }
+}
+```
+
+### QueryBuilder
+
+```typescript
+const users = await this.usersRepo
+  .createQueryBuilder('u')
+  .leftJoinAndSelect('u.posts', 'p')
+  .where('u.email LIKE :email', {email: '%example.com'})
+  .andWhere('u.createdAt > :date', {date: since})
+  .orderBy('u.createdAt', 'DESC')
+  .take(10)
+  .getMany();
+```
+
+### Migration
+
+```bash
+# 생성
+npm run typeorm migration:generate -- -d src/data-source.ts src/migrations/InitSchema
+
+# 실행
+npm run typeorm migration:run -- -d src/data-source.ts
+
+# 롤백
+npm run typeorm migration:revert -- -d src/data-source.ts
+```
+
+## Mongoose (MongoDB)
+
+### 설치
+
+```bash
+npm i @nestjs/mongoose mongoose
+```
+
+### Schema
+
+```typescript
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+@Schema({timestamps: true})
+export class User {
+  @Prop({required: true, unique: true})
+  email: string;
+
+  @Prop({required: true})
+  name: string;
+
+  @Prop()
+  bio?: string;
+
+  @Prop([{type: Types.ObjectId, ref: 'Post'}])
+  posts: Types.ObjectId[];
+}
+
+export type UserDocument = User & Document;
+export const UserSchema = SchemaFactory.createForClass(User);
+```
+
+### Module
+
+```typescript
+@Module({
+  imports: [
+    MongooseModule.forRoot('mongodb://localhost/nest'),
+    MongooseModule.forFeature([{name: User.name, schema: UserSchema}]),
+  ],
+})
+export class UsersModule {}
+```
+
+### Service
+
+```typescript
+@Injectable()
+export class UsersService {
+  constructor(
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+  ) {}
+
+  async findAll(): Promise<User[]> {
+    return this.userModel.find().populate('posts').exec();
+  }
+
+  async create(dto: CreateUserDto): Promise<User> {
+    return this.userModel.create(dto);
+  }
+}
+```
+
+## Drizzle (경량 TS)
+
+### 설치
+
+```bash
+npm i drizzle-orm postgres
+npm i -D drizzle-kit
+```
+
+### Schema
+
+```typescript
+import { pgTable, serial, varchar, timestamp } from 'drizzle-orm/pg-core';
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  email: varchar('email', {length: 256}).notNull().unique(),
+  name: varchar('name', {length: 100}).notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+```
+
+### Provider
+
+```typescript
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+
+@Module({
+  providers: [
+    {
+      provide: 'DRIZZLE',
+      useFactory: () => {
+        const client = postgres(process.env.DATABASE_URL);
+        return drizzle(client);
+      },
+    },
+  ],
+  exports: ['DRIZZLE'],
+})
+export class DatabaseModule {}
+```
+
+### Service
+
+```typescript
+@Injectable()
+export class UsersService {
+  constructor(@Inject('DRIZZLE') private db: any) {}
+
+  async findAll() {
+    return this.db.select().from(users);
+  }
+
+  async create(data: NewUser) {
+    return this.db.insert(users).values(data).returning();
+  }
+}
+```
+
+## Connection Pool
+
+프로덕션은 pool 설정 필수:
+
+```typescript
+// Prisma
+new PrismaClient({
+  datasources: {db: {url: `${databaseUrl}?connection_limit=10&pool_timeout=20`}},
+})
+
+// TypeORM
+{
+  ...
+  extra: {
+    max: 10,
+    idleTimeoutMillis: 30000,
+  },
+}
+```
+
+## 트랜잭션 패턴
+
+### Prisma
+
+```typescript
+async createUserWithPosts(dto: CreateUserWithPostsDto) {
+  return this.prisma.$transaction(async (tx) => {
+    const user = await tx.user.create({data: {email: dto.email, name: dto.name}});
+    for (const postData of dto.posts) {
+      await tx.post.create({data: {...postData, authorId: user.id}});
+    }
+    return user;
+  });
+}
+```
+
+### TypeORM (DataSource)
+
+```typescript
+async createWithTransaction() {
+  return this.dataSource.transaction(async (manager) => {
+    const user = await manager.save(User, {...});
+    await manager.save(Post, [...]);
+    return user;
+  });
+}
+```
+
+### `nestjs-cls` + AsyncLocalStorage (transaction propagation)
+
+여러 service 를 하나의 트랜잭션으로 묶기 어려운 경우 `nestjs-cls` + Prisma extension 또는 TypeORM `QueryRunner` 로 request-scoped session.
+
+## Health Check
+
+`@nestjs/terminus` + DB indicator:
+
+```typescript
+@Get('health')
+@HealthCheck()
+check() {
+  return this.health.check([
+    () => this.db.pingCheck('database'),
+    () => this.mongoose.pingCheck('mongo'),
+  ]);
+}
+```
+
+## 함정
+
+> [!WARNING]
+> **`synchronize: true` 를 프로덕션에**. DB 스키마 자동 변경. 데이터 손실 위험. 마이그레이션 강제.
+
+> [!CAUTION]
+> **N+1 query**. Prisma `include`, TypeORM `relations`, Mongoose `populate` 로 해결. 안 하면 lazy load 로 요청당 수십 query.
+
+> [!WARNING]
+> **트랜잭션 안에서 외부 API 호출 금지**. DB lock 유지 시간 늘어남.
+
+> [!IMPORTANT]
+> **Prisma binary target**. Docker 이미지가 alpine 이면 `binaryTargets = ["linux-musl"]` 필요.
+
+> [!CAUTION]
+> **Migration timing**. Deploy 전 migration 실행. Blue/green 시에는 forward-compatible schema.
+
+## 관련 위키
+
+- [[nestjs|NestJS]] - 상위 개요
+- [[nestjs-modules|Modules]] - Dynamic module
+- [[nestjs-providers|Providers]] - Injectable ORM
+- [[nestjs-config|Config]] - DB URL 관리
+- [[nestjs-testing|Testing]] - DB 격리
+- [[nestjs-deployment|Deployment]] - Migration 자동화
+- [[nestjs-microservices|Microservices]]
+- [[nestjs-exception-filters|Exception Filters]] - DB 예외 매핑
+- [[fastapi-pydantic|FastAPI + Pydantic]] - 대비
