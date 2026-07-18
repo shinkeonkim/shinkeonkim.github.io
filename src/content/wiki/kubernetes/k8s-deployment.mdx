@@ -3,7 +3,7 @@ title: "[K8s] Deployment: ReplicaSet, rolling update, rollback"
 aliases: ["Deployment", "ReplicaSet", "rolling update", "k8s rollback", "maxUnavailable", "maxSurge", "RollingUpdate strategy"]
 tags: [kubernetes, deployment, rollout, k8s]
 category: kubernetes
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "Kubernetes Docs: Deployments"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
@@ -12,6 +12,15 @@ references:
 ## 정의
 
 **Deployment** = *stateless 워크로드를 위한 컨트롤러*. 내부적으로 *ReplicaSet 관리 + rolling update / rollback*.
+
+## 사용 시나리오
+
+| 상황 | Deployment 역할 |
+|---|---|
+| Stateless API / Web 배포 | replica 수 보장 + rolling update |
+| 이미지 버전 업그레이드 | 무중단 rolling update |
+| 배포 실패 시 복구 | revision history 로 rollback |
+| 점진적 배포 | maxSurge / maxUnavailable 조절 |
 
 ## 계층
 
@@ -46,6 +55,9 @@ spec:
     rollingUpdate:
       maxUnavailable: 1
       maxSurge: 1
+  minReadySeconds: 10           # 새 pod ready 후 추가 10초 대기
+  progressDeadlineSeconds: 300  # 5분 내 완료 안 되면 Failed
+  revisionHistoryLimit: 10
   template:
     metadata:
       labels: { app: web }
@@ -57,6 +69,15 @@ spec:
             - containerPort: 80
           readinessProbe:
             httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
 ```
 
 ## Rolling Update
@@ -99,6 +120,47 @@ strategy:
 - *다운타임 발생*.
 - *DB schema 마이그레이션* 같이 *두 버전 동시 운영 불가* 한 경우.
 
+## 배포 상태 흐름
+
+```mermaid
+flowchart LR
+    Prog["Progressing<br/>(롤아웃 중)"]
+    Done["Complete<br/>(모든 pod ready)"]
+    Fail["Failed<br/>(deadline 초과)"]
+
+    Prog -->|"모든 replica ready"| Done
+    Prog -->|"progressDeadlineSeconds 초과"| Fail
+    Fail -->|"rollback"| Prog
+```
+
+- `progressDeadlineSeconds` 기본 600초. 이 시간 내 *진행 없으면 `Failed` 마킹*.
+- `minReadySeconds` = 새 pod 가 ready 된 후 *추가 대기 시간*. 실제 트래픽 안정화 확인용.
+
+## ConfigMap / Secret 주입
+
+```yaml
+spec:
+  containers:
+    - name: app
+      image: myapp:1.0
+      env:
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: db_host
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secret
+              key: db_password
+      envFrom:
+        - configMapRef:
+            name: app-config    # ConfigMap 의 모든 key → env
+```
+
+> ConfigMap/Secret 변경 시 *pod 재시작 필요* (envFrom). 실시간 반영은 *volumeMount + 파일 감시* 패턴.
+
 ## Rollout 명령
 
 ```bash
@@ -132,6 +194,53 @@ spec:
 kubectl get rs   # 옛 ReplicaSet 들이 있음 (replica=0)
 ```
 
+## 헬스 체크 3종
+
+```yaml
+spec:
+  containers:
+    - name: app
+      livenessProbe:        # 실패 시 pod 재시작
+        httpGet: { path: /healthz, port: 8080 }
+        initialDelaySeconds: 15
+        failureThreshold: 3
+      readinessProbe:       # 실패 시 Service 에서 제외
+        httpGet: { path: /ready, port: 8080 }
+        periodSeconds: 5
+      startupProbe:         # 느린 앱 초기화 대기 (1.18+)
+        httpGet: { path: /healthz, port: 8080 }
+        failureThreshold: 30
+        periodSeconds: 10   # 최대 300초 대기
+```
+
+| 프로브 | 실패 시 동작 | 용도 |
+|---|---|---|
+| `livenessProbe` | pod 재시작 | 데드락 / 무한루프 감지 |
+| `readinessProbe` | Service 엔드포인트 제거 | 트래픽 차단 (배포 중) |
+| `startupProbe` | 초기화 완료 전 다른 프로브 비활성 | 느린 앱 초기화 |
+
+> [!TIP]
+> *startupProbe 없이 livenessProbe 만* 쓰면 느린 앱이 *초기화 중 재시작 루프* 에 빠짐.
+
+## PodDisruptionBudget
+
+노드 드레인 / 클러스터 업그레이드 시 *pod 가용성 최소 보장*.
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  minAvailable: 2          # 최소 2개 항상 유지
+  # maxUnavailable: 1      # 또는 최대 1개까지 중단 허용
+  selector:
+    matchLabels: { app: web }
+```
+
+> [!TIP]
+> PDB 없으면 `kubectl drain` 이 *모든 pod 를 동시에 퇴거* 할 수 있음. *3개 replica + minAvailable: 2* 조합이 안전.
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -139,6 +248,7 @@ kubectl get rs   # 옛 ReplicaSet 들이 있음 (replica=0)
 > 2. **`maxSurge=0`** = 새 pod 만들기 전에 옛 pod 죽임 → 일시 *capacity 부족*.
 > 3. **이미지 tag `latest`** = `kubectl rollout restart` 안 하면 *새 이미지 안 받음*. 항상 *명시 tag* (sha).
 > 4. **Resource limits 없이** = 한 pod 가 *node 자원 독점* → 다른 pod throttle.
+> 5. **minReadySeconds 미설정** = 새 pod 가 ready 직후 바로 old 삭제 → *실제 트래픽 오류 가능*.
 
 ## 관련 위키
 

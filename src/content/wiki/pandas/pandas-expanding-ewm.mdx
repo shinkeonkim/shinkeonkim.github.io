@@ -18,6 +18,23 @@ references:
 - **`expanding()`** : 시작부터 현재까지 누적 윈도우
 - **`ewm()`** : exponentially weighted (지수 가중)
 
+## 윈도우 개념 비교
+
+```mermaid
+flowchart TD
+    D["시계열 데이터"]
+    D -->|"고정 n 개만"| R["rolling(n)<br/>균등 가중, 슬라이딩"]
+    D -->|"시작 → 현재 전체"| E["expanding()<br/>누적 성장, 균등 가중"]
+    D -->|"전체, 지수 감쇠"| W["ewm(span=n)<br/>최근 값 강조"]
+```
+
+| 항목 | `rolling(n)` | `expanding()` | `ewm(span=n)` |
+|:---|:---|:---|:---|
+| 윈도우 크기 | 고정 n | 1 → 무한 | 사실상 무한 |
+| 가중치 | 균등 | 균등 | *지수 감쇠* |
+| 초기 NaN | n-1 개 | 0 개 (min_periods=1) | 0 개 |
+| 노이즈 민감도 | 중간 | 낮음 | *낮음 (최근 강조)* |
+
 ## expanding
 
 ```python
@@ -86,6 +103,46 @@ $$
 
 지수 감쇠 가중. 모든 과거 값을 고려하지만 가중치가 지수적으로 감소.
 
+## ewm 추가 파라미터
+
+```python
+# min_periods: 최소 관측 수 (미만이면 NaN)
+s.ewm(span=5, min_periods=3).mean()
+
+# ignore_na: NaN 을 건너뛰고 가중치 계산
+s.ewm(span=5, ignore_na=True).mean()
+
+# times: 불균등 시간 간격 지원 (pandas 1.1+)
+import numpy as np
+times = pd.to_datetime(['2026-01-01', '2026-01-02', '2026-01-05', '2026-01-06'])
+s2 = pd.Series([1.0, 2.0, 3.0, 4.0], index=times)
+s2.ewm(halflife='1D', times=s2.index).mean()
+```
+
+| 파라미터 | 기본값 | 의미 |
+|:---|:---|:---|
+| `min_periods` | 0 | 최소 관측 수 (미만 NaN) |
+| `ignore_na` | False | NaN 위치 가중치 처리 |
+| `adjust` | True | 초기 가중치 보정 여부 |
+| `times` | None | 불균등 시간 간격 지원 |
+
+> [!TIP]
+> *시계열 데이터가 불규칙 간격* (주말 없음, 결측 등) 이면 `times=` + `halflife='1D'` 조합으로 *실제 시간 기반 감쇠* 적용.
+
+## ewm var / std / cov
+
+```python
+# 분산, 표준편차
+s.ewm(span=10).var()
+s.ewm(span=10).std()
+
+# 공분산, 상관계수
+s1.ewm(span=10).cov(s2)
+s1.ewm(span=10).corr(s2)
+```
+
+금융 리스크 모델 (GARCH 근사), 포트폴리오 변동성 추적에 활용.
+
 ## rolling vs expanding vs ewm
 
 | 항목 | 윈도우 | 가중치 |
@@ -133,6 +190,20 @@ df['smoothed'] = df['signal'].ewm(span=10).mean()
 # noise 줄이기
 ```
 
+### 이상 탐지 (Z-score 기반)
+
+```python
+# expanding 으로 누적 평균/표준편차 계산 후 Z-score
+df['mean_so_far'] = df['value'].expanding().mean()
+df['std_so_far']  = df['value'].expanding().std()
+df['z_score']     = (df['value'] - df['mean_so_far']) / df['std_so_far']
+
+# |z| > 3 이면 이상치
+df['is_anomaly'] = df['z_score'].abs() > 3
+```
+
+*온라인 이상 탐지*: 과거 전체 분포를 기준으로 현재 값이 얼마나 벗어났는지 실시간 계산.
+
 ## adjust 옵션
 
 ```python
@@ -142,6 +213,45 @@ s.ewm(span=3, adjust=False).mean()   # 재귀식 사용 (online 계산용)
 
 - `adjust=True` : 시작 부분의 가중치도 보정
 - `adjust=False` : 단순 재귀 (실시간 처리에 적합)
+
+## Rolling vs EWM 시각 비교
+
+<ChartJs
+  client:visible
+  type="line"
+  title="Rolling Mean vs EWM Mean (span=3)"
+  caption="EWM 이 최근 값 변화에 더 빠르게 반응한다."
+  height="240px"
+  data={{
+    labels: ['t=0','t=1','t=2','t=3','t=4','t=5','t=6','t=7'],
+    datasets: [
+      {
+        label: '원본 데이터',
+        data: [10, 20, 10, 30, 10, 40, 10, 50],
+        borderColor: '#94a3b8',
+        borderDash: [4, 4],
+        pointRadius: 3,
+        fill: false,
+      },
+      {
+        label: 'rolling(3).mean()',
+        data: [null, null, 13.3, 20.0, 16.7, 26.7, 20.0, 33.3],
+        borderColor: '#3b82f6',
+        fill: false,
+      },
+      {
+        label: 'ewm(span=3).mean()',
+        data: [10.0, 15.0, 12.5, 21.3, 15.6, 27.8, 18.9, 34.5],
+        borderColor: '#f59e0b',
+        fill: false,
+      },
+    ],
+  }}
+  options={{
+    plugins: { legend: { position: 'top' } },
+    scales: { y: { title: { display: true, text: '값' } } },
+  }}
+/>
 
 ## 함정
 
@@ -167,6 +277,16 @@ df['ema'] = df.groupby('user')['x'].transform(
 ```
 
 `apply` 보다 `transform` 권장 (원본 shape 유지).
+
+### 4. ewm + NaN 혼재
+
+```python
+# NaN 이 있으면 ignore_na=True 로 건너뜀
+s_with_nan = pd.Series([1, None, 3, 4, 5])
+s_with_nan.ewm(span=3, ignore_na=True).mean()
+```
+
+기본 `ignore_na=False` 는 NaN 위치에서 가중치를 0 으로 처리해 결과가 달라짐.
 
 ## 참고
 

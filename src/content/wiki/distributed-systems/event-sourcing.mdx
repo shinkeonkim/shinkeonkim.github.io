@@ -164,12 +164,115 @@ v2: Deposited(amount: int, currency: string)   ← currency 추가
 
 ```mermaid
 flowchart TD
-    Q[GDPR: 사용자 데이터 삭제 요구]
-    Q --> Issue[ES: 이벤트는 불변 → 어떻게 지움?]
-    Issue --> S1["1. Crypto-shredding: 개인정보 *암호화*, key 만 삭제"]
+    Q["GDPR: 사용자 데이터 삭제 요구"]
+    Q --> Issue["ES: 이벤트는 불변 → 어떻게 지움?"]
+    Issue --> S1["1. Crypto-shredding: 개인정보 암호화, key 만 삭제"]
     Issue --> S2["2. Event redaction: 특정 필드 null 처리"]
     Issue --> S3["3. 별도 저장: 개인정보는 가변 DB, 이벤트는 reference"]
 ```
+
+## Aggregate 설계 원칙
+
+| 원칙 | 의미 |
+|---|---|
+| *단일 트랜잭션 경계* | Aggregate 안에서만 불변식 보장 |
+| *작게 유지* | 한 개 Aggregate = 한 개 Entity + 직접 소유 ValueObject |
+| *다른 Aggregate 는 ID 참조* | 직접 참조 금지 |
+| *Eventually consistent* | Aggregate 간 일관성은 eventual |
+
+```mermaid
+flowchart LR
+    subgraph Order["Order Aggregate"]
+        O[Order] --> L1[OrderLine]
+        O --> L2[OrderLine]
+        O --> Addr[ShippingAddress]
+    end
+    subgraph Customer["Customer Aggregate (별개)"]
+        C[Customer]
+    end
+    O -.->|"customerId (ID 참조)"| C
+```
+
+## Command vs Event 구분
+
+```mermaid
+flowchart LR
+    Cmd["Command<br/>(의도, 거절 가능)"]
+    Evt["Event<br/>(사실, 불변)"]
+    Agg[Aggregate]
+    Cmd -->|"validate + apply"| Agg
+    Agg -->|"emit"| Evt
+    Evt -->|"append"| Store[(Event Store)]
+```
+
+| 구분 | Command | Event |
+|---|---|---|
+| 형식 | `PlaceOrder` | `OrderPlaced` |
+| 시제 | 현재/미래 | 과거 |
+| 거절 가능? | Yes (validation) | No (이미 발생) |
+| 저장 | 저장 안 함 (보통) | 영구 저장 |
+
+## Projection 전략
+
+```mermaid
+flowchart TB
+    Store[(Event Store)] -->|"event stream"| P1[Projection Worker 1]
+    Store -->|"event stream"| P2[Projection Worker 2]
+    P1 -->|"upsert"| V1[("잔액 View")]
+    P2 -->|"upsert"| V2[("거래 내역 View")]
+    P1 -->|"checkpoint"| CP1[("checkpoint 1")]
+    P2 -->|"checkpoint"| CP2[("checkpoint 2")]
+```
+
+- *checkpoint*: 마지막으로 처리한 event version. 재시작 시 여기서 재개.
+- *eventual consistency*: projection 이 약간 뒤처짐 허용.
+
+## 이벤트 스키마 진화 전략
+
+| 전략 | 설명 | 추천 |
+|---|---|---|
+| Default value | 신규 필드에 기본값 삽입 | 단순 추가 시 |
+| Up-cast | 로드 시 구버전 → 신버전 변환 | 필드 이름 변경 |
+| Weak schema | JSON + 필드 검사 코드에서 | 스키마 불안정 |
+| Re-write (비권장) | 옛 이벤트 수정 | 불변 원칙 위반 |
+
+```python
+# Up-cast 예시
+class DepositedV1ToV2:
+    def upcast(self, event: dict) -> dict:
+        if event['version'] == 1:
+            event['payload']['currency'] = 'USD'   # 기본값 보강
+            event['version'] = 2
+        return event
+```
+
+## 테스트 전략
+
+```python
+# Given-When-Then 패턴 (이벤트 기반)
+def test_withdraw_sufficient_funds():
+    # Given: 과거 이벤트로 상태 세팅
+    account = Account.from_events([
+        Deposited(amount=200),
+        Deposited(amount=100),
+    ])
+
+    # When: 커맨드 실행
+    events = account.withdraw(50)
+
+    # Then: 발행 이벤트 검증
+    assert len(events) == 1
+    assert isinstance(events[0], Withdrawn)
+    assert events[0].amount == 50
+
+def test_withdraw_insufficient_funds():
+    account = Account.from_events([Deposited(amount=30)])
+    with pytest.raises(InsufficientFundsError):
+        account.withdraw(50)
+```
+
+> [!TIP]
+> ES 테스트의 핵심: *DB 없이 이벤트 리스트만으로 Aggregate 를 만들고 검증*. 매우 빠른 단위 테스트 가능.
 
 ## 흔한 함정
 
@@ -185,4 +288,4 @@ flowchart TD
 - [[saga-pattern]]
 - [[outbox-pattern]]
 - [[kafka]] (이벤트 저장)
-- [[Redis Streams]]
+- [[Redis Stream]]

@@ -3,7 +3,7 @@ title: "[Concurrency] Retry + Exponential Backoff + Jitter"
 aliases: ["Retry", "Exponential backoff", "Jitter", "AWS retry policy", "retry storm", "thundering herd retry"]
 tags: [retry, backoff, jitter, resilience, concurrency]
 category: concurrency
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "AWS Architecture: Exponential Backoff and Jitter"
     url: "https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/"
@@ -19,7 +19,7 @@ references:
 flowchart LR
     Linear["Linear<br/>1s, 2s, 3s, 4s, ..."]
     Exp["Exponential<br/>1s, 2s, 4s, 8s, 16s, ..."]
-    ExpJ["Exp + Jitter<br/>1s ± random, 4s ± random, ..."]
+    ExpJ["Exp + Jitter<br/>1s + random, 4s + random, ..."]
     DecorJ["Decorrelated Jitter<br/>AWS 권장"]
 ```
 
@@ -47,6 +47,27 @@ sleep = random.uniform(base, prev_sleep * 3)
 ```
 
 *과거 sleep 의 함수*. *완전 무작위 + 점진 증가*. 평균적으로 가장 짧은 retry 시간.
+
+## 재시도 상태 머신
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Service
+
+    C->>S: 1차 요청
+    S-->>C: 503 Unavailable
+    Note over C: wait 1s + jitter
+    C->>S: 2차 재시도
+    S-->>C: 503 Unavailable
+    Note over C: wait 2s + jitter
+    C->>S: 3차 재시도
+    S-->>C: 200 OK
+    Note over C: 성공, 응답 반환
+```
+
+각 retry 사이에 `sleep` 을 두고, sleep 은 attempt 가 늘어날수록 exponentially 커진다. jitter 로 동일 시각 재시도를 분산한다.
 
 ## 비교 시뮬레이션
 
@@ -123,6 +144,117 @@ flowchart LR
 
 > 무한 retry = 사용자 *영원히 대기*. 빠른 *deadline* + fallback.
 
+## Deadline 전파
+
+분산 시스템에서는 클라이언트가 설정한 deadline 을 **모든 하위 서비스로 전파**해야 한다. 그렇지 않으면 클라이언트는 이미 timeout 되었는데 하위 서비스는 계속 retry 한다.
+
+```python
+import grpc
+from datetime import datetime, timedelta
+
+# gRPC: deadline 을 context 로 전파
+with grpc.insecure_channel("service:50051") as channel:
+    stub = ServiceStub(channel)
+    deadline = datetime.utcnow() + timedelta(seconds=10)
+    # timeout 이 남은 시간으로 자동 설정
+    resp = stub.CallMethod(request, timeout=10.0)
+```
+
+HTTP 에서는 `X-Request-Deadline` 같은 커스텀 헤더 또는 `X-B3-Deadline` 로 전파한다.
+
+> [!CAUTION]
+> deadline 전파 없이 retry 하면 *zombie retry* 가 발생한다. 클라이언트는 504 를 받고 떠났는데 서버 내부에서는 수 분간 재시도가 계속된다. 자원 낭비 + 부하 증폭.
+
+## 구현 예시
+
+### Python: tenacity
+
+```python
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    wait_random,
+    retry_if_exception_type,
+)
+import requests
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=16) + wait_random(0, 2),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    reraise=True,
+)
+def call_api(url: str) -> dict:
+    resp = requests.get(url, timeout=5)
+    resp.raise_for_status()
+    return resp.json()
+```
+
+### Java: Resilience4j
+
+```java
+RetryConfig config = RetryConfig.custom()
+    .maxAttempts(5)
+    .intervalFunction(IntervalFunction.ofExponentialRandomBackoff(500, 2.0, 0.5))
+    .retryOnException(e -> e instanceof HttpServerErrorException)
+    .build();
+
+Retry retry = Retry.of("api-call", config);
+Supplier<String> decorated = Retry.decorateSupplier(retry, () -> callDownstream());
+Try.ofSupplier(decorated).recover(ex -> fallback()).get();
+```
+
+### Go: backoff 라이브러리
+
+```go
+import "github.com/cenkalti/backoff/v4"
+
+b := backoff.NewExponentialBackOff()
+b.InitialInterval = 1 * time.Second
+b.MaxInterval = 16 * time.Second
+b.MaxElapsedTime = 60 * time.Second
+
+err := backoff.RetryNotify(
+    func() error {
+        return callAPI(ctx)
+    },
+    backoff.WithContext(b, ctx),
+    func(err error, d time.Duration) {
+        log.Printf("retry after %v: %v", d, err)
+    },
+)
+```
+
+## Hedged Requests
+
+Retry 와 다른 전략: *첫 요청이 일정 시간 내에 응답 안 오면 두 번째 요청을 병렬로 보내고, 먼저 오는 응답을 사용*. 실패 없이 tail latency 를 낮추는 패턴.
+
+```
+t=0:   → request 1
+t=50ms → (응답 없음) → request 2 병렬 시작
+t=80ms ← response 2 도착 → response 1 취소
+```
+
+```python
+import asyncio
+
+async def hedged_call(url: str, hedge_delay=0.05) -> dict:
+    async with aiohttp.ClientSession() as session:
+        task1 = asyncio.create_task(session.get(url))
+        await asyncio.sleep(hedge_delay)
+        task2 = asyncio.create_task(session.get(url))
+        done, pending = await asyncio.wait(
+            [task1, task2], return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        return await done.pop()
+```
+
+> [!IMPORTANT]
+> Hedging 은 *non-idempotent 요청 (POST 결제 등) 에는 금지*. 멱등 읽기 (GET, SELECT) 에만 사용.
+
 ## Retry-After 헤더
 
 ```http
@@ -166,6 +298,7 @@ flowchart LR
 > 3. **Idempotent 아닌데 retry** = 결제 중복. Idempotency-Key 필수.
 > 4. **Max attempt 무한** = 사용자 영원히 대기. timeout + fallback.
 > 5. **Nested retry** = 계층마다 retry (client → SDK → SDK 내부) → *retry × retry* 폭증. 한 곳에서만.
+> 6. **Deadline 미전파** = 클라이언트 timeout 후에도 하위 서비스가 계속 재시도.
 
 ## 관련 위키
 
@@ -173,3 +306,4 @@ flowchart LR
 - [[idempotency-keys]]
 - [[backpressure]]
 - [[rate-limiting]]
+- [[api-gateway]], gateway 레벨 retry 정책 설정

@@ -4,7 +4,7 @@ aliases: ["coordinate compression", "좌표 압축", "값 압축", "값 매핑",
 tags: [algorithm, query, coordinate-compression]
 category: algorithm
 subcategory: query
-updated: 2026-06-25
+updated: 2026-07-18
 references:
   - id: solved-ac
     note: "tag: coordinate_compression"
@@ -14,11 +14,29 @@ references:
 
 **값 / 좌표 압축 (Coordinate Compression)** 은 큰 범위의 값 (예: 10^9) 을 정렬된 순서를 유지하며 **작은 정수 인덱스** (0..K-1) 로 매핑하는 기법. K = unique value count.
 
+이 기법의 핵심 속성:
+- **순서 보존**: 원래 값의 대소 관계가 압축 후에도 동일하게 유지.
+- **가역성**: `uniq[compressed[i]] == original[i]` 로 언제든 복원 가능.
+- **크기 축소**: 범위 10^9 → K ≤ N 으로, 희소한 값들을 연속 인덱스로 변환.
+
 ## 문제 상황과 동기
 
 값의 범위가 10^9 이고 입력 크기가 10^5 라면, Fenwick tree 나 segment tree 를 값 자체를 인덱스로 사용할 수 없음. 압축하면 희소한 값들을 연속된 인덱스로 바꾸어 **배열 기반 자료구조**를 사용 가능.
 
 핵심 통찰: *상대 순서만 중요하지 절대값은 중요하지 않다. 값을 정렬하고 중복 제거한 뒤, 각 값의 순위(index)가 곧 압축된 좌표.*
+
+### 언제 좌표 압축이 필요한가?
+
+```mermaid
+flowchart TD
+    Start["입력 값 범위가 크다 (10^8 이상)"]
+    Start --> Q1{"배열/트리에 값을<br/>직접 인덱스로 쓸 것?"}
+    Q1 -->|No| End1["압축 불필요"]
+    Q1 -->|Yes| Q2{"입력 크기 N"}
+    Q2 -->|"N <= 10^7"| End2["직접 배열 가능"]
+    Q2 -->|"N 이 작고 값이 크다"| CC["좌표 압축 적용"]
+    CC --> DS["Fenwick, Segment Tree, BIT, 카운팅 배열 등 사용 가능"]
+```
 
 ## 시각화
 
@@ -49,6 +67,18 @@ compress(a[]):
 // 예: a = [-5, 10^9, 0, -5, 42]
 // sorted = [-5, 0, 42, 10^9]
 // compressed = [0, 3, 1, 0, 2]
+```
+
+### 단계별 흐름
+
+```mermaid
+flowchart LR
+    A["원본 배열\n[-5, 10^9, 0, -5, 42]"]
+    B["유니크 정렬\n[-5, 0, 42, 10^9]"]
+    C["이진 탐색 매핑\n[0, 3, 1, 0, 2]"]
+    A -->|"sort + unique"| B
+    B -->|"lower_bound"| C
+    C --> R["Fenwick/SegTree 에 사용"]
 ```
 
 ## 구현
@@ -178,19 +208,70 @@ public class Main {
 | **LIS** | 음수/큰 값 좌표를 순위로 변환해 O(N log N) LIS |
 | **2D 압축** | x, y 각각 압축해 희소 2D 그리드 구성 |
 
+### LIS 와 조합 예시
+
+LIS (Longest Increasing Subsequence) 에서 좌표 압축을 자주 활용한다.
+
+```text
+// 값 범위가 크거나 음수를 포함하는 경우
+a = [100, -5, 200, -5, 50]
+
+// 압축 후
+compressed = [2, 0, 3, 0, 1]
+
+// 이제 Fenwick tree 크기 = K = 4 로 LIS 계산 가능
+```
+
+### 2D 압축
+
+2D 좌표 문제에서 x, y 를 각각 독립적으로 압축한다. 결과로 (최대 N)×(최대 N) 크기의 2D 배열/트리를 사용 가능.
+
+```text
+points = [(10^9, 10^8), (5, 3), (10^9, 3)]
+xs = compress([10^9, 5, 10^9])  -> [1, 0, 1]
+ys = compress([10^8, 3, 3])     -> [1, 0, 0]
+// 결과: (1,1), (0,0), (1,0) -> 3x2 그리드
+```
+
 ## 함정
 
 ### 1. 중복 제거 누락
 
 `unique()` 또는 `set()` 으로 중복을 제거하지 않으면, 같은 값이 여러 인덱스를 가져 Fenwick 트리에서 overflow / 잘못된 결과.
 
+```cpp
+// 잘못된 예: sort만 하고 unique 안 함
+vector<int> uniq = a;
+sort(uniq.begin(), uniq.end());
+// uniq = [-5, -5, 0, 42, 10^9] -- 중복 있음!
+// -5 의 lower_bound = 0, -5 의 second occurrence = index 1
+// 같은 값 두 개가 다른 인덱스를 가짐 -> 오류
+```
+
 ### 2. lower_bound 대신 map 사용
 
 Python 의 `dict` 나 C++ 의 `unordered_map` 을 쓰면 O(1) mapping 이 가능하지만, 순서가 필요한 경우 (구간 쿼리, Fenwick) 는 정렬 배열 + binary search 가 필수.
 
+```python
+# 경우에 따라 dict 도 OK (순서 필요 없을 때)
+rank = {v: i for i, v in enumerate(sorted(set(a)))}
+compressed = [rank[v] for v in a]
+# 단: range query 에서는 인덱스 순서가 의미를 가져야 하므로 이 방식이 더 명확
+```
+
 ### 3. 0-based vs 1-based
 
 Fenwick tree 는 1-based index 가 필요. 압축 결과가 0-based (lower_bound 기본) 이면 `compressed[i] + 1` 사용.
+
+```cpp
+// Fenwick tree 와 함께 사용 시
+int idx = lower_bound(uniq.begin(), uniq.end(), v) - uniq.begin();
+fenwick.update(idx + 1, 1);  // 1-based!
+```
+
+### 4. 쿼리 값도 함께 압축해야 할 때
+
+범위 쿼리 `[L, R]` 에서 L, R 도 압축된 인덱스 공간으로 변환해야 한다. 원본 배열과 쿼리 값을 합쳐서 압축하거나, L 에는 `lower_bound`, R 에는 `upper_bound` 를 적절히 사용.
 
 ## BOJ 연습 문제
 

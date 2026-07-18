@@ -36,6 +36,24 @@ references:
 
 컨테이너를 사용하는 두 관점입니다.
 
+```mermaid
+flowchart TB
+    K["Linux Kernel<br/>namespaces + cgroups"]
+    K --> SC["System Container (LXC)"]
+    K --> AC["Application Container (Docker)"]
+
+    subgraph SC["System Container (LXC)"]
+        Init["init / systemd (PID 1)"] --> Nginx["nginx"]
+        Init --> Rails["rails app"]
+        Init --> Cron["crond"]
+        Init --> SSH["sshd"]
+    end
+
+    subgraph AC["Application Container (Docker)"]
+        Proc["앱 프로세스 (PID 1)"]
+    end
+```
+
 ### System Container (LXC 계열)
 
 - **미니 VM 처럼 사용**: `init` 프로세스 + `systemd` + 여러 서비스 실행
@@ -193,12 +211,71 @@ machinectl start ubuntu-noble
 machinectl shell ubuntu-noble
 ```
 
+## 보안 모델 상세
+
+### Unprivileged vs Privileged 심층
+
+LXC 의 **unprivileged container** 는 Linux user namespace 를 활용합니다.
+
+```
+호스트 관점          컨테이너 관점
+UID 100000 (일반 유저) → UID 0 (root)
+UID 100001           → UID 1
+...
+```
+
+컨테이너 안에서 root 로 실행되더라도, 호스트에서는 UID 100000 (권한 없는 유저) 입니다. 컨테이너가 탈출해도 호스트 root 권한을 얻지 못합니다.
+
+```bash
+# /etc/subuid, /etc/subgid 설정 확인
+cat /etc/subuid
+# myuser:100000:65536
+
+# unprivileged 컨테이너 생성 (기본값)
+lxc-create -n myct -t download -- --dist ubuntu --release noble --arch amd64
+# /etc/lxc/lxc-usernet 에 bridge 권한 필요
+```
+
+### AppArmor / SELinux 프로파일
+
+LXC 는 AppArmor (Ubuntu 기본) 또는 SELinux 프로파일로 컨테이너의 호스트 접근을 추가 제한합니다.
+
+- `/etc/apparmor.d/usr.bin.lxc-start` 에 기본 프로파일 포함
+- `/proc`, `/sys` 의 민감한 하위 경로 마운트 제한
+- `SYS_ADMIN` 같은 위험 capability 기본 박탈
+
+### Capability 관리
+
+컨테이너 시작 시 불필요한 Linux capability 를 드롭합니다.
+
+```bash
+# config 에서 capability 제한
+lxc.cap.drop = sys_admin
+lxc.cap.drop = sys_rawio
+lxc.cap.drop = net_admin
+```
+
+## 함정
+
+> [!WARNING]
+> **Privileged container 는 root 탈출 위험**. `lxc-create` 기본값은 unprivileged 이지만, 구버전 문서나 튜토리얼이 privileged 를 전제하는 경우가 있습니다. 프로덕션에서는 항상 unprivileged 확인.
+
+> [!CAUTION]
+> **nested container 는 추가 설정 필요**. LXD 컨테이너 안에서 Docker 를 쓰려면 `security.nesting: true` 설정 필요. 설정 없이는 docker 가 커널 기능을 사용하지 못합니다.
+
+> [!WARNING]
+> **이미지 파일시스템 크기 기본값이 작을 수 있습니다**. 기본 루트 파티션이 수 GB 인 경우 패키지 설치 중 공간 부족. 생성 시 크기를 명시하거나 ZFS/btrfs 백엔드로 동적 확장 구성.
+
+> [!IMPORTANT]
+> **Live migration (CRIU)** 은 실험적 기능입니다. 특정 syscall / device 를 쓰는 프로세스는 checkpoint 실패. 중요 서비스 migration 전 충분한 테스트.
+
 ## 참고
 
 - 관련 [[docker|Docker]] (application container)
 - 관련 [[cgroups-namespaces|cgroups + namespaces]] (LXC 의 근간)
 - 관련 [[virtualization|가상화 전체]]
 - 관련 [[vm-vs-container|VM vs Container 비교]]
+- 관련 [[k8s-pod|Kubernetes Pod]] (쿠버네티스에서의 컨테이너 단위)
 - 공식: [linuxcontainers.org](https://linuxcontainers.org/)
 - Incus: [https://linuxcontainers.org/incus/](https://linuxcontainers.org/incus/)
 - Ubuntu 튜토리얼: [https://ubuntu.com/tutorials/how-to-run-docker-inside-lxd-containers](https://ubuntu.com/tutorials/how-to-run-docker-inside-lxd-containers)

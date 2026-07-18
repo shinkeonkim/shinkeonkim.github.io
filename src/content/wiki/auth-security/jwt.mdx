@@ -3,10 +3,12 @@ title: "[Auth] JWT: 구조, 서명, 만료, refresh token"
 aliases: ["JWT", "JSON Web Token", "JWS", "JWE", "JWA", "Bearer token", "Refresh token", "Access token", "RS256", "HS256"]
 tags: [jwt, auth, security, backend]
 category: auth-security
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "RFC 7519 (JWT)"
     url: "https://datatracker.ietf.org/doc/html/rfc7519"
+  - title: "RFC 7516 (JWE)"
+    url: "https://datatracker.ietf.org/doc/html/rfc7516"
   - title: "jwt.io"
     url: "https://jwt.io/"
   - title: "OWASP: JSON Web Token Cheat Sheet"
@@ -16,6 +18,20 @@ references:
 ## 정의
 
 **JWT (JSON Web Token)** ([RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519)) 은 *base64url 인코딩된 JSON + 서명* 형태의 *self-contained token*. 서버가 *세션 저장 없이 클레임 검증* 가능.
+
+## JWS vs JWE: 두 가지 형태
+
+| 형태 | 풀네임 | 기능 | 사용 |
+|---|---|---|---|
+| **JWS** | JSON Web Signature | 서명 (무결성 보장) | 대부분의 JWT (인증, 인가) |
+| **JWE** | JSON Web Encryption | 암호화 (기밀성 보장) | 민감 정보 페이로드 필요 시 |
+
+```
+JWS: header.payload.signature           (페이로드 가시)
+JWE: header.key.iv.ciphertext.tag       (페이로드 암호화)
+```
+
+> 일반적으로 "JWT" 는 JWS 를 의미. *페이로드는 암호화 아님* (base64 인코딩만).
 
 ## 구조: 3 부분
 
@@ -42,18 +58,36 @@ eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsIm5hbWUiOiJrb2EiLCJleHAiOjE
 | `iat` | issued at |
 | `jti` | JWT ID (unique, replay 방지) |
 
-## 서명 알고리즘
+## 서명 알고리즘: HS256 vs RS256
 
-| Alg | 종류 | 비고 |
-|---|---|---|
-| `HS256/384/512` | HMAC (대칭) | 양측이 같은 secret. 내부 |
-| `RS256/384/512` | RSA (비대칭) | private 으로 sign, public 으로 verify |
-| `ES256/384/512` | ECDSA | 짧고 빠름 |
-| `EdDSA` | Ed25519 | 가장 빠름, 안전 |
-| `none` | *서명 없음* | **사용 금지** (취약점 다수) |
+| Alg | 종류 | 키 | 비고 |
+|---|---|---|---|
+| `HS256/384/512` | HMAC (대칭) | 공유 secret | 양측이 같은 키. 내부 서비스 |
+| `RS256/384/512` | RSA (비대칭) | private (sign) / public (verify) | *권장*. 공개키 배포 가능 |
+| `ES256/384/512` | ECDSA | private / public | 짧고 빠름 |
+| `EdDSA` (Ed25519) | EdDSA | private / public | 가장 빠름, 안전 |
+| `none` | 서명 없음 | - | **절대 사용 금지** |
 
-> [!WARNING]
-> *`alg: none`* 을 받는 라이브러리는 *치명적 취약점*. 항상 *허용 alg 화이트리스트*.
+```mermaid
+sequenceDiagram
+    participant Auth as AuthServer
+    participant API as APIServer
+    participant Client as Client
+
+    Note over Auth,API: RS256 키 배포 (1회)
+    Auth->>API: 공개키 (JWKS endpoint or 환경변수)
+
+    Note over Client,API: 인증 흐름
+    Client->>Auth: POST /login
+    Auth->>Auth: JWT 생성 (private key 로 서명)
+    Auth-->>Client: access_token (JWT)
+    Client->>API: GET /resource (Authorization: Bearer JWT)
+    API->>API: 공개키로 서명 검증 (Auth 서버 접속 없음)
+    API-->>Client: 200 OK
+```
+
+> [!IMPORTANT]
+> *RS256*: Auth Server 만 *private key* 보유. API Server 는 *public key* 로 검증. *public key 유출돼도 토큰 위조 불가*. HS256 은 secret 공유 필요 → *서비스 수 늘어날수록 위험*.
 
 ## 흐름
 
@@ -61,19 +95,39 @@ eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsIm5hbWUiOiJrb2EiLCJleHAiOjE
 sequenceDiagram
     autonumber
     participant C as Client
-    participant Auth as Auth Server
-    participant API as API Server
+    participant Auth as AuthServer
+    participant API as APIServer
 
     C->>Auth: POST /login (id, password)
     Auth->>Auth: 검증 + JWT 생성
     Auth-->>C: { access_token, refresh_token }
-    C->>API: GET /me<br/>Authorization: Bearer <jwt>
+    C->>API: GET /me (Authorization: Bearer JWT)
     API->>API: JWT 검증 (서명 + exp)
     API-->>C: 200 OK
     Note over C: 만료 임박
     C->>Auth: POST /refresh (refresh_token)
     Auth-->>C: 새 access_token
 ```
+
+## Refresh Token Rotation 패턴
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Auth as AuthServer
+
+    C->>Auth: POST /refresh (RT=abc)
+    Auth->>Auth: RT 검증, 새 AT + 새 RT 발급
+    Auth->>Auth: 구 RT(abc) 무효화
+    Auth-->>C: { access_token, refresh_token: xyz }
+    Note over C,Auth: 탈취된 RT 로 재시도
+    C->>Auth: POST /refresh (RT=abc 재사용 시도)
+    Auth->>Auth: abc 무효화 확인
+    Auth-->>C: 401 Unauthorized
+    Auth->>Auth: 계정 전체 세션 강제 종료 (재사용 감지)
+```
+
+> *RT rotation*: 매 refresh 마다 새 RT 발급 + 구 RT 즉시 무효화. 재사용 시 *탈취 감지* → *전체 세션 폐기*.
 
 ## Access Token vs Refresh Token
 
@@ -88,11 +142,77 @@ sequenceDiagram
 > [!IMPORTANT]
 > *Access token 을 localStorage 에 저장* 하면 XSS 시 즉시 탈취. *메모리 + 새로고침 시 refresh* 패턴이 정통.
 
-## Stateless vs Stateful
+## alg=none 취약점
 
-```anim:stateless-vs-stateful
-{}
+```python
+# 취약한 라이브러리 예시 (개념도)
+import jwt
+
+# 공격자가 만든 페이로드
+malicious_header = {"alg": "none", "typ": "JWT"}
+malicious_payload = {"sub": "1", "role": "admin", "exp": 9999999999}
+
+# base64 인코딩 후 서명 없이 전송
+token = base64(malicious_header) + "." + base64(malicious_payload) + "."
+# → 취약 라이브러리는 서명 검증 없이 통과
 ```
+
+**방어**:
+
+```python
+# 안전한 사용법: 허용 alg 화이트리스트
+decoded = jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"])  # alg 명시
+# algorithms=["RS256"] 에 없는 알고리즘은 거절
+```
+
+> [!WARNING]
+> *`alg: none`* 을 받는 라이브러리는 *치명적 취약점*. 항상 *허용 alg 화이트리스트*. 사용 라이브러리의 CVE 이력 확인.
+
+## Revoke 전략
+
+```mermaid
+flowchart TD
+    Q{revoke 필요}
+    Q --> A["짧은 exp + refresh<br/>대부분의 경우"]
+    Q --> B["Blacklist (Redis)<br/>jti 등록"]
+    Q --> C["Versioning<br/>user.token_version 비교"]
+    A --> Best[추천]
+    B --> Heavy[캐시 부담]
+    C --> Sync[DB 한 번 조회 필요]
+```
+
+**Redis Blacklist 구현**:
+
+```typescript
+// 로그아웃 시 jti 를 blacklist 에 등록
+async function logout(jti: string, exp: number) {
+  const ttl = exp - Math.floor(Date.now() / 1000);
+  await redis.setex(`blacklist:${jti}`, ttl, "1");
+}
+
+// 검증 미들웨어
+async function verifyToken(token: string) {
+  const payload = jwt.verify(token, PUBLIC_KEY, { algorithms: ["RS256"] });
+  const isBlacklisted = await redis.exists(`blacklist:${payload.jti}`);
+  if (isBlacklisted) throw new Error("Token revoked");
+  return payload;
+}
+```
+
+## XSS / CSRF 와의 관계
+
+```mermaid
+flowchart TD
+    Store{저장 위치}
+    Store --> A[localStorage] -->|XSS 시 탈취| Bad1[X]
+    Store --> B["메모리 + HttpOnly cookie refresh"] -->|XSS 영향 적음| Good[O]
+    Store --> C["HttpOnly cookie + SameSite=Strict"] -->|CSRF 안전 + XSS 안전| Best[권장]
+```
+
+> [!IMPORTANT]
+> *Cookie 기반* 이면 *CSRF 방어* 필요 (SameSite=Strict 또는 CSRF token). *Bearer header* 면 *XSS 방어* 가 중요.
+
+## Stateless vs Stateful
 
 | | Session (stateful) | JWT (stateless) |
 |---|---|---|
@@ -105,32 +225,6 @@ sequenceDiagram
 > [!CAUTION]
 > *"JWT 가 항상 더 좋다"* 는 미신. *작은 monolith* 에서는 *session 이 더 단순 + 즉시 revoke 가능*. JWT 는 *분산 + 마이크로서비스 + 모바일 SDK* 에서 진가.
 
-## Revoke 전략 (Stateless 의 단점 보완)
-
-```mermaid
-flowchart TD
-    Q{revoke 필요}
-    Q --> A[짧은 exp + refresh<br/>대부분의 경우]
-    Q --> B["Blacklist (Redis)<br/>jti 등록"]
-    Q --> C[Versioning<br/>user.token_version<br/>JWT 안에 version]
-    A --> Best[추천]
-    B --> Heavy[캐시 부담]
-    C --> Sync[DB 한 번 조회 필요]
-```
-
-## XSS / CSRF 와의 관계
-
-```mermaid
-flowchart TD
-    Store{저장 위치}
-    Store --> A[localStorage] -->|XSS 시 탈취| Bad1[X]
-    Store --> B[메모리 + HttpOnly cookie refresh] -->|XSS 영향 적음| Good[O]
-    Store --> C[HttpOnly cookie + SameSite=Strict] -->|CSRF 안전 + XSS 안전| Best[권장]
-```
-
-> [!IMPORTANT]
-> *Cookie 기반* 이면 *CSRF 방어* 필요 (SameSite=Strict 또는 CSRF token). *Bearer header* 면 *XSS 방어* 가 중요.
-
 ## 흔한 함정
 
 > [!WARNING]
@@ -139,6 +233,20 @@ flowchart TD
 > 3. **만료 너무 김** = 탈취 시 피해 큼. 15분 ~ 1시간 권장.
 > 4. **secret 이 짧음** = `secret` 같이 무차별 공격 가능한 키. *32+ 바이트 랜덤*.
 > 5. **민감 정보 페이로드** = JWT 는 *암호화 아님* (base64 인코딩). password / 카드 번호 *절대 금지*.
+> 6. **Refresh token localStorage 저장** = XSS 취약. *반드시 HttpOnly cookie*.
+> 7. **RT rotation 미적용** = 탈취된 RT 무한 재사용 가능.
+
+## JWT 크기와 성능 고려사항
+
+JWT 는 *매 요청 헤더에 포함*. 크기가 커지면 *네트워크 오버헤드*:
+
+| 클레임 수 | 대략 크기 (HS256) |
+|---|---|
+| 최소 (sub, exp, iat) | ~150 bytes |
+| 일반 (10개 클레임) | ~300-400 bytes |
+| 과도 (role, permission 배열 포함) | 1KB+ |
+
+> *클레임 최소화*: role 이름 대신 *role ID*, permission 배열 대신 *scope string* 으로 압축. 큰 권한 데이터는 *DB 조회*로.
 
 ## JWE (암호화 변형)
 

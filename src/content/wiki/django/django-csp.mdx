@@ -58,6 +58,22 @@ Content-Security-Policy:
 | `form-action` | form action target |
 | `report-uri` | 위반 리포트 |
 
+## CSP 동작 흐름
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as Server
+    participant A as Attacker
+    B->>S: HTTP Request
+    S-->>B: "Response + CSP Header"
+    B->>B: "script-src 정책 파싱"
+    A->>B: "XSS 인젝션 시도"
+    B->>B: "origin 검사: 허용 목록에 없음"
+    B-->>S: "POST /csp-report/ (위반 보고)"
+    Note over B: 스크립트 실행 차단
+```
+
 ## Django 6.0 CSP 설정
 
 ```python
@@ -191,6 +207,73 @@ SECURE_CSP = {
 | **Spring** | Spring Security header |
 | **Express** | helmet.js |
 | **Next.js** | `next.config.js` headers |
+
+## CSP 배포 전략
+
+1. **Report-Only 모드로 시작** : 실제 차단 없이 위반 로그 수집
+2. **로그 분석** : 허용해야 할 원본 파악
+3. **정책 정제** : 불필요한 `'unsafe-inline'` 제거, nonce/hash 도입
+4. **강화 모드로 전환** : `SECURE_CSP` 로 실제 차단 활성화
+5. **지속 모니터링** : 새 기능 배포 때마다 위반 로그 점검
+
+> [!TIP]
+> 배포 직전에는 항상 Report-Only 를 먼저 적용하고 위반 없음을 확인한 뒤 강화.
+
+## SPA 환경에서 CSP
+
+React / Vue 같은 SPA 는 번들러가 생성하는 인라인 스크립트가 많아 처리가 까다롭다:
+
+```python
+# 방법 1: nonce 주입 (SSR 환경)
+SECURE_CSP = {
+    'script-src': ["'self'", "'nonce-{nonce}'"],
+}
+
+# 방법 2: hash 허용 (정적 인라인만)
+SECURE_CSP = {
+    'script-src': [
+        "'self'",
+        "'sha256-xxxxx='",   # 번들러가 계산한 hash
+    ],
+}
+
+# 방법 3: strict-dynamic (nonce 통과 스크립트 체인 허용)
+SECURE_CSP = {
+    'script-src': ["'strict-dynamic'", "'nonce-{nonce}'"],
+    'object-src': ["'none'"],
+    'base-uri': ["'none'"],
+}
+```
+
+개발 환경에서는 `SECURE_CSP_REPORT_ONLY` 로만 운영하고, CI 에서 E2E 테스트 통과 후 프로덕션 강화.
+
+## CSP 테스트
+
+```python
+# tests/test_csp.py
+def test_csp_header_present(client):
+    response = client.get('/')
+    assert 'Content-Security-Policy' in response
+    csp = response['Content-Security-Policy']
+    assert "'unsafe-eval'" not in csp      # eval 차단 확인
+    assert "default-src 'self'" in csp
+
+def test_csp_report_endpoint(client):
+    payload = {
+        'csp-report': {
+            'document-uri': 'http://testserver/',
+            'violated-directive': 'script-src',
+            'blocked-uri': 'http://evil.com/x.js',
+        }
+    }
+    import json
+    resp = client.post(
+        '/csp-report/',
+        data=json.dumps(payload),
+        content_type='application/csp-report',
+    )
+    assert resp.status_code == 204
+```
 
 ## 관련 위키
 

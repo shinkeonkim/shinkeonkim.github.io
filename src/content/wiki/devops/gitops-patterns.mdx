@@ -1,13 +1,21 @@
 ---
 title: "[GitOps] 패턴: 단일 vs 다중 repo, environment promotion"
-aliases: ["GitOps patterns", "monorepo manifests", "environment promotion", "image updater", "Renovate"]
-tags: [gitops, argocd, flux, ci-cd, devops]
+aliases: ["GitOps patterns", "monorepo manifests", "environment promotion", "image updater", "Renovate", "Kustomize", "Flux", "GitOps repo structure"]
+tags: [gitops, argocd, flux, ci-cd, devops, kustomize]
 category: devops
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "GitOps Principles"
     url: "https://opengitops.dev/"
+  - title: "ArgoCD docs"
+    url: "https://argo-cd.readthedocs.io/"
+  - title: "Flux docs"
+    url: "https://fluxcd.io/flux/"
 ---
+
+## 정의
+
+**GitOps** = Git 을 *single source of truth* 로 삼아 *자동으로 인프라 + 앱 상태를 reconcile* 하는 운영 방식.
 
 ## GitOps 4가지 원칙 (OpenGitOps)
 
@@ -16,23 +24,50 @@ references:
 3. **Pulled Automatically**: 시스템이 *자동 fetch + apply*.
 4. **Continuously Reconciled**: 지속적 *desired vs actual 비교 + 수정*.
 
+## Push vs Pull 모델
+
+```mermaid
+flowchart LR
+    subgraph "Push-based (전통 CI/CD)"
+        CI1[CI] -->|"kubectl apply (cluster 접근 필요)"| Cluster1[K8s Cluster]
+    end
+    subgraph "Pull-based (GitOps)"
+        CI2[CI] -->|"이미지 빌드 + manifest 업데이트"| Git[Git Manifest Repo]
+        Agent["ArgoCD / Flux (cluster 내부)"] -->|"pull + apply"| Cluster2[K8s Cluster]
+        Git -->|"감시"| Agent
+    end
+```
+
+| 항목 | Push-based | Pull-based (GitOps) |
+|---|---|---|
+| Cluster 접근 | CI 서버가 직접 접근 | 에이전트가 내부에서 pull |
+| 보안 | CI 에 cluster 권한 노출 | *cluster 권한 외부 노출 없음* |
+| 자동 복구 | 없음 | *drift 감지 + 자동 복구* |
+| 감사 (audit) | CI history | *Git log (PR + 리뷰)* |
+| 다중 cluster | 복잡 | *에이전트 배포만으로 확장* |
+
 ## Repo 구조 패턴
 
 ```mermaid
 flowchart TD
-    Q{Repo 구조}
-    Q --> Mono[Monorepo<br/>app + manifest 함께]
-    Q --> Two[2-repo<br/>app code / manifest 분리]
-    Q --> Multi[Multi-repo<br/>app / manifest / infra 각자]
+    Q{"Repo 구조 선택"}
+    Q --> Mono["Monorepo (app + manifest 함께)"]
+    Q --> Two["2-repo (app / manifest 분리, 권장)"]
+    Q --> Multi["Multi-repo (앱별 + 인프라별 분리)"]
 ```
 
 ### 1. Monorepo (app + manifest)
 
 ```
 my-repo/
-├── src/         (app code)
-├── k8s/         (manifest)
+├── src/          (app code)
+├── k8s/          (manifest)
+│   ├── base/
+│   └── overlays/
+│       ├── dev/
+│       └── prod/
 └── .github/workflows/
+    └── build.yml
 ```
 
 장점: 단순. 단점: *app PR 이 인프라 변경 동시 일으킴* → 위험.
@@ -43,98 +78,213 @@ my-repo/
 app-repo/
 ├── src/
 └── .github/workflows/
-    └── build.yml (image push to ECR)
+    └── build.yml  # 이미지 빌드 → registry push
 
 manifest-repo/
 ├── apps/
 │   └── web/
-│       └── deployment.yaml (image: ...:abc123)
+│       ├── base/
+│       │   ├── deployment.yaml
+│       │   └── kustomization.yaml
+│       └── overlays/
+│           ├── dev/
+│           │   └── kustomization.yaml  # image tag dev
+│           └── prod/
+│               └── kustomization.yaml  # image tag prod
 └── argocd/
     └── applications.yaml
 ```
 
-> *CI 가 새 image* → *manifest repo 의 yaml 의 image tag 자동 update* → ArgoCD 가 cluster 동기화.
+> *CI 가 새 image* → *manifest repo 의 image tag 자동 update* → ArgoCD 가 cluster 동기화.
 
-### 3. Multi-repo
+## CI/CD 통합 흐름
 
-각 app, 각 component, 각 cluster 별 repo. 큰 조직.
+```mermaid
+sequenceDiagram
+    participant Dev
+    participant AppRepo as App Repo
+    participant CI as GitHub Actions
+    participant Reg as Container Registry
+    participant ManRepo as Manifest Repo
+    participant Argo as ArgoCD
+
+    Dev->>AppRepo: feature PR merge
+    AppRepo->>CI: push trigger
+    CI->>CI: test + build
+    CI->>Reg: docker push myapp:abc123
+    CI->>ManRepo: PR (image tag abc123)
+    Dev->>ManRepo: PR review + merge
+    ManRepo->>Argo: webhook (또는 polling)
+    Argo->>Argo: manifest diff
+    Argo->>Argo: kubectl apply
+```
+
+```yaml
+# GitHub Actions: build.yml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t ghcr.io/myorg/myapp:${{ github.sha }} \
+            --push .
+      - name: Update manifest
+        run: |
+          git clone https://x-token:${{ secrets.MANIFEST_TOKEN }}@github.com/myorg/manifests
+          cd manifests
+          # yq 로 image tag 업데이트
+          yq e '.images[0].newTag = "${{ github.sha }}"' \
+            -i apps/web/overlays/prod/kustomization.yaml
+          git commit -am "chore: update web image to ${{ github.sha }}"
+          git push
+```
 
 ## Environment Promotion
 
 ```mermaid
 flowchart LR
-    Dev[dev branch] -->|PR| Stage[stage branch]
-    Stage -->|PR| Prod[prod branch]
-    Argo_Dev[ArgoCD dev cluster] -.watch.-> Dev
-    Argo_Stage -.watch.-> Stage
-    Argo_Prod -.watch.-> Prod
+    Dev["dev branch"] -->|"PR merge"| Stage["staging branch"]
+    Stage -->|"PR merge (manual approval)"| Prod["prod branch"]
+    ArgoDev["ArgoCD: dev cluster"] -.->|"watch"| Dev
+    ArgoStage["ArgoCD: stage cluster"] -.->|"watch"| Stage
+    ArgoProd["ArgoCD: prod cluster"] -.->|"watch"| Prod
 ```
 
-또는 *디렉토리 분리*:
+또는 *디렉토리 분리 (Kustomize overlay)*:
 
 ```
 manifests/
-├── overlays/
-│   ├── dev/      → dev cluster
-│   ├── stage/    → stage cluster
-│   └── prod/     → prod cluster
-└── base/         → 공통
+├── base/
+│   ├── deployment.yaml    # 공통 설정
+│   └── kustomization.yaml
+└── overlays/
+    ├── dev/
+    │   ├── kustomization.yaml  # replica: 1, image: dev-tag
+    │   └── patch-resources.yaml
+    ├── staging/
+    │   └── kustomization.yaml  # replica: 2
+    └── prod/
+        ├── kustomization.yaml  # replica: 5, HPA
+        └── patch-hpa.yaml
 ```
 
-> *Kustomize* + ArgoCD app 별 path 분리.
+```yaml
+# overlays/prod/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: myapp
+    newName: ghcr.io/myorg/myapp
+    newTag: abc123sha
+patches:
+  - path: patch-hpa.yaml
+```
 
 ## Image Updater
 
 ```mermaid
 flowchart LR
-    CI -->|push| Registry[(Container Registry)]
-    Updater[ArgoCD Image Updater<br/>또는 Renovate] -.poll.-> Registry
-    Updater -->|PR / commit| Manifest[manifest repo]
+    CI -->|push| Registry[("Container Registry")]
+    Updater["ArgoCD Image Updater\n(또는 Renovate)"] -.->|poll| Registry
+    Updater -->|"PR / direct commit"| Manifest["manifest repo"]
     Argo -->|sync| Cluster
 ```
 
-| 도구 | 의미 |
-|---|---|
-| ArgoCD Image Updater | tag 정책 기반 자동 |
-| Renovate | dependency 갱신 PR |
-| Flux Image Automation | Flux 내장 |
+| 도구 | 방식 | 특징 |
+|---|---|---|
+| **ArgoCD Image Updater** | tag 정책 기반 자동 commit | ArgoCD 통합 |
+| **Renovate** | dependency PR | 광범위한 ecosystem |
+| **Flux Image Automation** | Flux 내장 | Flux 전용 |
+| **Keel** | 자동 deploy | webhook 기반 |
+
+```yaml
+# ArgoCD Image Updater annotation
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: myapp=ghcr.io/myorg/myapp
+    argocd-image-updater.argoproj.io/myapp.update-strategy: semver
+    argocd-image-updater.argoproj.io/myapp.allow-tags: regexp:^v[0-9]+\.[0-9]+\.[0-9]+$
+```
 
 ## Secret 처리 (git 안전)
 
 ```mermaid
 flowchart TD
-    Q[Secret 처리]
-    Q --> Sealed[Sealed Secrets]
-    Q --> ESO[External Secrets Operator]
-    Q --> SOPS[SOPS + KMS]
-    Q --> Vault[Vault Agent / CSI]
+    Q["Secret 처리 방법"]
+    Q --> Sealed["Sealed Secrets\n(kubeseal, cluster 내 복호화)"]
+    Q --> ESO["External Secrets Operator\n(AWS SM, GCP SM, Vault)"]
+    Q --> SOPS["SOPS + KMS\n(AGE / AWS KMS 암호화)"]
+    Q --> Vault["Vault Agent Injector / CSI"]
 ```
 
-자세한 건 [[k8s-configmap-secret]].
+```bash
+# Sealed Secrets 예시
+kubeseal --fetch-cert > pub-cert.pem
+kubectl create secret generic db-pass \
+  --from-literal=password=mysecret --dry-run=client -o yaml \
+  | kubeseal --cert pub-cert.pem > sealed-secret.yaml
+# sealed-secret.yaml 을 git 에 commit 가능
+
+# External Secrets Operator
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-password
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-ssm
+    kind: ClusterSecretStore
+  target:
+    name: db-password
+  data:
+    - secretKey: password
+      remoteRef:
+        key: /prod/db/password
+```
+
+## ArgoCD vs Flux
+
+| 항목 | ArgoCD | Flux |
+|---|---|---|
+| **UI** | 강력 | Weave GitOps UI 별도 |
+| **학습 곡선** | 중간 | 낮음 |
+| **설치 방식** | `kubectl apply` | Flux CLI (`flux bootstrap`) |
+| **Multi-tenancy** | 강 (Project 개념) | 보통 |
+| **Image automation** | 별도 Image Updater | 내장 |
+| **Notification** | built-in | Alertmanager 통합 |
+| **OCI artifact** | 지원 | 지원 |
+| **인기** | *2026 기준 더 인기* | 단순함 선호 |
 
 ## Multi-cluster GitOps
 
 ```mermaid
 flowchart LR
-    Git[Manifest repo]
-    Git --> Argo1[ArgoCD on cluster-dev]
-    Git --> Argo2[ArgoCD on cluster-prod-us]
-    Git --> Argo3[ArgoCD on cluster-prod-eu]
-    Argo1 --> ClusterDev
-    Argo2 --> ProdUS
-    Argo3 --> ProdEU
+    Git["Manifest repo"]
+    Git -->|watch| Argo1["ArgoCD (cluster-dev)"]
+    Git -->|watch| Argo2["ArgoCD (cluster-prod-us)"]
+    Git -->|watch| Argo3["ArgoCD (cluster-prod-eu)"]
+    Argo1 --> ClusterDev["Dev Cluster"]
+    Argo2 --> ProdUS["Prod US"]
+    Argo3 --> ProdEU["Prod EU"]
 ```
 
 또는 *중앙 ArgoCD + 다중 cluster credential*:
 
 ```yaml
-apiVersion: v1
-kind: Secret
-type: stringData:
-  name: prod-us-cluster
-  server: https://k8s.prod-us.example.com
-  config: |
-    { "bearerToken": "..." }
+# ArgoCD Application: 다른 cluster 배포
+spec:
+  destination:
+    server: https://k8s.prod-us.example.com   # 외부 cluster
+    namespace: web
 ```
 
 ## Drift Detection
@@ -142,16 +292,19 @@ type: stringData:
 | 상황 | ArgoCD 동작 |
 |---|---|
 | 수동 `kubectl edit` | Out of Sync 표시 + selfHeal 시 자동 복구 |
-| Git update | Sync 트리거 |
+| Git update | Sync 트리거 (webhook 또는 3분 polling) |
 | Image tag 변경 | Image Updater 가 manifest commit |
+| CRD 삭제 | Sync 오류 (finalizer 남음) |
 
 ## 흔한 함정
 
 > [!WARNING]
-> 1. **수동 hotfix** = git 우회. 항상 git 으로.
-> 2. **Branch 정책 부재** = main 직접 push. *PR + 리뷰 + branch protection*.
-> 3. **모든 cluster 같은 manifest** = 환경별 차이 못 표현. Kustomize / Helm values.
-> 4. **거대한 PR** = ArgoCD 가 *한 번에 모든 변경 적용*. 작은 PR 권장.
+> 1. **수동 hotfix** = git 우회. cluster 상태 ArgoCD 가 revert. 항상 git PR.
+> 2. **Branch 정책 부재** = main 직접 push. *branch protection + PR 리뷰 필수*.
+> 3. **모든 cluster 같은 manifest** = 환경별 차이 못 표현. Kustomize overlay / Helm values.
+> 4. **Secret 평문 git commit** = 히스토리 영구 노출. SOPS / Sealed Secrets / ESO.
+> 5. **거대한 단일 PR** = ArgoCD 가 한 번에 대량 변경 적용. *작은 PR + canary 배포*.
+> 6. **Webhook 미설정** = 3분 polling 지연. GitHub webhook 설정 권장.
 
 ## 관련 위키
 

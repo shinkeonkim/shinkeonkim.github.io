@@ -1,14 +1,16 @@
 ---
 title: "[Container] cgroups + namespaces: 컨테이너의 두 기둥"
-aliases: ["cgroups", "namespaces", "cgroup v2", "PID namespace", "network namespace", "mount namespace", "user namespace", "Linux container internals"]
+aliases: ["cgroups", "namespaces", "cgroup v2", "PID namespace", "network namespace", "mount namespace", "user namespace", "Linux container internals", "overlay filesystem", "OverlayFS"]
 tags: [linux, cgroups, namespaces, container, kernel]
 category: virtualization
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "Linux man: namespaces(7)"
     url: "https://man7.org/linux/man-pages/man7/namespaces.7.html"
   - title: "cgroup v2 docs"
     url: "https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html"
+  - title: "Linux Kernel namespaces"
+    url: "https://lwn.net/Articles/531114/"
 ---
 
 ## 정의
@@ -18,61 +20,163 @@ references:
 ```mermaid
 flowchart LR
     Container[Container]
-    Container --> NS["Namespaces<br/>(격리)"]
-    Container --> CG["cgroups<br/>(자원 제한)"]
-    Container --> FS["Overlay FS<br/>(layered FS)"]
+    Container --> NS["Namespaces (격리)"]
+    Container --> CG["cgroups (자원 제한)"]
+    Container --> FS["Overlay FS (layered FS)"]
+```
+
+> VM 은 *hypervisor + 별도 커널*, 컨테이너는 *host 커널 공유*. 시작 속도 수 ms vs 수 초.
+
+## 컨테이너 생성 과정
+
+```mermaid
+sequenceDiagram
+    participant CLI as docker run
+    participant D as containerd
+    participant Runc as runc
+    participant OS as Linux Kernel
+
+    CLI->>D: 컨테이너 생성 요청
+    D->>Runc: OCI bundle (config.json + rootfs)
+    Runc->>OS: clone(CLONE_NEWPID|CLONE_NEWNET|CLONE_NEWNS|...)
+    OS-->>Runc: 새 namespace pid=1
+    Runc->>OS: cgroup 설정 (memory.max, cpu.max)
+    Runc->>OS: mount overlay filesystem
+    Runc->>OS: exec (container entrypoint)
+    OS-->>CLI: 컨테이너 실행 중
 ```
 
 ## Namespaces (격리)
 
-| Namespace | 격리 대상 |
-|---|---|
-| `pid` | 프로세스 ID (안에서 PID=1) |
-| `mnt` | 파일시스템 마운트 |
-| `net` | 네트워크 인터페이스, 라우팅, 방화벽 |
-| `uts` | hostname, domain |
-| `ipc` | System V IPC, POSIX msg queue |
-| `user` | UID/GID 매핑 (root in container ≠ root in host) |
-| `cgroup` | cgroup root |
-| `time` | clock |
+Linux 8가지 namespace 로 컨테이너 격리:
+
+| Namespace | 격리 대상 | 커널 버전 |
+|---|---|---|
+| `pid` | 프로세스 ID (안에서 PID=1) | 3.8 |
+| `mnt` | 파일시스템 마운트 | 3.8 |
+| `net` | 네트워크 인터페이스, 라우팅, 방화벽 | 3.8 |
+| `uts` | hostname, domain | 3.8 |
+| `ipc` | System V IPC, POSIX msg queue | 3.8 |
+| `user` | UID/GID 매핑 (root in container ≠ root in host) | 3.8 |
+| `cgroup` | cgroup root | 4.6 |
+| `time` | clock (monotonic, boot time) | 5.6 |
 
 ```bash
 # 새 namespace 에서 명령 실행
 unshare --pid --mount --net --fork bash
+
+# 컨테이너 namespace 확인
+ls -la /proc/$(docker inspect --format='{{.State.Pid}}' my-container)/ns/
+
+# namespace 종류별 ID (같은 숫자 = 공유)
+lsns -p $(docker inspect --format='{{.State.Pid}}' my-container)
+```
+
+## PID Namespace 심화
+
+```
+Host                 Container
+------               ----------
+PID 1: systemd       PID 1: nginx (container init)
+PID 2: kthread       PID 2: nginx worker
+PID 100: dockerd     (host PIDs 불가시)
+PID 234: nginx       (동일 프로세스, host 는 234로 봄)
+```
+
+*컨테이너 안 PID 1* 이 종료되면 *컨테이너 전체 종료*. `SIGTERM` 핸들러 필수.
+
+```dockerfile
+# PID 1 문제 해결: init process 사용
+FROM node:22-alpine
+RUN apk add --no-cache tini
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "server.js"]
+```
+
+> *tini/dumb-init* = zombie reaping + SIGTERM 전파. 직접 `CMD ["node"]` 하면 zombie process 누적.
+
+## Network Namespace 심화
+
+```
+Host network namespace:
+  eth0: 192.168.1.10
+  docker0 (bridge): 172.17.0.1
+
+Container network namespace:
+  eth0 (veth pair): 172.17.0.2
+  lo: 127.0.0.1
+```
+
+```bash
+# container 의 network namespace 진입
+nsenter --target $(docker inspect --format='{{.State.Pid}}' c1) \
+        --net -- ip addr show
+
+# veth pair 확인 (host side)
+ip link show type veth
 ```
 
 ## cgroups (자원 제한)
 
 ```mermaid
 flowchart TB
-    Root[/sys/fs/cgroup/]
-    Root --> ContainerA[container-a/]
-    Root --> ContainerB[container-b/]
-    ContainerA --> CPU["cpu.max = 50000 100000<br/>(50% CPU)"]
-    ContainerA --> Mem[memory.max = 512M]
-    ContainerA --> IO[io.max = read 100MB/s]
-    ContainerB --> CPU2[cpu.max = 200000 100000]
-    ContainerB --> Mem2[memory.max = 2G]
+    Root["/sys/fs/cgroup/"]
+    Root --> ContainerA["container-a/"]
+    Root --> ContainerB["container-b/"]
+    ContainerA --> CPU["cpu.max = 50000 100000 (50% CPU)"]
+    ContainerA --> Mem["memory.max = 512M"]
+    ContainerA --> IO["io.max = read 100MB/s"]
+    ContainerB --> CPU2["cpu.max = 200000 100000 (200%)"]
+    ContainerB --> Mem2["memory.max = 2G"]
 ```
 
-| Controller | 제한 |
-|---|---|
-| `cpu` | CPU 시간 |
-| `memory` | RAM + swap |
-| `io` | block I/O |
-| `pid` | 프로세스 수 |
-| `network` (BPF) | NIC bandwidth |
-| `hugetlb` | huge pages |
+| Controller | 제한 대상 | 파일 |
+|---|---|---|
+| `cpu` | CPU 시간 | `cpu.max` |
+| `memory` | RAM + swap | `memory.max`, `memory.swap.max` |
+| `io` | block I/O | `io.max` |
+| `pid` | 프로세스 수 | `pids.max` |
+| `cpuset` | CPU core 지정 | `cpuset.cpus` |
+| `hugetlb` | huge pages | `hugetlb.*.max` |
+
+```bash
+# cgroup v2 확인
+cat /sys/fs/cgroup/cgroup.controllers
+# output: cpuset cpu io memory hugetlb pids rdma misc
+
+# container cgroup 확인
+cat /sys/fs/cgroup/system.slice/docker-<id>.scope/memory.current
+cat /sys/fs/cgroup/system.slice/docker-<id>.scope/cpu.stat
+```
 
 ## cgroup v1 vs v2
 
 | | v1 | v2 |
 |---|---|---|
-| 출시 | 2007 | 2016 |
-| 계층 | controller 별 다수 | *단일 통합 계층* |
-| 권장 | legacy | *모든 현대 distro* |
+| 출시 | 2007 | 2016 (kernel 4.5) |
+| 계층 | *controller 별 다수 트리* | *단일 통합 계층* |
+| 파일시스템 | `/sys/fs/cgroup/{cpu,memory,...}/` | `/sys/fs/cgroup/` 하나 |
+| thread granularity | 없음 | thread-level 제어 가능 |
+| 권장 | legacy | *모든 현대 distro 기본* |
+| K8s 지원 | deprecated (1.25+) | *기본 (1.25+)* |
 
 > *Ubuntu 22.04+, Fedora 31+, K8s 1.25+* 가 cgroup v2 기본.
+
+### cgroup v2 CPU 제한 예시
+
+```bash
+# CPU 50% 제한 (50ms / 100ms period)
+echo "50000 100000" > /sys/fs/cgroup/mycontainer/cpu.max
+
+# Docker 설정
+docker run --cpus="0.5" --memory="512m" nginx
+
+# K8s 설정 (내부적으로 cgroup 설정)
+resources:
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+```
 
 ## OCI Runtime spec 에서
 
@@ -98,49 +202,77 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    Container->>OS: allocate memory (RAM 부족)
-    OS-->>Container: ENOMEM 또는 OOM kill
-    Note over OS: cgroup memory.max 초과
-    OS->>Container: SIGKILL (즉시)
+    participant App as Container App
+    participant OS as Linux Kernel
+
+    App->>OS: malloc() (RAM 부족)
+    OS-->>OS: cgroup memory.max 초과 감지
+    OS->>App: SIGKILL (즉시)
+    Note over App,OS: OOM Killer 발동, graceful shutdown 없음
 ```
 
 > [!CAUTION]
-> *Memory limit 초과 = SIGKILL (graceful 없음)*. 애플리케이션이 *준비 안 됨*. limit 보수적으로.
+> *Memory limit 초과 = SIGKILL (graceful 없음)*. K8s 는 `OOMKilled` 로 표시. limit 을 *측정 후 여유 있게*.
+
+```bash
+# OOM kill 확인
+dmesg | grep -i "oom"
+kubectl describe pod mypod | grep -A5 "OOMKilled"
+```
 
 ## User Namespace
 
 ```
-container 내부 root (uid 0)
-host: uid 100000 (제한된 일반 사용자)
+Container:           Host:
+root (uid 0)    =>  uid 100000
+user1 (uid 1)   =>  uid 100001
 ```
 
-> *컨테이너 내부 root 가 host root 아님*. 보안 강화. *rootless container* (podman) 의 토대.
+*컨테이너 내부 root 가 host root 아님*. 보안 강화. *rootless container* (Podman) 의 토대.
+
+```bash
+# rootless Podman (host uid 1000 사용자로 실행)
+podman run --rm ubuntu id
+# uid=0(root) gid=0(root) ... (container 내부는 root 처럼 보임)
+
+# 실제 host 에서 확인
+cat /proc/$(pgrep -n bash)/status | grep Uid
+# Uid: 100000  100000 ...  (실제 제한된 uid)
+```
+
+> Docker 는 userns-remap 설정 필요. Podman 은 기본 지원.
 
 ## OverlayFS
 
 ```
-lowerdir (read-only): image layers
-upperdir (read-write): container 변경
-merged: 통합 view
+lowerdir (read-only): image layers (L1, L2, L3 ...)
+upperdir (read-write): container 변경사항
+merged:               통합 view (container 가 보는 FS)
+workdir:              OverlayFS 내부 작업 디렉토리
 ```
 
-```anim:linked-list
-{}
-```
+```bash
+# OverlayFS 마운트 확인
+mount | grep overlay
+# overlay on /var/lib/docker/overlay2/<id>/merged type overlay
+#   (lowerdir=<L3>:<L2>:<L1>,upperdir=<upper>,workdir=<work>)
 
-> Layered FS 의 *append-only* 동작 직관 (Linked list 의 *읽기 시 위에서 아래로* 와 유사).
+# container 에서 파일 수정 시
+# → upperdir 에만 기록 (lowerdir 불변)
+# → 삭제는 whiteout 파일로 표시
+```
 
 ## 흔한 함정
 
 > [!WARNING]
-> 1. **`--privileged`** = 모든 namespace 해제. 컨테이너 의미 없음. *capabilities* 만 추가.
-> 2. **호스트 PID/IPC/Network 공유** = 컨테이너 = host process. 격리 없음.
-> 3. **CPU limit 의 throttle** = container 가 *느려짐* (kill 아님). 메트릭으로 확인.
-> 4. **Memory limit 너무 작음** = OOM kill 반복. 측정.
+> 1. **`--privileged`** = 모든 namespace 해제 + 모든 capability. 컨테이너 = host process. *capabilities 만 추가 (`--cap-add`)*.
+> 2. **호스트 PID/IPC/Network 공유** = `--pid=host` 등. 격리 완전히 없어짐.
+> 3. **CPU limit 의 throttle** = container 가 *느려짐* (kill 아님). `cpu_throttled_seconds` 메트릭 확인.
+> 4. **Memory limit 너무 작음** = OOM kill 반복. 실제 사용량 측정 후 설정.
+> 5. **PID 1 에 signal 핸들러 없음** = SIGTERM 무시, K8s graceful shutdown 실패. tini 사용.
 
 ## 관련 위키
 
 - [[docker]]
-- [[oci-image]]
-- [[k8s-pod]]
 - [[container-image-best-practices]]
+- [[k8s-pod]]

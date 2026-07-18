@@ -177,6 +177,74 @@ mount-s3 my-bucket /mnt/s3 \
 - `--allow-delete` / `--allow-overwrite`: 기본은 read-only + no-overwrite 안전
 - Container 환경: `privileged` + `SYS_ADMIN` capability 필요 (FUSE)
 
+## 아키텍처 결정 흐름
+
+```mermaid
+flowchart TD
+    Start[S3 파일 접근 필요] --> Q1{온프렘 NFS/SMB?}
+    Q1 -->|Yes| FG[S3 File Gateway]
+    Q1 -->|No| Q2{"POSIX 완전 필요?"}
+    Q2 -->|"Yes, 소형"| EFS[Amazon EFS]
+    Q2 -->|"Yes, 대형 HPC/ML"| FSxL["FSx for Lustre + S3 DRA"]
+    Q2 -->|No| Q3{"초저지연 필요?"}
+    Q3 -->|Yes| EZ[S3 Express One Zone]
+    Q3 -->|"No, 읽기 위주"| MP[Mountpoint for S3]
+    Q3 -->|"No, DB 랜덤 R/W"| EBS[Amazon EBS]
+```
+
+## 보안 및 접근 제어
+
+### Mountpoint IAM 최소 권한
+
+읽기 전용 파이프라인:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::my-bucket",
+        "arn:aws:s3:::my-bucket/*"
+      ]
+    }
+  ]
+}
+```
+
+읽기/쓰기가 필요하면 `s3:PutObject`, 삭제가 필요하면 `s3:DeleteObject` 를 추가합니다.
+
+### VPC 엔드포인트
+
+퍼블릭 인터넷을 거치지 않으려면 **S3 Gateway Endpoint** (무료) 를 VPC 에 붙입니다. 더 세밀한 제어가 필요하면 **S3 Interface Endpoint** (PrivateLink, 유료) 를 사용합니다.
+
+### 암호화 옵션 비교
+
+| 옵션 | 방식 | 비고 |
+|:---|:---|:---|
+| **SSE-S3** | S3 관리 키 | 기본값, 추가 비용 없음 |
+| **SSE-KMS** | KMS 고객 관리 키 | 감사 로그, 세밀한 접근 제어 |
+| **SSE-C** | 클라이언트 제공 키 | 키 관리 책임이 클라이언트에 |
+| **CSE** | 업로드 전 클라이언트 암호화 | S3 는 암호문만 저장 |
+
+Mountpoint 와 File Gateway 모두 SSE-S3 / SSE-KMS 를 지원합니다.
+
+## 성능 모니터링
+
+CloudWatch 에서 확인할 핵심 S3 지표:
+
+| 지표 | 의미 | 관찰 포인트 |
+|:---|:---|:---|
+| `NumberOfRequests` | API 호출 수 | 과도한 `ListObjects` 호출 감시 |
+| `FirstByteLatency` | 첫 바이트 수신 지연 | Express One Zone: 10ms 미만 목표 |
+| `TotalRequestLatency` | 전체 요청 지연 | 표준 S3: 100ms 미만 목표 |
+| `4xxErrors` | 클라이언트 에러 | IAM 정책 또는 버킷 정책 문제 |
+| `5xxErrors` | S3 서버 에러 | 재시도 로직 점검 신호 |
+
+Mountpoint 로그는 기본적으로 stderr 에 출력됩니다. `--log-directory /var/log/mountpoint-s3/` 로 파일에 기록하면 CloudWatch Logs Agent 로 수집하기 편리합니다.
+
 ## 함정
 
 > [!WARNING]

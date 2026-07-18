@@ -170,6 +170,97 @@ schemathesis run openapi.yaml --url=https://api.example.com
 | Scalar | 신예, dark mode + 빠름 |
 | Stoplight Elements | 임베드 친화 |
 
+## 버전 역사
+
+| 버전 | 출시 | 핵심 변화 |
+|:---|:---|:---|
+| **Swagger 2.0** | 2014 | `swagger: "2.0"` 키. `host` + `basePath` + `schemes` 조합으로 서버 URL 표현. |
+| **OAS 3.0** | 2017 | OpenAPI Initiative 첫 리브랜딩. `servers` 배열, `components`, `requestBody` 도입. `$ref` 외부 파일 참조 지원. |
+| **OAS 3.1** | 2021 | JSON Schema 2020-12 완전 호환. `webhooks` 최상위 필드. `nullable` 제거 → `type: ["string", "null"]`. `$vocabulary`. |
+
+> [!IMPORTANT]
+> 2026 기준 신규 프로젝트는 **OAS 3.1** 권장. openapi-generator, Redoc, Swagger UI, Scalar 모두 3.1 지원. 기존 Swagger 2.0 스펙은 [swagger-converter](https://converter.swagger.io/) 로 자동 변환 가능.
+
+## CI/CD 파이프라인 통합
+
+API-first 워크플로는 스펙이 항상 구현과 동기화되어야 합니다. CI 에 3 단계로 포함:
+
+```yaml
+# .github/workflows/api-contract.yml
+name: API Contract
+on: [push, pull_request]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint OpenAPI spec
+        run: npx @redocly/cli lint openapi.yaml
+
+      - name: Run contract tests
+        run: |
+          pip install schemathesis
+          schemathesis run openapi.yaml \
+            --url=http://localhost:8080 \
+            --checks=all
+
+      - name: Generate TypeScript SDK
+        run: |
+          npx @openapitools/openapi-generator-cli generate \
+            -i openapi.yaml -g typescript-axios -o ./sdk
+```
+
+| 단계 | 도구 | 실패 의미 |
+|:---|:---|:---|
+| **Lint** | Redocly CLI | 스펙 문법 오류 |
+| **Contract test** | Schemathesis | 서버 응답이 스펙 위반 |
+| **SDK 생성** | openapi-generator | SDK 타입 불일치 조기 발견 |
+
+## `$ref` 설계 팁
+
+모든 스키마를 `components/schemas` 에 정의하고 `$ref` 로 재사용합니다.
+
+```yaml
+# 나쁜 예: inline 반복 정의
+paths:
+  /orders:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                item_id: {type: string}
+                qty: {type: integer}
+
+# 좋은 예: components 에 정의, $ref 로 재사용
+components:
+  schemas:
+    OrderRequest:
+      type: object
+      required: [item_id, qty]
+      properties:
+        item_id: {type: string}
+        qty:
+          type: integer
+          minimum: 1
+
+paths:
+  /orders:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderRequest'
+```
+
+`$ref` 재사용의 이점: SDK 생성 시 공유 타입으로 자동 추출, 스키마 수정 한 곳에서 완결.
+
 ## OpenAPI 의 한계
 
 ```mermaid
@@ -195,7 +286,9 @@ flowchart TD
 
 ## 관련 위키
 
-- [[REST API Design]]
-- [[gRPC]] (proto 대안)
-- [[GraphQL]] (SDL 대안)
-- [[JWT]] (인증 표현)
+- [[rest-api-design|REST API Design]]
+- [[api-versioning|API 버전 관리]] (URL vs Header vs Media Type 전략)
+- [[gRPC]] (proto 기반 대안)
+- [[GraphQL]] (SDL 기반 대안)
+- [[JWT]] (인증 스키마 표현)
+- [[aws-api-gateway|AWS API Gateway]] (클라우드 게이트웨이에서 OpenAPI import 지원)

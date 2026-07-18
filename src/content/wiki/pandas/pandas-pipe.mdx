@@ -3,7 +3,7 @@ title: "[Pandas] pipe / method chaining"
 aliases: ["Pandas pipe", "pandas method chain", "Pandas 체이닝"]
 tags: [python, pandas, pipe, method-chain]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-17
 references:
   - id: pandas-docs
     note: "pipe"
@@ -16,6 +16,42 @@ references:
 ```python
 df.pipe(my_func, arg1, arg2)
 # = my_func(df, arg1, arg2)
+```
+
+## 사용 상황
+
+| 상황 | pipe 활용 |
+|:---|:---|
+| 사용자 함수를 chain 에 끼워 넣기 | `.pipe(my_func)` |
+| 데이터 전처리 파이프라인 구성 | `.pipe(normalize).pipe(clean)` |
+| chain 중간에 로깅 / 검증 | `.pipe(log_shape).pipe(assert_no_null)` |
+| func 의 첫 인자가 df 가 아닐 때 | `.pipe((func, 'df_kwarg'), ...)` |
+| 함수형 스타일 데이터 변환 | `df -> f -> g -> h -> result` |
+
+## 시각화
+
+중첩 호출 vs pipe 체이닝 비교:
+
+```mermaid
+flowchart TD
+    A["원본 DataFrame"] --> B["중첩 함수 호출 방식"]
+    A --> C["pipe 체이닝 방식"]
+    B --> B1["clean_data(remove_outliers(normalize(df)))"]
+    B1 --> B2["역순으로 읽혀 가독성 낮음"]
+    C --> C1["df.pipe(normalize)"]
+    C1 --> C2[".pipe(remove_outliers)"]
+    C2 --> C3[".pipe(clean_data)"]
+    C3 --> C4["위에서 아래로 흐름 명확"]
+```
+
+pipe 함수 실행 흐름:
+
+```mermaid
+flowchart LR
+    DF["DataFrame"] --> Pipe["df.pipe(func, arg1, arg2)"]
+    Pipe --> Call["func(df, arg1, arg2) 호출"]
+    Call --> Ret["반환값 = 새 DataFrame"]
+    Ret --> Next["다음 chain 단계"]
 ```
 
 ## 왜 pipe 인가
@@ -114,7 +150,55 @@ def remove_outliers(df, col, n_std=3):
 df.pipe(normalize, ['x', 'y']).pipe(remove_outliers, 'z')
 ```
 
-각 함수가 `DataFrame → DataFrame`, 재사용성 ↑.
+각 함수가 `DataFrame -> DataFrame`, 재사용성 높음.
+
+## tap 패턴 (중간 검사)
+
+chain 을 끊지 않고 중간 상태를 로깅하거나 검증할 때 유용하다.
+
+```python
+def tap(df, func):
+    """chain 중간에 side effect, df 그대로 반환"""
+    func(df)
+    return df
+
+result = (df
+    .pipe(normalize, ['x', 'y'])
+    .pipe(tap, lambda d: print(f"normalize 후: {d.shape}"))
+    .pipe(remove_outliers, 'z')
+    .pipe(tap, lambda d: print(f"outlier 제거 후: {d.shape}"))
+    .pipe(clean_data))
+```
+
+### assert pipe
+
+```python
+def assert_no_null(df, cols=None):
+    check = df[cols] if cols else df
+    null_count = check.isnull().sum().sum()
+    if null_count > 0:
+        raise ValueError(f"null {null_count}개 발견")
+    return df
+
+df.pipe(assert_no_null, cols=['id', 'date'])
+```
+
+## pipe 와 assign 고급 조합
+
+`assign` 내부에서 lambda 로 이전 결과를 참조하는 패턴:
+
+```python
+df = (df
+    .assign(
+        revenue=lambda d: d['price'] * d['qty'],
+        margin=lambda d: d['revenue'] - d['cost'],   # 방금 추가한 revenue 참조
+        margin_pct=lambda d: d['margin'] / d['revenue'] * 100,
+    )
+    .pipe(filter_positive_margin)
+    .pipe(add_segment_label, bins=[0, 20, 50, 100]))
+```
+
+`assign` 의 lambda 는 위에서 아래로 순서대로 실행되어, 같은 assign 블록 안에서도 이전 열을 참조할 수 있다.
 
 ## 가독성 가이드
 
@@ -153,7 +237,7 @@ return 빠뜨리면 None.
 # 중간 결과 확인 어려움
 result = df.pipe(a).pipe(b).pipe(c)
 
-# 임시 변수
+# 임시 변수로 격리
 step1 = df.pipe(a)
 step2 = step1.pipe(b)
 step3 = step2.pipe(c)
@@ -161,8 +245,25 @@ step3 = step2.pipe(c)
 
 문제 단계 격리에 임시 변수가 유용.
 
-## 참고
+### 4. copy 없는 함수 주의
+
+```python
+def bad_normalize(df, cols):
+    for c in cols:
+        df[c] = (df[c] - df[c].mean()) / df[c].std()   # 원본 수정
+    return df
+```
+
+`df.copy()` 없이 원본을 수정하면 예상치 못한 side effect 발생. chain 함수는 반드시 복사본을 반환하거나, 원본 수정이 의도인 경우 명시한다.
+
+### 5. 큰 DataFrame 에서 pipe 마다 copy
+
+각 `pipe` 단계에서 DataFrame 을 복사하면 메모리가 증가한다. 대용량 데이터에서는 적절한 단위로 묶거나 inplace 변형 후 `return df` 패턴을 검토.
+
+## 관련 위키
 
 - [[Pandas DataFrame]]
 - [[Pandas apply / map]]
 - [[Pandas query]]
+- [[Pandas agg]]
+- [[Pandas groupby]]

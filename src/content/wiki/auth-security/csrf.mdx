@@ -3,7 +3,7 @@ title: "[Auth] CSRF: 위조 요청 공격과 방어"
 aliases: ["CSRF", "Cross-Site Request Forgery", "CSRF token", "Synchronizer Token", "Double Submit Cookie", "SameSite cookie defense"]
 tags: [csrf, security, auth, browser, backend]
 category: auth-security
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "OWASP: CSRF Prevention"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html"
@@ -12,6 +12,16 @@ references:
 ## 정의
 
 **CSRF (Cross-Site Request Forgery)** 는 *사용자가 로그인된 상태* 에서 *공격자가 만든 페이지* 가 *피해자 브라우저로 위조 요청* 을 보내는 공격. 쿠키 기반 인증의 *큰 약점*.
+
+## CSRF vs XSS
+
+| 항목 | CSRF | XSS |
+|---|---|---|
+| 공격 경로 | 브라우저 자동 쿠키 첨부 악용 | 피해 사이트에 스크립트 주입 |
+| 피해 사이트 코드 조작 | 불필요 | 필요 |
+| 피해자 의도 | 피해자가 요청을 모름 | 피해자 브라우저에서 코드 실행 |
+| 방어 포인트 | 서버: 요청 출처 검증 | 서버: 출력 인코딩 |
+| 쿠키 의존 | 쿠키 기반 세션에 한정 | 어떤 인증 방식도 영향 |
 
 ## 공격 시나리오
 
@@ -39,10 +49,10 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     Q{방어 패턴}
-    Q --> A[1. SameSite Cookie<br/>가장 단순]
-    Q --> B[2. CSRF Token<br/>Synchronizer]
-    Q --> C[3. Double Submit Cookie]
-    Q --> D[4. Custom Header]
+    Q --> A["1. SameSite Cookie<br/>(가장 단순)"]
+    Q --> B["2. CSRF Token<br/>(Synchronizer)"]
+    Q --> C["3. Double Submit Cookie"]
+    Q --> D["4. Custom Header"]
 ```
 
 ### 1. SameSite Cookie
@@ -53,6 +63,12 @@ Set-Cookie: SID=abc; HttpOnly; Secure; SameSite=Lax
 
 `SameSite=Lax` 가 cross-site form POST 차단. *2020 부터 Chrome 의 기본값*.
 
+| SameSite 값 | Cross-site GET | Cross-site POST | 설명 |
+|---|---|---|---|
+| `Strict` | 차단 | 차단 | 완전 격리, 외부 링크 클릭도 차단 |
+| `Lax` | top-level 허용 | 차단 | 기본값, 대부분의 CSRF 차단 |
+| `None` | 허용 | 허용 | `Secure` 필수, iframe / 3rd-party 용 |
+
 > [!IMPORTANT]
 > **SameSite=Lax 만으로도 대부분의 CSRF 차단**. *옛 브라우저 호환* 이 필요하면 추가 패턴.
 
@@ -62,7 +78,7 @@ Set-Cookie: SID=abc; HttpOnly; Secure; SameSite=Lax
 sequenceDiagram
     C->>Server: GET /form
     Server->>Server: token = random()
-    Server-->>C: HTML + <input name="_csrf" value="token"><br/>(session 에 token 저장)
+    Server-->>C: HTML + hidden input _csrf=token (session 에 token 저장)
     C->>Server: POST /transfer<br/>_csrf=token + body
     Server->>Server: session 의 token == 받은 token?
     Server-->>C: OK / 거절
@@ -106,6 +122,61 @@ fetch('/api/transfer', {
 - 다른 origin 이면 preflight 거절 → 위조 요청 *애초에 불가*.
 - *SPA + API* 의 *깔끔한 패턴*.
 
+## Origin / Referer 헤더 검증
+
+서버에서 요청 출처를 직접 확인하는 보조 방어:
+
+```python
+# 서버 측 Origin 검증 예시
+def check_origin(request):
+    origin = request.headers.get('Origin')
+    referer = request.headers.get('Referer')
+    allowed = {'https://myapp.com', 'https://www.myapp.com'}
+    if origin:
+        return origin in allowed
+    if referer:
+        return any(referer.startswith(o) for o in allowed)
+    return False  # 둘 다 없으면 거절
+```
+
+> [!WARNING]
+> *Referer 는 브라우저 설정 / 프록시로 제거될 수 있음*. Origin + CSRF Token 을 *같이* 사용 권장. Referer 만으로는 불충분.
+
+## 프레임워크 기본 내장
+
+| 프레임워크 | CSRF 방어 |
+|---|---|
+| Django | `CsrfViewMiddleware` 기본 활성화 (`{% csrf_token %}` 태그) |
+| Rails | `protect_from_forgery :exception` 기본 |
+| Spring Security | `csrf()` 기본 활성화 (JWT 사용 시 disable) |
+| Laravel | `VerifyCsrfToken` 미들웨어 기본 |
+| Express | `csrf` 패키지 별도 설치 필요 |
+
+> *서버 렌더링 프레임워크는 기본 내장*. SPA 는 별도 설정 필요.
+
+## CORS 와 CSRF 관계
+
+CORS 와 CSRF 는 *다른 문제*. 혼동 주의.
+
+```mermaid
+flowchart LR
+    CORS["CORS<br/>(Cross-Origin Resource Sharing)"]
+    CSRF["CSRF<br/>(Cross-Site Request Forgery)"]
+
+    CORS -->|"브라우저가 cross-origin 요청 허용 여부"| Browser["브라우저 정책"]
+    CSRF -->|"인증된 사용자 대신 위조 요청"| Attack["공격 방어"]
+```
+
+| 항목 | CORS | CSRF |
+|---|---|---|
+| 목적 | 다른 origin 의 JS 가 응답 읽기 허용 | 위조 요청 자체를 차단 |
+| 방어 대상 | 응답 데이터 노출 | 상태 변경 요청 위조 |
+| Simple Request | preflight 없음 → CORS 우회 가능 | CSRF 공격 가능 |
+| 관계 | CORS 허용해도 CSRF 방어 별도 필요 | CSRF 방어해도 CORS 설정 별도 필요 |
+
+> [!WARNING]
+> *CORS 를 허용했다고 CSRF 가 방어되는 것이 아님*. Simple Request (form POST) 는 preflight 없이 전송되어 CORS 와 무관하게 CSRF 공격 가능.
+
 ## 어디에 어떤 방어?
 
 | 환경 | 권장 |
@@ -116,6 +187,30 @@ fetch('/api/transfer', {
 | 모바일 앱 (자체 HTTP 라이브러리) | *영향 없음* |
 | 3rd-party 통합 (iframe) | **SameSite=None + Secure** + token |
 
+## 현대 브라우저 현황 (2024+)
+
+```mermaid
+flowchart TD
+    Chrome["Chrome 80+<br/>SameSite=Lax 기본"]
+    Firefox["Firefox 79+<br/>SameSite=Lax 기본"]
+    Safari["Safari 13.1+<br/>SameSite 지원"]
+    Old["IE / 구형 브라우저<br/>SameSite 미지원"]
+
+    Chrome -->|"대부분 CSRF 자동 차단"| Safe["안전"]
+    Firefox -->|"대부분 CSRF 자동 차단"| Safe
+    Safari -->|"대부분 CSRF 자동 차단"| Safe
+    Old -->|"추가 방어 필요"| Extra["CSRF Token 필수"]
+```
+
+| 브라우저 | SameSite=Lax 기본 | 비고 |
+|---|---|---|
+| Chrome 80+ | 적용 | 2020년 2월부터 |
+| Firefox 79+ | 적용 | 2020년 7월부터 |
+| Safari 13.1+ | 적용 | 2020년 3월부터 |
+| IE 11 | 미지원 | 레거시 환경은 CSRF Token 필수 |
+
+> *현대 브라우저 환경에서는 SameSite=Lax 기본값으로 대부분 방어*. 레거시 지원 필요 시 CSRF Token 병행.
+
 ## GET 의 위험성
 
 ```html
@@ -125,6 +220,29 @@ fetch('/api/transfer', {
 > [!CAUTION]
 > *상태 변경 GET* 은 *CSRF 의 가장 흔한 함정*. *모든 변경 요청은 POST/PUT/DELETE 만*. *GET 은 idempotent + read-only*.
 
+## 토큰 구현 시 주의사항
+
+CSRF Token 을 직접 구현할 때:
+
+```python
+import secrets
+import hmac
+import hashlib
+
+def generate_csrf_token(session_id: str, secret: str) -> str:
+    # 세션 ID 와 서버 secret 으로 HMAC 생성
+    # 단순 random 보다 세션 바인딩이 더 안전
+    random_part = secrets.token_hex(16)
+    mac = hmac.new(
+        secret.encode(),
+        f"{session_id}:{random_part}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{random_part}:{mac}"
+```
+
+> *단순 `random()` 토큰* 은 서버 재시작 시 세션과 분리될 수 있음. *HMAC 기반 토큰* 이 더 안전하고 stateless 구현 가능.
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -132,6 +250,7 @@ fetch('/api/transfer', {
 > 2. **CSRF token 을 *모든 요청에서 동일*** = *하나만 탈취* 되면 모든 요청 위조. *세션 단위 회전*.
 > 3. **GET 의 *상태 변경*** = SameSite=Lax 가 top-level GET 허용 → CSRF.
 > 4. **Multipart form 의 *Content-Type*** = simple request 라 *preflight 없음*. Custom header 방어가 *부분적*.
+> 5. **JWT + cookie 혼합** = Authorization 헤더 JWT 는 안전하지만 *cookie 에 저장된 JWT* 는 CSRF 위험.
 
 ## 관련 위키
 

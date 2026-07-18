@@ -1,39 +1,73 @@
 ---
 title: "[Distributed] Kafka Consumer Group: rebalancing, offset, lag"
-aliases: ["kafka-consumer-group", "Kafka consumer group", "Kafka rebalancing", "cooperative rebalancing", "consumer lag", "static membership", "partition assignment"]
-tags: [kafka, consumer-group, rebalancing, backend]
+aliases: ["kafka-consumer-group", "Kafka consumer group", "Kafka rebalancing", "cooperative rebalancing", "consumer lag", "static membership", "partition assignment", "Group Coordinator"]
+tags: [kafka, consumer-group, rebalancing, backend, distributed]
 category: distributed-systems
-updated: 2026-06-25
+updated: 2026-07-14
 references:
   - title: "Kafka Consumer Configurations"
     url: "https://kafka.apache.org/documentation/#consumerconfigs"
   - title: "Incremental Cooperative Rebalancing (KIP-429)"
     url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol"
+  - title: "Static Membership (KIP-345)"
+    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-345%3A+Recover+from+unnecessary+rebalances+in+static+group+membership"
+  - title: "KIP-848: Next Generation of the Consumer Rebalance Protocol"
+    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-848%3A+The+Next+Generation+of+the+Consumer+Rebalance+Protocol"
 ---
 
 ## 정의
 
-**Consumer Group** = 같은 `group.id` 를 가진 consumer 들이 *함께 한 topic 을 분담 소비*. *partition 단위로 분배*.
+**Consumer Group** = 같은 `group.id`를 가진 consumer들이 *함께 한 topic을 분담 소비*. *partition 단위로 분배*.
+
+핵심 특성:
+- *한 partition → 한 consumer* (group 안에서)
+- *여러 Consumer Group*은 같은 topic을 *독립적으로* 소비 가능
+- *Group Coordinator* (Kafka broker)가 멤버십과 partition 할당 관리
 
 ## Partition 할당
 
 ```mermaid
 flowchart LR
-    subgraph T[Topic: orders, 6 partitions]
+    subgraph T["Topic: orders (6 partitions)"]
         P0[p0] & P1[p1] & P2[p2] & P3[p3] & P4[p4] & P5[p5]
     end
-    subgraph CG[Consumer Group]
-        C1[Consumer 1] --> P0 & P1
-        C2[Consumer 2] --> P2 & P3
-        C3[Consumer 3] --> P4 & P5
+    subgraph CG["Consumer Group"]
+        C1["Consumer 1"] --> P0 & P1
+        C2["Consumer 2"] --> P2 & P3
+        C3["Consumer 3"] --> P4 & P5
     end
 ```
 
 규칙:
+- *partition 수 >= consumer 수*면 모두 분배
+- *partition 수 < consumer 수*면 *일부 consumer idle*
+- *한 partition → 한 consumer* (group 안)
 
-- *partition 수 ≥ consumer 수* 면 모두 분배.
-- *partition 수 < consumer 수* 면 *일부 consumer idle*.
-- *한 partition → 한 consumer* (group 안).
+## Group Coordinator
+
+**Group Coordinator** = consumer group의 멤버십과 rebalancing을 관리하는 Kafka broker.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as "Consumer"
+    participant GC as "Group Coordinator (Broker)"
+    participant ZK as "__consumer_offsets topic"
+
+    C->>GC: FindCoordinator (group.id)
+    GC-->>C: Coordinator broker 주소
+    C->>GC: JoinGroup
+    GC->>GC: 모든 멤버 대기 (sync barrier)
+    GC-->>C: JoinGroup Response (leader 선출)
+    Note over C: Group Leader가 partition 할당 계산
+    C->>GC: SyncGroup (할당 결과)
+    GC-->>C: SyncGroup Response (내 할당)
+    C->>ZK: offset commit
+```
+
+- `__consumer_offsets` 내부 topic에 offset 저장
+- Group Leader (consumer 중 하나)가 실제 partition 할당 계산
+- Coordinator는 할당 결과를 모든 멤버에게 배포
 
 ## Rebalancing
 
@@ -42,17 +76,17 @@ consumer 추가 / 제거 / 죽음 → *partition 재할당*:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C1 as Consumer 1
-    participant C2 as Consumer 2 (new)
-    participant Coord as Group Coordinator
+    participant C1 as "Consumer 1"
+    participant C2 as "Consumer 2 (new)"
+    participant Coord as "Group Coordinator"
 
     C1->>Coord: heartbeat
     C2->>Coord: join group
     Note over Coord: rebalance 시작
     Coord->>C1: stop fetching (revoke)
     C1->>Coord: ack + commit offset
-    Coord->>C1: new assignment (p0, p1, p2)
-    Coord->>C2: new assignment (p3, p4, p5)
+    Coord->>C1: "new assignment (p0, p1, p2)"
+    Coord->>C2: "new assignment (p3, p4, p5)"
     C1->>C1: resume fetching
     C2->>C2: start fetching
 ```
@@ -61,12 +95,37 @@ sequenceDiagram
 
 | | Eager (옛 기본) | Cooperative (Kafka 2.4+) |
 |---|---|---|
-| Rebalance 시 | *모든 consumer 정지* | *영향받는 partition 만* |
+| Rebalance 시 | *모든 consumer 정지* | *영향받는 partition만* |
 | 처리 중단 | 길음 (수십 초 가능) | *짧음* |
 | Throughput | 하락 큼 | 적음 |
+| 구현 | RangeAssignor | CooperativeStickyAssignor |
 
 > [!IMPORTANT]
-> *Cooperative rebalancing* 이 *2026 권장 기본*. `partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor`.
+> *Cooperative rebalancing*이 *2026 권장 기본*. `partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor`.
+
+## Cooperative Sticky Assignor 설정
+
+```properties
+# consumer.properties
+group.id=my-consumer-group
+partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+
+# 또는 여러 전략 조합 (마이그레이션 시)
+partition.assignment.strategy=\
+  org.apache.kafka.clients.consumer.CooperativeStickyAssignor,\
+  org.apache.kafka.clients.consumer.RangeAssignor
+```
+
+```java
+// Java 코드
+Properties props = new Properties();
+props.put(ConsumerConfig.GROUP_ID_CONFIG, "my-group");
+props.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
+    CooperativeStickyAssignor.class.getName());
+
+KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+consumer.subscribe(List.of("orders", "payments"));
+```
 
 ## Static Membership (KIP-345)
 
@@ -74,17 +133,24 @@ sequenceDiagram
 group.instance.id=consumer-1
 ```
 
-- consumer 가 *동일 ID 로 재접속* 하면 *partition 유지*.
-- *배포 / 재시작* 시 rebalance 회피.
-- 보통 *수십 초 ~ 수 분 안* 의 짧은 재시작 가정.
+- consumer가 *동일 ID로 재접속*하면 *partition 유지*
+- *배포 / 재시작* 시 rebalance 회피
+- 보통 *수십 초 ~ 수 분 안*의 짧은 재시작 가정
+
+```mermaid
+flowchart LR
+    C1["Consumer 1\ngroup.instance.id=c1"] -->|"재시작"| C1b["Consumer 1 (재시작)"]
+    C1b -->|"동일 ID로 재접속"| GC["Group Coordinator"]
+    GC -->|"partition 유지 (rebalance 없음)"| P["p0, p1 유지"]
+```
 
 ## Offset 관리
 
 ```mermaid
 flowchart LR
     C[Consumer] -->|fetch| K[(Kafka)]
-    C -->|commit| Offset["__consumer_offsets<br/>(internal topic)"]
-    Note1[정기 commit 또는 명시적]
+    C -->|commit| Offset["__consumer_offsets\n(internal topic)"]
+    Note1["정기 commit 또는 명시적"]
 ```
 
 | 모드 | 안전성 |
@@ -98,21 +164,77 @@ flowchart LR
 ```
 1. fetch [100, 101, 102]
 2. 처리 중 ...
-3. 5초 후 auto commit (103 까지 commit)
+3. 5초 후 auto commit (103까지 commit)
 4. consumer crash (102 처리 미완)
-5. 재시작 → 103 부터 fetch → 102 손실!
+5. 재시작 → 103부터 fetch → 102 손실!
+```
+
+### 명시적 commit 패턴
+
+```java
+while (true) {
+    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+    for (ConsumerRecord<String, String> record : records) {
+        process(record);
+    }
+    // 배치 처리 완료 후 명시적 commit
+    consumer.commitSync();
+}
 ```
 
 > [!CAUTION]
-> **Auto commit 은 손실 또는 중복** 의 함정. *exactly-once* 가 필요하면 명시적 commit + idempotent 처리.
+> **Auto commit은 손실 또는 중복**의 함정. *exactly-once*가 필요하면 명시적 commit + idempotent 처리.
+
+## Exactly-once 처리 패턴
+
+Kafka 자체의 EOS (Exactly-Once Semantics)는 *Kafka → Kafka* 구간만 보장. 외부 DB까지 포함하려면 추가 패턴 필요.
+
+```mermaid
+flowchart LR
+    K[(Kafka)] -->|"fetch"| C[Consumer]
+    C -->|"처리"| DB[(Database)]
+    C -->|"offset commit"| K
+    DB -->|"idempotency key 체크"| DB
+```
+
+```java
+// Transactional producer (Kafka → Kafka exactly-once)
+producer.initTransactions();
+
+try {
+    producer.beginTransaction();
+    producer.send(new ProducerRecord<>("output-topic", key, value));
+    // offset commit을 트랜잭션에 포함
+    producer.sendOffsetsToTransaction(offsets, consumerGroupMetadata);
+    producer.commitTransaction();
+} catch (Exception e) {
+    producer.abortTransaction();
+}
+```
+
+```java
+// DB까지 exactly-once: idempotency key 패턴
+@Transactional
+public void processRecord(ConsumerRecord<String, Order> record) {
+    String idempotencyKey = record.topic() + "-" + record.partition() + "-" + record.offset();
+
+    if (processedOffsets.existsByKey(idempotencyKey)) {
+        return;   // 이미 처리됨
+    }
+
+    orderService.process(record.value());
+    processedOffsets.save(idempotencyKey);
+    // DB 트랜잭션 커밋 후 offset commit
+}
+```
 
 ## Consumer Lag
 
 ```mermaid
 flowchart LR
-    Last["partition 의 last offset (LEO): 1000"] --> Lag
+    Last["partition의 last offset (LEO): 1000"] --> Lag
     Curr["consumer current offset: 800"] --> Lag
-    Lag[Lag = 200<br/>processing 못 따라옴]
+    Lag["Lag = 200\nprocessing 못 따라옴"]
 ```
 
 | 도구 | 의미 |
@@ -121,15 +243,48 @@ flowchart LR
 | Kafka Lag Exporter | Prometheus 메트릭 |
 | Burrow (LinkedIn) | 더 세련된 lag 분석 |
 
+```bash
+# lag 확인
+kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --group my-consumer-group \
+  --describe
+
+# 출력 예시
+GROUP           TOPIC     PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+my-group        orders    0          800             1000            200
+my-group        orders    1          950             1000            50
+```
+
 ## Lag 기반 Auto-Scaling
 
 ```mermaid
 flowchart LR
-    Lag[Consumer Lag] -->|KEDA| HPA[Kubernetes HPA]
-    HPA --> Scale[Consumer pod 수 증가]
+    Lag["Consumer Lag"] -->|KEDA| HPA["Kubernetes HPA"]
+    HPA --> Scale["Consumer pod 수 증가"]
 ```
 
-[KEDA](https://keda.sh/) 가 Kafka lag 을 *Kubernetes HPA 지표* 로 사용. *spike 자동 흡수*.
+[KEDA](https://keda.sh/)가 Kafka lag을 *Kubernetes HPA 지표*로 사용. *spike 자동 흡수*.
+
+```yaml
+# KEDA ScaledObject
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kafka-consumer-scaler
+spec:
+  scaleTargetRef:
+    name: order-consumer
+  minReplicaCount: 1
+  maxReplicaCount: 10   # partition 수 이하로
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: my-consumer-group
+        topic: orders
+        lagThreshold: "100"   # lag 100 이상이면 scale out
+```
 
 ## Heartbeat / Session
 
@@ -142,13 +297,33 @@ flowchart LR
 > [!WARNING]
 > `max.poll.interval.ms` 초과 = consumer *추방*. 처리 시간이 길면 *명시적 늘림* 또는 *워커 별도 스레드*.
 
+## Consumer Group 성능 튜닝
+
+| 설정 | 기본 | 권장 (고처리량) |
+|---|---|---|
+| `fetch.min.bytes` | 1 | 1024 (배치 효율) |
+| `fetch.max.wait.ms` | 500ms | 500ms |
+| `max.poll.records` | 500 | 100~500 (처리 시간에 따라) |
+| `max.partition.fetch.bytes` | 1MB | 1MB |
+| `enable.auto.commit` | true | false (명시적 commit) |
+
+```properties
+# 고처리량 consumer 설정
+fetch.min.bytes=1024
+fetch.max.wait.ms=500
+max.poll.records=200
+enable.auto.commit=false
+auto.offset.reset=earliest
+```
+
 ## 흔한 함정
 
 > [!WARNING]
 > 1. **Rebalancing 폭주** = consumer 자주 추가/제거 → 처리 정지 반복. cooperative + static membership.
 > 2. **`auto.offset.reset=latest` + 다운** = 다운 사이 메시지 *손실*. 보통 `earliest`.
 > 3. **너무 큰 batch** = `max.poll.records` 너무 큼 → 처리 시간 길어 추방.
-> 4. **상태 있는 consumer + rebalance** = partition 이 다른 consumer 로 가면서 *처리 진행 정보 손실*. 상태는 *외부 store* 에.
+> 4. **상태 있는 consumer + rebalance** = partition이 다른 consumer로 가면서 *처리 진행 정보 손실*. 상태는 *외부 store*에.
+> 5. **partition 수 < consumer 수** = 초과 consumer는 idle. partition 수를 consumer 최대 수 이상으로 설정.
 
 ## 관련 위키
 
@@ -156,3 +331,4 @@ flowchart LR
 - [[Redis Pub Sub vs Streams]] (consumer group 유사)
 - [[message-broker-comparison]]
 - [[idempotency-keys]]
+- [[outbox-pattern]] (exactly-once 패턴)

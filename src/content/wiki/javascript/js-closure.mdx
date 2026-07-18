@@ -3,7 +3,7 @@ title: "[Javascript] 클로저"
 aliases: ["closure", "클로저", "클로져", "클로저(Closure)", "JavaScript closure", "JS closure"]
 tags: [javascript, closure, lexical-environment, fundamentals]
 category: javascript
-updated: 2026-06-14
+updated: 2026-07-17
 references:
   - id: mdn-web-docs
     note: "Web/JavaScript/Closures"
@@ -18,6 +18,22 @@ references:
 함수가 일급 객체 ([[일급 함수]]) 인 언어의 자연스러운 결과. 메커니즘은 [[Lexical Environment]] + 함수 객체의 `[[Environment]]` 내부 슬롯.
 
 자세한 메커니즘은 [[함수는 끝났는데 변수가 살아있다, Lexical Environment와 클로저의 메커니즘]] 글 참고.
+
+## 시각화: 클로저 메커니즘
+
+```mermaid
+flowchart TD
+    ROOT["const a (Root)"]
+    FN["반환된 화살표 함수"]
+    LE["makeCounter LE (힙)"]
+    ENV["count: N"]
+    ROOT --> FN
+    FN -->|"Environment 슬롯"| LE
+    LE --> ENV
+```
+
+> `makeCounter` 의 실행 컨텍스트가 콜 스택에서 사라져도 LE 는 힙에 남음.  
+> `const a` 가 반환된 함수를 참조하는 한, 이 사슬은 끊어지지 않는다.
 
 ## 핵심 특성
 
@@ -53,11 +69,11 @@ b(); // 1, b 의 count 는 독립
 참조 사슬:
 ```text
 const a (Root)
-  ↓
+  |
 반환된 화살표 함수
-  ↓ [[Environment]] 슬롯
+  | Environment 슬롯
 makeCounter 의 LE
-  ↓ Environment Record
+  | Environment Record
 count: N
 ```
 
@@ -115,6 +131,88 @@ const double = multiply(2);
 double(5); // 10
 ```
 
+## 디바운스 구현
+
+클로저로 *타이머 핸들* 을 닫아두는 전형적 패턴.
+
+```javascript
+function debounce(fn, delay) {
+  let timer = null; // 클로저로 timer 상태 보존
+  return function (...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      fn.apply(this, args);
+    }, delay);
+  };
+}
+
+const onSearch = debounce((query) => fetchResults(query), 300);
+input.addEventListener('input', (e) => onSearch(e.target.value));
+```
+
+> 반환된 함수가 `timer` 를 클로저로 들고 다니므로 호출 간 상태 유지.
+
+## React 에서의 클로저: Stale Closure
+
+React hooks 와 클로저의 가장 흔한 함정.
+
+```jsx
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCount(count + 1); // count 가 항상 0! stale closure
+    }, 1000);
+    return () => clearInterval(id);
+  }, []); // 의존성 배열 비어있음 → count 가 0 인 클로저를 계속 사용
+}
+```
+
+해결: 함수형 업데이트 또는 `useRef` 사용.
+
+```jsx
+useEffect(() => {
+  const id = setInterval(() => {
+    setCount((prev) => prev + 1); // prev = 최신 값
+  }, 1000);
+  return () => clearInterval(id);
+}, []);
+```
+
+> `useCallback`, `useMemo` 의 의존성 배열도 동일 원리. 클로저가 오래된 값을 "닫아두는" 문제.
+
+## 클로저 vs 클래스
+
+```javascript
+// 클로저 방식
+function makeStack() {
+  const items = [];
+  return {
+    push: (x) => items.push(x),
+    pop: () => items.pop(),
+    size: () => items.length,
+  };
+}
+
+// 클래스 방식
+class Stack {
+  #items = [];
+  push(x) { this.#items.push(x); }
+  pop()    { return this.#items.pop(); }
+  size()   { return this.#items.length; }
+}
+```
+
+| 측면 | 클로저 | 클래스 |
+|:---|:---|:---|
+| 상태 은닉 | 자연스럽게 은닉 | `#private` 필드 필요 |
+| 프로토타입 체인 | 없음 (메서드 복사) | 있음 (메서드 공유) |
+| 메모리 | 인스턴스마다 함수 복사 | 프로토타입 공유 |
+| 가독성 | 함수형 스타일 | OOP 스타일 |
+
+> 수백~수천 인스턴스 생성 시 클래스가 메모리 효율적. 단순 상태 캡슐화는 클로저로 충분.
+
 ## 함정
 
 ### for + var + 클로저
@@ -159,7 +257,7 @@ function attachHandler() {
 
 큰 데이터는 명시적으로 해제 (`data = null`).
 
-## 클로저 ≠ 익명 함수
+## 클로저 vs 익명 함수
 
 흔한 오해. 익명 함수, 화살표 함수, 일반 함수 모두 클로저가 될 수 있고, 안 될 수도 있다.
 
@@ -172,4 +270,5 @@ function attachHandler() {
 - [[Lexical Environment]]
 - [[일급 함수]]
 - [[고차 함수]]
+- [[js-scope-chain]]
 - [[함수는 끝났는데 변수가 살아있다, Lexical Environment와 클로저의 메커니즘]]

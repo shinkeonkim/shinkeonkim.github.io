@@ -182,3 +182,143 @@ nfd = unicodedata.normalize("NFD", text)  # 분해형
 ```
 
 파일명/유저 입력 비교 시 정규화하지 않으면 같은 글자도 다르게 보일 수 있다.
+
+## PEP 393: 유연한 내부 표현
+
+Python 3.3+ 의 `str` 객체는 담긴 문자의 최대 코드포인트에 따라 내부 표현을 자동 선택한다.
+
+```mermaid
+flowchart TD
+    A["str 객체 생성"] --> B{"최대 코드포인트?"}
+    B -->|"U+00FF 이하"| C["Latin-1 compact: 1 byte/char"]
+    B -->|"U+FFFF 이하"| D["UCS-2: 2 bytes/char"]
+    B -->|"U+10FFFF 이하"| E["UCS-4: 4 bytes/char"]
+    C --> F["ASCII, Latin 텍스트에 최적"]
+    D --> G["BMP 전체: 한글, 한자 포함"]
+    E --> H["이모지, 희귀 문자"]
+```
+
+```python
+import sys
+print(sys.getsizeof("A"))          # ~50 bytes (Latin-1)
+print(sys.getsizeof("가"))          # ~76 bytes (UCS-2)
+print(sys.getsizeof("\U0001F600")) # ~80 bytes (UCS-4, 이모지)
+```
+
+`len(str)` 은 항상 **코드포인트 수** 를 반환한다. 내부 바이트 크기와 다를 수 있다.
+
+## textwrap: 긴 텍스트 정리
+
+`textwrap` 모듈은 긴 문자열을 지정 너비로 줄바꿈하거나 들여쓰기를 정규화할 때 사용한다.
+
+```python
+import textwrap
+
+text = "Python 의 str 은 불변 유니코드 시퀀스다. PEP 393 이후 코드포인트에 따라 내부 표현이 자동 선택된다."
+
+# 30자 너비로 자동 줄바꿈
+print(textwrap.fill(text, width=30))
+
+# docstring 공통 들여쓰기 제거
+raw = """
+    첫 번째 줄
+    두 번째 줄
+"""
+print(textwrap.dedent(raw).strip())
+
+# 각 줄 앞에 접두어 추가
+print(textwrap.indent("foo\nbar", prefix="  >> "))
+```
+
+자세히는 [[py-textwrap-locale]] 참고.
+
+## 문자열 인터닝
+
+CPython 은 identifier 처럼 생긴 짧은 문자열 리터럴을 자동으로 인터닝(캐시)한다.
+
+```python
+a = "hello"
+b = "hello"
+print(a is b)       # True (같은 객체, CPython 보장)
+
+a = "hello world"   # 공백 포함: 인터닝 보장 안 됨
+b = "hello world"
+print(a is b)       # CPython 에서도 False 일 수 있음
+```
+
+문자열 동등 비교에는 반드시 `==`. `is` 를 쓰면 `SyntaxWarning` (Python 3.8+).
+
+명시적 인터닝이 필요하면 `sys.intern()`:
+
+```python
+import sys
+a = sys.intern("hello world")
+b = sys.intern("hello world")
+print(a is b)   # True
+```
+
+같은 문자열 키가 사전에 수백만 번 등장할 때 메모리 절약 목적으로 사용한다.
+
+## 포매팅 방식 비교
+
+| 방식 | 예시 | 비고 |
+|---|---|---|
+| `%` 연산자 | `"Hello %s" % name` | C 스타일, 구식 |
+| `.format()` | `"Hello {}".format(name)` | 3.0+, 유연한 위치/키워드 인자 |
+| f-string | `f"Hello {name}"` | 3.6+, 가장 빠름, 권장 |
+| `string.Template` | `Template("Hello $name").substitute(...)` | 외부 입력 처리에 안전 |
+
+f-string 은 CPython 3.12 에서 컴파일 타임 추가 최적화되었다.
+
+## 인코딩 오류 처리 전략
+
+```python
+bad = b'\xff\xfe'
+
+bad.decode('utf-8', errors='strict')           # UnicodeDecodeError (기본)
+bad.decode('utf-8', errors='replace')          # U+FFFD 대체 문자로 치환
+bad.decode('utf-8', errors='ignore')           # 무효 바이트 삭제
+bad.decode('utf-8', errors='backslashreplace') # \xNN 이스케이프 형식
+```
+
+파일 읽기 시 인코딩과 오류 처리 전략을 명시하는 것이 좋은 습관이다:
+
+```python
+with open("data.txt", encoding="utf-8", errors="replace") as f:
+    content = f.read()
+```
+
+## `str` vs `bytes` 구분
+
+Python 3 는 `str` (유니코드 텍스트) 와 `bytes` (바이트열) 를 엄격히 분리한다.
+
+```python
+"text" + b"bytes"    # TypeError: 섞어 쓸 수 없음
+len("가")             # 1 (코드포인트)
+len("가".encode())    # 3 (UTF-8 바이트)
+```
+
+네트워크 I/O, 바이너리 파일, 이미지 처리에는 `bytes` / `bytearray` 사용. 자세히는 [[py-bytes-bytearray]] 참고.
+
+## 정규식 연계
+
+복잡한 패턴 매칭, 치환, 분할이 필요하면 `re` 모듈을 사용한다. 자세히는 [[py-re-regex]] 참고.
+
+```python
+import re
+
+# 숫자 추출
+nums = re.findall(r'\d+', "order-123, item-456")
+# ['123', '456']
+
+# 이메일 마스킹
+masked = re.sub(r'[\w.]+@[\w.]+', '***', "user@example.com 에 전송")
+# '*** 에 전송'
+```
+
+## 관련 위키
+
+- [[py-bytes-bytearray]]
+- [[py-re-regex]]
+- [[py-textwrap-locale]]
+- [[py-string-formatting]]

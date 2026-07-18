@@ -1,15 +1,19 @@
 ---
 title: "[Distributed Systems] CAP Theorem과 PACELC"
-aliases: ["CAP theorem", "PACELC", "Brewer's theorem", "consistency availability partition tolerance", "CAP 정리"]
-tags: [distributed-systems, cap, consistency, availability, partition]
+aliases: ["CAP theorem", "PACELC", "Brewer's theorem", "consistency availability partition tolerance", "CAP 정리", "eventual consistency", "strong consistency"]
+tags: [distributed-systems, cap, consistency, availability, partition, pacelc]
 category: distributed-systems
-updated: 2026-06-24
+updated: 2026-07-14
 references:
   - id: wikipedia
     note: "CAP theorem"
   - title: "Daniel Abadi: PACELC (2010)"
     url: "https://dbmsmusings.blogspot.com/2010/04/problems-with-cap-and-yahoos-little.html"
     note: "PACELC 확장"
+  - title: "Martin Kleppmann: Please stop calling databases CP or AP"
+    url: "https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html"
+  - title: "etcd: Raft consensus"
+    url: "https://etcd.io/docs/v3.5/learning/design-raft/"
 ---
 
 ## 정의
@@ -20,17 +24,103 @@ references:
 - **A (Availability)**: 모든 요청이 응답 받음 (실패도 응답)
 - **P (Partition Tolerance)**: 네트워크 분할이 있어도 동작
 
-현실: **P 는 선택지 아님** (네트워크는 항상 깨질 수 있음). 따라서 실질적 선택은:
+현실: **P는 선택지 아님** (네트워크는 항상 깨질 수 있음). 따라서 실질적 선택은:
 - **CP**: 분할 시 일관성 우선 → 일부 노드 응답 안 함
 - **AP**: 분할 시 가용성 우선 → 일관성 일시 깨짐
 
-## CAP 의 한계와 PACELC
+## CP vs AP 선택 다이어그램
 
-CAP 는 "분할 시" 시나리오만 다룸. **정상 작동 시의 trade-off** 는?
+```mermaid
+flowchart TD
+    P{"네트워크 분할 발생"}
+    P -->|"CP 선택"| CP["일관성 우선\n일부 노드 응답 거부\n(minority partition 정지)"]
+    P -->|"AP 선택"| AP["가용성 우선\n모든 노드 응답\n(일시적 불일치 허용)"]
+    CP --> CPex["etcd, Consul, ZooKeeper\nHBase, Spanner\nPostgreSQL (single)"]
+    AP --> APex["Cassandra, DynamoDB\nCouchDB, Riak\nDNS"]
+```
+
+## 실제 시스템 매핑
+
+| 시스템 | CAP 분류 | 이유 |
+|---|---|---|
+| **etcd** | CP | Raft 합의, minority 정지 |
+| **Consul** | CP | Raft 기반, quorum 필요 |
+| **ZooKeeper** | CP | ZAB 프로토콜, leader 필요 |
+| **Cassandra** | AP | 모든 노드 응답, eventual consistency |
+| **DynamoDB** | AP (기본) | 가용성 우선, 강한 일관성 옵션 |
+| **Riak** | AP | vector clock 기반 충돌 해결 |
+| **CouchDB** | AP | MVCC, eventual consistency |
+| **HBase** | CP | HDFS + ZooKeeper |
+| **Spanner** | CP | TrueTime, global consistency |
+| **MongoDB** | CP (기본) | primary-only write |
+| **Redis Cluster** | AP | 분할 시 일부 write 손실 가능 |
+| **DNS** | AP | 캐시로 stale 응답 허용 |
+
+> [!IMPORTANT]
+> 이 분류는 단순화. 실제 시스템은 설정에 따라 달라진다. DynamoDB는 `ConsistentRead=true`로 CP에 가깝게, Cassandra는 `CONSISTENCY ALL`로 CP에 가깝게 동작 가능.
+
+## etcd / Consul: CP 상세
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as "Client"
+    participant L as "Leader (etcd)"
+    participant F1 as "Follower 1"
+    participant F2 as "Follower 2 (분리됨)"
+
+    C->>L: write key=value
+    L->>F1: AppendEntries (Raft)
+    L->>F2: AppendEntries (Raft)
+    F1-->>L: ack
+    Note over F2: 네트워크 분할
+    L->>L: quorum (2/3) 달성 → commit
+    L-->>C: OK
+
+    C->>F2: read (분리된 노드)
+    F2-->>C: 오류 또는 stale 거부
+```
+
+- Raft quorum (N/2 + 1)이 없으면 write 거부
+- minority partition은 read도 거부 (stale 방지)
+- 분할 복구 후 자동 동기화
+
+## Cassandra: AP 상세
+
+```mermaid
+flowchart LR
+    subgraph DC1["DC1 (분할됨)"]
+        N1["Node A\nwrite: x=1"]
+    end
+    subgraph DC2["DC2 (분할됨)"]
+        N2["Node B\nwrite: x=2"]
+    end
+    N1 -.분할 복구.-> N2
+    N2 -.충돌 해결 LWW.-> Result["x=2 (최신 timestamp 승리)"]
+```
+
+- 분할 중에도 양쪽 모두 write 허용
+- 복구 후 *Last Write Wins (LWW)* 또는 *vector clock*으로 충돌 해결
+- 일시적으로 다른 사용자가 다른 결과를 볼 수 있음
+
+## CAP의 한계와 PACELC
+
+CAP는 "분할 시" 시나리오만 다룸. **정상 작동 시의 trade-off**는?
 
 **PACELC** (Daniel Abadi, 2010):
-- **P** artition 시: **A** vailability vs **C** onsistency
-- **E** lse (정상): **L** atency vs **C** onsistency
+- **P**artition 시: **A**vailability vs **C**onsistency
+- **E**lse (정상): **L**atency vs **C**onsistency
+
+```mermaid
+flowchart TD
+    Q{"네트워크 상태"}
+    Q -->|"분할 발생 (P)"| PQ{"A vs C"}
+    Q -->|"정상 (E)"| EQ{"L vs C"}
+    PQ -->|"A 선택"| PA["PA: Cassandra, DynamoDB, Riak"]
+    PQ -->|"C 선택"| PC["PC: etcd, HBase, Spanner"]
+    EQ -->|"L 선택"| EL["EL: Cassandra, DynamoDB"]
+    EQ -->|"C 선택"| EC["EC: Spanner, VoltDB"]
+```
 
 | 시스템 | PACELC | 해석 |
 |---|---|---|
@@ -39,60 +129,67 @@ CAP 는 "분할 시" 시나리오만 다룸. **정상 작동 시의 trade-off** 
 | HBase | PC / EC | 항상 C |
 | DynamoDB | PA / EL | 항상 가용성 / latency 우선 |
 | PostgreSQL | PC / EC | 단일 노드 강한 일관성 |
+| Spanner | PC / EC | 글로벌 강한 일관성 |
 
-PACELC 가 더 실제적: 정상 시간이 훨씬 길기 때문.
+PACELC가 더 실제적: 정상 시간이 훨씬 길기 때문.
 
-## CP 시스템 예: HBase, MongoDB (default)
+## Conflict Resolution (충돌 해결)
 
-```
-[Node A (Primary)] ←── network OK ──→ [Node B (Secondary)]
-                    ↓
-                replication
-                    ↓
-            consistent read
+AP 시스템에서 분할 후 복구 시 충돌 해결 방법:
 
-[Node A] ←── network 분할 ──→ [Node B]
-   ↓ leader election 발동
-   write → A 만 받음
-   B 의 read → 실패 또는 stale 반환 거부
-```
-
-분할 시 minority partition 은 응답 거부 → **가용성 손실**, 일관성 보장.
-
-장점: 사용자가 항상 최신 데이터를 봄.
-단점: 일부 사용자가 아예 응답 못 받음.
-
-## AP 시스템 예: Cassandra, DynamoDB
+### Last Write Wins (LWW)
 
 ```
-[Node A] ←── 분할 ──→ [Node B]
-
-write A → A 의 view 만 업데이트
-write B → B 의 view 만 업데이트
-both nodes 응답 OK → 가용성 보존
-
-나중에 분할 복구:
-A 와 B 의 view 가 다름 → conflict resolution (LWW, vector clock 등)
+Node A: x=1 at t=100
+Node B: x=2 at t=101
+→ x=2 승리 (최신 timestamp)
 ```
 
-장점: 사용자가 항상 응답 받음.
-단점: 일시적으로 다른 사용자가 다른 결과 봄 (eventual consistency).
+- 단순하지만 *clock skew* 위험 (NTP 오차로 잘못된 승리)
+- Cassandra 기본 전략
+
+### Vector Clock
+
+```
+Node A: x=1, vc=[A:1, B:0]
+Node B: x=2, vc=[A:0, B:1]
+→ 충돌 감지 (두 vc가 비교 불가)
+→ 애플리케이션이 해결 (또는 두 값 모두 보존)
+```
+
+- 인과 관계 추적 가능
+- Riak, Amazon Dynamo 사용
+
+### CRDT (Conflict-free Replicated Data Type)
+
+```
+G-Counter: 각 노드가 자기 카운터만 증가
+merge: max(A.count, B.count) per node
+→ 충돌 없이 자동 병합
+```
+
+- 특정 데이터 타입 (counter, set, map)에서 자동 병합
+- Redis CRDT, Riak 지원
 
 ## Consistency Spectrum
 
-CAP 의 "C" 는 strong consistency. 실무는 더 세밀한 spectrum:
+CAP의 "C"는 strong consistency. 실무는 더 세밀한 spectrum:
 
+```mermaid
+flowchart TD
+    S["Strong Consistency\n가장 엄격"]
+    S --> L["Linearizability\n실시간 순서 보장"]
+    L --> Seq["Sequential Consistency"]
+    Seq --> Cau["Causal Consistency\n인과 관계만 보장"]
+    Cau --> E["Eventual Consistency\n가장 느슨"]
 ```
-Strong consistency     ─── 가장 엄격
-   ↓
-Linearizability        (실시간 순서 보장)
-   ↓
-Sequential consistency
-   ↓
-Causal consistency     (인과 관계만 보장)
-   ↓
-Eventual consistency   ─── 가장 느슨
-```
+
+| 수준 | 의미 | 예시 |
+|---|---|---|
+| Linearizability | 실시간 순서 보장, 가장 강함 | etcd, Spanner |
+| Sequential | 모든 노드가 같은 순서로 봄 | ZooKeeper |
+| Causal | 인과 관계 있는 연산만 순서 보장 | MongoDB causal sessions |
+| Eventual | 결국 수렴, 시간 보장 없음 | Cassandra (ONE), DNS |
 
 대부분 AP 시스템 = eventual. CP 시스템 = strong (or linearizable).
 
@@ -106,7 +203,13 @@ CONSISTENCY LEVEL = ONE / QUORUM / ALL / EACH_QUORUM
 - QUORUM: 과반수 (N/2 + 1)
 - ALL: 모든 replica 응답 (느리지만 가장 일관)
 
-write QUORUM + read QUORUM = strong consistency 보장 (N=3 면 2+2 = 4 > 3).
+write QUORUM + read QUORUM = strong consistency 보장 (N=3이면 2+2 = 4 > 3).
+
+```sql
+-- Cassandra CQL
+CONSISTENCY QUORUM;
+SELECT * FROM orders WHERE id = ?;
+```
 
 ## 실무 선택 기준
 
@@ -133,56 +236,64 @@ write QUORUM + read QUORUM = strong consistency 보장 (N=3 면 2+2 = 4 > 3).
 → Elasticsearch (near real-time)
 ```
 
+### 서비스 디스커버리: CP
+
+```
+잘못된 서비스 주소 = 장애
+→ etcd, Consul (Raft 기반)
+→ 분할 시 등록 거부가 안전
+```
+
 ### 메시지 큐: 두 모드
 
 - Kafka: AP (high throughput)
-- RabbitMQ: 모드별 선택 (mirror queue 는 CP)
+- RabbitMQ: 모드별 선택 (mirror queue는 CP)
 
-## CAP 의 흔한 오해
+## CAP의 흔한 오해
 
 ### 오해 1: CA 시스템도 가능?
 
-NO. 분산 환경에서 P 는 선택지 아님 (네트워크는 항상 깨질 수 있음). "CA" 는 single-node 시스템 (MySQL standalone).
+NO. 분산 환경에서 P는 선택지 아님 (네트워크는 항상 깨질 수 있음). "CA"는 single-node 시스템 (MySQL standalone).
 
 ### 오해 2: AP = 일관성 없음?
 
-NO. AP 는 eventual consistency 또는 weaker. 결국엔 수렴.
+NO. AP는 eventual consistency 또는 weaker. 결국엔 수렴.
 
-### 오해 3: CAP 가 영구 선택?
+### 오해 3: CAP가 영구 선택?
 
-NO. 분할 발생 시점에만 trade-off. 정상 시간엔 PACELC 의 E (latency vs consistency).
+NO. 분할 발생 시점에만 trade-off. 정상 시간엔 PACELC의 E (latency vs consistency).
 
-### 오해 4: P 는 datacenter 분할만?
+### 오해 4: P는 datacenter 분할만?
 
-분할 = network 가 잠시라도 깨짐. 짧은 packet loss / latency spike 도 포함. 빈번히 발생.
+분할 = network가 잠시라도 깨짐. 짧은 packet loss / latency spike도 포함. 빈번히 발생.
 
-## consensus 와의 관계
+## consensus와의 관계
 
-CAP 의 "C" 를 보장하려면 합의 (consensus) 필요. Raft, Paxos 같은 알고리즘이 분할 시 majority 만 진행:
+CAP의 "C"를 보장하려면 합의 (consensus) 필요. Raft, Paxos 같은 알고리즘이 분할 시 majority만 진행:
 
 ```
 5-node cluster
-└── 3-node majority (가능, 진행)
+├── 3-node majority (가능, 진행)
 └── 2-node minority (정지)
 ```
 
-majority 가 사라지면 (3+ 노드 분할) cluster 전체 정지. [[distributed-systems-consensus]] 참고.
+majority가 사라지면 (3+ 노드 분할) cluster 전체 정지. [[distributed-systems-consensus]] 참고.
 
-## 함정과 베스트 프랙티스
+## 흔한 함정
 
-- **CAP 는 정상 시 trade-off 안 다룸**: PACELC 가 더 현실적
-- **P 는 항상**: CA 시스템은 single-node 에서만
-- **eventual consistency 도 정확한 정의**: 결국 수렴, 시간 보장 X
-- **Tunable consistency 활용**: Cassandra 의 QUORUM 패턴
-- **금융은 CP, SNS 는 AP**: 도메인 별 명확
-- **단순화하지 말 것**: 모든 read 가 strong 필요 X, 모든 write 가 eventual OK X
-- **monitoring**: stale read 비율, partition 빈도 추적
+> [!WARNING]
+> 1. **CAP는 정상 시 trade-off 안 다룸**: PACELC가 더 현실적
+> 2. **P는 항상**: CA 시스템은 single-node에서만
+> 3. **eventual consistency도 정확한 정의**: 결국 수렴, 시간 보장 X
+> 4. **Tunable consistency 활용**: Cassandra의 QUORUM 패턴
+> 5. **금융은 CP, SNS는 AP**: 도메인별 명확
+> 6. **단순화하지 말 것**: 모든 read가 strong 필요 X, 모든 write가 eventual OK X
+> 7. **monitoring**: stale read 비율, partition 빈도 추적
 
 ## 관련 위키
 
 - [[distributed-systems-consensus]]
 - [[distributed-systems-distributed-transaction]]
-- [[concurrency/stateless]]
-- [[concurrency/stateful]]
-- [[spring-cloud]]
-- [[zero-downtime-deployment]]
+- [[kafka]] (AP 시스템)
+- [[idempotency-keys]] (AP 환경에서 중복 방지)
+- [[outbox-pattern]] (eventual consistency 패턴)

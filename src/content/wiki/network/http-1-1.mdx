@@ -96,6 +96,24 @@ sequenceDiagram
 
 → HTTP/2 의 *multiplexing* 이 이 문제를 *프레임 인터리빙* 으로 해결. 자세한 건 [[head-of-line-blocking]] / [[HTTP/2]].
 
+## HTTP Method 의미론
+
+| Method | 멱등 | 안전 | 용도 |
+|---|---|---|---|
+| `GET` | O | O | 리소스 조회 |
+| `HEAD` | O | O | 헤더만 조회 (본문 없음) |
+| `OPTIONS` | O | O | 허용 메서드 확인 (CORS preflight) |
+| `PUT` | O | X | 리소스 전체 교체 |
+| `DELETE` | O | X | 리소스 삭제 |
+| `POST` | X | X | 리소스 생성 / 액션 |
+| `PATCH` | X | X | 리소스 부분 수정 |
+
+- *멱등 (idempotent)*: 같은 요청을 여러 번 보내도 결과 동일
+- *안전 (safe)*: 서버 상태를 변경하지 않음
+
+> [!IMPORTANT]
+> `PUT` 은 *전체 교체*, `PATCH` 는 *부분 수정*. REST API 에서 혼용하면 클라이언트가 *누락 필드를 null 로 덮어쓰는* 버그 발생.
+
 ## Content-Length vs Chunked
 
 본문 끝을 알리는 *두 가지 방법*:
@@ -140,6 +158,46 @@ Developer\r\n
 > [!NOTE]
 > `307/308` vs `302/301` 의 핵심 차이: **307/308 은 HTTP method 를 보존**. `POST → 302 → GET` 의 *옛 클라이언트 동작* 이 *307 에서는 POST → POST*.
 
+## Range Requests (206 Partial Content)
+
+*대용량 파일 다운로드 재개, 동영상 seek* 에 사용:
+
+```http
+# 요청: 0~999 바이트
+GET /video.mp4 HTTP/1.1
+Range: bytes=0-999
+
+# 응답
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 0-999/50000000
+Content-Length: 1000
+
+<1000 bytes>
+```
+
+서버가 Range 를 지원하면 `Accept-Ranges: bytes` 헤더를 응답에 포함. 지원 안 하면 `200 OK` 로 전체 응답.
+
+## Content Negotiation
+
+클라이언트가 *선호 포맷 / 언어 / 인코딩* 을 헤더로 협상:
+
+```http
+Accept: application/json, text/html;q=0.9, */*;q=0.8
+Accept-Language: ko-KR, ko;q=0.9, en;q=0.8
+Accept-Encoding: gzip, br, deflate
+```
+
+| 헤더 | 의미 |
+|---|---|
+| `Accept` | 응답 MIME 타입 선호도 |
+| `Accept-Language` | 언어 선호도 |
+| `Accept-Encoding` | 압축 방식 (gzip, br) |
+| `Content-Type` | 실제 응답 타입 |
+| `Content-Encoding` | 실제 압축 방식 |
+
+> [!TIP]
+> `br` (Brotli) 는 gzip 대비 *20-30% 더 압축*. 모던 브라우저 + HTTPS 환경에서 *br 우선 설정* 권장. nginx: `brotli on; brotli_comp_level 6;`
+
 ## Cache 헤더 (HTTP/1.1 의 가장 큰 진화)
 
 ```http
@@ -156,6 +214,28 @@ flowchart LR
 ```
 
 자세한 캐시 패턴은 [[network-http-caching]] 참고.
+
+## HTTP 인증 기초
+
+```http
+# 서버가 인증 요구
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="api"
+
+# 클라이언트 재요청
+GET /api/me HTTP/1.1
+Authorization: Bearer eyJhbGci...
+```
+
+| 스킴 | 특징 |
+|---|---|
+| `Basic` | Base64 인코딩 (HTTPS 필수) |
+| `Bearer` | JWT / OAuth 토큰 |
+| `Digest` | 해시 기반 (거의 미사용) |
+| `API-Key` | 커스텀 헤더 (`X-API-Key`) |
+
+> [!WARNING]
+> `Authorization` 헤더는 *브라우저 캐시에 저장되지 않음*. 반면 쿠키는 `HttpOnly + Secure + SameSite=Strict` 설정 시 XSS / CSRF 방어.
 
 ## 흔한 함정
 

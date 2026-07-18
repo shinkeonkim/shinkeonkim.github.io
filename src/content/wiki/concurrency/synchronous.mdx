@@ -1,23 +1,25 @@
 ---
 title: "Synchronous (동기)"
-aliases: ["synchronous", "sync", "동기", "동기식", "동기 호출", "synchronous call"]
-tags: [concurrency, programming-model, sync-async]
+aliases: ["synchronous", "sync", "동기", "동기식", "동기 호출", "synchronous call", "blocking call"]
+tags: [concurrency, programming-model, sync-async, blocking, io]
 category: concurrency
-updated: 2026-06-18
+updated: 2026-07-14
 references:
   - id: wikipedia
-    note: "Asynchronous I"
+    note: "Asynchronous I/O"
   - id: openjdk
     note: "JEP 444"
+  - title: "POSIX: Synchronous and Asynchronous I/O"
+    url: "https://pubs.opengroup.org/onlinepubs/9699919799/functions/V2_chap02.html"
 ---
 
 ## 정의
 
 **Synchronous (동기)** 는 호출자가 **결과가 나올 때까지 기다리는** 실행 모델. 함수를 호출한 코드는 그 함수가 반환할 때까지 **다음 줄로 진행하지 않는다**.
 
-이 정의는 Java 의 `synchronized` 키워드와는 **별개의 개념** 이다. `synchronized` 는 동시성 제어 (mutual exclusion), Synchronous 는 호출 모델 (control flow).
+이 정의는 Java의 `synchronized` 키워드와는 **별개의 개념**이다. `synchronized`는 동시성 제어 (mutual exclusion), Synchronous는 호출 모델 (control flow).
 
-[[Asynchronous]] 와의 대비, 그리고 [[Blocking]] 과의 관계가 핵심.
+[[Asynchronous]]와의 대비, 그리고 [[Blocking]]과의 관계가 핵심.
 
 ## 가장 단순한 형태
 
@@ -29,13 +31,36 @@ process(result);                          // 그 다음 진행
 
 호출자는 응답이 오기 전까지는 다음 줄을 실행하지 않는다. 코드 작성과 디버깅이 가장 쉽다.
 
-## Sync 의 두 형태, blocking vs non-blocking
+## 4가지 조합
 
-Synchronous 는 호출자가 **결과를 기다린다** 는 의미이지, 그 동안 **CPU 를 점유** 하는지는 별개. 따라서 두 가지가 가능.
+동기/비동기와 블로킹/논블로킹은 **독립적인 두 축**이다. 조합하면 4가지가 나온다.
+
+```mermaid
+flowchart TD
+    subgraph Sync["Synchronous (호출자가 결과를 기다림)"]
+        SB["Sync + Blocking\n가장 흔함\nthread sleep"]
+        SNB["Sync + Non-Blocking\n드묾\nbusy-wait / spin"]
+    end
+    subgraph Async["Asynchronous (호출자가 결과를 기다리지 않음)"]
+        AB["Async + Blocking\n안티패턴\ncallback 안에서 sleep"]
+        ANB["Async + Non-Blocking\n고성능 IO\nNIO, epoll, io_uring"]
+    end
+```
+
+| 조합 | 호출자 대기 | 스레드 상태 | 예시 |
+|:---|:---:|:---:|:---|
+| **Sync + Blocking** | O | sleep | `socket.read()`, `Thread.sleep()` |
+| **Sync + Non-Blocking** | O | active (spin) | `Thread.onSpinWait()`, busy-loop |
+| **Async + Blocking** | X | sleep (안티패턴) | callback 안에서 `Thread.sleep()` |
+| **Async + Non-Blocking** | X | active (event loop) | Node.js, Netty, epoll |
+
+## Sync의 두 형태: blocking vs non-blocking
+
+Synchronous는 호출자가 **결과를 기다린다**는 의미이지, 그 동안 **CPU를 점유**하는지는 별개. 따라서 두 가지가 가능.
 
 ### Synchronous + Blocking (가장 흔함)
 
-호출자가 결과를 기다리는 동안 **스레드가 멈춘다 (block)**. OS 가 스레드를 sleep 상태로 만들고 CPU 를 다른 스레드에게 양보.
+호출자가 결과를 기다리는 동안 **스레드가 멈춘다 (block)**. OS가 스레드를 sleep 상태로 만들고 CPU를 다른 스레드에게 양보.
 
 ```java
 // 전형적인 sync + blocking
@@ -46,7 +71,7 @@ Thread.sleep(1000);                       // 1초 block
 
 ### Synchronous + Non-Blocking (드물지만 가능)
 
-호출자가 결과를 기다리지만 **스레드는 활성 상태** 로 계속 돈다. busy-waiting 또는 polling.
+호출자가 결과를 기다리지만 **스레드는 활성 상태**로 계속 돈다. busy-waiting 또는 polling.
 
 ```java
 while (!result.isReady()) {
@@ -55,53 +80,71 @@ while (!result.isReady()) {
 String value = result.get();
 ```
 
-CPU 를 낭비하므로 거의 안 쓴다. 매우 짧은 대기에만 쓰이는 마이크로 최적화.
+CPU를 낭비하므로 거의 안 쓴다. 매우 짧은 대기에만 쓰이는 마이크로 최적화.
 
 ## 동기 호출 흐름
 
-```text
-[caller]                    [callee]
-   │
-   │── call ───────────────►│
-   │                         │ 작업 수행
-   │ (waiting)              │
-   │                         │
-   │◄─────────── return ────│
-   │
-   │ 결과 처리 시작
-   │
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Callee
+
+    Caller->>Callee: call()
+    Note over Caller: waiting (blocked)
+    Callee->>Callee: 작업 수행
+    Callee-->>Caller: return result
+    Note over Caller: 결과 처리 시작
 ```
 
-호출자와 호출자의 스택 프레임이 **일직선** 으로 이어진다. 디버깅 시 stack trace 가 그대로 보인다.
+호출자와 호출자의 스택 프레임이 **일직선**으로 이어진다. 디버깅 시 stack trace가 그대로 보인다.
+
+## 동기 vs 비동기 대비
+
+```mermaid
+sequenceDiagram
+    participant C1 as "Caller (Sync)"
+    participant S as "Service"
+    participant C2 as "Caller (Async)"
+
+    C1->>S: call()
+    Note over C1: blocked (대기)
+    S-->>C1: result
+    Note over C1: 처리 재개
+
+    C2->>S: call(callback)
+    Note over C2: 즉시 다음 작업 진행
+    S-->>C2: callback(result)
+    Note over C2: 콜백에서 처리
+```
 
 ## 장점
 
-- **읽기 쉽다**, 위에서 아래로 흐름이 명확
-- **에러 처리가 자연스럽다**, `try / catch` 가 호출자 스택에 닿는다
-- **디버깅이 쉽다**, breakpoint 가 작동, stack trace 가 일관
-- **테스트가 쉽다**, 순차 실행이라 결과 비교 단순
+- **읽기 쉽다**: 위에서 아래로 흐름이 명확
+- **에러 처리가 자연스럽다**: `try / catch`가 호출자 스택에 닿는다
+- **디버깅이 쉽다**: breakpoint가 작동, stack trace가 일관
+- **테스트가 쉽다**: 순차 실행이라 결과 비교 단순
 
 ## 단점
 
-- **느린 작업은 스레드를 묶는다**, 동시에 1000명 응답하려면 1000개 스레드
-- **CPU 활용도가 낮을 수 있다**, I/O 대기 중에는 CPU idle
-- **응답성 저하**, 한 요청이 다른 요청의 진행을 막을 수 있다
+- **느린 작업은 스레드를 묶는다**: 동시에 1000명 응답하려면 1000개 스레드
+- **CPU 활용도가 낮을 수 있다**: I/O 대기 중에는 CPU idle
+- **응답성 저하**: 한 요청이 다른 요청의 진행을 막을 수 있다
 
 ## 언제 동기가 적절한가
 
-- **응답이 빠르고 일관적**, 5ms 이내의 DB 쿼리 같은 작업
-- **순차 흐름이 본질**, 단계 A 의 결과로 단계 B 를 결정
-- **저부하 시스템**, 동시 접속 < 수백 수준
+- **응답이 빠르고 일관적**: 5ms 이내의 DB 쿼리 같은 작업
+- **순차 흐름이 본질**: 단계 A의 결과로 단계 B를 결정
+- **저부하 시스템**: 동시 접속 < 수백 수준
 - **테스트, 스크립트, 마이그레이션 도구**
 
-## 언제 [[Asynchronous]] 가 더 나은가
+## 언제 [[Asynchronous]]가 더 나은가
 
 - 외부 API 호출 (수 초 걸릴 수 있음)
 - 수만 명 동시 접속을 받는 서버
-- UI 가 멈추면 안 되는 클라이언트
+- UI가 멈추면 안 되는 클라이언트
 - 여러 작업을 병렬로 진행해야 할 때
 
-## Java 의 동기 IO 예
+## Java의 동기 IO 예
 
 ### HTTP 클라이언트 (sync)
 
@@ -130,9 +173,42 @@ Socket client = server.accept();           // 연결을 받을 때까지 block
 String line = new BufferedReader(...).readLine();   // 데이터를 받을 때까지 block
 ```
 
-## Sync 모델의 동시성, 스레드 풀
+## 언어별 동기 IO 패턴
 
-대량 동시성을 위해 sync 코드는 **스레드 풀** 을 쓴다. 각 요청을 별도 스레드에 할당해 병렬 처리.
+### Python (requests)
+
+```python
+import requests
+
+# 동기 (기본)
+response = requests.get("https://api.example.com/users")
+data = response.json()   # 응답 올 때까지 block
+
+# 비동기 대안: httpx + asyncio
+import httpx, asyncio
+
+async def fetch():
+    async with httpx.AsyncClient() as client:
+        response = await client.get("https://api.example.com/users")
+        return response.json()
+```
+
+### Node.js
+
+```javascript
+// 동기 (fs.readFileSync) - 이벤트 루프 블로킹
+const data = fs.readFileSync("data.txt", "utf8");   // 블로킹!
+
+// 비동기 (권장)
+const data = await fs.promises.readFile("data.txt", "utf8");
+```
+
+> [!WARNING]
+> Node.js에서 `*Sync` 함수 (예: `readFileSync`, `execSync`)는 이벤트 루프 전체를 블로킹한다. 서버 코드에서는 절대 사용 금지. 스크립트나 초기화 코드에서만 허용.
+
+## Sync 모델의 동시성: 스레드 풀
+
+대량 동시성을 위해 sync 코드는 **스레드 풀**을 쓴다. 각 요청을 별도 스레드에 할당해 병렬 처리.
 
 ```java
 ExecutorService pool = Executors.newFixedThreadPool(100);
@@ -145,25 +221,44 @@ pool.submit(() -> {
 
 이 방식의 한계:
 - 스레드 1개당 메모리 ~1MB
-- 100 스레드 ≈ 100MB
+- 100 스레드 = 100MB
 - 10,000 동시 연결 → ~10GB, 비현실적
 
-Java 21+ 의 **Virtual Threads (JEP 444)** 가 이 한계를 깬다. 동기 코드 그대로 두면서도 수백만 동시 연결을 가능하게 만든다.
+Java 21+의 **Virtual Threads (JEP 444)**가 이 한계를 깬다. 동기 코드 그대로 두면서도 수백만 동시 연결을 가능하게 만든다.
 
-## sync 와 [[Blocking]] 의 관계
+```java
+// Virtual Threads: 동기 코드 그대로, 스레드 수 제한 없음
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    executor.submit(() -> {
+        String r = http.get(url);   // 여전히 sync, 하지만 virtual thread
+        process(r);
+    });
+}
+```
+
+## sync와 [[Blocking]]의 관계
 
 | 표현 | 의미 |
 |:---|:---|
 | **synchronous** | 호출자가 결과를 기다린다 (control flow) |
 | **blocking** | 그 동안 스레드가 멈춘다 (thread state) |
 
-같이 쓰이지만 다른 차원. 대부분의 sync 코드는 blocking 이지만, **non-blocking sync** 도 가능 (`Thread.onSpinWait()`, busy-loop) 하다.
+같이 쓰이지만 다른 차원. 대부분의 sync 코드는 blocking이지만, **non-blocking sync**도 가능 (`Thread.onSpinWait()`, busy-loop)하다.
 
-반대로 **async + blocking** 도 가능 (콜백 안에서 다시 sleep 하는 경우, 자주 보는 안티패턴).
+반대로 **async + blocking**도 가능 (콜백 안에서 다시 sleep하는 경우, 자주 보는 안티패턴).
 
-## 참고
+## 흔한 함정
+
+> [!WARNING]
+> 1. **동기 = 느림이라는 오해**: 동기 자체가 느린 게 아니라, *느린 I/O를 동기로 기다리는 것*이 문제. 빠른 I/O는 동기가 더 단순하고 충분히 빠르다.
+> 2. **스레드 풀 크기 과소 설정**: 동시 요청 수 > 스레드 수 → 큐 대기 → 응답 지연. 모니터링 필수.
+> 3. **Virtual Thread에서 synchronized 블록**: Java 21 Virtual Thread는 `synchronized` 블록 안에서 blocking 시 carrier thread를 점유 (pinning). `ReentrantLock` 사용 권장.
+> 4. **Node.js에서 Sync 함수 사용**: 이벤트 루프 전체 블로킹. 서버 코드에서 절대 금지.
+
+## 관련 위키
 
 - [[Asynchronous]]
 - [[Blocking]]
 - [[Non-Blocking]]
 - [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- [[backpressure]] (동기 호출 과부하 시 흐름 제어)

@@ -199,8 +199,115 @@ JSON.stringify({ a: Infinity })      // '{"a":null}'
 3. **`x == null`** 만 예외적 허용 (null 또는 undefined 검사)
 4. **`??` (nullish coalescing)** 활용
 
+## 타입 변환 흐름도
+
+hint 에 따라 `Symbol.toPrimitive` → `toString` / `valueOf` 순서가 결정됩니다.
+
+```mermaid
+flowchart TD
+    TRIG["강제 변환 발생"] --> SH["hint: string"]
+    TRIG --> NH["hint: number"]
+    TRIG --> DH["hint: default"]
+    SH --> SP1["Symbol.toPrimitive 있으면 사용"]
+    SH --> NO1["없으면 toString, 실패 시 valueOf"]
+    NH --> SP2["Symbol.toPrimitive 있으면 사용"]
+    NH --> NO2["없으면 valueOf, 실패 시 toString"]
+    DH --> SP2
+    SP1 --> RES["원시값 완성"]
+    NO1 --> RES
+    SP2 --> RES
+    NO2 --> RES
+```
+
+## 연산자별 변환 요약
+
+```mermaid
+flowchart LR
+    PLUS["+ 연산자"] -->|"둘 다 number"| NUM["숫자 덧셈"]
+    PLUS -->|"하나라도 string"| STR["문자열 연결"]
+    ARITH["산술 연산자"] -->|"항상 ToNumber"| TONUM["숫자 연산"]
+    CMP["비교 연산자"] -->|"둘 다 string"| LEXI["문자열 사전 비교"]
+    CMP -->|"나머지"| TONUM2["ToNumber 후 비교"]
+```
+
+## Object.is 비교
+
+`===` 의 두 가지 예외를 올바르게 처리합니다.
+
+| 비교 | `==` | `===` | `Object.is` |
+|:---|:---:|:---:|:---:|
+| `1 == '1'` | true | false | false |
+| `null == undefined` | true | false | false |
+| `NaN` 자기 비교 | false | false | **true** |
+| `+0 vs -0` | true | true | **false** |
+
+```javascript
+Object.is(NaN, NaN)    // true  (NaN 검사에 사용)
+Object.is(+0, -0)      // false (부호 0 구분 필요 시)
+
+// React useState 내부도 Object.is 사용
+// Redux 는 Object.is 기반 얕은 비교
+```
+
+`Object.is(NaN, NaN)` 이 `true` 이므로 `Number.isNaN` 대신 사용 가능.
+
+## TypeScript 에서의 암묵적 변환
+
+TypeScript 타입 시스템은 컴파일 타임에 강제 변환 오류를 잡아 주지만, `as` 단언은 런타임 변환이 아닙니다.
+
+```typescript
+// 잘못된 as 사용
+const raw = '5' as unknown as number;
+const result = raw + 1;
+// 런타임: '51' (string concat!) - TypeScript 는 number 로 보지만 값은 여전히 string
+
+// 올바른 명시적 변환
+function toNumber(v: unknown): number {
+    const n = Number(v);
+    if (Number.isNaN(n)) throw new TypeError(`변환 불가: ${String(v)}`);
+    return n;
+}
+
+// 타입 가드 + 변환 조합
+function coerceToString(v: string | null | undefined): string {
+    return v ?? '';   // null / undefined 만 빈 문자열로
+}
+```
+
+> [!WARNING]
+> `as unknown as T` 는 TypeScript 타입 검사기를 우회합니다. 런타임 값이 실제로 `T` 임을 보장하지 않습니다.
+
+## 실전 패턴
+
+```javascript
+// 1. 숫자 변환 3가지 방법
++'42'                          // 42, unary +
+Number('42')                   // 42, 명시적
+parseInt('42px', 10)           // 42, 관대 파싱 (기수 반드시 명시)
+
+// 2. nullish vs falsy 구분
+const a = userInput ?? 'default';   // null / undefined 만 처리
+const b = userInput || 'default';   // falsy 전체 (빈 문자열도 대체!)
+
+// 3. 안전한 숫자 변환
+const n = Number(raw);
+const safe = Number.isFinite(n) ? n : 0;
+
+// 4. 배열의 암묵적 변환 방지
+const display = Array.isArray(v) ? v.join(', ') : String(v);
+
+// 5. 불리언 변환: !! vs Boolean()
+!!0            // false
+Boolean(0)     // false (동일, Boolean() 가 더 명시적)
+!!'0'          // true (문자열 '0' 은 truthy!)
+!![]           // true (빈 배열도 truthy!)
+```
+
 ## 참고
 
-- [[JS Number]]
-- [[JS String]]
-- [[JS boolean / null / undefined]]
+- [[js-number|JS Number]]
+- [[js-string|JS String]]
+- [[js-boolean-null-undefined|JS boolean / null / undefined]]
+- [[js-nan-infinity|JS NaN / Infinity]]
+- [[js-symbol|JS Symbol]]
+- [[js-json|JS JSON]]

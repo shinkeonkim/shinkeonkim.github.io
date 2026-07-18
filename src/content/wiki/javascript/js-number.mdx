@@ -1,12 +1,14 @@
 ---
 title: "[Javascript] Number"
-aliases: ["JS Number", "JavaScript 숫자", "double precision"]
-tags: [javascript, primitive, number, fundamentals]
+aliases: ["JS Number", "JavaScript 숫자", "double precision", "IEEE 754", "Number 타입"]
+tags: [javascript, primitive, number, fundamentals, ieee754]
 category: javascript
-updated: 2026-06-18
+updated: 2026-07-14
 references:
   - id: mdn-web-docs
     note: "Number"
+  - id: tc39-ecma
+    note: "Number type"
 ---
 
 ## 정의
@@ -18,6 +20,30 @@ typeof 42         // 'number'
 typeof 3.14       // 'number'
 typeof NaN        // 'number'
 typeof Infinity   // 'number'
+```
+
+## IEEE 754 구조
+
+64비트를 세 구역으로 나눠 부동소수점을 표현합니다.
+
+```mermaid
+flowchart LR
+    A["64비트 double"] --> B["부호 1비트"]
+    A --> C["지수 11비트"]
+    A --> D["가수 52비트"]
+    B --> E["양수 0, 음수 1"]
+    C --> F["지수 범위 -1022~1023"]
+    D --> G["유효 자릿수 약 15-16자리"]
+```
+
+값은 `(-1)^부호 × 2^지수 × (1 + 가수)` 로 계산됩니다. 가수가 52비트이므로 정수는 `2^53` 까지만 정확히 표현 가능합니다.
+
+```mermaid
+flowchart LR
+    H["정수 안전 범위"] --> I["MAX_SAFE_INTEGER = 2^53 - 1"]
+    H --> J["MIN_SAFE_INTEGER = -(2^53 - 1)"]
+    I --> K["9,007,199,254,740,991"]
+    J --> L["-9,007,199,254,740,991"]
 ```
 
 ## 정수 안전 범위
@@ -47,6 +73,19 @@ Number.MIN_VALUE              // 5e-324
 Math.abs((0.1 + 0.2) - 0.3) < Number.EPSILON    // 비교 idiom
 ```
 
+`Number.EPSILON` 은 `2^-52 ≈ 2.22e-16`. 두 수의 차이가 이 값보다 작으면 "같다"고 판단합니다.
+
+### 왜 0.1 + 0.2 가 0.3 이 아닌가
+
+`0.1` 의 이진 표현은 `0.0001100110011...` 의 무한 반복. 52비트에서 잘려 반올림됩니다. 이 오차가 연산 중에 누적됩니다.
+
+```javascript
+// 통화 연산: 정수 단위로
+const price = 0.1 * 100;      // cent 단위
+const tax   = 0.2 * 100;
+const total = (price + tax) / 100;   // 0.3 (정확)
+```
+
 ## 특수 값
 
 | 값 | 의미 |
@@ -66,6 +105,36 @@ Number.isNaN('hello')    // false (엄격)
 ```
 
 `Number.isNaN` 권장 (변환 없이 검사).
+
+```javascript
+// NaN 전파: 연산 결과로 퍼짐
+NaN + 1     // NaN
+NaN * 0     // NaN
+Math.sqrt(-1)  // NaN
+
+// 체크 패턴
+function isValidNumber(n) {
+    return typeof n === 'number' && !Number.isNaN(n) && isFinite(n);
+}
+```
+
+## BigInt
+
+`Number.MAX_SAFE_INTEGER` 를 초과하는 정수에는 `BigInt` 를 사용합니다.
+
+```javascript
+const big = 9007199254740991n;   // 리터럴: 숫자 뒤에 n
+const big2 = BigInt('12345678901234567890');
+
+big + 1n       // 9007199254740992n (정확!)
+big * 2n       // 18014398509481982n
+
+// BigInt 와 Number 는 섞을 수 없음
+big + 1        // ❌ TypeError
+Number(big)    // 변환 (정밀도 손실 가능)
+```
+
+자세히: [[JS BigInt]]
 
 ## 형변환
 
@@ -137,7 +206,7 @@ Math.trunc(-1.9)         // -1 (정수부만)
 Math.sign(-3)            // -1
 Math.max(1, 2, 3)        // 3
 Math.min(...arr)         // spread 활용
-Math.random()            // 0 ≤ x < 1
+Math.random()            // 0 <= x < 1
 Math.pow(2, 10)          // 1024 (또는 2**10)
 Math.sqrt(16)            // 4
 Math.log(Math.E)         // 1
@@ -145,7 +214,46 @@ Math.log2(8)             // 3
 Math.log10(1000)         // 3
 ```
 
+## 실전 패턴
+
+### 범위 내 랜덤 정수
+
+```javascript
+function randInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+```
+
+### 안전한 파싱
+
+```javascript
+function parseNumber(str, fallback = 0) {
+    const n = Number(str);
+    return isFinite(n) ? n : fallback;
+}
+
+parseNumber('3.14')     // 3.14
+parseNumber('hello')    // 0 (fallback)
+parseNumber('')         // 0 (fallback 아님, Number('') === 0)
+```
+
+### 반올림 정확도 확보
+
+```javascript
+// toFixed 는 string 반환, 부동소수점 오차 있음
+(1.005).toFixed(2)   // '1.00' (예상: '1.01')
+
+// 더 정확한 반올림
+function round(n, digits) {
+    const factor = 10 ** digits;
+    return Math.round(n * factor) / factor;
+}
+```
+
 ## 함정
+
+> [!WARNING]
+> 다음 함정들은 실제 운영 환경에서 자주 발생합니다.
 
 ### 1. 0 의 양수/음수
 
@@ -171,8 +279,27 @@ console.log(id);    // 12345678901234568 (마지막 자리 변형)
 // 큰 ID 는 string 또는 BigInt 로
 ```
 
-## 참고
+### 4. 암묵적 형변환
+
+```javascript
+'5' - 3   // 2 (문자열이 숫자로 변환)
+'5' + 3   // '53' (숫자가 문자열로 변환)
+true + 1  // 2
+```
+
+타입 명시 변환 (`Number(...)`, `parseInt(...)`) 을 권장합니다.
+
+### 5. toFixed 는 문자열 반환
+
+```javascript
+typeof (1.23).toFixed(2)   // 'string', '1.23'
+// 연산에 쓰려면 Number 변환 필요
+Number((1.23).toFixed(2))  // 1.23
+```
+
+## 관련 위키
 
 - [[JS BigInt]]
 - [[JS 타입 변환]]
 - [[JS NaN / Infinity]]
+- [[JS Date]]

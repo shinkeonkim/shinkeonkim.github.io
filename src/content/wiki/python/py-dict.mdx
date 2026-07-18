@@ -3,7 +3,7 @@ title: "[Python] dict: 해시 맵과 삽입 순서 보장"
 aliases: ["python dict", "파이썬 딕셔너리", "dictionary", "hash map", "ordered dict"]
 tags: [python, dict, dictionary, hash, basics]
 category: python
-updated: 2026-06-20
+updated: 2026-07-16
 references:
   - id: python-docs
     note: "Python `dict` documentation - https://docs.python.org/3/library/stdtypes.html#mapping-types-dict"
@@ -18,6 +18,31 @@ references:
 ## 정의
 
 `dict`는 Python의 **해시 맵 자료구조**다. Python 3.7부터 **삽입 순서를 언어 사양으로 보장**한다(이전엔 CPython 3.6 구현 디테일이었음). 평균 O(1) 조회·삽입·삭제. 키는 해시 가능해야 한다(`tuple`/`str`/`frozenset` O, `list`/`dict`/`set` X).
+
+## 내부 구조 (compact dict, 3.6+)
+
+```mermaid
+flowchart TB
+    subgraph HT["해시 테이블 (indices 배열)"]
+        H0["slot 0: -"]
+        H1["slot 1: 2"]
+        H2["slot 2: 0"]
+        H3["slot 3: -"]
+        H4["slot 4: 1"]
+    end
+    subgraph EA["entries 배열 (삽입 순서)"]
+        E0["0: hash=..., key='a', val=1"]
+        E1["1: hash=..., key='b', val=2"]
+        E2["2: hash=..., key='c', val=3"]
+    end
+    H2 --> E0
+    H4 --> E1
+    H1 --> E2
+```
+
+- **해시 테이블**: 슬롯마다 entries 배열의 인덱스만 저장
+- **entries 배열**: 실제 (hash, key, value) 를 삽입 순서대로 저장
+- 삽입 순서 보장 + 메모리 절약 동시 달성 (이전 CPython 대비 ~50% 절약)
 
 ## 생성
 
@@ -58,6 +83,7 @@ print(d)`}
   output={`1
 None
 -1
+True
 {'a': 99, 'b': 2, 'c': 3, 'd': 4, 'e': 5}
 2
 ('e', 5)
@@ -104,7 +130,8 @@ for v in d.values():
     print(v)
 ```
 
-**함정**: 순회 중 dict를 변경하면 `RuntimeError: dictionary changed size during iteration`.
+> [!WARNING]
+> **순회 중 변경 금지**: 순회 중 dict를 변경하면 `RuntimeError: dictionary changed size during iteration`.
 
 ```python
 # WRONG
@@ -145,6 +172,20 @@ print(c.most_common(3))`}
 [('a', 5), ('b', 2), ('r', 2)]`}
 />
 
+### Counter 산술
+
+```python
+from collections import Counter
+
+a = Counter(["cat", "dog", "cat"])
+b = Counter(["dog", "bird"])
+
+print(a + b)        # Counter({'cat': 2, 'dog': 2, 'bird': 1})
+print(a - b)        # Counter({'cat': 2})
+print(a & b)        # Counter({'dog': 1})   # min(a, b)
+print(a | b)        # Counter({'cat': 2, 'dog': 1, 'bird': 1})  # max(a, b)
+```
+
 ## setdefault와 get
 
 `get(k, default)`는 dict를 변경하지 않고 기본값 반환. `setdefault(k, default)`는 키가 없으면 추가까지.
@@ -172,6 +213,25 @@ a |= b                       # a 직접 갱신
 merged = {**a, **b}
 ```
 
+## ChainMap: 계층적 조회
+
+`collections.ChainMap` 은 여러 dict를 체인으로 연결. 앞에서부터 순서대로 키 검색.
+
+```python
+from collections import ChainMap
+
+defaults = {"color": "red", "verbose": False}
+env     = {"verbose": True}
+cli     = {"output": "json"}
+
+config = ChainMap(cli, env, defaults)
+print(config["color"])    # "red" (defaults 에서)
+print(config["verbose"])  # True (env 에서 오버라이드)
+print(config["output"])   # "json" (cli 에서)
+
+# 실전: argparse + 환경변수 + 기본값 계층
+```
+
 ## 해시 가능성
 
 키는 `__hash__`를 구현해야 한다. 가변 객체(`list`, `dict`, `set`)는 해시 불가능.
@@ -183,6 +243,20 @@ merged = {**a, **b}
 ```
 
 해시값과 동등성은 일관되어야 한다(`a == b` → `hash(a) == hash(b)`). 직접 만든 클래스를 키로 쓰려면 `__eq__`와 `__hash__`를 함께 구현.
+
+```python
+class Point:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+    def __eq__(self, other):
+        return (self.x, self.y) == (other.x, other.y)
+
+    def __hash__(self):
+        return hash((self.x, self.y))   # tuple 해시 재활용
+
+d = {Point(0, 0): "origin"}
+```
 
 ## 내부 구조 간단히
 
@@ -196,8 +270,61 @@ sys.getsizeof({})              # 64 (3.12 기준)
 sys.getsizeof({"a": 1})        # 184
 ```
 
+## 실전 패턴
+
+### dict를 클래스처럼: TypedDict
+
+```python
+from typing import TypedDict
+
+class User(TypedDict):
+    name: str
+    age: int
+
+u: User = {"name": "Alice", "age": 30}
+# 정적 타입 검사 지원, 런타임엔 일반 dict
+```
+
+### 조건부 키 포함
+
+```python
+# 3.9+ 전: 조건 키 추가하려면 두 번 작성
+config = {}
+if debug:
+    config["verbose"] = True
+
+# 3.9+ 병합 연산자 활용
+config = {"host": "localhost"} | ({"verbose": True} if debug else {})
+```
+
+### 함수형: dict → 변환
+
+```python
+inventory = {"apple": 5, "banana": 0, "cherry": 3}
+
+# 0 제거
+available = {k: v for k, v in inventory.items() if v > 0}
+
+# 값 변환
+doubled = {k: v * 2 for k, v in inventory.items()}
+
+# 키 정렬
+sorted_inv = dict(sorted(inventory.items(), key=lambda kv: kv[1], reverse=True))
+```
+
 ## 성능 함정
 
-- 매우 큰 dict에서 키 정렬이 필요하면 `sorted(d)` 매번 호출보다 `sortedcontainers.SortedDict` 검토
+> [!CAUTION]
+> 매우 큰 dict에서 키 정렬이 필요하면 `sorted(d)` 매번 호출보다 `sortedcontainers.SortedDict` 검토.
+
 - 키 충돌이 심한 사용자 정의 객체는 O(n) 가능 → `__hash__` 잘 분포되게 구현
 - `dict` 대신 `__slots__` + 클래스: 메모리 1/3, 속도 약간 빠름 (필드 고정 시)
+- `dict.get()` vs `try/except KeyError`: 키 존재 확률 낮으면 예외 방식이 더 빠름
+
+## 관련 위키
+
+- [[py-comprehension]] - dict comprehension 문법
+- [[py-set-frozenset]] - set: 해시 가능 키 집합
+- [[py-collections]] - defaultdict, Counter, ChainMap, OrderedDict
+- [[py-typing]] - TypedDict, Mapping, MutableMapping 타입 힌트
+- [[py-dataclass]] - 구조화 데이터: dict 대신 클래스 쓸 때

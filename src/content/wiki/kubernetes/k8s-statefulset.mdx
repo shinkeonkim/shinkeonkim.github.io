@@ -3,7 +3,7 @@ title: "[K8s] StatefulSet: 순서 보장, 고유 ID, 영속 스토리지"
 aliases: ["StatefulSet", "STS", "stable identity", "ordered deployment", "PV per pod", "headless service"]
 tags: [kubernetes, statefulset, stateful, k8s, storage]
 category: kubernetes
-updated: 2026-06-25
+updated: 2026-07-16
 references:
   - title: "Kubernetes Docs: StatefulSets"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/"
@@ -28,7 +28,7 @@ references:
 flowchart TD
     Yes[StatefulSet 적합]
     Yes --> Y1["DB (PostgreSQL, MySQL replica)"]
-    Yes --> Y2[Kafka, Zookeeper]
+    Yes --> Y2["Kafka, Zookeeper"]
     Yes --> Y3[Elasticsearch]
     Yes --> Y4[etcd]
     Yes --> Y5[Cassandra]
@@ -45,7 +45,7 @@ apiVersion: v1
 kind: Service
 metadata: { name: db-headless }
 spec:
-  clusterIP: None        # ← Headless 필수
+  clusterIP: None        # Headless 필수
   selector: { app: db }
   ports: [{ port: 5432, targetPort: 5432 }]
 ---
@@ -63,6 +63,11 @@ spec:
         - name: postgres
           image: postgres:17
           ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres]
+            initialDelaySeconds: 5
+            periodSeconds: 5
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
@@ -84,6 +89,25 @@ pod 2: db-2   → db-2.db-headless.default.svc.cluster.local
 
 > *각 pod 가 고유 DNS 이름*. peer 끼리 *서로 직접 통신* (replication 등).
 
+## Peer Discovery 패턴
+
+StatefulSet + Headless Service 조합이 *peer discovery 의 핵심*:
+
+```mermaid
+flowchart LR
+    db0["db-0 (Primary)"]
+    db1["db-1 (Replica 1)"]
+    db2["db-2 (Replica 2)"]
+    db0 -->|"WAL 스트리밍"| db1
+    db0 -->|"WAL 스트리밍"| db2
+    db1 -.->|"db-0.db-headless 연결"| db0
+    db2 -.->|"db-0.db-headless 연결"| db0
+```
+
+- Replica 가 Primary 에 연결: `postgresql://db-0.db-headless:5432`
+- pod 재시작 후에도 *같은 DNS 유지*
+- 애플리케이션이 *Primary 주소를 안정적으로 참조* 가능
+
 ## 시작 / 종료 순서
 
 ```mermaid
@@ -104,6 +128,33 @@ sequenceDiagram
 > [!IMPORTANT]
 > *Master-replica DB* 처럼 *순서가 중요* 한 경우 핵심. `podManagementPolicy: Parallel` 로 *순차 종속성 제거* 가능 (Kafka 같이 *peer 끼리 sync*).
 
+## initContainers로 초기화
+
+Replica pod 가 시작 전 Primary 에서 데이터를 받아야 할 때:
+
+```yaml
+initContainers:
+  - name: init-replica
+    image: postgres:17
+    command:
+      - bash
+      - -c
+      - |
+        # db-0 (Primary) 은 초기화 스킵
+        [ "$(hostname)" = "db-0" ] && exit 0
+        # Primary 에서 base backup 취득
+        pg_basebackup -h db-0.db-headless \
+          -U replicator -D /var/lib/postgresql/data \
+          -Xs -R
+    volumeMounts:
+      - name: data
+        mountPath: /var/lib/postgresql/data
+```
+
+- `db-0` (Primary) 은 initContainer 를 스킵
+- `db-1`, `db-2` 는 *기동 전 Primary 에서 base backup 취득*
+- *데이터가 있는 상태* 에서 Replica 시작 보장
+
 ## PVC per Pod (영속 스토리지)
 
 ```mermaid
@@ -111,13 +162,30 @@ flowchart LR
     STS[StatefulSet] --> P0[db-0]
     STS --> P1[db-1]
     STS --> P2[db-2]
-    P0 --> PVC0[(PVC: data-db-0<br/>100GB)]
-    P1 --> PVC1[(PVC: data-db-1<br/>100GB)]
-    P2 --> PVC2[(PVC: data-db-2<br/>100GB)]
+    P0 --> PVC0[("data-db-0")]
+    P1 --> PVC1[("data-db-1")]
+    P2 --> PVC2[("data-db-2")]
 ```
 
-- *pod 재생성* 후에도 *같은 PVC 재연결*.
-- *pod 삭제* 해도 *PVC 보존* (직접 삭제 필요).
+- *pod 재생성* 후에도 *같은 PVC 재연결*
+- *pod 삭제* 해도 *PVC 보존* (직접 삭제 필요)
+
+## PVC 생명주기 관리
+
+| 작업 | 동작 |
+|---|---|
+| Pod 재시작 | PVC 자동 재연결 |
+| Scale down | PVC 보존 (삭제 안 됨) |
+| StatefulSet 삭제 | PVC 보존 (수동 삭제 필요) |
+| PVC 용량 확장 | `StorageClass allowVolumeExpansion: true` 필요 |
+
+```yaml
+# K8s 1.27+: StatefulSet 삭제/축소 시 PVC 정책 설정
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete    # StatefulSet 삭제 시 PVC 도 삭제
+    whenScaled: Retain     # Scale down 시 PVC 유지
+```
 
 ## Update 전략
 
@@ -127,18 +195,68 @@ flowchart LR
 | `OnDelete` | *수동 삭제 시* 만 새 spec |
 | `partition: N` | 인덱스 ≥ N 만 업데이트 (canary) |
 
+## Canary Update (partition 활용)
+
+```yaml
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 2    # db-2 만 먼저 업데이트
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    Note over STS: partition=2 설정
+    STS->>db2: 새 이미지로 업데이트
+    db2-->>STS: 정상 확인
+    Note over STS: partition=1 로 변경
+    STS->>db1: 새 이미지로 업데이트
+    db1-->>STS: 정상 확인
+    Note over STS: partition=0 으로 변경
+    STS->>db0: 새 이미지로 업데이트
+```
+
+*문제 발생 시*: `image` 를 이전 버전으로 되돌리면 이미 업데이트된 pod 도 재시작 시 롤백.
+
 ## 운영 패턴: Operator
 
 ```mermaid
 flowchart LR
     Op["Operator (controller)"] -->|관리| STS[StatefulSet]
-    Op -->|backup| Backup[(S3 backup)]
-    Op -->|failover| Promote[Replica → Primary]
-    Op -->|scale| Add[새 replica join]
+    Op -->|backup| Backup[("S3 backup")]
+    Op -->|failover| Promote["Replica to Primary"]
+    Op -->|scale| Add[새 replica 추가]
 ```
 
-- *DB 운영의 표준* (PostgreSQL Operator, Kafka Strimzi, ElasticSearch ECK).
-- StatefulSet 만으로 부족한 *애플리케이션 특화 로직* 자동화.
+- *DB 운영의 표준* (PostgreSQL Operator, Kafka Strimzi, ElasticSearch ECK)
+- StatefulSet 만으로 부족한 *애플리케이션 특화 로직* 자동화
+
+| 대상 | 대표 Operator |
+|---|---|
+| PostgreSQL | CNPG (CloudNativePG), Zalando postgres-operator |
+| Kafka | Strimzi |
+| Elasticsearch | ECK (Elastic Cloud on K8s) |
+| Redis | Redis Operator |
+
+## Primary 장애 복구 흐름
+
+Operator 없이 *수동 failover* 시:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    Note over db0: Primary 다운
+    db1->>db1: pg_promote 실행
+    db2->>db1: 복제 재연결 (db-0 → db-1)
+    Note over Admin: db-0 PVC 데이터 초기화
+    Admin->>db0: pod 재시작
+    db0->>db1: base backup 취득 후 Replica 합류
+```
+
+> [!IMPORTANT]
+> Operator (예: CNPG, Zalando) 를 사용하면 *이 모든 흐름이 자동화*. 수동 StatefulSet 만으로 DB HA 구현은 권장하지 않음.
 
 ## 흔한 함정
 
@@ -146,7 +264,9 @@ flowchart LR
 > 1. **Headless Service 없음** = pod DNS 안 잡힘 → peer discovery 실패.
 > 2. **`partition` 활용 안 함** = canary 불가. 모든 pod 한 번에 업데이트.
 > 3. **PVC delete 정책** = StatefulSet 삭제 시 *PVC 보존* (기본). 의도적으로 삭제 안 하면 *영구 storage cost*.
-> 4. **DB 의 *순서 의존성 + parallel 정책 잘못*** = 데이터 손상.
+> 4. **DB 의 순서 의존성 + parallel 정책 잘못** = 데이터 손상.
+> 5. **initContainer 없이 Replica 시작** = *빈 PVC 로 Replica 가 기동*, 데이터 없는 상태.
+> 6. **Operator 없이 DB HA 구현** = failover, backup, scale 을 손으로. Operator 사용 권장.
 
 ## 관련 위키
 

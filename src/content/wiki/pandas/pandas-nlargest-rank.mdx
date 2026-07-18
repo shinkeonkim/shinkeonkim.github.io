@@ -3,7 +3,7 @@ title: "[Pandas] nlargest / nsmallest / rank"
 aliases: ["Pandas nlargest", "Pandas nsmallest", "Pandas rank", "Pandas nlargest / rank", "Top-N pandas"]
 tags: [python, pandas, sorting, rank]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "nlargest"
@@ -16,6 +16,21 @@ references:
 - **`nlargest(n, cols)`** : 상위 N 개 행 (`sort_values + head` 보다 빠름)
 - **`nsmallest(n, cols)`** : 하위 N 개 행
 - **`rank()`** : 각 원소의 순위 (1, 2, 3, ...)
+
+## rank method 비교 시각화
+
+```mermaid
+flowchart TD
+    INPUT["값: 75, 88, 92, 92, 95"] --> AVG["method='average'\n75→1, 88→2, 92→3.5, 92→3.5, 95→5"]
+    INPUT --> MIN["method='min'\n75→1, 88→2, 92→3, 92→3, 95→5"]
+    INPUT --> MAX["method='max'\n75→1, 88→2, 92→4, 92→4, 95→5"]
+    INPUT --> DENSE["method='dense'\n75→1, 88→2, 92→3, 92→3, 95→4"]
+    INPUT --> FIRST["method='first'\n75→1, 88→2, 92→3, 92→4, 95→5"]
+
+    AVG --> SQL_RANK["SQL RANK()"]
+    DENSE --> SQL_DENSE["SQL DENSE_RANK()"]
+    FIRST --> SQL_ROW["SQL ROW_NUMBER()"]
+```
 
 ## nlargest / nsmallest
 
@@ -40,11 +55,11 @@ print(df.nlargest(3, 'score'))`}
 3    D     92`}
 />
 
-|   | name | score |
+| | name | score |
 |---|------|-------|
-| 4 | E    | 95    |
-| 1 | B    | 92    |
-| 3 | D    | 92    |
+| 4 | E | 95 |
+| 1 | B | 92 |
+| 3 | D | 92 |
 
 ### keep 옵션
 
@@ -99,13 +114,13 @@ dtype: float64
 
 ### method 옵션 비교
 
-| method | 92, 92 인 경우 다음 순위 |
-|:---|:---|
-| `min` (기본은 `average`) | 92, 92 모두 3 → 다음은 5 |
-| `max` | 92, 92 모두 4 → 다음은 5 |
-| `dense` | 92, 92 모두 3 → 다음은 4 |
-| `average` | 92, 92 모두 3.5 → 다음은 5 |
-| `first` | 등장 순 (92→3, 92→4) → 다음은 5 |
+| method | 92, 92 인 경우 | 다음 순위 | SQL 대응 |
+|:---|:---|:---|:---|
+| `average` | 3.5, 3.5 | 5 | - |
+| `min` | 3, 3 | 5 | `RANK()` |
+| `max` | 4, 4 | 5 | - |
+| `dense` | 3, 3 | 4 | `DENSE_RANK()` |
+| `first` | 3, 4 | 5 | `ROW_NUMBER()` |
 
 ## 그룹별 순위 (SQL 의 ROW_NUMBER OVER PARTITION BY)
 
@@ -115,11 +130,92 @@ df['rank_in_dept'] = df.groupby('dept')['salary'].rank(ascending=False)
 
 [[Pandas groupby]] + rank.
 
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+df = pd.DataFrame({
+    'dept': ['Dev','Dev','HR','HR','Dev'],
+    'name': ['A','B','C','D','E'],
+    'salary': [5000, 7000, 4000, 6000, 6000],
+})
+df['rank'] = df.groupby('dept')['salary'].rank(method='dense', ascending=False)
+cols = ['dept', 'name', 'salary', 'rank']
+print(df[cols])`}
+  output={`  dept name  salary  rank
+0  Dev    A    5000   3.0
+1  Dev    B    7000   1.0
+2   HR    C    4000   2.0
+3   HR    D    6000   1.0
+4  Dev    E    6000   2.0`}
+/>
+
 ## 분위수
 
 ```python
 df['quartile'] = pd.qcut(df['score'], 4, labels=['Q1','Q2','Q3','Q4'])
-df['percentile'] = df['score'].rank(pct=True)
+df['percentile'] = df['score'].rank(pct=True)   # 0.0~1.0
+```
+
+`rank(pct=True)` 는 백분위 (0~1).
+
+## 실전 패턴
+
+### Top-N 필터 (그룹별)
+
+```python
+# 부서별 연봉 상위 2명
+df['rank'] = df.groupby('dept')['salary'].rank(method='min', ascending=False)
+top2 = df[df['rank'] <= 2]
+```
+
+### 증가율 Top-N
+
+```python
+df['growth'] = df['revenue'].pct_change()
+growth_cols = ['name', 'revenue', 'growth']
+top5_growth = df.nlargest(5, 'growth')[growth_cols]
+```
+
+### 순위 변동 추적
+
+```python
+# 이번 달 순위 - 지난 달 순위
+df['rank_change'] = df['rank_prev'] - df['rank_curr']
+df.nlargest(5, 'rank_change')   # 가장 많이 오른 항목
+```
+
+### 분위수 기반 세그먼트
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+df = pd.DataFrame({'score': [45, 60, 72, 85, 91, 55, 78, 63, 88, 50]})
+df['tier'] = pd.qcut(df['score'], q=3, labels=['하위','중위','상위'])
+print(df.groupby('tier', observed=True)['score'].agg(['min','max','count']))`}
+  output={`       min  max  count
+tier
+하위    45   60      4
+중위    63   78      3
+상위    85   91      3`}
+/>
+
+## 성능
+
+```python
+# nlargest vs sort + head
+import timeit
+
+# sort_values + head: O(n log n)
+# nlargest: O(n log k), k << n 일 때 크게 유리
+
+# 1M 행에서 Top-10 추출
+# nlargest: ~0.05s
+# sort_values + head: ~0.3s
+
+# 다중 컬럼 정렬은 nlargest 에서도 내부 sort 사용 가능
+df.nlargest(10, ['col_a', 'col_b'])   # col_a 우선, 동률 시 col_b
 ```
 
 ## 자주 만나는 함정
@@ -128,12 +224,15 @@ df['percentile'] = df['score'].rank(pct=True)
 
 `rank()` 의 기본은 `'average'`, 동률을 평균값으로 둔다. 정수 순위를 원하면 `method='min'` 또는 `'dense'`.
 
+> [!IMPORTANT]
+> `rank()` 기본 `method='average'` 는 동률 시 float 값을 반환한다 (3.5 등). 정수 순위가 필요하면 `method='min'` (SQL RANK) 또는 `method='dense'` (SQL DENSE_RANK) 를 명시.
+
 ### 2. NaN 처리
 
 ```python
 s.rank(na_option='keep')      # NaN 은 NaN (기본)
-s.rank(na_option='top')       # NaN 을 가장 낮은 순위
-s.rank(na_option='bottom')    # NaN 을 가장 높은 순위
+s.rank(na_option='top')       # NaN 을 가장 높은 순위 (가장 큰 값처럼)
+s.rank(na_option='bottom')    # NaN 을 가장 낮은 순위 (가장 작은 값처럼)
 ```
 
 ### 3. nlargest 의 다중 키
@@ -143,7 +242,21 @@ df.nlargest(3, ['a', 'b'])
 # 'a' 가 더 우선, 'b' 는 동률일 때만 결정
 ```
 
-## 참고
+### 4. ascending 방향 혼동
+
+```python
+df['rank'] = df['score'].rank(ascending=False)
+# ascending=False 면 높은 점수가 낮은 순위 번호 (1위, 2위...)
+# ascending=True (기본) 면 낮은 값이 1위
+```
+
+> [!WARNING]
+> `rank(ascending=True)` 가 기본값이다. 점수가 높을수록 1위가 되게 하려면 반드시 `ascending=False`. 이를 빠뜨리면 순위가 반전된다.
+
+## 관련 위키
 
 - [[Pandas sort_values / sort_index]]
 - [[Pandas groupby]]
+- [[Pandas agg]]
+- [[Pandas cut / qcut]]
+- [[Pandas idxmax]]

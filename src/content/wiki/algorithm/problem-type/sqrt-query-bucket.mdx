@@ -199,6 +199,93 @@ batch 마다 자료구조 복제하면 O(N · √Q). 신중한 reuse.
 
 같은 위치 / 같은 시각의 batch 안 쿼리 순서를 명확히. 답이 흔들리지 않게.
 
+## 처리 흐름 시각화
+
+√Q 버킷팅의 전체 흐름:
+
+```mermaid
+flowchart TD
+    Q["쿼리 Q개"] --> Batch["배치 분할: B = sqrt(Q)"]
+    Batch --> Proc["배치 처리 반복"]
+    Proc --> |"갱신 쿼리"| Buf["버퍼에 누적"]
+    Proc --> |"조회 쿼리"| Merge["체크포인트 + 버퍼로 응답"]
+    Buf --> Rebuild["버퍼 B개 차면 재구축"]
+    Rebuild --> Clear["버퍼 초기화"]
+    Clear --> Proc
+    Merge --> Proc
+```
+
+재구축은 전체 Q/B = √Q 회 발생. 각 재구축 O(N) → 전체 O(√Q * N).
+
+## √N vs √Q 선택 기준
+
+| 상황 | 버킷 크기 | 이유 |
+|:---|:---|:---|
+| Q ~ N | 둘 다 동일 | 같은 차원 |
+| Q >> N (쿼리 많음) | √Q | 쿼리 개수 기준 |
+| Q << N (자료구조 우선) | √N | 자료구조 크기 기준 |
+| 갱신이 비싼 경우 | √Q | 재구축 최소화 |
+| 조회가 비싼 경우 | √N | 버퍼 최소화 |
+
+실전에서는 `B = max(1, (int)sqrt(min(N, Q)))` 로 출발 후 프로파일링으로 조정.
+
+## Python 구현 (소규모 검증용)
+
+```python
+# O(Q * sqrt(Q)) DSU 기반 연결성 질의 + 간선 추가
+from math import isqrt
+
+def solve(N, queries):
+    B = max(1, isqrt(len(queries)))  # 버킷 크기
+    checkpoint_edges = []
+    buffer = []
+    results = []
+
+    def dsu_query(edges, N, u, v):
+        parent = list(range(N))
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        def union(a, b):
+            parent[find(a)] = find(b)
+        for a, b in edges:
+            union(a, b)
+        return find(u) == find(v)
+
+    for op, u, v in queries:
+        if op == "add":
+            buffer.append((u, v))
+            if len(buffer) == B:
+                checkpoint_edges.extend(buffer)
+                buffer = []
+        else:
+            results.append(dsu_query(checkpoint_edges + buffer, N, u, v))
+
+    return results
+
+# 사용 예
+queries = [
+    ("add", 0, 1), ("add", 1, 2), ("query", 0, 2),  # True
+    ("add", 3, 4), ("query", 0, 3),                   # False
+]
+print(solve(5, queries))  # [True, False]
+```
+
+## 오프라인 전환 검토 기준
+
+√Q 버킷팅 적용 전, 오프라인 전환 가능한지 먼저 확인:
+
+| 조건 | 방법 | 복잡도 |
+|:---|:---|:---|
+| 쿼리 순서 변경 가능 | Mo's Algorithm | O(N * sqrt(Q)) |
+| 전체 쿼리 미리 알 때 | Offline Incremental | O(N log N) |
+| 순서 변경 불가 (온라인) | √Q 버킷팅 | O(N * sqrt(Q)) |
+| 삭제 없음 (append only) | Union-Find | O(N * alpha(N)) |
+
+온라인 제약이 있거나 자료구조 특성상 삭제가 어렵고 offline 전환도 불가할 때 √Q 버킷팅이 최선의 선택.
+
 ## BOJ 연습 문제
 
 | 번호 | 제목 | 링크 |

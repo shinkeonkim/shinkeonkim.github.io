@@ -208,7 +208,94 @@ arr.splice(1, 0, 'x')  // 1 에 'x' 삽입 (제거 X)
 arr.splice(1, 1, 'x')  // 1 에서 1개 제거, 'x' 삽입
 ```
 
-## 참고
+## 메서드 선택 가이드
+
+```mermaid
+flowchart TD
+    Q["목적?"] -->|"변환"| M["map / flatMap"]
+    Q -->|"필터링"| F[filter]
+    Q -->|"집계 / 누적"| R["reduce / reduceRight"]
+    Q -->|"원소 탐색"| S["find / indexOf / includes / at"]
+    Q -->|"조건 검사"| C["some / every"]
+    Q -->|"원본 수정"| MUT["push / pop / splice / sort / fill"]
+    Q -->|"불변 복사 (ES2023+)"| IMM["toSorted / toReversed / toSpliced / with"]
+```
+
+## 성능 특성
+
+| 연산 | 시간복잡도 | 비고 |
+|:---|:---|:---|
+| `arr[i]` 인덱스 접근 | O(1) | 밀집 배열 |
+| `push` / `pop` | O(1) amortized | 끝 |
+| `shift` / `unshift` | O(N) | 앞 삽입/제거, 전체 재색인 |
+| `splice(0, ...)` | O(N) | shift 와 동일 |
+| `indexOf` / `includes` | O(N) | 선형 검색 |
+| `sort` | O(N log N) | V8 TimSort |
+| `flat(Infinity)` | O(총 원소 수) | 재귀 평탄화 |
+
+> **실전 팁**: `shift` 가 bottleneck 이면 index pointer 방식으로 O(1) 구현. 수백만 건 아니면 가독성 우선.
+
+## 메모리 레이아웃 (V8 최적화)
+
+V8 은 내부 배열을 원소 타입에 따라 점진적으로 특화:
+
+- `[1, 2, 3]` → `SMI_ELEMENTS` (정수, 가장 빠름)
+- `[1, 2, 3.14]` → `PACKED_DOUBLE_ELEMENTS`
+- `[1, 'two', true]` → `PACKED_ELEMENTS` (박싱)
+- `[1, , 3]` → `HOLEY_ELEMENTS` (느림, JIT 가드 필요)
+
+```javascript
+// 좋음: dense + 같은 타입
+const nums = [1, 2, 3, 4, 5];         // SMI_ELEMENTS
+
+// 피하기: sparse 생성
+const sparse = [];
+sparse[100] = 1;                       // HOLEY_ELEMENTS
+```
+
+한 번 강등 (`downgrade`) 된 배열은 다시 최적화 타입으로 복귀하지 않음. 타입 일관성 유지가 중요.
+
+## 고급 패턴
+
+### 청크 분할
+
+```javascript
+const chunk = (arr, size) =>
+    Array.from({ length: Math.ceil(arr.length / size) }, (_, i) =>
+        arr.slice(i * size, i * size + size)
+    );
+
+chunk([1, 2, 3, 4, 5], 2)   // [[1, 2], [3, 4], [5]]
+```
+
+### 중복 제거
+
+```javascript
+// 원시값
+[...new Set([1, 2, 2, 3])]   // [1, 2, 3]
+
+// 객체 (key 기준)
+const unique = [...new Map(arr.map(x => [x.id, x])).values()]
+```
+
+### 배열 회전
+
+```javascript
+// left rotation by n
+const rotate = (arr, n) => [...arr.slice(n), ...arr.slice(0, n)];
+rotate([1, 2, 3, 4], 1)   // [2, 3, 4, 1]
+```
+
+### zip (여러 배열 합치기)
+
+```javascript
+const zip = (...arrs) =>
+    arrs[0].map((_, i) => arrs.map(a => a[i]));
+
+zip([1, 2, 3], ['a', 'b', 'c'])   // [[1,'a'], [2,'b'], [3,'c']]
+```
+
+## 관련 위키
 
 - [[JS Object]]
 - [[JS Spread / Rest]]

@@ -193,12 +193,79 @@ flowchart TD
 > 3. **LLM 응답 끝나길 기다리고 TTS 시작** = TTS 의 streaming 의미 없음.
 > 4. **VAD 없이 STT** = STT 가 *전사 못 끝남*. 발화 종료 감지 필수.
 
+## 인프라 요구사항
+
+### 네트워크
+
+음성 에이전트는 낮은 레이턴시가 생명입니다.
+
+| 프로토콜 | 지연 | 용도 |
+|:---|:---|:---|
+| **WebRTC** | 최저 | 브라우저 / 모바일 클라이언트. 미디어 서버 (LiveKit, Daily) 경유. |
+| **WebSocket** | 낮음 | 서버-서버 또는 기기 연결. 텍스트/바이너리 양방향 스트림. |
+| **HTTP chunked** | 높음 | 단순 구현 가능하나 지연 큼. 프로토타입에만 권장. |
+
+### VAD (Voice Activity Detection) 선택
+
+발화 종료를 얼마나 정확히, 얼마나 빠르게 감지하느냐가 전체 latency budget 의 핵심입니다.
+
+| VAD 방식 | 지연 | 설명 |
+|:---|:---|:---|
+| **에너지 기반** | 매우 낮음 | 단순 볼륨 임계값. 오탐 많음. |
+| **Silero VAD** | 낮음 | 경량 ML 모델 (5 MB). 정확도-속도 균형. 가장 많이 쓰임. |
+| **시맨틱 endpointing** | 중간 | STT partial 결과를 LLM 으로 "문장이 끝났는가" 판단. 가장 자연스러움. |
+
+### Sentence Aggregator
+
+STT 의 partial transcript 를 LLM 에 넘길 적절한 단위로 묶는 컴포넌트.
+
+- *너무 짧게 끊으면*: LLM 이 컨텍스트 없이 처리 → 어색한 응답
+- *너무 길게 기다리면*: TTS 시작이 늦어짐
+
+일반적으로 **문장 완성 (마침표, 쉼표 후 길이 임계)** 기준으로 aggregation.
+
+## 프로덕션 체크리스트
+
+배포 전 검증 항목:
+
+| 항목 | 검증 방법 |
+|:---|:---|
+| **p50 / p95 / p99 latency** | 실제 통화 10,000 건 이상 메트릭 수집 |
+| **Barge-in** | 사용자가 응답 도중 끊을 때 TTS 즉시 중단 + STT 재개 |
+| **VAD 오탐 / 미탐** | 배경 소음 환경 테스트 (사무실, 카페) |
+| **LLM fallback** | 타임아웃 시 "잠시만 기다려 주세요" 응답 |
+| **TTS 오류 복구** | TTS API 오류 시 기본 합성 폴백 |
+| **동시 세션 수** | 서버당 최대 동시 통화 수 부하 테스트 |
+| **오디오 코덱** | Opus 16 kHz mono (WebRTC 표준), G.711 (전화망) |
+
+## 모니터링 메트릭
+
+```mermaid
+flowchart LR
+    Mic["사용자 발화 종료"] -->|VAD delay| STT_start["STT 시작"]
+    STT_start -->|STT latency| LLM_start["LLM 호출"]
+    LLM_start -->|TTFT| TTS_start["TTS 첫 청크"]
+    TTS_start -->|TTFB| Speaker["스피커 출력 시작"]
+```
+
+추적해야 하는 메트릭:
+
+- **VAD endpointing delay**: 실제 발화 종료 ~ STT 시작
+- **STT latency**: 오디오 수신 ~ final transcript
+- **LLM TTFT** (Time-to-First-Token): 프롬프트 전송 ~ 첫 토큰 수신
+- **TTS TTFB** (Time-to-First-Byte): 텍스트 전송 ~ 첫 오디오 청크
+- **종단 latency**: VAD 종료 ~ 스피커 첫 소리
+
+각 단계를 OpenTelemetry span 으로 기록하면 병목이 어느 단계인지 즉시 파악됩니다.
+
 ## 관련 위키
 
-- [[stt-streaming]]
-- [[tts-streaming-ssml]]
-- [[speech-to-speech-realtime]]
-- [[vad-silero]]
-- [[turn-detection-barge-in]]
-- [[latency-percentiles]]
-- [[pipecat-livekit]]
+- [[stt-streaming|STT 스트리밍]]
+- [[tts-streaming-ssml|TTS 스트리밍 + SSML]]
+- [[speech-to-speech-realtime|Speech-to-Speech Realtime]]
+- [[vad-silero|VAD Silero]]
+- [[turn-detection-barge-in|Turn Detection / Barge-in]]
+- [[latency-percentiles|Latency 퍼센타일]]
+- [[pipecat-livekit|Pipecat + LiveKit]]
+- [[voice-rag|Voice RAG]] (음성 에이전트 + RAG 결합)
+- [[voice-first-prompt|Voice-First 프롬프트 설계]]

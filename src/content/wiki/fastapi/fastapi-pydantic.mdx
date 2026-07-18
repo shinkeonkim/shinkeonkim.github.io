@@ -1,0 +1,353 @@
+---
+title: "[FastAPI] Pydantic Integration"
+aliases:
+  - "FastAPI Pydantic"
+  - "FastAPI + Pydantic"
+  - "FastAPI 검증"
+  - "response_model"
+  - "BaseModel FastAPI"
+  - "pydantic v2 FastAPI"
+  - "Pydantic Settings"
+tags: [python, fastapi, pydantic, validation]
+category: fastapi
+updated: 2026-07-07
+references:
+  - title: "Pydantic v2 Documentation"
+    url: "https://docs.pydantic.dev/latest/"
+  - title: "FastAPI Request Body"
+    url: "https://fastapi.tiangolo.com/tutorial/body/"
+  - title: "FastAPI Response Model"
+    url: "https://fastapi.tiangolo.com/tutorial/response-model/"
+  - title: "pydantic-settings"
+    url: "https://docs.pydantic.dev/latest/concepts/pydantic_settings/"
+---
+
+## 정의
+
+**FastAPI + Pydantic** 은 요청/응답의 **타입 검증, 직렬화, JSON Schema 생성** 을 위한 통합입니다. Pydantic v2 는 Rust 코어 (`pydantic-core`) 로 v1 대비 5-50배 성능 향상되었고, FastAPI 0.100+ 부터 완전히 지원됩니다.
+
+## BaseModel 기본
+
+```python
+from pydantic import BaseModel, Field, EmailStr
+from datetime import datetime
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+    name: str = Field(..., max_length=50)
+    age: int = Field(default=0, ge=0, le=150)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+- `...` (Ellipsis): required
+- `default` 또는 `default_factory`: optional
+- `ge`, `le`, `gt`, `lt`, `min_length`, `max_length`, `pattern`: validation
+- `EmailStr`: `email-validator` 패키지 필요
+
+## Field 상세 옵션
+
+```python
+class Product(BaseModel):
+    name: str = Field(
+        ...,
+        title="상품명",
+        description="상품의 고유 이름",
+        example="MacBook Pro",
+        min_length=1,
+        max_length=100,
+    )
+    price: float = Field(..., gt=0, description="가격 (KRW)")
+    tags: list[str] = Field(default_factory=list, max_length=10)
+```
+
+`title`, `description`, `example` 은 OpenAPI 문서에 그대로 노출.
+
+## 중첩 모델
+
+```python
+class Address(BaseModel):
+    city: str
+    zip_code: str
+
+class User(BaseModel):
+    name: str
+    address: Address
+    friends: list["User"] = []       # 순환 참조 (forward ref)
+```
+
+Pydantic v2 는 forward ref 자동 해결. `model_rebuild()` 는 대개 불필요.
+
+## Validator (v2)
+
+### field_validator (개별 필드)
+
+```python
+from pydantic import BaseModel, field_validator
+
+class User(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def name_must_contain_space(cls, v: str) -> str:
+        if " " not in v:
+            raise ValueError("name must contain a space")
+        return v.title()
+```
+
+- `mode="before"`: 파싱 전 (raw 값 접근)
+- `mode="after"` (기본): 파싱 후 (타입 검증 후)
+
+### model_validator (모델 전체)
+
+```python
+from pydantic import model_validator
+
+class User(BaseModel):
+    password: str
+    password_confirm: str
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.password != self.password_confirm:
+            raise ValueError("passwords do not match")
+        return self
+```
+
+## Computed Field (v2)
+
+응답에만 나타나는 계산 필드:
+
+```python
+from pydantic import computed_field
+
+class User(BaseModel):
+    first_name: str
+    last_name: str
+
+    @computed_field
+    @property
+    def full_name(self) -> str:
+        return f"{self.first_name} {self.last_name}"
+```
+
+## Config (v2: model_config)
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+class User(BaseModel):
+    model_config = ConfigDict(
+        str_strip_whitespace=True,     # 문자열 자동 trim
+        str_min_length=1,
+        populate_by_name=True,          # alias 와 원본 필드명 모두 허용
+        from_attributes=True,           # ORM 모드 (SQLAlchemy)
+        json_schema_extra={
+            "examples": [
+                {"email": "a@b.com", "name": "Kim"}
+            ]
+        },
+    )
+```
+
+v1 의 `class Config` 는 deprecated. `ConfigDict` 사용.
+
+## Alias (필드명 매핑)
+
+```python
+class User(BaseModel):
+    user_name: str = Field(..., alias="userName")   # camelCase JSON
+
+    model_config = ConfigDict(populate_by_name=True)
+```
+
+요청 JSON 이 `{"userName": "..."}` 형태여도 파싱. 응답도 `userName` 로 직렬화.
+
+**전역 alias generator**:
+
+```python
+from pydantic.alias_generators import to_camel
+
+class User(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+    user_name: str
+    email: str
+```
+
+## Response Model
+
+FastAPI 의 `response_model` 은 Pydantic 모델로 응답 필터/검증.
+
+```python
+class UserIn(BaseModel):
+    email: str
+    password: str
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+
+@app.post("/users/", response_model=UserOut)
+def create_user(user: UserIn) -> UserIn:
+    # 저장 후 반환. password 는 자동 제거.
+    saved = save_to_db(user)
+    return saved
+```
+
+`UserOut` 스키마와 다른 필드는 응답에서 자동 제외.
+
+### response_model_exclude_unset
+
+```python
+@app.get("/users/{id}", response_model=User, response_model_exclude_unset=True)
+def read_user(id: int):
+    return db.query(User).get(id)
+```
+
+None 이 아닌 실제로 설정된 필드만 응답. sparse 응답에 유용.
+
+## ORM 모드 (from_attributes)
+
+SQLAlchemy 등 ORM 객체를 Pydantic 으로 자동 변환:
+
+```python
+from sqlalchemy.orm import Mapped
+
+class UserORM(Base):
+    __tablename__ = "users"
+    id: Mapped[int]
+    email: Mapped[str]
+
+class User(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: str
+
+user_orm = db.query(UserORM).first()
+user_pydantic = User.model_validate(user_orm)   # ORM -> Pydantic
+```
+
+FastAPI `response_model` 에서 return 값이 ORM 객체여도 자동 변환.
+
+## Discriminator (v2)
+
+Tagged union:
+
+```python
+from typing import Literal
+from pydantic import BaseModel, Field
+from typing import Annotated, Union
+
+class Cat(BaseModel):
+    pet_type: Literal["cat"]
+    meow: str
+
+class Dog(BaseModel):
+    pet_type: Literal["dog"]
+    bark: str
+
+Pet = Annotated[Union[Cat, Dog], Field(discriminator="pet_type")]
+
+class Owner(BaseModel):
+    pet: Pet
+```
+
+`{"pet_type": "cat", "meow": "..."}` 는 자동으로 Cat 으로 파싱.
+
+## pydantic-settings (설정 관리)
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="APP_",
+    )
+
+    database_url: str
+    secret_key: str
+    debug: bool = False
+
+settings = Settings()
+```
+
+환경변수 `APP_DATABASE_URL` 이 `database_url` 필드로 매핑. `.env` 파일도 자동 로딩.
+
+FastAPI 에서 DI 로 사용:
+
+```python
+from functools import lru_cache
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+@app.get("/info")
+def info(settings: Settings = Depends(get_settings)):
+    return {"debug": settings.debug}
+```
+
+## JSON Schema 생성
+
+```python
+schema = User.model_json_schema()
+```
+
+FastAPI 는 이 스키마를 OpenAPI `components/schemas` 에 자동 등록.
+
+## v1 -> v2 마이그레이션
+
+| v1 | v2 |
+|:---|:---|
+| `class Config:` | `model_config = ConfigDict(...)` |
+| `.dict()` | `.model_dump()` |
+| `.json()` | `.model_dump_json()` |
+| `.parse_obj(x)` | `.model_validate(x)` |
+| `.parse_raw(s)` | `.model_validate_json(s)` |
+| `@validator` | `@field_validator` |
+| `@root_validator` | `@model_validator` |
+| `orm_mode=True` | `from_attributes=True` |
+| `allow_population_by_field_name=True` | `populate_by_name=True` |
+| `min_items` / `max_items` | `min_length` / `max_length` (list) |
+| `regex=` | `pattern=` |
+| `.copy()` | `.model_copy()` |
+| `.parse_file(p)` | (제거됨) `.model_validate_json(open(p).read())` |
+
+## 성능 팁
+
+- **Rust 코어**: v2 는 파싱/직렬화 대부분이 Rust. 벤치마크 v1 대비 5-50배.
+- **`model_dump(mode='json')`**: dict 대신 JSON 호환 dict 반환 (datetime, UUID 등 문자열).
+- **`model_dump_json()`**: dict 를 거치지 않고 바로 JSON 직렬화. 가장 빠름.
+- **큰 리스트 응답**: `response_model` 이 성능 병목이 될 수 있음. 필요 시 `response_model=None` + 직접 dict 반환.
+
+## 함정
+
+> [!WARNING]
+> **v1 API 를 v2 에서 쓰면 deprecation warning + eventually 오류**. 프로젝트 시작 시 반드시 v2 로.
+
+> [!CAUTION]
+> **`from_attributes=True` (ORM 모드)** 없이 SQLAlchemy 객체를 반환하면 응답 직렬화 실패. Response model 을 쓰면 반드시 이 설정.
+
+> [!WARNING]
+> **JSON Schema 순환 참조**. Forward reference (`list["User"]`) 는 v2 에서 자동 해결되지만, 매우 깊은 중첩은 `model_rebuild()` 필요.
+
+> [!IMPORTANT]
+> **`Field(default=...)` vs `Field(default_factory=...)`**. Mutable 기본값 (list, dict) 는 반드시 `default_factory` 사용. `default=[]` 는 모든 인스턴스가 공유하는 위험한 mutable default.
+
+> [!CAUTION]
+> **`Literal` 파싱**. `Literal["a", "b"]` 는 정확한 문자열만 허용, case-sensitive. 대소문자 무관하게 하려면 `field_validator` 로 lower/upper 변환.
+
+## 관련 위키
+
+- [[fastapi|FastAPI]] - 상위 개요
+- [[fastapi-routing|FastAPI Routing]] - Body / query 파라미터
+- [[fastapi-dependency-injection|FastAPI DI]] - Settings DI
+- [[fastapi-testing|FastAPI Testing]] - 검증 실패 응답 검증
+- [[py-pydantic|Pydantic]] - Pydantic 자체 개요
+- [[py-typeddict-protocol|TypedDict / Protocol]] - 대안 스키마
+- [[py-dataclass|Dataclass]] - 표준 라이브러리 대안

@@ -3,7 +3,7 @@ title: "[Pandas] Nullable Types (Int64, boolean, string[pyarrow])"
 aliases: ["Pandas Nullable Types", "Pandas nullable", "Pandas Int64", "Pandas boolean", "Pandas string"]
 tags: [python, pandas, dtype, nullable]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "Nullable integer dtype"
@@ -18,6 +18,31 @@ references:
 - **`Float32`, `Float64`** : nullable 실수
 - **`boolean`** : nullable bool
 - **`string`** : 명시적 문자열 (object 대신)
+
+## dtype 계열 시각화
+
+```mermaid
+flowchart TD
+    A["pandas dtype 계열"] --> B["NumPy 계열 (기존)"]
+    A --> C["Nullable 계열 (pandas 1.0+)"]
+    A --> D["Arrow 계열 (pandas 2.0+)"]
+
+    B --> B1["int64 / float64 / bool / object"]
+    C --> C1["Int64 / boolean / string"]
+    C --> C2["Float32 / Float64"]
+    D --> D1["int64[pyarrow] / string[pyarrow]"]
+    D --> D2["timestamp[ns][pyarrow]"]
+```
+
+## 사용 상황
+
+| 상황 | 권장 dtype |
+|:---|:---|
+| NaN 포함 정수 컬럼 | `Int64` (nullable) |
+| DB 에서 읽어 온 bool | `boolean` |
+| 문자열 메모리 절약 | `string[pyarrow]` |
+| Arrow 파이프라인 통합 | `dtype_backend='pyarrow'` |
+| 단순 수치 연산 (NaN 없음) | `int64` / `float64` (NumPy, 빠름) |
 
 ## 왜 필요한가
 
@@ -61,7 +86,7 @@ df = pd.read_csv('data.csv', dtype={
     'is_active': 'boolean',
 })
 
-# pyarrow backend
+# pyarrow backend (pandas 2.0+)
 df = pd.read_csv('data.csv', dtype_backend='numpy_nullable')
 ```
 
@@ -119,6 +144,77 @@ Arrow 백킹의 장점:
 
 [[Pandas pyarrow backend]] 참고.
 
+## 타입별 메모리 비교
+
+```python
+import pandas as pd
+
+s_obj = pd.Series(['hello'] * 10_000, dtype='object')
+s_str = pd.Series(['hello'] * 10_000, dtype='string')
+s_arrow = pd.Series(['hello'] * 10_000, dtype='string[pyarrow]')
+
+# deep=True 로 실제 Python 객체 포함 측정
+print(s_obj.memory_usage(deep=True))    # ~590000 bytes
+print(s_str.memory_usage(deep=True))    # ~590000 bytes
+print(s_arrow.memory_usage(deep=True))  # ~50000 bytes (10x 이상 절약)
+```
+
+## pandas 2.x 전환 패턴
+
+```python
+# 전체 DataFrame 을 nullable 로 일괄 전환
+df = df.convert_dtypes()
+# int64 -> Int64, object -> string, float64 -> Float64 (자동 추론)
+
+# pyarrow 전환
+df = df.convert_dtypes(dtype_backend='pyarrow')
+# int64 -> int64[pyarrow], string -> large_string[pyarrow]
+```
+
+### 특정 컬럼만 선택적 전환
+
+```python
+int_cols = df.select_dtypes('int').columns
+df[int_cols] = df[int_cols].astype('Int64')
+
+str_cols = df.select_dtypes('object').columns
+df[str_cols] = df[str_cols].astype('string')
+```
+
+## 타입 간 연산 동작
+
+```python
+s_int = pd.array([1, 2, pd.NA, 4], dtype='Int64')
+s_float = pd.array([1.5, 2.5, pd.NA, 4.5], dtype='Float64')
+
+# 산술: NA 전파
+s_int + 10           # [11, 12, <NA>, 14]
+s_int + s_float      # [2.5, 4.5, <NA>, 8.5]
+
+# 비교
+s_int > 2            # [False, False, <NA>, True] (boolean dtype 반환)
+
+# 집계: NA 자동 무시
+s_int.sum()          # 7  (1+2+4)
+s_int.mean()         # 2.333...  (NA 제외)
+```
+
+## NA 처리 흐름
+
+```mermaid
+flowchart LR
+    A["NA 포함 컬럼"] --> B{"어떤 연산?"}
+    B -->|"필터링"| C["isna() / notna()"]
+    B -->|"집계"| D["sum() / mean() NA 자동 무시"]
+    B -->|"boolean context"| E["fillna(False) 명시"]
+    B -->|"numpy 함수"| F["fillna 후 변환"]
+
+    C --> G["df[df['x'].notna()]"]
+    D --> H["skipna=False 로 NA 포함 집계 가능"]
+    E --> I["mask.fillna(False).any()"]
+    F --> J["np.where 에는 fillna 선행"]
+```
+
 ## 자주 만나는 함정
 
 ### 1. Int64 (NumPy) vs Int64 (nullable)
@@ -134,29 +230,62 @@ df['x'].astype('Int64')        # nullable, NaN 허용
 
 ```python
 mask = df['active']            # boolean dtype, pd.NA 가능
-if mask.any():                  # ambiguous (NA 때문)
-mask.fillna(False).any()        # ✓ 명시
+if mask.any():                  # ambiguous (NA 때문에 TypeError)
+mask.fillna(False).any()        # ✓ 명시적
 ```
 
-### 3. 일부 메서드 미지원
+### 3. 일부 NumPy 함수 미지원
 
-일부 numpy 함수는 pandas nullable 을 직접 처리 못 함. 임시로 변환 필요.
+일부 numpy 함수는 pandas nullable 을 직접 처리 못 함. 변환이 필요.
 
 ```python
 np.where(df['flag'], 'A', 'B')  # boolean dtype 에서 동작 안 할 수 있음
 np.where(df['flag'].fillna(False), 'A', 'B')   # 회피
 ```
 
-### 4. arrow string 의 일부 메서드
+### 4. arrow string 의 일부 regex
 
-대부분 동작하지만 일부 (특수 regex 옵션) 는 fallback 가능. 표준 메서드만 쓰는 것이 안전.
+대부분 동작하지만 일부 특수 regex 옵션은 fallback 가능. 표준 str 메서드만 쓰는 것이 안전.
+
+### 5. to_parquet / to_csv 호환성
+
+```python
+# nullable dtype 은 parquet 로 저장할 때 pyarrow 가 알아서 처리
+df.to_parquet('out.parquet')   # ✓ 정상 동작
+
+# CSV 는 pd.NA 가 빈 문자열로 출력됨
+df.to_csv('out.csv')           # <NA> -> 빈 문자열
+```
+
+### 6. groupby + nullable key
+
+```python
+# pandas 2.x 에서 groupby key 가 nullable 이면 NA 그룹 처리
+df.groupby('id_nullable', dropna=False).sum()
+# dropna=False 로 NA 그룹 포함 (기본은 NA 그룹 제외)
+```
+
+### 7. concat 후 dtype 변화
+
+```python
+df1 = pd.DataFrame({'x': pd.array([1, 2], dtype='Int64')})
+df2 = pd.DataFrame({'x': [3, 4]})          # int64 (NumPy)
+pd.concat([df1, df2])['x'].dtype            # float64 (강등 가능)
+
+# 안전하게
+df2['x'] = df2['x'].astype('Int64')
+pd.concat([df1, df2])['x'].dtype            # Int64 유지
+```
 
 ## pandas 3.0 의 미래
 
 pandas 3.0 부터 **Arrow 가 기본 백킹**이 될 예정. 지금부터 nullable dtype 에 익숙해지면 마이그레이션이 쉽다.
 
-## 참고
+## 관련 위키
 
 - [[Pandas replace / astype]]
 - [[Pandas pyarrow backend]]
 - [[Pandas read_csv]]
+- [[Pandas read_parquet / to_parquet]]
+- [[Pandas dropna / fillna]]
+- [[Pandas DataFrame]]

@@ -145,6 +145,124 @@ flowchart LR
 > 3. **Priority 잘못 설정** = 일부 클라이언트가 *priority frame 무시*. RFC 9218 의 *priority hints* 가 더 신뢰.
 > 4. **PUSH 의존 코드** = 위 server push 폐기 때문에 *fallback* 필수.
 
+## Connection Preface
+
+HTTP/2 연결의 첫 24 바이트 = *magic octets*:
+
+```
+PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
+```
+
+이후 클라이언트 `SETTINGS` frame 전송. `h2c` (cleartext) 직접 연결 식별에 사용. `h2` (TLS+ALPN) 에서는 ALPN 협상 후 magic 전송.
+
+## ALPN 협상
+
+HTTP/2 를 사용하려면 TLS 핸드셰이크 중 **ALPN** (Application-Layer Protocol Negotiation) 으로 버전 협상.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: TLS ClientHello + ALPN: h2, http/1.1
+    S-->>C: TLS ServerHello + ALPN: h2
+    Note over C,S: 이후 HTTP/2 바이너리 프레임 교환
+```
+
+| 식별자 | 의미 |
+|---|---|
+| `h2` | TLS 위 HTTP/2 (브라우저 표준) |
+| `h2c` | Cleartext HTTP/2 (내부망, gRPC mesh) |
+| `http/1.1` | ALPN fallback (h2 미지원 시) |
+
+서버 설정 예:
+- Nginx: `listen 443 ssl; http2 on;` (nginx 1.26+ 권장)
+- Caddy: 자동 ALPN 협상 (별도 설정 불필요)
+- Go `net/http`: `h2.ConfigureServer` 또는 기본 TLS 서버
+- Java Netty: `ApplicationProtocolNegotiationHandler`
+
+## Stream 상태 머신
+
+각 HTTP/2 stream 은 *상태 머신*. `RST_STREAM` 으로 언제든지 즉시 취소.
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> open : HEADERS 전송 또는 수신
+    open --> half_closed_local : END_STREAM 전송
+    open --> half_closed_remote : END_STREAM 수신
+    half_closed_local --> closed : RST_STREAM 또는 END_STREAM 수신
+    half_closed_remote --> closed : RST_STREAM 또는 END_STREAM 전송
+    open --> closed : RST_STREAM
+    closed --> [*]
+```
+
+| 상태 | 의미 |
+|---|---|
+| `idle` | 미사용. 클라이언트 = 홀수 ID, 서버 push = 짝수 ID |
+| `open` | 양방향 송수신 가능 |
+| `half_closed_local` | 로컬 전송 완료, 수신만 |
+| `half_closed_remote` | 원격 전송 완료, 송신만 |
+| `closed` | 완전 종료. ID 재사용 불가 |
+
+> [!NOTE]
+> 스트림 ID 는 *단조 증가*. 연결 수명 동안 최대 2^31 개. 한도 도달 시 `GOAWAY` 로 연결 재시작.
+
+## gRPC 와 HTTP/2
+
+gRPC 는 HTTP/2 를 *전송 계층*으로 사용. Protobuf 를 `DATA` frame 에 실어 보낸다.
+
+```mermaid
+flowchart LR
+    Caller["gRPC Caller<br/>Protobuf 직렬화"]
+    Caller --> H2["HTTP/2 DATA frames"]
+    H2 --> Mux["Stream Multiplexing<br/>단일 TCP 연결"]
+    Mux --> Svr["gRPC Server<br/>Protobuf 역직렬화"]
+```
+
+| HTTP/2 개념 | gRPC 매핑 |
+|---|---|
+| stream 1개 | RPC 호출 1개 |
+| `HEADERS` frame | gRPC metadata, trailer |
+| `DATA` frame | Protobuf payload |
+| `RST_STREAM` | 오류 취소 |
+| `SETTINGS: MAX_CONCURRENT_STREAMS` | 최대 동시 RPC 수 제한 |
+
+gRPC 4가지 통신 모드:
+
+| 모드 | 방향 | 적합 예 |
+|---|---|---|
+| Unary | 1:1 | 단순 API 호출 |
+| Server streaming | 1:N | 실시간 피드, 로그 스트림 |
+| Client streaming | N:1 | 파일 업로드, 배치 수집 |
+| Bidirectional streaming | N:N | 채팅, 협업, 게임 |
+
+> [!WARNING]
+> L4 LB 앞 gRPC: *1 TCP 연결 = 1 백엔드 고착* → 편향 분산. **L7 gRPC-aware LB** (Envoy, Istio, k8s Ingress) 로 stream 레벨 분산 필요. 자세히는 [[grpc]].
+
+## HTTP/2 vs HTTP/3 빠른 비교
+
+| 항목 | HTTP/2 | HTTP/3 |
+|---|---|---|
+| 전송 계층 | TCP | QUIC (UDP 기반) |
+| HoL Blocking | TCP 패킷 손실 시 전 스트림 대기 | 스트림별 독립 (없음) |
+| 헤더 압축 | HPACK (dynamic table) | QPACK |
+| 0-RTT 재개 | 없음 | 있음 (session ticket) |
+| 배포 성숙도 | 광범위 | CDN, 모던 브라우저 지원 확대 중 |
+
+자세히는 [[http-3]] 참고.
+
+## 실전 체크리스트
+
+| 항목 | 확인 방법 |
+|---|---|
+| h2 협상 여부 | `curl -I --http2 https://example.com` |
+| ALPN 선택값 | `openssl s_client -alpn h2 -connect example.com:443` |
+| Chrome h2 세션 | `chrome://net-internals/#http2` |
+| 금지 헤더 제거 | `Connection`, `Upgrade`, `Keep-Alive` 없애기 |
+| Server push 제거 | `http2_push` 지시자 제거, `103 Early Hints` 로 대체 |
+| gRPC LB | Envoy 또는 client-side LB 적용 |
+| 우선순위 힌트 | RFC 9218 Extensible Priorities (Urgency, Incremental 헤더) |
+
 ## 관련 위키
 
 - [[HTTP/1.1]] (이전 버전)

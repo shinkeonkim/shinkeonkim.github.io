@@ -172,6 +172,128 @@ flowchart LR
 > 3. **Choreography 의 *순환 의존성*** = A → B → C → A 같은 흐름. 디버깅 지옥.
 > 4. **상태 저장 안 함** = orchestrator 다운 시 *진행 잃음*. event log 또는 DB 필수.
 
+## Saga 상태 기계
+
+```mermaid
+stateDiagram-v2
+    [*] --> STARTED
+    STARTED --> PROCESSING : 단계 실행
+    PROCESSING --> PROCESSING : 다음 단계
+    PROCESSING --> COMPENSATING : 단계 실패
+    COMPENSATING --> COMPENSATING : 보상 단계 실행
+    COMPENSATING --> FAILED : 보상 완료
+    PROCESSING --> COMPLETED : 모든 단계 성공
+    FAILED --> [*]
+    COMPLETED --> [*]
+```
+
+| 상태 | 의미 |
+|---|---|
+| STARTED | saga 생성, 첫 단계 전 |
+| PROCESSING | 정방향 단계 실행 중 |
+| COMPENSATING | 실패 후 보상 단계 실행 중 |
+| COMPLETED | 모든 단계 성공 |
+| FAILED | 보상 완료, 논리적 롤백 완료 |
+
+## Saga 와 2PC 비교
+
+| 항목 | Saga | 2PC (XA) |
+|---|---|---|
+| 트랜잭션 격리 | 약함 (eventually consistent) | 강함 (ACID) |
+| 가용성 | 높음 (부분 실패 허용) | 낮음 (코디네이터 블로킹) |
+| 구현 복잡도 | 보상 로직 필요 | 분산 코디네이터 필요 |
+| 성능 | 비동기 가능 | 동기, 잠금 |
+| 적합 | 마이크로서비스 | 단일 조직 DB 간 |
+
+> [!NOTE]
+> *2PC 가 필요하다고 느껴진다면* saga 를 먼저 검토. saga 로 해결 안 되는 경우에만 2PC.
+
+## Temporal 워크플로 예시
+
+```python
+# Temporal Python SDK
+from temporalio import workflow, activity
+from datetime import timedelta
+
+@workflow.defn
+class OrderSaga:
+    @workflow.run
+    async def run(self, order_id: str) -> str:
+        # T1: 주문 확인
+        order = await workflow.execute_activity(
+            confirm_order,
+            order_id,
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        try:
+            # T2: 결제
+            payment = await workflow.execute_activity(
+                charge_payment,
+                order.payment_info,
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+        except Exception:
+            # C1: 보상 - 주문 취소
+            await workflow.execute_activity(cancel_order, order_id)
+            raise
+        try:
+            # T3: 재고 차감
+            await workflow.execute_activity(
+                deduct_stock,
+                order.items,
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+        except Exception:
+            # C2: 결제 환불
+            await workflow.execute_activity(refund_payment, payment.id)
+            await workflow.execute_activity(cancel_order, order_id)
+            raise
+        return "completed"
+```
+
+Temporal 의 핵심:
+- *activity 실패 시 자동 retry* (정책 설정 가능)
+- *workflow state 는 영속 저장*: 서버 재시작 후에도 재개
+- 언어 native 코드처럼 쓰지만 분산 + 내구성
+
+## Saga 테스트 전략
+
+| 테스트 레벨 | 목적 | 도구 |
+|---|---|---|
+| Unit | 각 서비스 보상 로직 멱등성 | Jest / pytest |
+| Integration | 오케스트레이터 + 스텁 서비스 | Testcontainers |
+| Contract | 서비스 간 이벤트 스키마 | Pact |
+| End-to-End | 실패 시나리오 전체 흐름 | Temporal test env |
+
+```python
+# 멱등성 단위 테스트 예시
+def test_compensate_payment_idempotent():
+    saga_id = "test-saga-1"
+    payment_id = "pay-1"
+
+    # 첫 번째 보상
+    compensate_payment(saga_id, payment_id)
+
+    # 두 번째 보상 (중복) 도 에러 없이 통과
+    compensate_payment(saga_id, payment_id)
+
+    # DB 에 환불 기록 1건만
+    assert count_refunds(payment_id) == 1
+```
+
+Saga 테스트 핵심: *실패 경로마다 보상이 올바르게 실행되는지*, *보상 자체가 실패할 때 어떻게 되는지* 검증.
+
+## 프로덕션 체크리스트
+
+- [ ] 각 단계에 Idempotency Key 부여 (재시도 안전)
+- [ ] 모든 보상 트랜잭션 구현 및 멱등성 검증
+- [ ] Saga 상태 영속 저장 (DB 또는 워크플로 엔진)
+- [ ] 비가역 작업 (이메일, push) saga 마지막에 배치
+- [ ] 실패 알람 및 Dead Letter Queue 운영
+- [ ] 각 단계 timeout + retry 정책 설정
+- [ ] correlationId / traceid 로 분산 추적 연결
+- [ ] 보상 단계 실패 시 수동 개입 알람
+
 ## 관련 위키
 
 - [[distributed-systems-distributed-transaction]] (2PC)
@@ -179,3 +301,5 @@ flowchart LR
 - [[idempotency-keys]]
 - [[event-sourcing]]
 - [[microservices-vs-monolith]]
+- [[cqrs]]
+- [[cap-theorem]]

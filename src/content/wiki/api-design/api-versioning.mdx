@@ -3,12 +3,16 @@ title: "[API Design] API Versioning: URL / Header / Date 비교"
 aliases: ["API versioning", "API breaking change", "Stripe API version", "deprecation policy", "semver API"]
 tags: [api, versioning, backend, design]
 category: api-design
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "Stripe API Versioning"
     url: "https://stripe.com/docs/api/versioning"
   - title: "GitHub: REST API versions"
     url: "https://docs.github.com/en/rest/overview/api-versions"
+  - title: "Google API Design Guide"
+    url: "https://cloud.google.com/apis/design/versioning"
+  - title: "RFC 8594: The Sunset HTTP Header Field"
+    url: "https://datatracker.ietf.org/doc/html/rfc8594"
 ---
 
 ## 정의
@@ -81,19 +85,55 @@ Stripe-Version: 2023-10-16
 
 ```mermaid
 flowchart LR
-    A["2023-10-16<br/>(고객 1 pin)"] --> Implementation
-    B[2024-04-10] --> Implementation
-    C[2025-01-15] --> Implementation
-    D["2026-06-25<br/>(최신)"] --> Implementation
-    Implementation[서버<br/>다중 버전 동시 지원]
+    A["2023-10-16<br/>(고객 1 pin)"] --> Impl
+    B[2024-04-10] --> Impl
+    C[2025-01-15] --> Impl
+    D["2026-06-25<br/>(최신)"] --> Impl
+    Impl["서버<br/>(다중 버전 동시 지원)"]
 ```
 
-| 방식 | 권장 사용처 |
-|---|---|
-| URL | 일반 SaaS API |
-| Accept | RESTful 엄격 + 캐시 인프라 신뢰 |
-| 커스텀 헤더 | 내부 / 단순 |
-| 날짜 (Stripe 식) | 결제 / 큰 SDK 생태계 / 세밀한 backward compat |
+## 기업 사례
+
+### Google (URL 버전)
+
+```
+GET https://www.googleapis.com/calendar/v3/calendars/primary
+GET https://youtube.googleapis.com/youtube/v3/videos
+```
+
+*모든 Google API 가 `/v{N}/` URL 버전* 채택. 버전 N = 대규모 재설계 시점.
+
+### Stripe (날짜 버전)
+
+```http
+GET /v1/charges
+Stripe-Version: 2023-10-16
+```
+
+- *매 변경마다* 날짜 버전 발행
+- 기존 API key 는 *발급 당시 최신 버전으로 고정*
+- 개발자가 *명시적 upgrade* 결정
+- 같은 `/v1/` 경로, 날짜로 세분화
+
+### GitHub (Accept 헤더 버전)
+
+```http
+GET /repos/octocat/hello-world
+Accept: application/vnd.github.v3+json
+X-GitHub-Api-Version: 2022-11-28
+```
+
+- 날짜 기반 버전 (2022-11-28 형식)
+- `X-GitHub-Api-Version` 커스텀 헤더로 전달
+
+### Twitter / X (URL 버전)
+
+```
+GET https://api.twitter.com/2/tweets
+GET https://api.twitter.com/1.1/statuses/show.json
+```
+
+v1.1, v2 를 *장기간 병행 지원* (마이그레이션 부담 최소화).
 
 ## Deprecation Policy
 
@@ -114,22 +154,67 @@ gantt
 |---|---|---|
 | **Active** | 정상 사용 | - |
 | **Deprecated** | 새 사용 자제 | `Sunset: <date>`, `Deprecation: <bool>` |
-| **Sunset (graceful)** | 사용 가능, 적극 경고 | 응답에 경고, 410 응답 일부 endpoint |
+| **Sunset (graceful)** | 사용 가능, 적극 경고 | 응답에 경고, 일부 endpoint 410 |
 | **Removed** | 410 Gone | - |
 
 > [!IMPORTANT]
 > Sunset 까지 *최소 6-12개월* 예고가 정통. *고객사가 단순 라이브러리만 따라잡으면 되도록*.
 
+## Sunset 헤더 구현 (RFC 8594)
+
+```typescript
+// Express 미들웨어 예시
+function deprecationMiddleware(req: Request, res: Response, next: NextFunction) {
+  if (req.path.startsWith("/v1/")) {
+    // RFC 8594: Sunset 헤더
+    res.set("Sunset", "Sat, 31 Dec 2026 23:59:59 GMT");
+    // draft RFC: Deprecation 헤더
+    res.set("Deprecation", "Tue, 01 Jun 2025 00:00:00 GMT");
+    res.set("Link", '</v2/docs>; rel="successor-version"');
+  }
+  next();
+}
+```
+
+클라이언트 측에서 Sunset 헤더를 감지해 알림:
+
+```typescript
+const response = await fetch("/v1/users");
+const sunset = response.headers.get("Sunset");
+if (sunset) {
+  const sunsetDate = new Date(sunset);
+  console.warn(`[API] v1 가 ${sunsetDate.toLocaleDateString()} 에 종료됩니다. v2 로 마이그레이션 필요.`);
+}
+```
+
+## Breaking Change 감지 도구
+
+| 도구 | 기능 |
+|---|---|
+| **openapi-diff** | 두 OpenAPI spec 의 breaking change 리포트 |
+| **oasdiff** | CLI, PR check 에서 자동 실행 |
+| **Bump.sh** | SaaS, spec 변경 시 changelog 자동 생성 |
+| **Optic** | CI/CD 통합, traffic 기반 spec 추출 |
+
+```bash
+# oasdiff 로 breaking change 감지
+oasdiff breaking openapi-v1.yaml openapi-v2.yaml
+
+# 출력 예시:
+# GET /users/{id} response property 'email' removed (breaking)
+# POST /users request body property 'phone' required (breaking)
+```
+
 ## 호환성 카테고리
 
 ```mermaid
 flowchart TD
-    Forward[Forward Compatible<br/>옛 클라이언트 → 새 응답 OK]
-    Backward[Backward Compatible<br/>새 클라이언트 → 옛 서버 OK]
+    Forward["Forward Compatible<br/>옛 클라이언트 to 새 응답 OK"]
+    Backward["Backward Compatible<br/>새 클라이언트 to 옛 서버 OK"]
     Both[양방향 호환]
-    Tip1["새 필드 추가 (옵션) → 양방향"]
-    Tip2["필드 제거 → 양방향 깨짐"]
-    Tip3["응답에 옵션 필드 → forward compatible"]
+    Tip1["새 필드 추가 (옵션) to 양방향"]
+    Tip2["필드 제거 to 양방향 깨짐"]
+    Tip3["응답에 옵션 필드 to forward compatible"]
     Forward --> Tip1
     Forward --> Tip3
     Backward --> Tip1
@@ -146,6 +231,24 @@ flowchart TD
 
 > Protobuf, JSON 모두 *unknown field 무시* 가 기본.
 
+## Changelog 관리 패턴
+
+```markdown
+## 2026-06-25
+
+### Breaking Changes
+- `GET /v1/users` 응답에서 `full_name` 필드 제거 (`first_name` + `last_name` 분리)
+
+### New Features
+- `GET /v2/users` 에 `first_name`, `last_name` 추가
+- `POST /v2/users/bulk` 배치 생성 endpoint 추가
+
+### Deprecations
+- `GET /v1/users` 2026-12-31 에 종료 예정
+```
+
+> *Changelog 는 클라이언트가 마이그레이션 결정 시 참고하는 핵심 문서*. 자동화 도구 (Bump.sh, Optic) 로 PR 단계에서 자동 생성 권장.
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -153,6 +256,7 @@ flowchart TD
 > 2. **`POST` 응답에 *enum 값 추가*** = 클라이언트의 *switch case 폭발*. *unknown case* 처리 강제.
 > 3. **deprecation *없이* 종료** = 고객 폭동. 최소 6개월 전 알림.
 > 4. **버전 수 *폭증*** = 5개 동시 지원 = 코드 분기 폭발. *최대 2-3개* 동시 지원 권장.
+> 5. **Sunset 헤더 없는 deprecation** = 클라이언트가 *종료 일정 파악 불가*. RFC 8594 헤더 적극 활용.
 
 ## 관련 위키
 

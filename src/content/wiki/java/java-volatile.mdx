@@ -190,8 +190,89 @@ JVM 명세는 `long`, `double` 의 단일 read/write 가 **64-bit OS 에서는 a
 
 요즘은 거의 64-bit 환경이라 차이가 없지만, `AtomicLong` 을 쓰는 게 안전.
 
+## JMM 메모리 배리어
+
+JVM 은 `volatile` 쓰기/읽기 주변에 **메모리 배리어** 명령어를 삽입한다.
+
+| 위치 | 배리어 | 효과 |
+|:---|:---|:---|
+| `volatile` 쓰기 전 | StoreStore | 이전 쓰기가 먼저 보이도록 순서 고정 |
+| `volatile` 쓰기 후 | StoreLoad | 쓰기를 메인 메모리로 flush |
+| `volatile` 읽기 후 | LoadLoad | 이후 읽기 재배치 차단 |
+| `volatile` 읽기 후 | LoadStore | 이후 쓰기 재배치 차단 |
+
+```mermaid
+flowchart TD
+    WA["일반 쓰기: x=42, y=100"] -->|"StoreStore barrier"| VW["volatile ready=true"]
+    VW -->|"StoreLoad barrier (flush)"| MM["Main Memory"]
+    MM -->|"LoadLoad barrier"| VR["volatile ready 읽기"]
+    VR -->|"LoadLoad barrier"| RA["일반 읽기: x, y 보임"]
+```
+
+CPU 수준에서는 `mfence` (x86) 또는 `dmb ish` (ARM) 명령어로 구현.
+
+## 대안 비교
+
+| 방법 | 원자성 | 가시성 | 복합 연산 | 상호 배제 | 비고 |
+|:---|:---:|:---:|:---:|:---:|:---|
+| `volatile` | read/write 만 | ✓ | ✗ | ✗ | lock-free, 최소 오버헤드 |
+| `synchronized` | ✓ | ✓ | ✓ | ✓ | biased lock 최적화 |
+| `AtomicInteger` | ✓ | ✓ | CAS 기반 | ✗ | compare-and-swap |
+| `LongAdder` | ✓ | ✓ | add 만 | ✗ | 고성능 카운터, 스트라이프 |
+| `ReentrantLock` | ✓ | ✓ | ✓ | ✓ | tryLock, Condition 지원 |
+
+용도별 선택 기준:
+
+- 단순 상태 플래그 → `volatile boolean`
+- 단조 증가 카운터, 경쟁 심함 → [[LongAdder]]
+- CAS 기반 원자 연산 → [[AtomicInteger]]
+- 복합 임계 구역 보호 → [[ReentrantLock]]
+
+## VarHandle (Java 9+)
+
+`sun.misc.Unsafe` 의 공개 대체제. `volatile` 과 동일한 메모리 접근 모드를 지원하면서 배열 요소, 필드 모두 접근 가능.
+
+```java
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+
+class AtomicCounter {
+    private volatile int value;
+
+    private static final VarHandle VALUE;
+    static {
+        try {
+            VALUE = MethodHandles.lookup()
+                .findVarHandle(AtomicCounter.class, "value", int.class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    public boolean compareAndSet(int expected, int newValue) {
+        return VALUE.compareAndSet(this, expected, newValue);
+    }
+
+    public int getAndIncrement() {
+        return (int) VALUE.getAndAdd(this, 1);
+    }
+}
+```
+
+접근 모드 (메모리 순서 보장 수준):
+
+| 모드 | 보장 |
+|:---|:---|
+| `PLAIN` | 기본 (순서 보장 없음) |
+| `OPAQUE` | 단일 변수 일관성 |
+| `ACQUIRE` / `RELEASE` | 방향성 barrier (단방향) |
+| `VOLATILE` | `volatile` 동등, 양방향 barrier |
+
 ## 참고
 
 - [[ReentrantLock]]
 - [[CopyOnWriteArrayList]]
+- [[AtomicInteger]]
+- [[LongAdder]]
+- [[ThreadLocal]]
 - Brian Goetz, *Java Concurrency in Practice*, §3.1.4 Volatile Variables

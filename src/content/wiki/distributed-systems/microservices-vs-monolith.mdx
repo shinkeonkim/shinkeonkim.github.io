@@ -3,7 +3,7 @@ title: "[Pattern] Microservices vs Monolith: 언제 분리, 언제 통합"
 aliases: ["Microservices", "Monolith", "Modular monolith", "Service boundary", "Conway's Law", "Distributed monolith"]
 tags: [microservices, monolith, architecture, backend]
 category: distributed-systems
-updated: 2026-06-25
+updated: 2026-07-16
 references:
   - title: "Martin Fowler: Microservices"
     url: "https://martinfowler.com/articles/microservices.html"
@@ -12,7 +12,7 @@ references:
 
 ## 정의
 
-| | Monolith | Modular Monolith | Microservices |
+| - | Monolith | Modular Monolith | Microservices |
 |---|---|---|---|
 | 배포 단위 | 1개 | 1개 (모듈 명확) | N개 |
 | 데이터 | 단일 DB | 단일 DB (스키마 분리) | DB per service |
@@ -27,12 +27,12 @@ references:
 ```mermaid
 flowchart TD
     Q1{팀 크기}
-    Q1 -->|< 10| Mono[Monolith]
-    Q1 -->|10-50| Q2{성장 속도?}
+    Q1 -->|"< 10"| Mono[Monolith]
+    Q1 -->|"10-50"| Q2{성장 속도?}
     Q2 -->|느림| Mono
     Q2 -->|빠름| MM[Modular Monolith]
-    Q1 -->|50-200| MM
-    Q1 -->|200+| MS[Microservices]
+    Q1 -->|"50-200"| MM
+    Q1 -->|"200+"| MS[Microservices]
     MM -->|"진짜 필요해지면"| MS
 ```
 
@@ -40,11 +40,11 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    Start[새 프로젝트] --> Mono[Monolith로 시작]
-    Mono --> Grow[성장 + 도메인 명확]
+    Start[새 프로젝트] --> Mono["Monolith 로 시작"]
+    Mono --> Grow["성장 + 도메인 명확"]
     Grow --> MM[Modular Monolith]
-    MM --> Carve[필요시 service 분리]
-    Carve --> MS[Microservices 일부]
+    MM --> Carve["필요시 service 분리"]
+    Carve --> MS["Microservices 일부"]
 ```
 
 > [!IMPORTANT]
@@ -94,8 +94,35 @@ flowchart TD
     Bad[나쁜 boundary]
     Bad --> X1["기술 계층 (API / DB / UI)"]
     Bad --> X2["유사 데이터 기준 (DB 테이블 1:1)"]
-    Bad --> X3["CRUD 단위 (UserService, OrderService 의 진짜 분리는 어디서?)"]
+    Bad --> X3[CRUD 단위 분리]
 ```
+
+## DDD Bounded Context
+
+*Domain-Driven Design* 에서 *Bounded Context* = *독립적인 도메인 모델이 유효한 경계*.
+
+```mermaid
+flowchart TB
+    subgraph Order["Order Context"]
+        O_Order[Order]
+        O_Item[OrderItem]
+        O_Price[Price]
+    end
+    subgraph Inventory["Inventory Context"]
+        I_Product[Product]
+        I_Stock[Stock]
+    end
+    subgraph Payment["Payment Context"]
+        P_Payment[Payment]
+        P_Invoice[Invoice]
+    end
+    Order -.->|"ProductId (ref only)"| Inventory
+    Order -.->|"PaymentId (ref only)"| Payment
+```
+
+- 각 context 안에서 *같은 이름이라도 의미가 다름* (Order 의 `Product` vs Inventory 의 `Product`)
+- Bounded Context 경계 = *Microservice 분리 경계의 자연스러운 후보*
+- *Context Map* 으로 context 간 관계 (ACL, Shared Kernel, Partnership) 명시
 
 ## Conway's Law
 
@@ -116,6 +143,50 @@ flowchart TB
 
 *반대로 service 구조부터 정해 → 팀 구조 맞추기*. *큰 조직 재편* 에서 사용.
 
+## API 통신 패턴: 동기 vs 비동기
+
+```mermaid
+flowchart TB
+    Sync["동기 (HTTP / gRPC)"]
+    Sync --> S1[즉각 응답 필요]
+    Sync --> S2[결과 바로 사용]
+    Sync --> S3["단점: 결합, 장애 전파"]
+    Async["비동기 (Kafka / NATS / RabbitMQ)"]
+    Async --> A1[결과 나중에 처리]
+    Async --> A2["단점: eventual consistency"]
+    Async --> A3["장점: 결합 없음, 장애 격리"]
+```
+
+| 패턴 | 사용처 | 예시 |
+|---|---|---|
+| 동기 REST/gRPC | 즉각 응답, 읽기 | 상품 조회, 인증 |
+| 비동기 이벤트 | 후속 처리, 팬아웃 | 결제 완료 후 알림 발송 |
+| Saga | 분산 트랜잭션 | 주문 생성 + 재고 감소 + 결제 |
+
+## 데이터 일관성 전략
+
+분산 트랜잭션 (2PC) 은 *마이크로서비스에서 피해야 할 패턴*. 대안:
+
+```mermaid
+sequenceDiagram
+    participant O as Order Service
+    participant E as Event Bus
+    participant I as Inventory Service
+    participant P as Payment Service
+
+    O->>E: OrderCreated (event)
+    E->>I: OrderCreated
+    I->>I: 재고 감소
+    I->>E: StockReserved
+    E->>P: StockReserved
+    P->>P: 결제 처리
+    P->>E: PaymentCompleted
+    E->>O: PaymentCompleted
+    O->>O: 주문 확정
+```
+
+*Choreography-based Saga*: 각 서비스가 이벤트를 듣고 *다음 단계를 직접 실행*.
+
 ## 분리 비용 카탈로그
 
 ```mermaid
@@ -123,12 +194,29 @@ flowchart TB
     Cost[Microservices 의 추가 비용]
     Cost --> Net[네트워크 호출]
     Cost --> Obs["관측성 (Tracing 필수)"]
-    Cost --> Auth[mTLS / Service Mesh]
+    Cost --> Auth["mTLS / Service Mesh"]
     Cost --> Data["데이터 일관성 (Saga)"]
-    Cost --> Deploy[K8s, CI/CD 복잡도]
-    Cost --> Test[Contract / E2E 테스트]
+    Cost --> Deploy["K8s, CI/CD 복잡도"]
+    Cost --> Test["Contract / E2E 테스트"]
     Cost --> Skill[엔지니어 학습 비용]
 ```
+
+## Service Mesh 개요
+
+마이크로서비스 간 *네트워크 복잡성* 을 인프라 레벨에서 해결:
+
+| 기능 | 설명 |
+|---|---|
+| mTLS | service 간 자동 암호화 + 인증 |
+| Load balancing | L7 수준, 헬스체크 기반 |
+| Circuit breaker | 연쇄 장애 방지 |
+| Observability | 자동 trace / metric 수집 |
+| Traffic management | canary, retry, timeout |
+
+대표 구현: *Istio* (풍부한 기능), *Linkerd* (경량), *Cilium* (eBPF 기반).
+
+> [!IMPORTANT]
+> Service Mesh 는 *마이크로서비스의 운영 복잡도 비용* 의 일부를 낮춰주지만, *도입 자체도 학습 비용이 크다*. 팀 규모와 트래픽 수준에 맞게 도입.
 
 ## 모듈 모놀리스 (Modular Monolith)
 
@@ -141,7 +229,7 @@ flowchart TB
     end
     U -.interface only.-> O
     O -.interface only.-> P
-    App --> DB[(단일 DB<br/>스키마 분리)]
+    App --> DB[("단일 DB<br/>스키마 분리")]
 ```
 
 - *모듈 간 직접 호출 금지*. *interface만*.
@@ -155,7 +243,8 @@ flowchart TB
 > 1. **너무 일찍 분리** = 도메인 잘못 잡고 *분리 후 재경계*. 가장 큰 후회.
 > 2. **DB 공유** = "Service 단위 분리" 가 *DB 결합* 으로 *무의미*. 각 service 자기 DB.
 > 3. **분산 트랜잭션 (2PC)** = 마이크로서비스의 *영혼*. Saga 패턴으로 대체.
-> 4. **shared library 의 *영원한 결합*** = service A 가 라이브러리 v2 로 못 올라가면 *모든 service* 정체.
+> 4. **shared library 의 영원한 결합** = service A 가 라이브러리 v2 로 못 올라가면 *모든 service* 정체.
+> 5. **Bounded Context 무시** = 잘못된 경계로 분리 후 service 간 *결합이 더 강해짐*.
 
 ## 관련 위키
 

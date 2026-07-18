@@ -1,0 +1,391 @@
+---
+title: "[Flask] Templates (Jinja2)"
+aliases:
+  - "Flask Templates"
+  - "Flask Jinja2"
+  - "Jinja2 Flask"
+  - "render_template"
+  - "Flask 템플릿"
+  - "template inheritance"
+  - "Jinja macro"
+tags: [python, flask, jinja2, templates, ssr]
+category: flask
+updated: 2026-07-07
+references:
+  - title: "Flask Templates"
+    url: "https://flask.palletsprojects.com/en/latest/templating/"
+  - title: "Jinja2 Documentation"
+    url: "https://jinja.palletsprojects.com/"
+  - title: "Jinja2 Template Designer"
+    url: "https://jinja.palletsprojects.com/en/latest/templates/"
+---
+
+## 정의
+
+**Flask Templates** 는 Jinja2 템플릿 엔진의 Flask 통합입니다. `render_template()` 로 컨텍스트 (변수) 를 넘겨 HTML/텍스트를 렌더링하고, template inheritance, macro, filter 등으로 재사용 가능한 UI 를 구축합니다.
+
+**서버 사이드 렌더링 (SSR)** 이 필요한 앱 (관리자 페이지, SEO 중요 페이지, HTMX 앱) 에서 여전히 강력. React/Vue SPA 로 완전히 대체할 필요 없는 경우 많음.
+
+## Hello World
+
+```python
+# app.py
+from flask import Flask, render_template
+
+app = Flask(__name__)
+
+@app.get("/user/<name>")
+def user(name):
+    return render_template("user.html", name=name, items=[1, 2, 3])
+```
+
+```html
+<!-- templates/user.html -->
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>Hello, {{ name }}</h1>
+  <ul>
+    {% for item in items %}
+      <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>
+```
+
+## Jinja2 문법
+
+### 변수 출력
+
+```html
+{{ variable }}
+{{ user.name }}
+{{ user["email"] }}
+{{ items[0] }}
+{{ func(arg) }}
+{{ user.get("name", "unknown") }}
+```
+
+### Filter (변수 변환)
+
+```html
+{{ name | upper }}                     <!-- 대문자 -->
+{{ text | truncate(100) }}             <!-- 100자 자르기 -->
+{{ date | dateformat("%Y-%m-%d") }}    <!-- 날짜 포맷 -->
+{{ list | join(", ") }}                <!-- 배열을 문자열로 -->
+{{ dict | tojson }}                    <!-- JSON 직렬화 -->
+{{ text | safe }}                      <!-- HTML escape 안 함 -->
+{{ number | round(2) }}                <!-- 소수점 -->
+{{ url | urlencode }}
+```
+
+**커스텀 filter**:
+
+```python
+@app.template_filter("reverse")
+def reverse_filter(s: str) -> str:
+    return s[::-1]
+
+# 템플릿: {{ "hello" | reverse }}  ->  olleh
+```
+
+### Control Flow
+
+```html
+{% if user %}
+  Hi, {{ user.name }}
+{% elif guest %}
+  Hi, guest
+{% else %}
+  Please log in.
+{% endif %}
+
+{% for item in items %}
+  <li>{{ loop.index }}: {{ item }}</li>
+{% else %}
+  <p>No items.</p>
+{% endfor %}
+```
+
+`loop.index` (1-based), `loop.index0` (0-based), `loop.first`, `loop.last`, `loop.length`.
+
+### Comment
+
+```html
+{# 이것은 렌더링되지 않는 주석 #}
+```
+
+### Whitespace 제어
+
+```html
+{%- for x in xs %}         <!-- 앞 공백 제거 -->
+  {{ x }}
+{% endfor -%}              <!-- 뒷 공백 제거 -->
+```
+
+## Template Inheritance
+
+```html
+<!-- templates/base.html -->
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{% block title %}Default Title{% endblock %}</title>
+</head>
+<body>
+  <nav>{% include "_nav.html" %}</nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>{% block footer %}Default footer{% endblock %}</footer>
+</body>
+</html>
+```
+
+```html
+<!-- templates/user.html -->
+{% extends "base.html" %}
+
+{% block title %}{{ name }}의 페이지{% endblock %}
+
+{% block content %}
+  <h1>{{ name }}</h1>
+  <ul>
+    {% for item in items %}
+      <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+{% endblock %}
+```
+
+### super() 로 부모 블록 확장
+
+```html
+{% block content %}
+  {{ super() }}
+  <p>추가 컨텐츠</p>
+{% endblock %}
+```
+
+### include vs extends
+
+- **`{% extends %}`**: 부모 템플릿 상속 (block override)
+- **`{% include %}`**: 파일 삽입 (context 공유)
+
+## Macro
+
+함수처럼 재사용 가능한 템플릿 조각.
+
+```html
+<!-- templates/_macros.html -->
+{% macro render_field(field, label=None) %}
+<div class="form-group">
+  <label>{{ label or field.label }}</label>
+  {{ field(class="form-control") }}
+  {% if field.errors %}
+    <ul class="errors">
+      {% for error in field.errors %}<li>{{ error }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+</div>
+{% endmacro %}
+```
+
+```html
+<!-- templates/register.html -->
+{% from "_macros.html" import render_field %}
+
+<form method="post">
+  {{ render_field(form.email, "이메일") }}
+  {{ render_field(form.password) }}
+  <button>가입</button>
+</form>
+```
+
+## Context Processor
+
+모든 템플릿에서 접근 가능한 전역 변수 주입.
+
+```python
+@app.context_processor
+def inject_globals():
+    return {
+        "current_user": get_current_user(),
+        "site_name": "MySite",
+        "now": datetime.utcnow(),
+    }
+```
+
+이제 어느 템플릿에서든 `{{ current_user }}`, `{{ site_name }}` 사용 가능.
+
+Blueprint 도 자기만의 context processor:
+
+```python
+@bp.app_context_processor
+def bp_context():
+    return {"key": "value"}
+```
+
+## Autoescape (XSS 방어)
+
+기본 활성화. `{{ user_input }}` 은 HTML escape.
+
+```html
+<!-- user.name = "<script>alert(1)</script>" -->
+<p>{{ user.name }}</p>
+<!-- 렌더링: <p>&lt;script&gt;alert(1)&lt;/script&gt;</p> -->
+```
+
+**`| safe`** 는 escape 를 해제. 신뢰할 만한 HTML 만 (예: 관리자가 CMS 에 넣은 것).
+
+```html
+{{ trusted_html | safe }}
+```
+
+`Markup` 객체를 파이썬에서 직접:
+
+```python
+from markupsafe import Markup
+return render_template("...", html=Markup("<b>bold</b>"))
+```
+
+## URL 생성
+
+```html
+<a href="{{ url_for('index') }}">Home</a>
+<a href="{{ url_for('user', name=user.name) }}">Profile</a>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+```
+
+Blueprint:
+
+```html
+<a href="{{ url_for('auth.login') }}">Login</a>
+```
+
+## Flash Messages
+
+한 번만 노출되는 사용자 알림.
+
+```python
+from flask import flash
+
+@app.post("/login")
+def login():
+    if success:
+        flash("로그인되었습니다", category="success")
+    else:
+        flash("실패했습니다", category="error")
+    return redirect(url_for("index"))
+```
+
+```html
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="alert alert-{{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+```
+
+## CSRF Token (Flask-WTF)
+
+```html
+<form method="post">
+  {{ form.hidden_tag() }}     <!-- CSRF 토큰 자동 삽입 -->
+  ...
+</form>
+```
+
+Extension 없이 수동으로 하려면:
+
+```html
+<form>
+  <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+  ...
+</form>
+```
+
+세션에 CSRF 토큰을 발급하고 form 처리 시 검증.
+
+## Set / Assign
+
+```html
+{% set price = item.price * 1.1 %}
+<p>세금 포함: {{ price }}</p>
+
+{% set nav %}
+  <a href="/">홈</a>
+  <a href="/about">소개</a>
+{% endset %}
+<nav>{{ nav | safe }}</nav>
+```
+
+## Template Rendering 성능
+
+Jinja2 는 템플릿을 **파이썬 코드로 컴파일** 후 실행. 첫 렌더링 시 컴파일. Flask 는 개발 모드에서 파일 변경 감지, 프로덕션은 캐시.
+
+```python
+app.jinja_env.cache_size = 400   # 기본 100
+app.jinja_env.auto_reload = False  # 프로덕션 필수
+```
+
+## Extension (자주 쓰이는)
+
+- **Jinja2 built-in**: `if`, `for`, `set`, `include`, `extends`, `block`, `macro`, `import`, `from`, `with`, `filter`, `endfilter`
+- **`jinja2.ext.do`**: `{% do list.append(x) %}` (side effect)
+- **`jinja2.ext.loopcontrols`**: `{% break %}`, `{% continue %}`
+- **`jinja2.ext.i18n`**: gettext 통합
+
+```python
+app.jinja_env.add_extension("jinja2.ext.do")
+```
+
+## HTMX / Alpine 조합
+
+Jinja2 + HTMX (혹은 Alpine.js) 는 SPA 대비 훨씬 단순한 인터랙션 앱을 만들 수 있음:
+
+```html
+<button hx-get="/api/count" hx-target="#count">Refresh</button>
+<span id="count">{{ count }}</span>
+```
+
+서버가 partial HTML 을 반환하면 HTMX 가 target 만 교체.
+
+```python
+@app.get("/api/count")
+def count():
+    return render_template("_count.html", count=get_count())
+```
+
+`_count.html`:
+
+```html
+<span id="count">{{ count }}</span>
+```
+
+## 함정
+
+> [!WARNING]
+> **`| safe` 남용은 XSS 취약점**. 사용자 입력에 절대 붙이지 않기.
+
+> [!CAUTION]
+> **`autoescape` 해제 파일**. `.html`, `.htm`, `.xml`, `.xhtml` 은 기본 autoescape 활성. 그 외는 활성 안 됨. `select_autoescape` 로 명시 관리.
+
+> [!WARNING]
+> **`get_flashed_messages` 는 한 번만 소비**. 다시 렌더링하면 메시지 사라짐. 저장 필요하면 별도.
+
+> [!IMPORTANT]
+> **템플릿에서 heavy computation 금지**. DB 쿼리, 파일 IO 등은 뷰에서 미리. 템플릿은 렌더링만.
+
+> [!CAUTION]
+> **Template caching**. Jinja2 cache_size 를 넘으면 LRU 로 축출. 큰 앱은 늘리기.
+
+## 관련 위키
+
+- [[flask|Flask]] - 상위 개요
+- [[flask-blueprints|Flask Blueprints]] - Blueprint 별 template folder
+- [[flask-request-response|Flask Request/Response]] - render_template 대안 (send_from_directory 등)
+- [[flask-sessions|Flask Sessions]] - flash 는 세션 사용
+- [[flask-extensions|Flask Extensions]] - Flask-WTF
+- [[flask-app-factory|Flask App Factory]]

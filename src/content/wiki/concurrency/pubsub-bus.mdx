@@ -3,7 +3,7 @@ title: "Pub/Sub Bus"
 aliases: ["Pub/Sub", "pubsub", "publish-subscribe", "메시지 버스", "Pub Sub Bus"]
 tags: [architecture, messaging, scaling, network]
 category: concurrency
-updated: 2026-06-13
+updated: 2026-07-16
 references:
   - id: redis-docs
     note: "manual/pubsub"
@@ -11,6 +11,8 @@ references:
     url: "https://socket.io/docs/v4/redis-adapter/"
   - title: "Kafka, Pub/Sub vs Consumer Group"
     url: "https://kafka.apache.org/documentation/#intro_consumers"
+  - title: "Redis Streams Documentation"
+    url: "https://redis.io/docs/manual/data-types/streams/"
 ---
 
 ## 정의
@@ -40,12 +42,18 @@ Client B → Server 2 (다른 서버)
 
 ### 해결책: Pub/Sub Bus
 
-```
-1. Server 1 이 A 의 메시지 수신
-2. Server 1 → Redis publish "channel-B" with payload
-3. Server 2 가 "channel-B" 를 구독 중
-4. Redis → Server 2 에 메시지 전달
-5. Server 2 → B 에게 send
+```mermaid
+sequenceDiagram
+    participant CA as "Client A"
+    participant S1 as "Server 1"
+    participant BUS as "Redis / Kafka"
+    participant S2 as "Server 2"
+    participant CB as "Client B"
+
+    CA->>S1: "B 에게 메시지"
+    S1->>BUS: publish("channel-B", payload)
+    BUS->>S2: push (구독 중)
+    S2->>CB: send(payload)
 ```
 
 서버는 자기 클라이언트만 관리하면 됨. 서버 간 라우팅은 bus 가 담당.
@@ -110,6 +118,43 @@ io.to('room-123').emit('msg', payload);
 
 서버 코드는 단일 인스턴스 때와 동일. Bus 가 multi-server 라우팅을 투명하게 처리한다.
 
+## Redis Pub/Sub vs Redis Streams
+
+Redis 에는 두 가지 메시지 메커니즘이 있다.
+
+```mermaid
+flowchart LR
+    subgraph PS["Redis Pub/Sub"]
+        P1["Publisher"] -->|"즉시 전달"| CH["Channel"]
+        CH -->|"구독 중인 경우만"| S1["Subscriber A"]
+        CH -->|"구독 중인 경우만"| S2["Subscriber B"]
+    end
+    subgraph ST["Redis Streams"]
+        P2["Producer"] -->|"영구 저장"| STR["Stream (log)"]
+        STR -->|"Consumer Group 1"| CG1["Consumer"]
+        STR -->|"Consumer Group 2"| CG2["Consumer"]
+        STR -->|"ID 기반 replay"| RPL["새 Subscriber"]
+    end
+```
+
+| 항목 | Redis Pub/Sub | Redis Streams |
+|:---|:---|:---|
+| 메시지 보관 | 없음 (fire-and-forget) | 영구 로그 |
+| 오프라인 수신자 | 메시지 유실 | 나중에 읽기 가능 |
+| Consumer Group | 없음 | 있음 (at-most-once / at-least-once) |
+| 순서 보장 | 채널 내 순서 보장 | Stream ID 순서 보장 |
+| 사용처 | 실시간 브로드캐스트 | 이벤트 소싱, 감사 로그 |
+
+```javascript
+// Redis Streams (Kafka 대안)
+await redis.xAdd('user-events', '*', { userId: '42', action: 'login' });
+
+// Consumer Group 으로 읽기 (at-least-once)
+const [stream, messages] = await redis.xReadGroup(
+  'myGroup', 'consumer-1', 'user-events', '>', { COUNT: 10 }
+);
+```
+
 ## Pub/Sub vs Message Queue (차이점)
 
 | | Pub/Sub | Message Queue |
@@ -120,6 +165,44 @@ io.to('room-123').emit('msg', payload);
 | 예시 | Redis Pub/Sub, NATS | RabbitMQ, SQS, Kafka (consumer group 모드) |
 
 **Redis Pub/Sub** 은 단순 Pub/Sub. **Kafka** 는 두 모드 모두 가능 (broadcast + consumer group).
+
+## Kafka: Pub/Sub 과 Consumer Group
+
+Kafka 는 두 패턴을 동시에 지원한다.
+
+```mermaid
+flowchart TB
+    TOPIC["Topic: order-created\n(partition 0, 1, 2)"]
+    TOPIC --> GRP1["Consumer Group A\n(결제 서비스)\n각 partition 을 1 consumer 가 처리"]
+    TOPIC --> GRP2["Consumer Group B\n(알림 서비스)\n동일 메시지 복제 수신"]
+    GRP1 --> C1["Consumer A-0 (partition 0)"]
+    GRP1 --> C2["Consumer A-1 (partition 1)"]
+    GRP1 --> C3["Consumer A-2 (partition 2)"]
+    GRP2 --> N1["Consumer B-0"]
+```
+
+- **같은 Group 내**: partition 마다 1 consumer 배정 (큐 방식, 메시지 1회 처리)
+- **다른 Group**: 독립 오프셋, 같은 메시지를 각 Group 이 개별 수신 (Pub/Sub 방식)
+
+## 순서 보장
+
+```
+Redis Pub/Sub: 채널 내 단일 subscriber 에 대한 순서는 보장
+              하지만 여러 서버에 broadcast 시 도달 순서는 보장 안 함
+
+Kafka:        partition 내 순서만 보장
+              여러 partition 에 걸치면 순서 보장 안 함
+              → 같은 key 를 같은 partition 으로 라우팅해서 순서 보장
+```
+
+```javascript
+// Kafka: key 로 partition 고정 → 순서 보장
+await producer.send({
+  topic: 'user-events',
+  messages: [{ key: userId.toString(), value: JSON.stringify(event) }]
+  //          ↑ 같은 userId 는 항상 같은 partition
+});
+```
 
 ## 부하 특성
 
@@ -164,6 +247,17 @@ DB 업데이트 → publish "cache-invalidate:user-{id}"
   → 모든 서버가 자기 로컬 캐시 무효화
 ```
 
+## 함정
+
+> [!WARNING]
+> **subscriber 가 오프라인이면 Redis Pub/Sub 메시지는 유실**된다. 장애 복구 후 재구독해도 그 사이 메시지는 없다. 내구성이 필요하면 Redis Streams 또는 Kafka 사용.
+
+> [!WARNING]
+> **Hot channel 문제**: 특정 채널에 메시지가 폭발적으로 몰리면 bus 에 부하가 집중된다. 채널을 partition 단위로 분리하거나 [[backpressure]] 적용.
+
+> [!CAUTION]
+> **Kafka consumer lag**: Consumer 가 처리 속도를 따라가지 못하면 lag 가 쌓인다. `kafka-consumer-groups.sh --describe` 로 모니터링 필수.
+
 ## 대안과 trade-off
 
 ### gRPC streaming + 서비스 디스커버리
@@ -178,7 +272,23 @@ L7 라우팅으로 메시지 전달. 더 강력하지만 복잡.
 
 PostgreSQL `LISTEN/NOTIFY` 같은 DB 내장 Pub/Sub. 외부 인프라 불필요.
 
+```sql
+-- Publisher (PostgreSQL)
+NOTIFY user_events, '{"userId": 42, "action": "login"}';
+
+-- Subscriber (psycopg2)
+conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+cur.execute("LISTEN user_events;")
+select.select([conn], [], [])
+conn.poll()
+for notify in conn.notifies:
+    print(notify.payload)
+```
+
 ## 관련 위키
 
-- [[Stateful]], Pub/Sub bus 가 필요한 이유
-- [[Sticky Session]], 대안적 접근
+- [[Stateful]] - Pub/Sub bus 가 필요한 이유: 상태를 가진 서버 확장
+- [[Sticky Session]] - 대안적 접근: 특정 서버에 클라이언트 고정
+- [[backpressure]] - 메시지 폭발 시 publisher 속도 제어
+- [[circuit-breaker]] - Bus 장애 시 graceful degradation
+- [[rate-limiting]] - publisher 속도 제어

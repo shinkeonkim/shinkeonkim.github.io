@@ -1,9 +1,18 @@
 ---
 title: "[DB] PostgreSQL: 프로세스 모델, MVCC, WAL, 확장성"
-aliases: ["PostgreSQL", "Postgres", "postmaster", "VACUUM", "TOAST", "psql"]
+aliases:
+  - "PostgreSQL"
+  - "Postgres"
+  - "postmaster"
+  - "VACUUM"
+  - "TOAST"
+  - "psql"
+  - "autovacuum"
+  - "vacuum freeze"
+  - "pg_dump"
 tags: [postgresql, database, sql, mvcc, wal]
 category: database-internals
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "PostgreSQL 공식"
     url: "https://www.postgresql.org/docs/current/"
@@ -15,23 +24,58 @@ references:
 
 **PostgreSQL** 은 *오픈소스 ORDBMS*. 1986 UC Berkeley *POSTGRES* 의 후예. *MVCC, 확장 가능 타입, JSONB, full-text search, GIS (PostGIS), 벡터 (pgvector)* 등 *무거운 데이터 시스템* 의 표준.
 
-## 프로세스 모델
+## 아키텍처 개요
 
 ```mermaid
 flowchart TB
-    Postmaster[postmaster<br/>master process] --> BG[Background workers]
-    BG --> WAL_W[WAL writer]
-    BG --> BG_W[Background writer]
-    BG --> Checkpointer[Checkpointer]
-    BG --> Autovacuum[Autovacuum launcher]
-    BG --> Stats[Stats collector]
-    Postmaster -->|fork| C1["Backend 1<br/>(connection)"]
-    Postmaster -->|fork| C2[Backend 2]
-    Postmaster -->|fork| C3[Backend N]
+    Client["Client (psql, app)"] --> Postmaster
+    subgraph Postmaster["postmaster (master)"]
+        direction TB
+        Auth["인증 / 연결 관리"]
+    end
+    Postmaster -->|"fork 1:1"| B1["Backend 1"]
+    Postmaster -->|"fork 1:1"| B2["Backend N"]
+    Postmaster --> BG["Background Workers"]
+    subgraph BG
+        WAL_W["WAL writer"]
+        BG_W["Background writer"]
+        Chkpt["Checkpointer"]
+        AVL["Autovacuum launcher"]
+        Stats["Stats collector"]
+    end
+    B1 --> SharedMem["Shared Buffers<br/>(공유 메모리)"]
+    WAL_W --> WALFile[("WAL 파일")]
+    Chkpt --> Data[("데이터 파일")]
 ```
 
 > [!IMPORTANT]
 > *프로세스 per connection*. 1000 연결 = 1000 OS 프로세스. *connection pool (PgBouncer)* 가 *거의 필수*.
+
+## 스토리지 레이아웃: 8KB Page
+
+PostgreSQL 은 *8KB page (block)* 단위로 데이터를 저장. 테이블/인덱스 모두 동일 형식.
+
+```mermaid
+flowchart TB
+    Page["8KB Page"] --> Header["PageHeader (24B)<br/>LSN, checksum, flags"]
+    Page --> Items["ItemId Array<br/>4B × 행수, tuple 위치 포인터"]
+    Page --> Free["Free Space (중간)"]
+    Page --> Tuples["Tuples (행 데이터)<br/>아래 방향 성장"]
+    Page --> Special["Special Area<br/>B-tree leaf 링크 등"]
+```
+
+| 영역 | 크기 | 의미 |
+|---|---|---|
+| PageHeader | 24 bytes | LSN, 체크섬, 플래그 |
+| ItemId | 4 bytes × 행 수 | tuple 위치 포인터 |
+| Tuple | 가변 | HeapTupleHeader + 실제 데이터 |
+| Special | 가변 | 인덱스 종류별 메타 |
+
+```sql
+-- 총 page 수 확인
+SELECT relpages, pg_size_pretty(relpages::bigint * 8192) AS size
+FROM pg_class WHERE relname = 'orders';
+```
 
 ## MVCC + VACUUM
 
@@ -39,10 +83,10 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    Update[UPDATE 한 행] --> NewVer[새 버전 tuple]
-    Update --> DeadVer["옛 버전 tuple<br/>(dead)"]
-    Auto[autovacuum<br/>주기적 실행] --> DeadVer
-    Auto -->|회수| Space[빈 공간]
+    Update["UPDATE 한 행"] --> NewVer["새 버전 tuple<br/>(xmin = txid)"]
+    Update --> DeadVer["옛 버전 tuple<br/>(xmax = txid, dead)"]
+    Auto["autovacuum<br/>주기적 실행"] --> DeadVer
+    Auto -->|회수| Space["빈 공간 (FSM 등록)"]
 ```
 
 | VACUUM 종류 | 동작 |
@@ -54,6 +98,54 @@ flowchart LR
 
 > [!CAUTION]
 > *autovacuum 이 따라잡지 못하면* `pg_stat_user_tables.n_dead_tup` 증가 → *쿼리 느려짐 + transaction ID wrap-around* 위험.
+
+## Visibility Map + Transaction ID Freeze
+
+```mermaid
+flowchart LR
+    VM["Visibility Map<br/>(page 당 2 bit)"] --> AV["all-visible bit<br/>= 모든 tuple 이 모든 tx 에 보임"]
+    VM --> AF["all-frozen bit<br/>= txid wrap-around 안전"]
+    Vacuum["VACUUM"] -->|설정| AV
+    VF["VACUUM FREEZE"] -->|설정| AF
+```
+
+- *all-visible 페이지* 는 VACUUM 이 스킵 → 빠른 vacuum.
+- *txid* 는 32bit → 약 21억 한도. *Freeze* 로 영구 보존.
+- `vacuum_freeze_min_age`, `vacuum_freeze_table_age` 튜닝.
+
+```sql
+-- 위험 수위 확인
+SELECT datname, age(datfrozenxid) AS xid_age
+FROM pg_database
+ORDER BY xid_age DESC;
+-- age > 1.5억 이면 경고 수준
+```
+
+## HOT Update (Heap-Only Tuple)
+
+*같은 page 안에서* 인덱스 컬럼을 수정하지 않는 UPDATE:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Heap as Heap Page
+    participant Index
+
+    Client->>Heap: UPDATE (인덱스 미참여 컬럼)
+    Heap->>Heap: 새 tuple 같은 page 에 추가
+    Note over Index: 인덱스 갱신 없음 (HOT chain)
+    Heap->>Heap: 이전 tuple xmax 설정
+```
+
+> *HOT* 조건: *인덱스 컬럼 변경 없음* + *같은 page 에 여유 공간*. `fillfactor = 80` 으로 여유 확보.
+
+```sql
+SELECT relname, n_tup_hot_upd, n_tup_upd,
+       round(n_tup_hot_upd::numeric / NULLIF(n_tup_upd, 0) * 100, 1) AS hot_pct
+FROM pg_stat_user_tables
+WHERE schemaname = 'public'
+ORDER BY n_tup_upd DESC;
+```
 
 ## WAL (Write-Ahead Log)
 
@@ -69,7 +161,9 @@ sequenceDiagram
 
 - COMMIT = *WAL fsync* 면 OK. 데이터 파일은 *나중에 checkpoint 시*.
 - *crash recovery* = WAL replay.
-- replication 도 *WAL streaming*.
+- *streaming replication* 도 WAL 전송.
+
+자세한 건 [[wal-write-ahead-log]] 참고.
 
 ## TOAST (큰 컬럼 압축)
 
@@ -78,28 +172,75 @@ sequenceDiagram
 ```
 row size > 2KB 이면:
 1. 압축 (LZ4 / pglz)
-2. 그래도 크면 → toast 테이블에 *분할 저장*
+2. 그래도 크면 → toast 테이블에 분할 저장 (최대 1GB)
 ```
 
-대용량 텍스트 / JSONB / bytea 가 *자동 처리*. 사용자 코드 불필요.
+대용량 텍스트 / JSONB / bytea 가 *자동 처리*.
+
+| TOAST 전략 | 의미 |
+|---|---|
+| `PLAIN` | 압축/외부화 안 함 |
+| `EXTENDED` | 압축 후 외부화 (기본) |
+| `EXTERNAL` | 압축 없이 외부화 |
+| `MAIN` | 압축 시도, 외부화 가능 |
+
+```sql
+ALTER TABLE docs ALTER COLUMN body SET STORAGE EXTERNAL;
+```
+
+## Autovacuum 튜닝
+
+```sql
+ALTER TABLE orders SET (
+  autovacuum_vacuum_scale_factor  = 0.01,   -- 1% dead 시 실행 (기본 20%)
+  autovacuum_vacuum_cost_delay    = 2,       -- ms (기본 20ms)
+  autovacuum_analyze_scale_factor = 0.005
+);
+```
+
+| 파라미터 | 기본값 | 의미 |
+|---|---|---|
+| `autovacuum_vacuum_scale_factor` | 0.2 | 테이블의 20% dead 시 실행 |
+| `autovacuum_vacuum_threshold` | 50 | 최소 dead 행 수 |
+| `autovacuum_vacuum_cost_delay` | 2ms | I/O 스로틀 |
+| `autovacuum_max_workers` | 3 | 동시 vacuum worker 수 |
+
+> [!TIP]
+> *대형 테이블* 은 `scale_factor = 0.01` 로 *더 자주* 실행하되, `cost_delay` 를 줄여 빠르게.
+
+## 병렬 쿼리 (Parallel Query)
+
+```mermaid
+flowchart LR
+    Planner["Planner"] -->|"max_parallel_workers_per_gather"| Leader["Leader Process"]
+    Leader --> W1["Worker 1<br/>(Seq Scan 1/3)"]
+    Leader --> W2["Worker 2<br/>(Seq Scan 2/3)"]
+    Leader --> W3["Worker 3<br/>(Seq Scan 3/3)"]
+    W1 & W2 & W3 --> Leader
+    Leader --> Result["Gather / Merge"]
+```
+
+```sql
+SET max_parallel_workers_per_gather = 4;
+
+EXPLAIN SELECT count(*) FROM large_table;
+-- Gather (cost=...)
+--   -> Parallel Seq Scan on large_table
+```
+
+> *집계, 대형 seq scan, hash join* 에서 자동 병렬화.
 
 ## 핵심 도구
 
 | 도구 | 의미 |
 |---|---|
 | `psql` | CLI |
-| `pg_dump` / `pg_restore` | 백업 |
+| `pg_dump` / `pg_restore` | 논리 백업 |
 | `pg_basebackup` | physical 백업 |
 | `pg_rewind` | replica → primary 빠른 동기화 |
 | `pgbench` | 벤치마크 |
-| `EXPLAIN` | 쿼리 plan |
+| `EXPLAIN (ANALYZE, BUFFERS)` | 쿼리 plan + 실행 통계 |
 | `pg_stat_*` | 통계 view |
-
-## EXPLAIN ANALYZE
-
-```sql
-EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users WHERE email = 'koa@x.com';
-```
 
 자세한 건 [[query-explain-plan]] 참고.
 
@@ -115,33 +256,38 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users WHERE email = 'koa@x.com';
 | BRIN | 큰 시계열 (작은 인덱스) |
 | Bloom | 다컬럼 (확률적) |
 
-자세한 건 [[gin-gist-hash-indexes]] 참고.
+자세한 건 [[gin-gist-hash-indexes]], [[gin-index-deep]] 참고.
 
 ## 확장 (Extension)
 
 ```sql
-CREATE EXTENSION postgis;      -- 공간
-CREATE EXTENSION pgvector;     -- 벡터
+CREATE EXTENSION postgis;             -- 공간
+CREATE EXTENSION pgvector;            -- 벡터
 CREATE EXTENSION pg_stat_statements;  -- 쿼리 통계
-CREATE EXTENSION pg_trgm;      -- 트라이그램 (LIKE 최적화)
-CREATE EXTENSION timescaledb;  -- 시계열
+CREATE EXTENSION pg_trgm;             -- 트라이그램 (LIKE 최적화)
+CREATE EXTENSION timescaledb;         -- 시계열
+CREATE EXTENSION pg_partman;          -- 파티션 자동화
 ```
 
-> *PostgreSQL 의 최대 강점*. 코어를 *확장 으로 거대화*.
+> *PostgreSQL 의 최대 강점*. 코어를 확장으로 무한 확장.
 
 ## 흔한 함정
 
 > [!WARNING]
 > 1. **`SELECT *` + 인덱스 only scan 기대** = TOAST 컬럼 있으면 *table fetch 강제*. 필요 컬럼만.
-> 2. **너무 많은 인덱스** = INSERT/UPDATE 느려짐. 사용 안 되는 인덱스 `pg_stat_user_indexes.idx_scan = 0` 으로 식별.
-> 3. **`pg_dump` 의 *논리 백업* 만 의존** = 대용량은 *시간 폭증*. *pg_basebackup + WAL archive* 가 정통.
+> 2. **너무 많은 인덱스** = INSERT/UPDATE 느려짐. `pg_stat_user_indexes.idx_scan = 0` 으로 미사용 식별.
+> 3. **`pg_dump` 의 논리 백업만 의존** = 대용량은 *시간 폭증*. `pg_basebackup + WAL archive` 가 정통.
 > 4. **autovacuum disable** = transaction ID wrap-around → DB 정지. 절대 끄지 말 것.
+> 5. **HOT 조건 미확인** = fillfactor 100% + 넓은 행 = HOT 실패 → 인덱스 bloat 폭증.
+> 6. **Freeze 지연** = `age(datfrozenxid) > 200,000,000` 이면 비상. `VACUUM FREEZE` 수동 실행.
 
 ## 관련 위키
 
 - [[mvcc]], [[btree-indexing]]
-- [[gin-gist-hash-indexes]]
+- [[gin-gist-hash-indexes]], [[gin-index-deep]]
 - [[query-explain-plan]]
 - [[transaction-isolation-levels]]
 - [[wal-write-ahead-log]]
 - [[mysql-innodb]] (비교)
+- [[postgresql-jsonb]]
+- [[char-varchar-text-jsonb]]

@@ -1,9 +1,9 @@
 ---
 title: "[Pandas] read_excel / to_excel"
-aliases: ["Pandas read_excel", "Pandas to_excel", "Excel pandas", "엑셀 pandas"]
-tags: [python, pandas, io, excel]
+aliases: ["Pandas read_excel", "Pandas to_excel", "Excel pandas", "엑셀 pandas", "pandas 엑셀 읽기"]
+tags: [python, pandas, io, excel, openpyxl]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-15
 references:
   - id: pandas-docs
     note: "read_excel"
@@ -11,54 +11,84 @@ references:
 
 ## 정의
 
-**`pandas.read_excel`** 는 Excel 파일 (.xlsx, .xls) 을 [[Pandas DataFrame]] 으로 읽는 함수. 한국 실무에서 매우 자주 쓰인다.
+**`pandas.read_excel`** 는 Excel 파일 (.xlsx, .xls) 을 [[Pandas DataFrame]] 으로 읽는 함수. **`pandas.ExcelWriter`** 와 **`DataFrame.to_excel`** 은 역방향 저장을 담당한다.
+
+한국 실무에서 업무 보고서, 정산 파일, 외부 데이터 수신 등에 매우 자주 쓰인다.
 
 ## 의존 라이브러리
 
 | 형식 | 필요한 패키지 |
 |:---|:---|
 | `.xlsx` | `openpyxl` |
-| `.xls` (구형) | `xlrd` (≤ 1.2.0) |
+| `.xls` (구형) | `xlrd` (v1.2.0 이하) |
 | `.xlsb` | `pyxlsb` |
 | `.ods` | `odfpy` |
+| `.xlsx` (고속) | `calamine` (pandas 2.2+) |
 
 ```bash
-pip install openpyxl
+pip install openpyxl          # 기본 xlsx 지원
+pip install python-calamine   # 대용량 고속 읽기
+```
+
+## 읽기 흐름
+
+```mermaid
+flowchart TD
+    F["Excel 파일"] --> E{"engine 선택"}
+    E -->|".xlsx"| OP["openpyxl"]
+    E -->|".xls"| XL["xlrd"]
+    E -->|"고속"| CA["calamine"]
+    OP & XL & CA --> P["pandas 내부 파서"]
+    P --> D["DataFrame"]
+    D --> Q{"후처리 필요?"}
+    Q -->|"병합 셀"| FF["ffill()"]
+    Q -->|"멀티 헤더"| MH["header=list"]
+    Q -->|"dtype 교정"| DT["astype / dtype="]
+    Q -->|"완료"| OK["분석 시작"]
 ```
 
 ## 기본 사용
 
 ```python
-df = pd.read_excel('data.xlsx')                       # 첫 시트
+import pandas as pd
+
+df = pd.read_excel('data.xlsx')                        # 첫 시트
 df = pd.read_excel('data.xlsx', sheet_name='Sheet2')
-df = pd.read_excel('data.xlsx', sheet_name=0)         # 0번째 시트
+df = pd.read_excel('data.xlsx', sheet_name=0)          # 0번째 시트
 ```
 
 ## 핵심 옵션
 
-| 옵션 | 의미 |
-|:---|:---|
-| `sheet_name` | 시트 이름/번호, `None` = 모든 시트 (dict 반환) |
-| `header` | 헤더 행 위치 |
-| `skiprows` | 건너뛸 행 |
-| `usecols` | 'A:C' 또는 컬럼명 리스트 |
-| `dtype` | 컬럼별 타입 |
-| `parse_dates` | 날짜 파싱 |
-| `na_values` | NA 변환 값 |
-| `engine` | 'openpyxl', 'xlrd', 'pyxlsb' |
+| 옵션 | 의미 | 예시 |
+|:---|:---|:---|
+| `sheet_name` | 시트 이름/번호, `None` = 모든 시트 | `sheet_name='Sales'` |
+| `header` | 헤더 행 위치, `None` = 헤더 없음 | `header=2` |
+| `skiprows` | 건너뛸 행 | `skiprows=5` |
+| `usecols` | 열 범위 또는 이름 리스트 | `usecols='A:D'` |
+| `dtype` | 컬럼별 타입 | `dtype={'id': str}` |
+| `parse_dates` | 날짜 파싱 | `parse_dates=['date']` |
+| `na_values` | NA 변환 값 | `na_values=['-', 'N/A']` |
+| `nrows` | 읽을 행 수 | `nrows=1000` |
+| `engine` | 파서 엔진 | `engine='calamine'` |
 
 ## 여러 시트 한 번에
 
 <CodeWithOutput
   language="python"
   outputLanguage="text"
-  code={`# 모든 시트를 dict[name → DataFrame] 으로
+  code={`# 모든 시트를 dict[name -> DataFrame] 으로
 sheets = pd.read_excel('multi.xlsx', sheet_name=None)
-print(list(sheets.keys()))    # ['Sales', 'Returns', 'Inventory']
+print(list(sheets.keys()))
 print(sheets['Sales'].shape)`}
   output={`['Sales', 'Returns', 'Inventory']
 (1234, 8)`}
 />
+
+```python
+# 특정 시트 여러 개 선택
+sheets = pd.read_excel('data.xlsx', sheet_name=['Jan', 'Feb', 'Mar'])
+combined = pd.concat(sheets.values(), keys=sheets.keys())
+```
 
 ## 일부 영역만
 
@@ -69,6 +99,69 @@ df = pd.read_excel('data.xlsx',
     nrows=100,
     skiprows=5,
 )
+
+# 컬럼명으로 선택
+df = pd.read_excel('data.xlsx',
+    usecols=['날짜', '매출', '비용'],
+)
+```
+
+## dtype 다루기
+
+Excel 자동 타입 추론을 방어하는 패턴.
+
+```python
+# 문자로 봐야 하는 컬럼 (주민번호, 전화번호 등)
+df = pd.read_excel('data.xlsx', dtype={
+    'phone': str,
+    'code': str,
+    'amount': float,
+})
+
+# 날짜 컬럼 파싱
+df = pd.read_excel('data.xlsx', parse_dates=['order_date', 'ship_date'])
+
+# 읽은 후 변환
+df['date'] = pd.to_datetime(df['date'], format='%Y%m%d', errors='coerce')
+```
+
+## 실전 패턴
+
+### 병합 셀 처리
+
+```python
+df = pd.read_excel('report.xlsx')
+# 병합 셀: 첫 셀에만 값, 나머지는 NaN
+# forward fill 로 복원
+df['department'] = df['department'].ffill()
+df['quarter'] = df['quarter'].ffill()
+```
+
+### 멀티 헤더
+
+```python
+# 1, 2행이 모두 헤더인 경우
+df = pd.read_excel('data.xlsx', header=[0, 1])
+# 결과: MultiIndex columns
+df.columns.get_level_values(0)   # 첫 번째 헤더 레벨
+df.columns.get_level_values(1)   # 두 번째 헤더 레벨
+
+# 납작하게 펼치기
+df.columns = ['_'.join(col).strip() for col in df.columns.values]
+```
+
+### 헤더가 없는 파일
+
+```python
+df = pd.read_excel('raw.xlsx', header=None)
+df.columns = ['id', 'name', 'amount', 'date']
+```
+
+### 특정 행부터 시작
+
+```python
+# 3행이 실제 데이터 시작 (0번째 행이 주석, 1번째가 빈 행, 2번째가 헤더)
+df = pd.read_excel('data.xlsx', skiprows=2, header=0)
 ```
 
 ## 저장 (to_excel)
@@ -82,44 +175,88 @@ with pd.ExcelWriter('out.xlsx') as writer:
     df2.to_excel(writer, sheet_name='Returns', index=False)
 ```
 
-## 서식 / 스타일
-
-`xlsxwriter` 또는 `openpyxl` 의 직접 API 사용. 단순 데이터 저장은 `to_excel`, 차트나 서식이 필요하면 `xlsxwriter` 의 raw API 를 결합.
+## ExcelWriter 심화
 
 ```python
+# 기존 파일에 시트 추가 (openpyxl 사용)
+with pd.ExcelWriter('existing.xlsx', engine='openpyxl', mode='a') as writer:
+    df_new.to_excel(writer, sheet_name='NewSheet', index=False)
+
+# 시작 행/열 오프셋
+with pd.ExcelWriter('report.xlsx') as writer:
+    df.to_excel(writer, sheet_name='Report', startrow=3, startcol=1, index=False)
+
+# 서식 추가 (xlsxwriter)
 with pd.ExcelWriter('styled.xlsx', engine='xlsxwriter') as writer:
     df.to_excel(writer, sheet_name='Report', index=False)
-    workbook = writer.book
+    workbook  = writer.book
     worksheet = writer.sheets['Report']
-    money_fmt = workbook.add_format({'num_format': '#,##0'})
-    worksheet.set_column('B:B', 12, money_fmt)
+    money_fmt = workbook.add_format({'num_format': '#,##0', 'bold': False})
+    date_fmt  = workbook.add_format({'num_format': 'yyyy-mm-dd'})
+    worksheet.set_column('B:B', 14, money_fmt)
+    worksheet.set_column('C:C', 12, date_fmt)
 ```
+
+## 성능: 대용량 파일
+
+```python
+# pandas 2.2+: calamine 엔진 (C 구현, openpyxl 대비 10배+)
+df = pd.read_excel('large.xlsx', engine='calamine')
+
+# 필요한 열만 읽기
+df = pd.read_excel('large.xlsx', usecols='A:F', nrows=50_000, engine='calamine')
+```
+
+| 엔진 | 속도 | 특징 |
+|:---|:---:|:---|
+| `openpyxl` (기본) | 보통 | 서식 읽기, 쓰기 모두 지원 |
+| `calamine` | 빠름 | 읽기 전용, pandas 2.2+ |
+| `xlrd` | 보통 | `.xls` 전용 |
+| `xlsxwriter` | - | 쓰기 전용, 서식 강점 |
+
+> [!TIP]
+> 100MB 이상의 Excel 이라면 CSV 나 Parquet 으로 변환 후 사용하는 것이 훨씬 빠르다. Excel 자체가 압축된 XML 이라 파싱 비용이 크다.
 
 ## 함정
 
-### 1. Excel 의 자동 타입 추론
+### 1. Excel 자동 타입 추론
 
 - 숫자처럼 보이는 문자 (`'0001'`) 가 정수로 변환됨
-- 날짜처럼 보이는 문자가 datetime 으로 변환됨
-- 해법: `dtype={'col': 'str'}`
+- 날짜처럼 보이는 문자가 `datetime` 으로 변환됨
+- 해법: `dtype={'col': str}` 명시
 
 ### 2. 큰 파일 성능
 
-- Excel 자체가 압축된 XML 이라 read_csv 보다 훨씬 느리다
+- Excel 은 압축된 XML 이라 `read_csv` 보다 훨씬 느리다
 - 가능하면 CSV / Parquet 사용 권장
-- 정 Excel 이 필요하면 `engine='calamine'` (pandas 2.2+) 가 빠름
+- 정 Excel 이 필요하면 `engine='calamine'` (pandas 2.2+)
 
 ### 3. 병합된 셀
 
-- 병합된 셀은 첫 셀에만 값, 나머지는 NaN
+- 병합된 셀은 첫 셀에만 값, 나머지는 `NaN`
 - 해법: `df.ffill()` 로 forward fill
 
 ### 4. 시트 이름의 한글
 
-- 일부 환경에서 한글 시트명이 깨질 수 있음, `engine='openpyxl'` 권장
+- 일부 환경에서 한글 시트명이 깨질 수 있음
+- `engine='openpyxl'` 로 명시
 
-## 참고
+### 5. 날짜가 정수로 읽힘
+
+```python
+# Excel 날짜 직렬화 숫자 (1900-01-01 기준)
+# parse_dates 가 실패하는 경우
+df['date'] = pd.TimedeltaIndex(df['date'], unit='d') + pd.Timestamp('1900-01-01')
+```
+
+> [!WARNING]
+> `openpyxl` 로 파일을 열 때 비밀번호 보호된 파일이나 매크로가 포함된 `.xlsm` 은 읽기 실패할 수 있다. 파일을 미리 열어 저장한 뒤 사용하라.
+
+## 관련 위키
 
 - [[Pandas DataFrame]]
 - [[Pandas read_csv]]
-- [[Pandas read_json]]
+- [[Pandas read_parquet]]
+- [[Pandas to_datetime]]
+- [[Pandas dropna / fillna]]
+- [[Pandas style]]

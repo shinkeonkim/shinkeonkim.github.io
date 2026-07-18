@@ -89,24 +89,21 @@ GROUP BY city;`}
 
 ## pandas 와의 1:1 대응
 
-[[Pandas]] 의 DataFrame 연산은 SQL 과 거의 대칭이다. 같은 개념의 두 표현.
+[[py-dict|Pandas]] 의 DataFrame 연산은 SQL 과 거의 대칭이다. 같은 개념의 두 표현.
 
 | SQL | pandas | 비고 |
 |:---|:---|:---|
 | `SELECT col1, col2 FROM t` | `df[['col1', 'col2']]` | 컬럼 선택 |
-| `WHERE col > 10` | `df[df['col'] > 10]` | [[Pandas Boolean Indexing]] |
+| `WHERE col > 10` | `df[df['col'] > 10]` | Boolean Indexing |
 | `ORDER BY col DESC` | `df.sort_values('col', ascending=False)` | 정렬 |
 | `LIMIT 10` | `df.head(10)` | 상위 N |
 | `DISTINCT col` | `df['col'].unique()` / `drop_duplicates` | 중복 제거 |
-| `GROUP BY` + `AVG(x)` | `df.groupby(...).mean()` | [[Pandas groupby]] |
-| `INNER JOIN` | `pd.merge(a, b, how='inner')` | [[Pandas merge]] |
-| `LEFT JOIN` | `pd.merge(a, b, how='left')` | [[Pandas merge]] |
-| `UNION ALL` | `pd.concat([a, b])` | [[Pandas concat]] |
+| `GROUP BY` + `AVG(x)` | `df.groupby(...).mean()` | groupby |
+| `INNER JOIN` | `pd.merge(a, b, how='inner')` | merge |
+| `LEFT JOIN` | `pd.merge(a, b, how='left')` | merge |
+| `UNION ALL` | `pd.concat([a, b])` | concat |
 | `CASE WHEN` | `np.where` / `pd.cut` | 조건 분기 |
 | 윈도 `ROW_NUMBER()` | `df.groupby(...).cumcount()` | 그룹 내 순번 |
-| `INSERT INTO` | `df.to_sql(...)` | [[Pandas read_sql]] |
-
-DB 와 직접 주고받는 통로는 [[Pandas read_sql]] 참고.
 
 ## 표준 SQL vs dialect
 
@@ -118,7 +115,7 @@ ANSI/ISO 표준은 골격, 실제 구현은 dialect 마다 차이가 크다.
 | 문자열 결합 | `||` | `||`, `CONCAT()` | `CONCAT()` (`||` 는 기본 OR) |
 | 상위 N | `FETCH FIRST n ROWS ONLY` | `LIMIT n` (+ `FETCH`) | `LIMIT n` |
 | Upsert | `MERGE` | `INSERT ... ON CONFLICT` | `INSERT ... ON DUPLICATE KEY UPDATE` |
-| 부울 | `BOOLEAN` | `BOOLEAN` (네이티브) | `BOOLEAN` ≡ `TINYINT(1)` |
+| 부울 | `BOOLEAN` | `BOOLEAN` (네이티브) | `BOOLEAN` = `TINYINT(1)` |
 | JSON | `JSON` | `JSON`, `JSONB` (인덱싱 가능) | `JSON` (인덱싱은 generated column) |
 | 정규식 | `LIKE_REGEX` (거의 미구현) | `~`, `~*`, `regexp_*` | `REGEXP`, `RLIKE` |
 
@@ -159,6 +156,80 @@ SELECT COUNT(col) FROM t;  -- NULL 제외
 - 집계 함수는 `NULL` 을 자동 무시 (단 `COUNT(*)` 는 행 자체를 셈)
 - `NULL` 비교는 `IS NULL` / `IS NOT NULL` / `IS DISTINCT FROM`
 
+## 윈도 함수 (Window Function)
+
+`GROUP BY` 는 행을 접어 버리지만, 윈도 함수는 각 행을 유지하면서 집계/순위를 계산한다.
+
+```mermaid
+flowchart LR
+    Raw["raw rows<br/>다수"]
+    GB["GROUP BY<br/>집계 후 행 수 감소"]
+    WF["OVER(PARTITION BY ...)<br/>행 수 유지 + 집계 컬럼 추가"]
+    Raw --> GB
+    Raw --> WF
+```
+
+```sql
+SELECT
+    name,
+    salary,
+    dept,
+    RANK()        OVER (PARTITION BY dept ORDER BY salary DESC) AS rank_in_dept,
+    AVG(salary)   OVER (PARTITION BY dept)                      AS dept_avg,
+    ROW_NUMBER()  OVER (ORDER BY salary DESC)                   AS global_rank
+FROM employees;
+```
+
+| 함수 | 역할 |
+|:---|:---|
+| `ROW_NUMBER()` | 파티션 내 고유 순번 (동점도 다른 번호) |
+| `RANK()` | 동점 같은 순위, 다음 순위 건너뜀 |
+| `DENSE_RANK()` | 동점 같은 순위, 다음 순위 연속 |
+| `LAG(col, n)` | n 행 앞의 값 |
+| `LEAD(col, n)` | n 행 뒤의 값 |
+| `SUM/AVG/MAX OVER (...)` | 이동 집계 |
+
+자세히는 [[SQL DML]].
+
+## 인덱스 활용 기본
+
+쿼리 최적화의 출발점은 인덱스가 제대로 타는지 확인하는 것이다.
+
+```sql
+-- 실행 계획 확인 (PostgreSQL)
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM orders WHERE user_id = 42 AND status = 'PENDING';
+```
+
+인덱스가 무용해지는 패턴:
+
+```sql
+-- 컬럼에 함수 적용 → 인덱스 못 탐
+WHERE YEAR(created_at) = 2024
+-- 대신:
+WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01'
+
+-- 앞 컬럼 생략 → 복합 인덱스 못 탐
+-- INDEX (a, b, c) 인데
+WHERE b = 1   -- a 없으면 인덱스 스캔 불가 (일반 RDBMS 기준)
+
+-- LIKE 와일드카드 앞 → 전체 스캔
+WHERE name LIKE '%kim'  -- 앞 % 는 인덱스 무효
+-- 대신: 전문검색 (FTS), ES, 역색인
+```
+
+## 트랜잭션 격리 수준
+
+| 수준 | Dirty Read | Non-Repeatable Read | Phantom Read |
+|:---|:---:|:---:|:---:|
+| `READ UNCOMMITTED` | 가능 | 가능 | 가능 |
+| `READ COMMITTED` | 차단 | 가능 | 가능 |
+| `REPEATABLE READ` | 차단 | 차단 | 가능 |
+| `SERIALIZABLE` | 차단 | 차단 | 차단 |
+
+> PostgreSQL 의 기본은 `READ COMMITTED`. MySQL InnoDB 는 `REPEATABLE READ`.
+> 자세히는 [[SQL DCL TCL]].
+
 ## 학습 경로
 
 1. **스키마**: [[SQL DDL]]
@@ -171,7 +242,6 @@ SELECT COUNT(col) FROM t;  -- NULL 제외
 
 ## 관련 위키
 
-- [[Pandas read_sql]]
-- [[Pandas merge]]
-- [[Pandas groupby]]
-- [[Redis]] (대비, NoSQL key-value)
+- [[PostgreSQL]]
+- [[MySQL]]
+- [[redis|Redis]] (대비, NoSQL key-value)

@@ -3,7 +3,7 @@ title: "[Pandas] PyArrow Backend"
 aliases: ["Pandas pyarrow backend", "Pandas pyarrow", "Pandas arrow", "Pandas 2.0 arrow"]
 tags: [python, pandas, pyarrow, arrow, performance]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-17
 references:
   - id: pandas-docs
     note: "PyArrow Functionality"
@@ -12,6 +12,47 @@ references:
 ## 정의
 
 pandas 2.0 부터 **Apache Arrow 를 백킹으로 사용** 하는 새 dtype 시스템. NumPy 기반의 한계 (메모리, 문자열, 타입 다양성) 를 크게 개선.
+
+## 사용 상황
+
+| 상황 | pyarrow backend 이점 |
+|:---|:---|
+| 대용량 문자열 컬럼 | 메모리 1/10 수준 절감 |
+| Parquet 읽기/쓰기 | Arrow - Parquet 직접 매핑, 변환 비용 없음 |
+| int + NaN 공존 | NumPy 는 float 으로 강등, Arrow 는 native int |
+| 중첩 타입 (list, struct) | NumPy 불가, Arrow 는 가능 |
+| 정확한 소수 (decimal) | Arrow decimal 타입 지원 |
+| Python 3.x 마이그레이션 준비 | pandas 3.0 은 Arrow 기본 예정 |
+
+## 시각화
+
+NumPy vs Arrow 메모리 레이아웃 비교:
+
+```mermaid
+flowchart LR
+    NP["NumPy Backend"]
+    AR["Arrow Backend"]
+    NP --> NP1["string: Python object 포인터 배열"]
+    NP --> NP2["int + NaN: float64 로 강등"]
+    NP --> NP3["중첩 타입: 지원 없음"]
+    AR --> AR1["string: 연속 바이트 버퍼 + 오프셋"]
+    AR --> AR2["int + NA: 비트마스크 분리 저장"]
+    AR --> AR3["list, struct: 네이티브 지원"]
+```
+
+마이그레이션 경로:
+
+```mermaid
+flowchart TD
+    Old["기존 NumPy dtype DataFrame"]
+    Old --> A["read 시점 변환: dtype_backend='pyarrow'"]
+    Old --> B["명시적 변환: convert_dtypes(dtype_backend='pyarrow')"]
+    Old --> C["개별 컬럼: astype('int64[pyarrow]')"]
+    A --> New["Arrow dtype DataFrame"]
+    B --> New
+    C --> New
+    New --> Compat["기존 pandas API 대부분 호환"]
+```
 
 ## 적용 방법
 
@@ -160,12 +201,60 @@ df = df.convert_dtypes(dtype_backend='pyarrow')
 # 기존 NumPy dtype → 적절한 arrow dtype 변환
 ```
 
+## dtype 변환 상세
+
+| NumPy dtype | Arrow dtype |
+|:---|:---|
+| `object` (문자열) | `string[pyarrow]` |
+| `int64` | `int64[pyarrow]` |
+| `float64` | `double[pyarrow]` |
+| `bool` | `bool[pyarrow]` |
+| `datetime64[ns]` | `timestamp[ns][pyarrow]` |
+| `category` | `dictionary[pyarrow]` |
+
+```python
+# 개별 컬럼 변환
+df['name'] = df['name'].astype('string[pyarrow]')
+df['count'] = df['count'].astype('int64[pyarrow]')
+
+# 전체 일괄 변환
+df_arrow = df.convert_dtypes(dtype_backend='pyarrow')
+
+# dtype 확인
+df_arrow.dtypes
+# id      int64[pyarrow]
+# name    string[pyarrow]
+```
+
+## ML 파이프라인 연동
+
+Arrow backend 로 메모리를 절약한 뒤, ML 단계에서는 NumPy 로 변환:
+
+```python
+# 1. 대용량 데이터: Arrow 로 로드
+df = pd.read_parquet('big_data.parquet', dtype_backend='pyarrow')
+
+# 2. 전처리: pandas API 그대로 사용
+df = df.dropna().query('age > 18')
+df['log_income'] = np.log(df['income'].to_numpy() + 1)
+
+# 3. ML 입력: NumPy 변환
+X = df[feature_cols].to_numpy(dtype=np.float32)
+y = df['target'].to_numpy()
+
+model.fit(X, y)
+```
+
+`.to_numpy()` 호출 시 Arrow - NumPy 복사가 발생하나, 학습 단계는 한 번만 실행되므로 허용 가능.
+
 ## pandas 3.0
 
 3.0 부터 **pyarrow 가 기본 백킹** 이 될 예정 (논의 중). 지금부터 적응하면 좋다.
 
-## 참고
+## 관련 위키
 
 - [[Pandas Nullable Types]]
 - [[Pandas read_parquet]]
 - [[Pandas read_csv]]
+- [[Pandas performance]]
+- [[Pandas DataFrame]]

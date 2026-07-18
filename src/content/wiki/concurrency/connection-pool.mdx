@@ -3,7 +3,7 @@ title: "[Concurrency] Connection Pool: DB, HTTP, gRPC 의 공통 패턴"
 aliases: ["Connection Pool", "DB connection pool", "PgBouncer", "HikariCP", "DataSource", "max connections"]
 tags: [connection-pool, database, concurrency, performance, backend]
 category: concurrency
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "PgBouncer"
     url: "https://www.pgbouncer.org/"
@@ -30,6 +30,21 @@ references:
 | DB auth + session 설정 | *0* |
 | OS file descriptor 한도 부담 | 제한적 |
 | TIME_WAIT socket 폭증 | 없음 |
+
+## 연결 생명주기
+
+```mermaid
+flowchart TD
+    Created["생성 (TCP + TLS + auth)"] --> Idle[Idle]
+    Idle -->|acquire| Active[Active]
+    Active -->|release| Idle
+    Active -->|에러| Expired[폐기]
+    Idle -->|idle timeout| Expired
+    Idle -->|max lifetime| Expired
+    Expired -->|"min_size 유지"| Created
+```
+
+연결이 `max_lifetime` 에 달하기 전에 교체되어야 LB / firewall 의 idle disconnect 로 인한 stale 에러를 피할 수 있다.
 
 ## 흐름
 
@@ -124,6 +139,117 @@ flowchart LR
     Note["HTTP/1.1: per-host pool<br/>HTTP/2: 1 connection 의 multiplexing"]
 ```
 
+## HikariCP 설정 (Java)
+
+Java 생태계에서 가장 빠른 JDBC pool. Spring Boot 의 기본값이다.
+
+```java
+HikariConfig config = new HikariConfig();
+config.setJdbcUrl("jdbc:postgresql://host:5432/mydb");
+config.setUsername("app_user");
+config.setPassword("password");
+
+// 핵심 파라미터
+config.setMinimumIdle(5);             // 최소 idle 연결
+config.setMaximumPoolSize(20);        // 최대 연결
+config.setConnectionTimeout(3_000);   // acquire 대기 최대 3s
+config.setIdleTimeout(600_000);       // idle 연결 10분 후 만료
+config.setMaxLifetime(1_800_000);     // 연결 최대 수명 30분
+config.setLeakDetectionThreshold(2_000); // 2s 반환 안 되면 경고
+
+HikariDataSource dataSource = new HikariDataSource(config);
+```
+
+> [!TIP]
+> `maxLifetime` 은 DB 또는 LB 의 idle timeout 보다 짧게 설정. 그렇지 않으면 LB 가 서버 측 연결을 끊었을 때 stale connection 에러가 난다.
+
+```yaml
+# application.yml (Spring Boot)
+spring:
+  datasource:
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      connection-timeout: 3000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+```
+
+## PgBouncer 설정
+
+PostgreSQL 전용 외부 connection pooler. 여러 app 인스턴스의 연결을 PG 의 작은 pool 로 압축한다.
+
+```ini
+[databases]
+mydb = host=postgres-host port=5432 dbname=mydb
+
+[pgbouncer]
+listen_port     = 6432
+listen_addr     = *
+auth_type       = md5
+auth_file       = /etc/pgbouncer/userlist.txt
+
+pool_mode           = transaction
+max_client_conn     = 1000
+default_pool_size   = 20
+min_pool_size       = 5
+reserve_pool_size   = 5
+reserve_pool_timeout = 3
+
+server_idle_timeout  = 600
+server_lifetime      = 3600
+```
+
+**transaction mode** 가 효율이 가장 높다. 단, prepared statement 와 일부 세션 변수 (`SET LOCAL`, `LISTEN/NOTIFY`) 는 transaction 경계를 넘으면 동작하지 않는다.
+
+## Python SQLAlchemy 풀 설정
+
+```python
+from sqlalchemy import create_engine
+
+engine = create_engine(
+    "postgresql+psycopg2://user:pass@host:5432/db",
+    pool_size=10,          # 기본 pool 크기
+    max_overflow=5,        # pool_size 초과 허용 (임시)
+    pool_timeout=3,        # acquire 대기 최대 3s
+    pool_recycle=1800,     # 30분마다 연결 재생성 (stale 방지)
+    pool_pre_ping=True,    # acquire 전 SELECT 1 validation
+)
+```
+
+`pool_pre_ping=True` 가 stale connection 에러를 대부분 제거한다. 비용은 acquire 시 `SELECT 1` 1회.
+
+## 모니터링 지표
+
+| 메트릭 | 의미 | 주의 신호 |
+|:---|:---|:---|
+| `active_connections` | 현재 사용 중인 연결 수 | `max_size` 의 90% 이상 지속 |
+| `idle_connections` | 대기 중인 연결 수 | `min_size` 아래로 떨어지면 부족 |
+| `wait_queue_length` | acquire 대기 요청 수 | 0 을 초과하면 pool 부족 |
+| `connection_create_rate` | 초당 새 연결 생성 수 | 높으면 pool 크기 부족 또는 leak |
+| `checkout_timeout_rate` | acquire 실패율 | 어느 값이든 즉각 조치 |
+| `connection_error_rate` | 연결 에러율 | DB 이슈 또는 stale 연결 |
+
+HikariCP: Prometheus endpoint 또는 JMX 로 위 지표 모두 노출 가능.
+
+## gRPC 연결 풀
+
+gRPC 는 HTTP/2 multiplexing 으로 단일 채널에서 수천 동시 스트림 처리가 가능하다. DB 처럼 대규모 pool 이 필요 없다.
+
+```go
+// Go: grpc.ClientConn 재사용 (pool 없이도 됨)
+conn, err := grpc.Dial("service:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+if err != nil {
+    log.Fatal(err)
+}
+defer conn.Close()
+
+// 여러 goroutine 에서 같은 conn 동시 사용 가능
+client := pb.NewUserServiceClient(conn)
+```
+
+pool 이 필요한 경우는 백엔드 인스턴스가 여럿이라 여러 address 로 분산할 때다.
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -147,3 +273,5 @@ flowchart LR
 - [[postgresql]], [[mysql-innodb]]
 - [[Load Balancer]]
 - [[backpressure]]
+- [[redis]], 외부 세션 store 및 connection pool의 대안
+- [[stateless]], 외부 store 에 의존하는 이유

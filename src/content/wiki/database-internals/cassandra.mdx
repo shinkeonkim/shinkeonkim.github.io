@@ -183,9 +183,113 @@ flowchart TD
 > 3. **Cross-partition query** = 비싸다. partition key 디자인이 *결정적*.
 > 4. **Strong consistency 기대** = QUORUM 으로도 *시계 어긋남 시 잘못된 결과*. *NTP + 보수적 timestamp*.
 
+## Compaction 전략
+
+| 전략 | 특징 | 적합 |
+|---|---|---|
+| **STCS** (Size-Tiered) | 비슷한 크기 SSTable 병합 | write-heavy |
+| **LCS** (Leveled) | 고정 크기 level 유지 | read-heavy, 공간 효율 |
+| **TWCS** (Time-Window) | 시간 창 단위 병합 | time-series, TTL |
+
+```sql
+ALTER TABLE orders
+  WITH compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'HOURS',
+    'compaction_window_size': 1
+  };
+```
+
+> [!TIP]
+> Time-series 데이터는 TWCS + TTL 조합. 오래된 데이터가 자동 삭제되어 tombstone 누적 없음.
+
+## 데이터 모델링 원칙
+
+```mermaid
+flowchart TD
+    Q["쿼리 패턴 먼저 정의"] --> T["테이블 설계"]
+    T --> P["Partition Key: 균등 분산 여부"]
+    P -->|불균등| FP["다른 partition key 선택"]
+    FP --> P
+    P -->|균등| C["Clustering Key: 정렬 방향 결정"]
+    C --> OK["테이블 확정"]
+```
+
+1. **쿼리 주도 설계**: 먼저 쿼리를 정의하고, 그에 맞는 테이블을 만든다.
+2. **1 쿼리 = 1 테이블**: 각 access pattern 에 전용 테이블.
+3. **Partition 크기**: 100MB 이하 권장. 너무 크면 hot partition.
+4. **Denormalization**: 중복 저장은 의도적. 조인 없음.
+5. **TTL 활용**: 만료 데이터는 `INSERT ... USING TTL` 로 자동 삭제.
+
+## nodetool 운영 명령어
+
+```bash
+# 클러스터 상태 확인
+nodetool status
+
+# 특정 키가 어느 노드에 있는지 확인
+nodetool getendpoints shop orders <partition_key>
+
+# 수동 compaction 실행
+nodetool compact shop orders
+
+# replica 동기화 (repair)
+nodetool repair shop
+
+# Tombstone 현황 확인
+nodetool cfstats shop.orders | grep "Tombstone"
+
+# 노드 드레인 (점검 전)
+nodetool drain
+```
+
+## Bloom Filter
+
+각 SSTable 은 *Bloom Filter* 를 가진다. 읽기 시 SSTable 을 열기 전에 키가 없음을 빠르게 판별.
+
+- **False positive 가능**: 있다고 했지만 없음 → 실제 SSTable 열어 확인
+- **False negative 없음**: 없다고 하면 진짜 없음
+- `bloom_filter_fp_chance` 로 정밀도 조정 (낮을수록 메모리 더 사용)
+
+```sql
+ALTER TABLE orders
+  WITH bloom_filter_fp_chance = 0.01;  -- 기본 0.1, 낮을수록 정확
+```
+
+## Write Path 상세
+
+```mermaid
+sequenceDiagram
+    Client->>Coord: WRITE (CL = QUORUM)
+    Coord->>N1: write
+    Coord->>N2: write
+    Coord->>N3: write (hinted handoff)
+    par 응답 대기
+        N1-->>Coord: ack
+        N2-->>Coord: ack
+    end
+    Coord-->>Client: OK
+    Note over N3: 오프라인 시 힌트 보관, 복귀 후 전달
+```
+
+- **Hinted Handoff**: 대상 노드 다운 시 코디네이터가 임시 보관. 복귀 후 데이터 전달.
+- commit log 에 먼저 기록 후 memtable 업데이트: 내구성 보장.
+- `ANY` consistency 는 hint 만으로 성공 → 실제 replica 에 아직 없을 수 있음.
+
+## Read Repair & Anti-Entropy
+
+| 메커니즘 | 시점 | 설명 |
+|---|---|---|
+| **Read Repair** | 읽기 직후 백그라운드 | 응답 노드 간 불일치 발견 시 자동 수정 |
+| **Anti-Entropy** | 수동 (`nodetool repair`) | Merkle tree 비교로 전체 데이터 동기화 |
+
+> [!WARNING]
+> **Repair 를 주기적으로 실행하지 않으면** 노드 간 데이터 드리프트가 누적됩니다. `gc_grace_seconds` 이내에 반드시 repair 완료.
+
 ## 관련 위키
 
 - [[dynamodb]] (비슷한 디자인)
 - [[mongodb]]
 - [[sharding-vs-partitioning]]
 - [[distributed-systems-consensus]]
+- [[wal-write-ahead-log]]

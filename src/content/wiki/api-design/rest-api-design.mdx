@@ -3,12 +3,16 @@ title: "[API Design] REST API: 원칙, 자원 모델링, HATEOAS, 버전 관리"
 aliases: ["REST API Design", "REST", "RESTful API", "Resource modeling", "HATEOAS", "Richardson Maturity Model", "API versioning"]
 tags: [rest, api-design, backend, http]
 category: api-design
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "Roy Fielding: REST 박사논문"
     url: "https://www.ics.uci.edu/~fielding/pubs/dissertation/top.htm"
   - title: "Microsoft REST API guidelines"
     url: "https://github.com/microsoft/api-guidelines"
+  - title: "RFC 7807: Problem Details for HTTP APIs"
+    url: "https://datatracker.ietf.org/doc/html/rfc7807"
+  - title: "RFC 5789: PATCH Method for HTTP"
+    url: "https://datatracker.ietf.org/doc/html/rfc5789"
   - title: "Stripe API"
     url: "https://stripe.com/docs/api"
     note: "현대 REST 의 모범 사례."
@@ -19,15 +23,15 @@ references:
 **REST (Representational State Transfer)** 는 Roy Fielding 의 2000년 박사논문에서 정립된 *분산 시스템 아키텍처 스타일*. HTTP 의 *자원 / 표현 / 상태 전이* 를 자연스럽게 활용.
 
 > [!IMPORTANT]
-> "REST" 라는 단어는 *대부분 실무에서 *HTTP+JSON CRUD* 를 의미*. Fielding 의 *순수 REST* (HATEOAS 포함) 는 *드물게* 적용. 이 페이지는 *실무 REST* 와 *진짜 REST* 둘 다 정리.
+> "REST" 라는 단어는 *대부분 실무에서 HTTP+JSON CRUD* 를 의미. Fielding 의 *순수 REST* (HATEOAS 포함) 는 *드물게* 적용. 이 페이지는 *실무 REST* 와 *진짜 REST* 둘 다 정리.
 
 ## Richardson Maturity Model (REST 의 4 단계)
 
 ```mermaid
 flowchart TB
-    L0[Level 0: 단일 endpoint<br/>POST /api 로 모든 작업] --> L1[Level 1: 자원 분리<br/>GET /users, /orders]
-    L1 --> L2[Level 2: HTTP method + status<br/>GET/POST/PUT/DELETE]
-    L2 --> L3[Level 3: HATEOAS<br/>응답에 next action 링크]
+    L0["Level 0: 단일 endpoint<br/>POST /api 로 모든 작업"] --> L1["Level 1: 자원 분리<br/>GET /users, /orders"]
+    L1 --> L2["Level 2: HTTP method + status<br/>GET/POST/PUT/DELETE"]
+    L2 --> L3["Level 3: HATEOAS<br/>응답에 next action 링크"]
 ```
 
 *실무 대부분은 Level 2 에 머문다*. Level 3 은 *Stripe, GitHub API 의 일부* 정도.
@@ -61,8 +65,49 @@ flowchart TB
 | PATCH | X (대개) | X | 부분 갱신 |
 | DELETE | O | X | 삭제 |
 
-> [!NOTE]
-> *PUT* 은 *idempotent*. 두 번 호출 = 한 번 호출 결과 같음. *POST* 는 *매번 새 자원 생성*.
+## PUT vs PATCH 상세
+
+**PUT**: *전체 교체*. 보내지 않은 필드는 null / 기본값으로 덮어씀.
+
+```http
+PUT /users/42
+Content-Type: application/json
+
+{ "name": "koa", "email": "koa@example.com", "phone": "010-1234-5678" }
+# 전체 객체를 보내야 함. phone 빠뜨리면 서버에서 phone=null 로 덮어씀
+```
+
+**PATCH**: *부분 갱신*. 보낸 필드만 변경.
+
+```http
+PATCH /users/42
+Content-Type: application/json
+
+{ "email": "newemail@example.com" }
+# email 만 변경. name, phone 은 그대로
+```
+
+**JSON Patch (RFC 6902)**: PATCH 의 표준 형식:
+
+```http
+PATCH /users/42
+Content-Type: application/json-patch+json
+
+[
+  { "op": "replace", "path": "/email", "value": "newemail@example.com" },
+  { "op": "add", "path": "/tags/-", "value": "premium" },
+  { "op": "remove", "path": "/phone" }
+]
+```
+
+| op | 의미 |
+|---|---|
+| `add` | 필드 추가 또는 배열 append |
+| `remove` | 필드 제거 |
+| `replace` | 필드 값 교체 |
+| `move` | 필드 이동 |
+| `copy` | 필드 복사 |
+| `test` | 값 검증 (실패 시 전체 취소) |
 
 ## Status Code 패턴
 
@@ -80,38 +125,113 @@ flowchart TB
 | 422 | 형식은 OK, 의미 검증 실패 |
 | 429 | rate limit 초과 |
 
-## API 버전 관리
+## 에러 응답 (RFC 7807)
 
-```mermaid
-flowchart LR
-    Q{버전 표시 방법}
-    Q --> URL["URL: /v1/users<br/>/v2/users"]
-    Q --> Header["헤더: Accept: application/vnd.api+json;v=2"]
-    Q --> Query["Query: /users?api-version=2"]
+```json
+{
+  "type": "https://example.com/probs/validation",
+  "title": "Validation failed",
+  "status": 422,
+  "detail": "Email is required",
+  "instance": "/requests/12345",
+  "errors": [
+    { "field": "email", "code": "REQUIRED" },
+    { "field": "phone", "code": "INVALID_FORMAT" }
+  ]
+}
 ```
 
-| 방식 | 장점 | 단점 |
-|---|---|---|
-| URL (`/v1/`) | 명시적, 캐싱 친화 | URL 영구 변경 |
-| Accept 헤더 | URL 깔끔 | 디버깅 / 캐시 어려움 |
-| Query | 단순 | URL 변형 |
+| 필드 | 의미 |
+|---|---|
+| `type` | 문제 타입 URI (안정적인 문서 링크) |
+| `title` | 사람이 읽는 요약 (고정 메시지) |
+| `status` | HTTP status code |
+| `detail` | 이 요청의 구체적 설명 |
+| `instance` | 이 오류의 고유 URI |
 
-> *Stripe* 는 *날짜 기반 버전* (`Stripe-Version: 2023-10-16`). 가장 *세밀하고 안전한 호환성*.
+## Idempotency-Key 패턴
+
+네트워크 재시도 시 *중복 생성* 방지:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant DB as Database
+
+    C->>S: POST /payments (Idempotency-Key: abc-123)
+    S->>DB: 키 abc-123 존재 확인
+    DB-->>S: 없음
+    S->>DB: 결제 처리 + 키 abc-123 저장
+    S-->>C: 201 Created
+
+    Note over C,S: 네트워크 오류 후 재시도
+    C->>S: POST /payments (Idempotency-Key: abc-123)
+    S->>DB: 키 abc-123 존재 확인
+    DB-->>S: 있음 (기존 결과 반환)
+    S-->>C: 200 OK (동일 결과, 재처리 없음)
+```
+
+```http
+POST /payments
+Idempotency-Key: abc-123-xyz
+Content-Type: application/json
+
+{ "amount": 10000, "currency": "KRW", "method": "card" }
+```
+
+## Rate Limiting 응답 헤더
+
+```http
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1720123456
+Retry-After: 3600
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/probs/rate-limited",
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "Rate limit exceeded. Retry after 3600 seconds."
+}
+```
+
+| 헤더 | 의미 |
+|---|---|
+| `X-RateLimit-Limit` | 윈도우당 허용 요청 수 |
+| `X-RateLimit-Remaining` | 현재 윈도우 남은 요청 수 |
+| `X-RateLimit-Reset` | 윈도우 초기화 시각 (Unix epoch) |
+| `Retry-After` | 다시 시도까지 대기 초 |
+
+## 필터링 / 정렬 / 검색 패턴
+
+```
+# 필터링
+GET /orders?status=pending&customer_id=42
+
+# 정렬 (- prefix = 내림차순)
+GET /orders?sort=-created_at,amount
+
+# 필드 선택 (sparse fieldsets)
+GET /users?fields=id,name,email
+
+# 전문 검색
+GET /products?q=mechanical+keyboard
+
+# 페이지네이션 (cursor 기반)
+GET /orders?cursor=eyJpZCI6MTAwfQ&limit=20
+```
 
 ## 페이지네이션
 
 ```mermaid
 flowchart LR
-    A[Offset/Limit<br/>?offset=20&limit=10] --> B[페이지 N 빠른 점프 가능]
-    C[Cursor<br/>?cursor=abc123] --> D[연속 스트림, 정확]
-    E[Page/Size<br/>?page=3&size=10] --> F[옛 패턴]
+    A["Offset/Limit<br/>?offset=20&limit=10"] --> B["페이지 N 빠른 점프 가능<br/>단, 큰 offset 시 O(N)"]
+    C["Cursor<br/>?cursor=abc123"] --> D["연속 스트림, 정확<br/>단, 임의 점프 불가"]
+    E["Page/Size<br/>?page=3&size=10"] --> F[옛 패턴]
 ```
-
-| 방식 | 장점 | 단점 |
-|---|---|---|
-| Offset | 임의 점프 | 큰 offset 시 *O(N) DB query* |
-| Cursor | 빠름, 정확 | 임의 점프 불가 |
-| Keyset | offset + cursor 의 장점 | 구현 복잡 |
 
 > [!TIP]
 > *대량 데이터 + 무한 스크롤* = 거의 항상 *cursor 기반*. *Stripe, GitHub, Twitter API* 모두.
@@ -134,31 +254,8 @@ flowchart LR
 }
 ```
 
-또는 *납작* (JSON:API 스펙):
-
-```json
-{
-  "data": [{ "id": "1", "type": "users", "attributes": { ... } }]
-}
-```
-
 > [!CAUTION]
 > envelope 의 *너무 깊은 nesting* 은 *클라이언트 코드 복잡*. *flat + 표준 (RFC 7807 problem details for errors)* 권장.
-
-## 에러 응답 (RFC 7807)
-
-```json
-{
-  "type": "https://example.com/probs/validation",
-  "title": "Validation failed",
-  "status": 422,
-  "detail": "Email is required",
-  "instance": "/requests/12345",
-  "errors": [
-    { "field": "email", "code": "REQUIRED" }
-  ]
-}
-```
 
 ## HATEOAS
 
@@ -179,6 +276,44 @@ flowchart LR
 > [!NOTE]
 > 클라이언트가 *URL 을 미리 알 필요 없이* 응답의 링크만 따라 가는 *진짜 REST*. 실무에서는 *드물지만 GitHub API 가 좋은 예*.
 
+## API 버전 관리
+
+```mermaid
+flowchart LR
+    Q{버전 표시 방법}
+    Q --> URL["URL: /v1/users<br/>/v2/users"]
+    Q --> Header["헤더: Accept: application/vnd.api+json;v=2"]
+    Q --> Query["Query: /users?api-version=2"]
+```
+
+| 방식 | 장점 | 단점 |
+|---|---|---|
+| URL (`/v1/`) | 명시적, 캐싱 친화 | URL 영구 변경 |
+| Accept 헤더 | URL 깔끔 | 디버깅 / 캐시 어려움 |
+| Query | 단순 | URL 변형 |
+
+> *Stripe* 는 *날짜 기반 버전* (`Stripe-Version: 2023-10-16`). 가장 *세밀하고 안전한 호환성*.
+
+## 보안 고려사항
+
+```mermaid
+flowchart TD
+    Auth{"인증 방식"}
+    Auth -->|내부 서비스| APIKey["API Key<br/>(간단, rotation 필요)"]
+    Auth -->|사용자 대리| JWT["JWT / OAuth2<br/>(scope 기반 권한)"]
+    Auth -->|서비스간| mTLS["mTLS<br/>(인증서 기반)"]
+    Auth -->|B2B 엔터프라이즈| SAML["SAML / OIDC<br/>(SSO 통합)"]
+```
+
+| 항목 | 고려사항 |
+|---|---|
+| **HTTPS** | *모든 endpoint* TLS 필수. HTTP redirect |
+| **Rate Limiting** | DDoS, brute force 방어 |
+| **Input Validation** | SQL injection, XSS 방어. schema validation |
+| **Auth header** | `Authorization: Bearer` + 짧은 만료 |
+| **CORS** | allowed origin 명시. wildcard `*` 금지 (인증 API) |
+| **Audit Log** | 민감 operation 로깅 (who, what, when) |
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -186,6 +321,8 @@ flowchart LR
 > 2. **모든 변경에 `PUT`** = PATCH 가 적절한 부분 갱신에도 PUT 사용 → race condition.
 > 3. **`POST` 의 *비-멱등* 위험** = 네트워크 재시도 시 *중복 생성*. *Idempotency-Key* 헤더로 해결.
 > 4. **버전 *없이* 시작** = breaking change 시 *모든 클라이언트 동시 마이그레이션* 강요.
+> 5. **에러 응답 포맷 불일치** = 각 endpoint 가 다른 에러 형식. *RFC 7807 통일*.
+> 6. **큰 offset pagination** = `?offset=100000` 은 DB 에서 *O(N) 풀 스캔*. cursor 기반으로.
 
 ## 관련 위키
 

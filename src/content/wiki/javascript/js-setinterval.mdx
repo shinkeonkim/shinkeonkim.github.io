@@ -3,7 +3,7 @@ title: "[Javascript] setInterval"
 aliases: ["setInterval", "setinterval", "set interval", "주기 타이머", "JavaScript setInterval", "JS setInterval", "window.setInterval"]
 tags: [javascript, timer, async, web-api]
 category: javascript
-updated: 2026-06-14
+updated: 2026-07-16
 references:
   - id: mdn-web-docs
     note: "Web/API/Window/setInterval"
@@ -14,6 +14,34 @@ references:
 **`setInterval(callback, delay, ...args)`** 은 호스트 환경이 제공하는 반복 타이머 API. 매 `delay` 밀리초마다 `callback` 을 매크로태스크 큐에 등록한다.
 
 전체 메커니즘은 [[이벤트 루프]] 와 [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]] 참고.
+
+## 사용 상황
+
+| 상황 | setInterval | 대안 |
+|:---|:---:|:---|
+| 고정 간격 UI 업데이트 (시계 등) | ✅ | - |
+| WebSocket heartbeat / keep-alive | ✅ | - |
+| 애니메이션 프레임 갱신 | ❌ | [[requestAnimationFrame]] |
+| 비동기 작업 반복 (fetch polling) | 주의 | setTimeout 재호출 패턴 |
+| 단발 지연 실행 | ❌ | [[setTimeout]] |
+
+## 이벤트 루프 내 동작
+
+```mermaid
+flowchart TD
+    A["setInterval(fn, 1000)"] --> B[타이머 등록]
+    B --> C["1000ms 경과"]
+    C --> D["fn 을 매크로태스크 큐에 추가"]
+    D --> E{콜 스택 비어있음?}
+    E -->|아님| F[대기]
+    F --> E
+    E -->|비어있음| G["fn() 실행"]
+    G --> H{clearInterval 호출?}
+    H -->|아님| C
+    H -->|호출됨| I[반복 종료]
+```
+
+`delay` 는 **최소** 간격. 콜 스택이 바쁘면 큐에서 대기하고 지연 실행된다.
 
 ## 문법
 
@@ -54,8 +82,8 @@ setInterval(() => {
   while (Date.now() - start < 1500) {}
   console.log('done');
 }, 1000);
-// → 1초마다 큐에 등록되는데 한 번 실행에 1.5초
-// → 큐가 무한히 쌓이거나, 브라우저가 자동으로 누락
+// 1초마다 큐에 등록되는데 한 번 실행에 1.5초
+// 큐가 무한히 쌓이거나, 브라우저가 자동으로 누락
 ```
 
 > [!CAUTION]
@@ -68,6 +96,46 @@ setInterval(() => {
 ### 3. 백그라운드 탭에서 throttle
 
 브라우저는 백그라운드 탭의 setInterval 을 1Hz 로 강제 (Chrome, Firefox). 시계 같은 UI 는 다른 방법 필요.
+
+### 4. React useEffect 에서 cleanup 누락
+
+```javascript
+// 잘못된 예: interval 이 누적됨
+useEffect(() => {
+  setInterval(() => setCount(c => c + 1), 1000);
+}, []);
+
+// 올바른 예
+useEffect(() => {
+  const id = setInterval(() => setCount(c => c + 1), 1000);
+  return () => clearInterval(id);  // cleanup
+}, []);
+```
+
+> [!WARNING]
+> React 의 `StrictMode` 는 개발 환경에서 Effect 를 두 번 실행한다. cleanup 이 없으면 interval 이 두 개 등록된다.
+
+### 5. this 바인딩 문제
+
+```javascript
+class Timer {
+  constructor() {
+    this.count = 0;
+  }
+
+  start() {
+    // 잘못: this 가 undefined (strict) 또는 window
+    setInterval(function() {
+      console.log(this.count);
+    }, 1000);
+
+    // 올바름: arrow function 은 외부 this 캡처
+    setInterval(() => {
+      console.log(this.count);
+    }, 1000);
+  }
+}
+```
 
 ## 더 안전한 대안, setTimeout 재호출
 
@@ -112,10 +180,21 @@ poll();
 ```javascript
 const id = setInterval(tick, 1000);
 clearInterval(id);
-// → 다음 tick 부터 실행 안 됨
+// 다음 tick 부터 실행 안 됨
 ```
 
 이미 큐에 들어간 콜백은 취소되지 않는다.
+
+## Node.js 에서의 차이
+
+Node.js 에서는 브라우저보다 delay 가 정확하고 최소값 강제가 없다. 그러나 블로킹 코드가 있으면 마찬가지로 delay 가 발생한다.
+
+```javascript
+// Node.js 전용: setInterval 반환값이 Timeout 객체
+const timer = setInterval(fn, 1000);
+timer.unref();   // 이 타이머만 남았을 때 프로세스 종료 허용
+timer.ref();     // 다시 프로세스 유지
+```
 
 ## 자주 쓰이는 패턴
 
@@ -145,9 +224,34 @@ const id = setInterval(() => {
 }, 30000);
 ```
 
-## 참고
+### AbortController 연계 (취소 가능 폴링)
+
+```javascript
+function startPolling(url, interval, signal) {
+  const id = setInterval(async () => {
+    if (signal.aborted) {
+      clearInterval(id);
+      return;
+    }
+    const res = await fetch(url, { signal });
+    console.log(await res.json());
+  }, interval);
+
+  signal.addEventListener('abort', () => clearInterval(id));
+  return id;
+}
+
+const controller = new AbortController();
+startPolling('/api/status', 5000, controller.signal);
+// 취소
+controller.abort();
+```
+
+## 관련 위키
 
 - [[setTimeout]]
 - [[이벤트 루프]]
 - [[requestAnimationFrame]]
+- [[js-microtask-queue|마이크로태스크 큐]]
+- [[js-abort-controller|AbortController]]
 - [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]

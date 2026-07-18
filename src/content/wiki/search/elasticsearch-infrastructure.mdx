@@ -188,6 +188,78 @@ flowchart LR
 - **CCS** (Cross-Cluster Search): 동시에 여러 cluster 검색.
 - DR / 글로벌 분석.
 
+## 모니터링 핵심 지표
+
+운영 중 최우선으로 관찰해야 할 지표:
+
+| 범주 | 지표 | 임계치/설명 |
+|:---|:---|:---|
+| **클러스터 상태** | `cluster.health` status | GREEN 목표, YELLOW 주의, RED 즉각 대응 |
+| **JVM 힙** | `jvm.mem.heap_used_percent` | 75% 초과 시 GC 압력 증가, 85% 이상 위험 |
+| **GC 시간** | `jvm.gc.collectors.old.collection_time` | old GC 200ms 이상이면 조사 |
+| **Search 지연** | `indices.search.query_time` | p99 기준 200ms 이상이면 조사 |
+| **Index 속도** | `indices.indexing.index_rate` | 피크 처리량 대비 70% 이상 지속 시 조사 |
+| **Disk 사용률** | `fs.total.available` | 85% 초과 시 shard allocation 중지 |
+| **Thread pool** | `thread_pool.write.queue` | 큐 적체 = 인덱싱 병목 신호 |
+
+```bash
+# 클러스터 상태 한눈에 보기
+GET _cluster/health?pretty
+
+# 노드별 JVM / 디스크 현황
+GET _cat/nodes?v&h=ip,name,heapPercent,diskUsedPercent,cpu,load_1m
+```
+
+## 용량 계획 가이드라인
+
+### 스토리지 계산
+
+```
+실제 필요 디스크 = 원본 데이터 크기
+                  x 인덱싱 오버헤드 (1.1-1.5x)
+                  x (replica 수 + 1)
+                  + safety buffer (20-30%)
+```
+
+예시: 100 GB 원본 + replica 1 = `100 x 1.2 x 2 x 1.25 = 약 300 GB`
+
+### JVM 힙 설정
+
+```yaml
+# jvm.options
+-Xms16g
+-Xmx16g     # 힙은 전체 RAM 의 50%, 최대 32 GB (Compressed OOPs 한계)
+```
+
+32 GB 초과 시 Compressed OOPs 가 비활성화되어 오히려 메모리 효율이 떨어집니다.
+
+### 노드 역할 분리 권장 규모
+
+```mermaid
+flowchart LR
+    small["소형 (5노드 미만)"]
+    medium["중형 (5-20노드)"]
+    large["대형 (20+ 노드)"]
+
+    small -->|all-in-one| A["master + data + ingest 결합"]
+    medium -->|분리 시작| B["dedicated master 3개 + data nodes"]
+    large -->|완전 분리| C["master / data-hot / data-warm / coord"]
+```
+
+## 성능 튜닝 체크리스트
+
+**인덱싱 속도 향상**:
+- [ ] `refresh_interval: 30s` (기본 1s, 실시간 검색 불필요 시)
+- [ ] `number_of_replicas: 0` (초기 대량 인덱싱 후 복구)
+- [ ] bulk API 사용: 배치당 5-15 MB, 500-1000 docs
+- [ ] 클라이언트 스레드 수 = data node 수 x 2
+
+**검색 속도 향상**:
+- [ ] `filter context` 최대 활용 (score 불필요 조건은 반드시 filter)
+- [ ] `fielddata` 비활성화 (집계에는 keyword 필드 사용)
+- [ ] 결과 크기 제한 (`size: 10`, `_source includes/excludes` 활용)
+- [ ] Shard 크기 20-50 GB 유지
+
 ## 흔한 함정
 
 > [!WARNING]

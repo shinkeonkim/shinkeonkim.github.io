@@ -152,6 +152,112 @@ L7 LB 의 추가 능력:
 > 3. **Health check 의 *서버 자살*** = HC 자체가 부하 → 서버 다운. *분리된 endpoint* + *경량 응답*.
 > 4. **Sticky session + auto-scaling** = scale-in 시 *stuck* 사용자 세션 손실. *세션을 *외부 store* (Redis)* 로 옮기는 게 정통.
 
+## Connection Draining (드레이닝)
+
+배포/유지보수 시 서버를 *안전하게 풀에서 제거*하는 과정.
+
+```mermaid
+sequenceDiagram
+    participant LB as Load Balancer
+    participant Old as Old Server
+    participant New as New Server
+    LB->>Old: 새 연결 중단 신호
+    LB->>New: 새 연결 전달
+    Old-->>LB: 진행 중 요청 처리 완료 대기
+    Old-->>LB: 완전 종료
+    Note over LB,Old: grace period 30-60s 내 완료
+```
+
+- AWS ALB: *deregistration delay* (default 300s, 조정 가능)
+- Kubernetes: `terminationGracePeriodSeconds` + readiness probe 제거
+- 드레이닝 없이 *즉시 종료* = 진행 중 요청 손실.
+
+## Blue-Green 배포 / Canary 배포
+
+LB 는 *무중단 배포*의 핵심 인프라.
+
+```mermaid
+flowchart LR
+    LB[Load Balancer]
+    Blue["Blue v1.0<br/>기존 버전"]
+    Green["Green v1.1<br/>신 버전"]
+    LB -->|"100% → 0%"| Blue
+    LB -->|"0% → 100%"| Green
+```
+
+| 전략 | 설명 | 롤백 속도 |
+|---|---|---|
+| Blue-Green | 동시 운영, 트래픽 전환 | 즉시 |
+| Canary | 소수 % 부터 점진 증가 | 비율 감소 |
+| Rolling | 순차 교체 (구/신 혼재) | 느림 |
+| Shadow | 복제 트래픽, 결과 비교 | 없음 |
+
+> [!TIP]
+> *Canary* 기준 지표: 에러율, P99 지연, 비즈니스 메트릭. 이상 감지 시 자동 롤백 (Argo Rollouts, Flagger).
+
+## DSR (Direct Server Return)
+
+트래픽 *반환 경로*를 LB 를 거치지 않고 *서버에서 클라이언트로 직접* 전달.
+
+```mermaid
+flowchart LR
+    Client -->|"요청 via LB"| LB["L4 LB"]
+    LB -->|"포워딩 (DIP to RIP)"| Server
+    Server -->|"응답 직접 반환"| Client
+```
+
+- *응답 트래픽* (보통 요청 대비 10x 이상) 이 LB 를 우회 → *LB 처리량 병목 해소*.
+- 주로 *L4 LB* (IPVS, HAProxy) 에서 구현.
+- 서버가 *VIP (Virtual IP)* 를 loopback 에 설정해야 함.
+
+## Global LB vs Regional LB
+
+| 구분 | Global LB | Regional LB |
+|---|---|---|
+| 역할 | DNS 기반 지역 선택 | 지역 내 서버 분산 |
+| 지연 최적화 | GeoDNS + anycast | 지역 내 최적 |
+| 예 | AWS Route 53, Cloudflare | AWS ALB, nginx |
+| 페일오버 단위 | 지역 전체 이전 | 서버 단위 |
+
+```mermaid
+flowchart TD
+    User[글로벌 사용자]
+    User --> DNS["GeoDNS / Anycast"]
+    DNS --> RegionA["Region A (서울) ALB"]
+    DNS --> RegionB["Region B (도쿄) ALB"]
+    RegionA --> SA1[Server A1]
+    RegionA --> SA2[Server A2]
+    RegionB --> SB1[Server B1]
+```
+
+> [!CAUTION]
+> *DNS TTL* 이 길면 지역 이전 시 *일부 사용자가 오래된 IP* 를 캐시. TTL 60-120s 권장. *Active-Active* 구성에서 데이터 동기화 전략 필수.
+
+## 클라이언트 사이드 LB
+
+인프라 LB 대신 *클라이언트가 서버 목록을 직접 관리*하여 선택.
+
+| 구분 | 서버 사이드 LB | 클라이언트 사이드 LB |
+|---|---|---|
+| 예 | AWS ALB, nginx | gRPC, Ribbon (Netflix) |
+| 장점 | 투명, 단순 | 레이턴시 1 hop 감소 |
+| 단점 | 중앙 병목 가능 | 클라이언트 복잡도 |
+| 서버 목록 | LB 가 관리 | 서비스 레지스트리 (Consul, etcd) |
+
+> [!NOTE]
+> 마이크로서비스 환경에서 *gRPC 는 기본 클라이언트 사이드 LB* (round-robin, pick-first). Kubernetes headless service 와 함께 사용.
+
+## 실전 LB 설정 패턴
+
+| 상황 | 권장 설정 |
+|---|---|
+| WebSocket | idle timeout 조정 (>60s), `proxy_read_timeout` 증가 |
+| gRPC | HTTP/2 지원 LB, keepalive 설정 |
+| Auto-scaling | Connection Draining 활성화, Health check 간격 단축 |
+| 무중단 배포 | Blue-Green 또는 Canary + draining |
+| 세션 유지 필요 | Sticky session (단, Redis 세션 스토어 권장) |
+| 초저지연 | DSR 고려 (L4), IPVS |
+
 ## 관련 위키
 
 - [[Sticky Session]]

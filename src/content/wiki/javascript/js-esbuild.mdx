@@ -1,0 +1,222 @@
+---
+title: "[JavaScript] esbuild"
+aliases:
+  - "esbuild"
+  - "ESBuild"
+  - "esbuild bundler"
+  - "esbuild transform"
+tags: [javascript, bundler, build-tool, esbuild, go]
+category: javascript
+updated: 2026-07-07
+references:
+  - title: "esbuild Documentation"
+    url: "https://esbuild.github.io/"
+  - title: "esbuild API"
+    url: "https://esbuild.github.io/api/"
+---
+
+## 정의
+
+**esbuild** 는 Evan Wallace (Figma CTO) 가 2020년 발표한 **Go 로 작성된 JavaScript 번들러/컴파일러** 입니다. **10-100배** 빠른 성능으로 유명하며, 다른 도구들의 기반 (Vite dev, tsup, Angular CLI) 이 됩니다.
+
+**한 줄 요약**: "가장 빠른 JS 빌드 도구". 특히 TypeScript/JSX 변환 속도 압도적.
+
+## 왜 이렇게 빠른가
+
+Evan Wallace 의 블로그 [FAQ](https://esbuild.github.io/faq/#why-is-esbuild-fast) 요약:
+
+1. **Go**: 컴파일 언어 + 병렬성
+2. **Multi-core 병렬 파싱**: 모든 CPU 활용
+3. **최소 문자열 할당**: 파싱/생성 시 문자열 사본 최소화
+4. **소스맵 병렬 생성**
+5. **TypeScript AST 자체 구현** (typescript 컴파일러 안 씀)
+6. **모든 것을 한 번에** (parse → transform → codegen 한 통과)
+
+**결과**: 10만 라인 TS 앱을 100ms 안에 번들.
+
+## 두 모드
+
+### Transformer (트랜스파일러)
+
+한 파일씩 변환 (TS → JS, JSX → JS, ES2022 → ES2015):
+
+```javascript
+import { transform } from 'esbuild';
+
+const { code } = await transform(
+  'const x: number = 5',
+  { loader: 'ts', target: 'es2020' }
+);
+```
+
+**용도**: dev server, jest transformer, watch mode.
+
+### Bundler
+
+여러 파일을 하나로 (또는 여러 chunk 로):
+
+```javascript
+import { build } from 'esbuild';
+
+await build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  outfile: 'dist/bundle.js',
+  minify: true,
+  sourcemap: true,
+  target: 'es2020',
+  format: 'esm',
+});
+```
+
+## 지원 loaders
+
+기본:
+- `.ts`, `.tsx`, `.js`, `.jsx`: JavaScript 변환
+- `.json`, `.text`, `.base64`, `.dataurl`, `.file`, `.binary`
+- `.css`: 기본 CSS 지원 (2023+)
+
+**Plugin 시스템** 으로 확장:
+- Vue, Svelte SFC
+- MDX
+- SASS/LESS/PostCSS
+
+## Plugin API
+
+Webpack loader 보다 간단:
+
+```javascript
+const myPlugin = {
+  name: 'my-plugin',
+  setup(build) {
+    build.onResolve({ filter: /^env$/ }, args => ({
+      path: args.path,
+      namespace: 'env-ns',
+    }));
+
+    build.onLoad({ filter: /.*/, namespace: 'env-ns' }, () => ({
+      contents: JSON.stringify(process.env),
+      loader: 'json',
+    }));
+  },
+};
+```
+
+## 성능 벤치마크
+
+**Sucrase, Babel, esbuild, swc** 트랜스파일 비교 (표준 벤치, 조건마다 다름):
+
+| 도구 | 상대 속도 |
+|:---|:---:|
+| esbuild | 100x |
+| swc | 30x |
+| sucrase | 20x |
+| babel | 1x (baseline) |
+
+프로덕션 번들 (Webpack 대비):
+
+| 도구 | 상대 속도 |
+|:---|:---:|
+| esbuild | 100-200x |
+| Rspack | 20-50x |
+| Webpack | 1x |
+
+## 사용처 (다른 도구가 esbuild 를 활용)
+
+- **Vite dev server**: dep pre-bundle
+- **Vite build (선택적)**: transform
+- **tsup**: TS 라이브러리 zero-config
+- **Angular CLI (16+)**: dev + prod
+- **SvelteKit dev**
+- **Next.js**: 옛 minifier 이관 시 (Terser → SWC/esbuild)
+- **Deno**: 자체 통합
+
+## 특징
+
+### Tree Shaking
+
+ESM 기반 자동. `sideEffects: false` 힌트.
+
+### Code Splitting
+
+Dynamic import 자동 chunk 분리. 하지만 Webpack/Vite/Rollup 만큼 세밀 X.
+
+### Minification
+
+`--minify`. Terser 대비 몇 배 빠름, 결과물 크기는 약간 큼 (5-10%).
+
+### Source Maps
+
+`--sourcemap` (external), `--sourcemap=inline`, `--sourcemap=external`.
+
+## esbuild 자체 한계
+
+**intentional 한계**:
+- **TypeScript type check X**: 문법만 변환. `tsc --noEmit` 병행 필요.
+- **일부 최신 CSS 기능 X**
+- **HMR X** (Vite 가 얹음)
+- **복잡한 code splitting X** (SPA 특화 X)
+
+이 한계 때문에 esbuild 는 종종 **다른 도구의 기반** 으로.
+
+## 실전 사용
+
+### tsup (TS 라이브러리)
+
+```bash
+npm i -D tsup
+```
+
+```json
+{
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts"
+  }
+}
+```
+
+esbuild 위 wrapper. 라이브러리 빌드 최소 설정.
+
+### 직접 사용 (CLI)
+
+```bash
+npx esbuild src/main.ts --bundle --outfile=dist/main.js --minify --target=es2020
+```
+
+### Watch 모드
+
+```javascript
+const ctx = await esbuild.context({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  outfile: 'dist/main.js',
+});
+await ctx.watch();
+```
+
+## 함정
+
+> [!WARNING]
+> **Type check 미포함**. `tsc --noEmit` 을 CI 에서 별도 실행 필수.
+
+> [!CAUTION]
+> **Legacy target 제한**. ES5 이하 target 은 미지원. IE 11 필요하면 Babel.
+
+> [!WARNING]
+> **CSS 처리는 기본만**. PostCSS/SASS 는 plugin 필요.
+
+> [!IMPORTANT]
+> **Minify 결과물 크기**. Terser 보다 5-10% 크지만, 속도 대가로 수용 가능.
+
+> [!CAUTION]
+> **Plugin API 는 다른 번들러와 다름**. Vite/Rollup plugin 을 esbuild 에 못 쓰고 그 반대도.
+
+## 관련 위키
+
+- [[js-bundling|JS 번들링 개요]]
+- [[js-vite|Vite]]
+- [[js-webpack|Webpack]]
+- [[js-rollup|Rollup]]
+- [[js-turbopack-rspack|Turbopack & Rspack]]
+- [[js-cjs-vs-esm|CJS vs ESM]]
+- [[typescript|TypeScript]]

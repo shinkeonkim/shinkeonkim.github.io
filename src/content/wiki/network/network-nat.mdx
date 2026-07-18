@@ -7,61 +7,249 @@ aliases:
   - "네트워크 주소 변환"
   - "SNAT"
   - "DNAT"
-tags: [network, nat, routing]
+  - "PAT"
+  - "NAPT"
+tags: [network, nat, routing, security]
 category: network
-updated: 2026-06-29
+updated: 2026-07-16
+references:
+  - title: "RFC 3022, Traditional IP Network Address Translator"
+    url: "https://datatracker.ietf.org/doc/html/rfc3022"
+  - title: "RFC 5389, STUN"
+    url: "https://datatracker.ietf.org/doc/html/rfc5389"
+  - title: "RFC 5766, TURN"
+    url: "https://datatracker.ietf.org/doc/html/rfc5766"
 ---
 
 ## 정의
 
-**NAT (Network Address Translation)** 는 IP 주소를 변환하는 기법. 주로 사설 IP 를 public IP 로, 또는 반대로 매핑.
+**NAT (Network Address Translation)** 는 IP 패킷의 헤더에서 소스 또는 목적지 IP 주소(포트 포함)를 변환하는 기법이다. 주로 사설 IP와 공인 IP 간 매핑에 사용된다.
 
 ## 왜 필요한가
 
-- **IPv4 주소 고갈**: 사내 100 대 호스트가 1 public IP 공유
-- **보안**: 내부 호스트 은닉
-- **정책**: 특정 서비스만 외부 노출
+```mermaid
+flowchart LR
+    subgraph Private["사설망 (192.168.0.0/24)"]
+        H1["호스트 A\n192.168.0.10"]
+        H2["호스트 B\n192.168.0.11"]
+        H3["호스트 C\n192.168.0.12"]
+    end
+
+    Router["라우터 / NAT 장비\n공인 IP: 203.0.113.5"]
+    Internet["인터넷"]
+
+    H1 & H2 & H3 --> Router --> Internet
+```
+
+- **IPv4 주소 고갈**: 전 세계 IPv4 주소는 약 43억 개뿐이다. 사내 100대 호스트가 공인 IP 1개를 공유하면 99개를 절약한다.
+- **보안**: 내부 호스트의 실제 IP를 외부에 노출하지 않는다.
+- **정책 제어**: 특정 내부 서비스만 선택적으로 외부에 노출할 수 있다.
 
 ## 종류
 
 ### SNAT (Source NAT)
 
-**아웃바운드** 트래픽의 source IP 를 변경. 홈 라우터 기본 동작:
-- 내부 `192.168.1.10:12345` → `203.0.113.5:12345`
-- 응답 오면 매핑 테이블 참조하여 원래 클라이언트로 전달
+**아웃바운드** 트래픽의 소스 IP/포트를 공인 IP로 변경한다. 홈 라우터나 AWS NAT Gateway의 기본 동작이다.
+
+```mermaid
+sequenceDiagram
+    participant H as "호스트\n192.168.1.10:12345"
+    participant R as "NAT 라우터\n203.0.113.5"
+    participant S as "외부 서버\n1.2.3.4:443"
+
+    H->>R: src=192.168.1.10:12345, dst=1.2.3.4:443
+    Note over R: 매핑 테이블 등록\n192.168.1.10:12345 -> 203.0.113.5:54321
+    R->>S: src=203.0.113.5:54321, dst=1.2.3.4:443
+    S-->>R: src=1.2.3.4:443, dst=203.0.113.5:54321
+    Note over R: 매핑 테이블 조회\n203.0.113.5:54321 -> 192.168.1.10:12345
+    R-->>H: src=1.2.3.4:443, dst=192.168.1.10:12345
+```
 
 ### DNAT (Destination NAT)
 
-**인바운드** 트래픽의 destination IP 를 변경. 포트 포워딩:
-- 외부 `203.0.113.5:80` → 내부 `192.168.1.10:8080`
+**인바운드** 트래픽의 목적지 IP/포트를 내부 서버로 변경한다. 포트 포워딩이 대표적인 예시다.
+
+```mermaid
+sequenceDiagram
+    participant C as "외부 클라이언트\n8.8.8.8"
+    participant R as "NAT 라우터\n203.0.113.5:80"
+    participant S as "내부 웹 서버\n192.168.1.10:8080"
+
+    C->>R: dst=203.0.113.5:80
+    Note over R: DNAT 규칙 적용\n:80 -> 192.168.1.10:8080
+    R->>S: dst=192.168.1.10:8080
+    S-->>R: src=192.168.1.10:8080
+    R-->>C: src=203.0.113.5:80
+```
+
+사용 예:
+- 웹 서버 포트 포워딩 (공인 `:80` -> 내부 `:8080`)
+- 쿠버네티스 NodePort
+- 로드 밸런서의 VIP(Virtual IP) 처리
 
 ### PAT (Port Address Translation, NAPT)
 
-포트까지 매핑. 한 public IP 를 여러 호스트가 공유:
-- `192.168.1.10:12345` → `203.0.113.5:1001`
-- `192.168.1.11:12345` → `203.0.113.5:1002`
+포트까지 포함한 매핑으로 한 공인 IP를 여러 내부 호스트가 공유한다. 실제로 대부분의 NAT는 PAT를 의미한다.
 
-거의 모든 실제 NAT 는 PAT.
+| 내부 주소 | 공인 주소 매핑 |
+|:---|:---|
+| 192.168.1.10:12345 | 203.0.113.5:1001 |
+| 192.168.1.11:12345 | 203.0.113.5:1002 |
+| 192.168.1.10:12346 | 203.0.113.5:1003 |
 
-## 클라우드 NAT
+포트 번호 공간은 65535개이므로 한 공인 IP로 수만 개의 동시 연결을 처리할 수 있다. 단, 연결이 많아지면 포트 고갈이 발생한다.
+
+## NAT 매핑 테이블
+
+```
+NAT 매핑 테이블 (PAT 예시)
+
+| Proto | 내부 IP         | 내부 Port | 외부 IP         | 외부 Port | 상태     | 타임아웃 |
+|-------|-----------------|-----------|-----------------|-----------|----------|----------|
+| TCP   | 192.168.1.10    | 12345     | 203.0.113.5     | 1001      | ESTABLISHED | 300s  |
+| TCP   | 192.168.1.11    | 12345     | 203.0.113.5     | 1002      | TIME_WAIT   | 30s   |
+| UDP   | 192.168.1.10    | 54321     | 203.0.113.5     | 2001      | ACTIVE      | 60s   |
+```
+
+- **TCP**: 연결 상태(SYN/ESTABLISHED/FIN)를 추적해 매핑 유지
+- **UDP**: stateless이므로 마지막 패킷 이후 일정 시간 후 만료 (보통 60-300초)
+- **ICMP**: echo id 기반 매핑
+
+## NAT 종류별 동작 차이 (RFC 3489 분류)
+
+| 타입 | 설명 | P2P 적합성 |
+|:---|:---|:---|
+| Full Cone NAT | 내부 IP:Port가 외부 IP:Port에 고정 매핑. 누구나 외부 포트로 연결 가능 | 가장 좋음 |
+| Restricted Cone NAT | 내부에서 먼저 통신한 외부 IP만 접근 허용 | 중간 |
+| Port Restricted Cone NAT | 외부 IP + 포트까지 제한 | 어려움 |
+| Symmetric NAT | 목적지마다 다른 포트 할당. 가장 엄격 | 매우 어려움 |
+
+## 클라우드에서의 NAT
 
 ### AWS
-- **NAT Gateway**: 관리형, 프라이빗 서브넷의 아웃바운드
-- **NAT Instance**: 자체 관리 EC2
 
-### 흐름
+```mermaid
+flowchart LR
+    subgraph PrivateSubnet["프라이빗 서브넷"]
+        EC2["EC2 Instance\n10.0.1.10"]
+    end
+    subgraph PublicSubnet["퍼블릭 서브넷"]
+        NATGW["NAT Gateway\n탄력적 IP: 52.x.x.x"]
+    end
+    IGW["Internet Gateway"]
+    Internet["Internet"]
+
+    EC2 --> NATGW --> IGW --> Internet
 ```
-private subnet → NAT Gateway (public subnet) → Internet Gateway → Internet
+
+- **NAT Gateway**: AWS 관리형 서비스. 고가용성, 자동 확장. 시간당 + 데이터 전송량 과금.
+- **NAT Instance**: 직접 관리하는 EC2. 비용 절감 가능하지만 단일 장애점.
+
+실무에서는 NAT Gateway를 권장하며, 비용 절감 시 VPC Endpoint로 S3/DynamoDB 트래픽을 NAT 없이 직접 연결한다.
+
+### iptables로 Linux NAT 직접 구성
+
+```bash
+# SNAT: 내부망 아웃바운드 트래픽을 eth0 IP로 변환
+iptables -t nat -A POSTROUTING -s 192.168.1.0/24 -o eth0 -j MASQUERADE
+
+# DNAT: 80 포트를 내부 8080으로 포워딩
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 80 -j DNAT \
+  --to-destination 192.168.1.10:8080
+
+# 포워딩 활성화
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# 현재 NAT 테이블 확인
+iptables -t nat -L -n -v
+```
+
+## NAT Traversal
+
+P2P 통신 (WebRTC, 게임, VoIP)에서 NAT 뒤에 있는 피어끼리 직접 연결을 맺으려면 NAT를 뚫어야 한다.
+
+```mermaid
+flowchart TB
+    subgraph NAT_A["NAT A (Symmetric)"]
+        A["피어 A\n192.168.1.10"]
+    end
+    subgraph NAT_B["NAT B (Full Cone)"]
+        B["피어 B\n10.0.0.5"]
+    end
+    STUN["STUN 서버\n(공인 IP)"]
+    TURN["TURN 서버\n(릴레이)"]
+
+    A -->|"1. 내 공인 IP:Port 확인 요청"| STUN
+    STUN -->|"2. 203.0.113.5:54321 응답"| A
+    B -->|"1. 내 공인 IP:Port 확인 요청"| STUN
+    STUN -->|"2. 198.51.100.1:22345 응답"| B
+    A <-->|"3. 직접 연결 시도 (Hole Punching)"| B
+    A <-->|"실패 시 릴레이"| TURN
+    TURN <-->|"릴레이"| B
+```
+
+### STUN (Session Traversal Utilities for NAT)
+
+자신의 공인 IP:포트를 발견하고 NAT 타입을 파악한다. 두 피어가 서로 공인 주소를 교환하고 동시에 패킷을 보내 NAT에 홀을 뚫는다 (**UDP Hole Punching**). Symmetric NAT 환경에서는 실패할 수 있다.
+
+### TURN (Traversal Using Relays around NAT)
+
+STUN으로 직접 연결이 불가능할 때 모든 트래픽을 릴레이 서버를 통해 전달한다. 항상 동작하지만 서버 대역폭 비용이 발생하며 지연이 증가한다.
+
+### ICE (Interactive Connectivity Establishment)
+
+[[webrtc|WebRTC]]에서 사용하는 프레임워크. STUN/TURN을 조합해 최적 경로를 자동 선택한다.
+
+```
+ICE Candidate 우선순위:
+1. host candidate (직접 연결)
+2. server reflexive candidate (STUN을 통한 공인 IP)
+3. relay candidate (TURN 릴레이)
+```
+
+## 실전 예시: AWS VPC NAT 구성
+
+```bash
+# AWS CLI로 NAT Gateway 생성
+# 1. EIP (Elastic IP) 할당
+EIP=$(aws ec2 allocate-address --domain vpc --query AllocationId --output text)
+
+# 2. 퍼블릭 서브넷에 NAT Gateway 생성
+NATGW=$(aws ec2 create-nat-gateway \
+  --subnet-id subnet-public-xxx \
+  --allocation-id $EIP \
+  --query NatGateway.NatGatewayId --output text)
+
+# 3. 프라이빗 서브넷 라우트 테이블에 NAT Gateway 경로 추가
+aws ec2 create-route \
+  --route-table-id rtb-private-xxx \
+  --destination-cidr-block 0.0.0.0/0 \
+  --nat-gateway-id $NATGW
+```
+
+비용 최적화: S3, DynamoDB 트래픽은 VPC Endpoint를 통해 NAT 없이 직접 연결하면 NAT Gateway 비용을 줄일 수 있다.
+
+```bash
+# S3 VPC Endpoint 생성 (NAT 없이 S3 접근)
+aws ec2 create-vpc-endpoint \
+  --vpc-id vpc-xxx \
+  --service-name com.amazonaws.ap-northeast-2.s3 \
+  --route-table-ids rtb-private-xxx
 ```
 
 ## 함정
 
-- **NAT traversal**: P2P (WebRTC, BitTorrent) 는 NAT 통과 어려움 → STUN, TURN 서버 필요
-- **Hairpin NAT**: 내부에서 자기 public IP 로 접근하는 경우
-- **NAT 만료**: 매핑 테이블은 유휴 시 만료 → long-lived TCP 는 keep-alive 필요
+> [!WARNING]
+> 1. **NAT 매핑 만료**: UDP 연결은 마지막 패킷 후 60-300초면 매핑이 만료된다. WebSocket, 게임 소켓 등 장기 연결은 주기적으로 keep-alive 패킷을 전송해야 한다.
+> 2. **Hairpin NAT 미지원**: 내부 호스트가 자기 공인 IP로 접근하면 일부 NAT 장비가 처리 못한다. `192.168.1.10`이 `203.0.113.5:80`에 접근하려 할 때 반환 경로가 없어 실패한다.
+> 3. **Symmetric NAT와 STUN 조합 불가**: 모바일 LTE 망은 Symmetric NAT가 많아 UDP Hole Punching이 실패한다. TURN 릴레이가 필요하다.
+> 4. **포트 고갈 (Port Exhaustion)**: 대규모 NAT Gateway에서 연결 수가 포트 수 (65535) 를 초과하면 새 연결이 거부된다. AWS NAT Gateway는 IP당 55000개 동시 연결을 권고한다.
+> 5. **NAT + IPSec 충돌**: ESP 프로토콜은 포트가 없어 PAT가 다중 연결을 구분하지 못한다. NAT-T (UDP 캡슐화)로 우회한다.
 
-## 참고
+## 관련 위키
 
-- [[network-ip|IP]]
-- [[network-cidr-subnetting|CIDR / 서브네팅]]
-- [[aws-vpc|AWS VPC]]
+- [[network-ip|IP]] - IP 주소 체계
+- [[network-cidr-subnetting|CIDR / 서브네팅]] - 서브넷 설계
+- [[webrtc|WebRTC]] - NAT Traversal을 활용하는 대표 프로토콜
+- [[tls|TLS]] - NAT 뒤에서도 종단간 암호화
+- [[quic|QUIC]] - Connection ID로 NAT 재바인딩을 자연스럽게 처리

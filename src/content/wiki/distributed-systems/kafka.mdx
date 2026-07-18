@@ -162,6 +162,89 @@ flowchart LR
 - 2.8+ preview, 3.5+ production, 4.0+ ZK 완전 제거.
 - *운영 단순화* + *확장성 (수백만 partition)*.
 
+## 주요 Producer 설정
+
+| 설정 | 기본값 | 권장 프로덕션 | 효과 |
+|---|---|---|---|
+| `acks` | `1` | `all` | 데이터 유실 방지 |
+| `batch.size` | 16KB | 64KB ~ 1MB | 처리량 향상 |
+| `linger.ms` | `0` | `5` ~ `50` | 배치 유리 (latency 조금 증가) |
+| `compression.type` | `none` | `snappy` / `lz4` | 네트워크 절약 |
+| `enable.idempotence` | `false` | `true` | 중복 전송 방지 |
+| `retries` | `0` | `MAX_INT` | 재시도 |
+| `max.in.flight.requests` | `5` | `1` (순서 중요 시) | 순서 보장 |
+
+## 주요 Consumer 설정
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `auto.offset.reset` | `latest` | `earliest` 권장 (재시작 시 손실 방지) |
+| `enable.auto.commit` | `true` | 수동 commit 추천 (`false`) |
+| `max.poll.records` | `500` | 한 번에 가져올 최대 수 |
+| `fetch.min.bytes` | `1` | 배치 효율 위해 늘림 |
+| `session.timeout.ms` | `45000` | consumer 죽었다고 판단하는 시간 |
+
+## 처리량 최적화 결정 트리
+
+```mermaid
+flowchart TD
+    Q["처리량 부족?"]
+    Q --> A1{"Producer 측?"}
+    A1 -->|"Yes"| P1["batch.size 늘리기<br/>linger.ms=5~50<br/>compression 추가"]
+    A1 -->|"No"| A2{"Consumer 측?"}
+    A2 -->|"Yes"| P2["partition 수 늘리기<br/>consumer 수 늘리기<br/>max.poll.records 조정"]
+    A2 -->|"No"| A3{"Broker 측?"}
+    A3 -->|"Yes"| P3["브로커 추가<br/>replication factor 검토<br/>log.flush 설정"]
+```
+
+## Kafka Streams 개요
+
+Kafka 위에서 *실시간 스트림 처리*. 별도 클러스터 불필요.
+
+```java
+StreamsBuilder builder = new StreamsBuilder();
+KStream<String, String> orders =
+    builder.stream("orders-topic");
+
+// 필터 + 변환
+orders
+    .filter((key, val) -> val.contains("status=PAID"))
+    .mapValues(val -> enrich(val))
+    .to("paid-orders-topic");
+
+KafkaStreams streams = new KafkaStreams(builder.build(), config);
+streams.start();
+```
+
+| 개념 | 설명 |
+|---|---|
+| KStream | 무한 레코드 스트림 |
+| KTable | 최신 값만 유지 (changelog) |
+| GlobalKTable | 전체 파티션 로컬 복사 |
+| Topology | 처리 그래프 |
+| State Store | 로컬 RocksDB (조인/집계) |
+
+## 모니터링 핵심 지표
+
+```mermaid
+flowchart LR
+    subgraph Producer
+        PR1["records-sent-rate<br/>초당 전송 건수"]
+        PR2["record-error-rate<br/>전송 실패율"]
+    end
+    subgraph Consumer
+        CR1["consumer-lag<br/>파티션별 미처리 수"]
+        CR2["records-consumed-rate<br/>초당 소비 건수"]
+    end
+    subgraph Broker
+        BR1["UnderReplicatedPartitions<br/>복제 따라가지 못한 수"]
+        BR2["ActiveControllerCount<br/>1 이어야 함"]
+    end
+```
+
+> [!WARNING]
+> **consumer-lag** 이 지속 증가 = consumer 처리 속도 부족. 파티션/consumer 수 증설 또는 처리 로직 최적화.
+
 ## Kafka 의 적합 / 부적합
 
 | 적합 | 부적합 |

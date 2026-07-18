@@ -3,7 +3,7 @@ title: "[Javascript] async/await"
 aliases: ["JS Async Await", "async/await", "async await", "async-await", "async function", "비동기 함수", "JavaScript async/await", "JS async/await"]
 tags: [javascript, async, ecmascript, syntax-sugar]
 category: javascript
-updated: 2026-06-14
+updated: 2026-07-14
 references:
   - id: mdn-web-docs
     note: "Web/JavaScript/Reference/Statements/async function"
@@ -37,6 +37,26 @@ async function loadProfile(userId) {
 }
 ```
 
+## await 실행 흐름
+
+```mermaid
+sequenceDiagram
+    participant C as 호출자
+    participant F as async 함수
+    participant MQ as Microtask Queue
+
+    C->>F: 함수 호출
+    F->>F: await 이전 동기 코드 실행
+    F->>MQ: Promise 대기 등록
+    F-->>C: 일시정지, 제어 반환
+    Note over C: 동기 코드 계속 실행
+    MQ->>F: Promise 정착 후 재개
+    F-->>C: 반환값 Promise 에 담김
+```
+
+> [!IMPORTANT]
+> `await` 이후 코드는 **항상 다음 마이크로태스크 틱에 실행**. 동기 코드보다 늦고, `setTimeout` 보다 빠르다.
+
 ## await 의 실제 동작
 
 `await` 는 `.then` 의 문법 설탕이다.
@@ -54,14 +74,83 @@ function f() {
 }
 ```
 
-엔진 안에서:
+엔진 내부 동작:
 1. 오른쪽 표현식을 평가, Promise 가 아니면 `Promise.resolve` 로 감쌈.
 2. 함수 상태를 [[Lexical Environment]] 에 저장.
 3. Promise 정착 시 [[Microtask Queue]] 에 "함수 재개" 등록.
 4. 마이크로태스크 차례가 오면 함수 이어 실행.
 
-> [!IMPORTANT]
-> `await` 이후 코드는 **항상 다음 마이크로태스크 틱에 실행**. 동기 코드보다 늦고, `setTimeout` 보다 빠르다.
+## Promise 체인과의 비교
+
+두 방식은 동등하지만 async/await 가 가독성이 높습니다.
+
+```javascript
+// Promise 체인
+function loadUser(id) {
+    return fetch(`/users/${id}`)
+        .then(res => res.json())
+        .then(user => fetch(`/posts?u=${user.id}`))
+        .then(res => res.json())
+        .catch(err => { console.error(err); throw err; });
+}
+
+// async/await: 동일한 로직, 읽기 쉬움
+async function loadUser(id) {
+    try {
+        const user = await fetch(`/users/${id}`).then(r => r.json());
+        return await fetch(`/posts?u=${user.id}`).then(r => r.json());
+    } catch (err) {
+        console.error(err);
+        throw err;
+    }
+}
+```
+
+체인이 길어질수록, 중간 값을 여러 단계에서 참조해야 할수록 async/await 가 유리합니다.
+
+## 에러 처리 전략
+
+### try/catch
+
+```javascript
+async function fetchData(url) {
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+    } catch (err) {
+        if (err instanceof TypeError) {
+            console.error('네트워크 오류:', err.message);
+        } else {
+            console.error('서버 오류:', err.message);
+        }
+        throw err; // 상위로 전파
+    }
+}
+```
+
+### 결과와 에러를 함께 반환하는 패턴
+
+```javascript
+// Go-style: [data, error] 튜플 반환
+async function safe(promise) {
+    try {
+        return [await promise, null];
+    } catch (err) {
+        return [null, err];
+    }
+}
+
+const [user, userErr] = await safe(fetchUser(id));
+if (userErr) { /* 처리 */ }
+```
+
+### 에러 무시
+
+```javascript
+// 에러를 무시하고 undefined 반환
+const data = await fetchData(url).catch(() => undefined);
+```
 
 ## 함정
 
@@ -115,9 +204,108 @@ const config = await fetch('/config.json').then(r => r.json());
 
 CommonJS 모듈에서는 불가.
 
+## 실전 예시
+
+### 재시도 (Retry with backoff)
+
+```javascript
+async function withRetry(fn, { retries = 3, backoff = 300 } = {}) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            if (attempt === retries - 1) throw err;
+            const delay = backoff * Math.pow(2, attempt);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+}
+
+const data = await withRetry(() => fetch('/api/data').then(r => r.json()));
+```
+
+### 타임아웃
+
+```javascript
+async function withTimeout(promise, ms) {
+    const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
+    );
+    return Promise.race([promise, timeout]);
+}
+
+const result = await withTimeout(fetchData('/slow'), 5000);
+```
+
+### AbortController 로 취소 가능한 fetch
+
+```javascript
+async function fetchWithAbort(url) {
+    const controller = new AbortController();
+
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        return await res.json();
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+```
+
+### 동시 실행 수 제한
+
+```javascript
+async function pLimit(tasks, concurrency) {
+    const results = [];
+    const running = [];
+
+    for (const task of tasks) {
+        const p = Promise.resolve().then(task).then(r => {
+            running.splice(running.indexOf(p), 1);
+            return r;
+        });
+        running.push(p);
+        results.push(p);
+
+        if (running.length >= concurrency) {
+            await Promise.race(running);
+        }
+    }
+
+    return Promise.all(results);
+}
+```
+
+## 성능 주의사항
+
+```javascript
+// ❌ 불필요한 await - Promise 를 그냥 반환하면 됨
+async function getData() {
+    return await fetchData(); // 마이크로태스크 1개 추가
+}
+
+// ✅ await 불필요
+async function getData() {
+    return fetchData(); // Promise 그대로 반환
+}
+
+// ⚠️ 단, try/catch 안에서는 await 필요
+async function getData() {
+    try {
+        return await fetchData(); // 에러를 catch 하려면 await 필요
+    } catch (err) {
+        handle(err);
+    }
+}
+```
+
 ## 참고
 
 - [[Promise]]
+- [[js-promise-methods|Promise.all / race / any / allSettled]]
 - [[Microtask Queue]]
 - [[이벤트 루프]]
 - [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]
+- [[JS Error / try-catch]]

@@ -1,0 +1,316 @@
+---
+title: "[Flask] Blueprints"
+aliases:
+  - "Flask Blueprints"
+  - "Flask Blueprint"
+  - "Flask 블루프린트"
+  - "Blueprint url_prefix"
+  - "flask register_blueprint"
+tags: [python, flask, web-framework, modular]
+category: flask
+updated: 2026-07-07
+references:
+  - title: "Flask Blueprints and Views"
+    url: "https://flask.palletsprojects.com/en/latest/tutorial/views/"
+  - title: "Flask Blueprints (API)"
+    url: "https://flask.palletsprojects.com/en/latest/blueprints/"
+---
+
+## 정의
+
+**Blueprint** 는 Flask 앱을 여러 모듈로 나누는 표준 도구입니다. 라우트, 정적파일, 템플릿, before/after hook, error handler 를 그룹화해 `create_app` 에서 조립합니다. Django 의 app, Rails 의 engine 유사.
+
+## 왜 필요한가
+
+- **모듈 분리**: 인증, API, 관리자 등 도메인별 파일 분리
+- **URL prefix**: `/api/v1/*`, `/admin/*` 등 서브트리 관리
+- **재사용**: 여러 프로젝트에서 공통 blueprint 재사용
+- **테스트 격리**: blueprint 단위 테스트
+
+## 기본 사용
+
+### 정의
+
+```python
+# myapp/auth/routes.py
+from flask import Blueprint, request, jsonify
+
+bp = Blueprint(
+    "auth",
+    __name__,
+    url_prefix="/auth",
+    template_folder="templates",
+    static_folder="static",
+)
+
+@bp.post("/login")
+def login():
+    ...
+    return jsonify({"token": "..."})
+
+@bp.post("/logout")
+def logout():
+    ...
+    return "", 204
+
+@bp.get("/me")
+def me():
+    ...
+    return jsonify({"user": ...})
+```
+
+### 등록
+
+```python
+# myapp/__init__.py
+from flask import Flask
+from myapp.auth.routes import bp as auth_bp
+from myapp.main.routes import bp as main_bp
+
+def create_app():
+    app = Flask(__name__)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(main_bp)
+    return app
+```
+
+Endpoint 이름은 `blueprint.endpoint` 형식:
+
+```python
+url_for("auth.login")     # /auth/login
+url_for("main.index")     # /
+```
+
+## Blueprint 생성 인자
+
+```python
+Blueprint(
+    name="auth",                    # endpoint prefix
+    import_name=__name__,           # root 위치 추정
+    url_prefix="/auth",             # 모든 route 앞에
+    subdomain=None,                 # 서브도메인
+    template_folder="templates",    # blueprint 별 템플릿
+    static_folder="static",         # blueprint 별 정적
+    static_url_path="/auth-static", # 정적 URL
+    root_path=None,
+    url_defaults=None,
+)
+```
+
+## register_blueprint 옵션
+
+```python
+app.register_blueprint(auth_bp, url_prefix="/api/auth")   # override
+app.register_blueprint(auth_bp, url_prefix="/v2/auth", name="auth_v2")  # 두 번 등록
+```
+
+같은 blueprint 를 다른 prefix 로 여러 번 등록도 가능 (버전 라우팅).
+
+## Blueprint hook
+
+Blueprint 는 자기만의 lifecycle hook 을 가짐.
+
+```python
+bp = Blueprint("api", __name__)
+
+@bp.before_request
+def api_before():
+    if not request.headers.get("X-API-Key"):
+        abort(401)
+
+@bp.after_request
+def api_after(response):
+    response.headers["X-API-Version"] = "1.0"
+    return response
+
+@bp.errorhandler(404)
+def api_not_found(e):
+    return {"error": "not found"}, 404
+
+@bp.errorhandler(Exception)
+def api_error(e):
+    return {"error": str(e)}, 500
+```
+
+이 hook 은 이 blueprint 의 라우트에만 적용.
+
+## Nested Blueprint (Flask 2.0+)
+
+Blueprint 안에 blueprint 를 등록.
+
+```python
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+users_bp = Blueprint("users", __name__, url_prefix="/users")
+
+@users_bp.get("/<int:id>")
+def get_user(id):
+    return f"user {id}"
+
+api_bp.register_blueprint(users_bp)
+app.register_blueprint(api_bp)
+
+# 최종 URL: /api/users/1
+# endpoint: api.users.get_user
+```
+
+**주의**: 중첩 시 endpoint 이름이 `.` 로 연결됩니다.
+
+## 프로젝트 구조 예시
+
+```
+myapp/
+├── src/
+│   └── myapp/
+│       ├── __init__.py           # create_app
+│       ├── auth/
+│       │   ├── __init__.py
+│       │   ├── routes.py          # bp = Blueprint("auth", ...)
+│       │   ├── forms.py
+│       │   └── templates/
+│       │       └── auth/
+│       │           └── login.html
+│       ├── api/
+│       │   ├── __init__.py
+│       │   ├── v1/
+│       │   │   ├── __init__.py
+│       │   │   ├── users.py       # bp_users = Blueprint("users", ...)
+│       │   │   └── items.py
+│       │   └── v2/
+│       │       └── users.py
+│       └── admin/
+│           └── routes.py
+```
+
+`create_app` 에서 blueprint 조립:
+
+```python
+def create_app():
+    app = Flask(__name__)
+    app.config.from_object("myapp.config.Config")
+
+    # DB, extensions
+    db.init_app(app)
+
+    # Blueprints
+    from myapp.auth.routes import bp as auth_bp
+    from myapp.api.v1.users import bp as api_users_bp
+    from myapp.api.v1.items import bp as api_items_bp
+    from myapp.admin.routes import bp as admin_bp
+
+    api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
+    api_v1.register_blueprint(api_users_bp)
+    api_v1.register_blueprint(api_items_bp)
+
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(api_v1)
+    app.register_blueprint(admin_bp)
+
+    return app
+```
+
+## Blueprint 안에서 url_for
+
+같은 blueprint 내 상대 참조 (`.endpoint`):
+
+```python
+@bp.get("/login")
+def login():
+    return redirect(url_for(".dashboard"))  # 같은 blueprint 의 dashboard
+
+@bp.get("/dashboard")
+def dashboard():
+    return "..."
+```
+
+다른 blueprint 참조:
+
+```python
+url_for("main.index")
+url_for("api_v1.users.get_user", id=1)
+```
+
+## Template folder 규칙
+
+Blueprint 의 `template_folder="templates"` 는 blueprint 경로 상대. 예를 들어 `myapp/auth/templates/` 는:
+
+- `render_template("auth/login.html")` -> `myapp/auth/templates/auth/login.html`
+- 앱 전체 `templates/` 와 병합
+
+**관용**: blueprint 명 하위 폴더 (`templates/auth/`) 로 격리해 이름 충돌 방지.
+
+## Static folder 규칙
+
+```python
+bp = Blueprint("auth", __name__, static_folder="static", static_url_path="/auth-static")
+```
+
+- 접근 URL: `/auth-static/logo.png` -> `myapp/auth/static/logo.png`
+- `url_for("auth.static", filename="logo.png")` 로 생성
+
+## Blueprint 로 재사용 가능한 컴포넌트
+
+Blueprint 를 별도 패키지로 배포 (예: `flask-user-auth` 라이브러리):
+
+```python
+# my_pkg/blueprint.py
+from flask import Blueprint
+
+user_bp = Blueprint("user", __name__, url_prefix="/user", template_folder="templates")
+
+@user_bp.get("/profile")
+def profile():
+    ...
+```
+
+사용:
+
+```python
+from my_pkg.blueprint import user_bp
+app.register_blueprint(user_bp)
+```
+
+Flask-Login, Flask-Admin 등 많은 extension 이 blueprint 로 동작.
+
+## CLI Command (Blueprint 별)
+
+```python
+import click
+
+@bp.cli.command("seed")
+@click.argument("count", type=int)
+def seed(count):
+    for _ in range(count):
+        db.session.add(User(...))
+    db.session.commit()
+    click.echo(f"Seeded {count} users.")
+```
+
+```bash
+flask auth seed 100
+```
+
+## 함정
+
+> [!WARNING]
+> **Blueprint 이름 중복** 하면 `AssertionError`. 여러 번 등록하려면 `name=` override.
+
+> [!CAUTION]
+> **Endpoint 이름 접두어**. `url_for("index")` 는 어떤 blueprint 의 것인지 모호. `url_for("main.index")` 처럼 명시.
+
+> [!WARNING]
+> **Circular import**. Blueprint 파일이 `from myapp import db` 하고 `myapp/__init__.py` 가 blueprint 를 import 하면 순환. `create_app` 안에서 import 하는 관용으로 해결.
+
+> [!IMPORTANT]
+> **Blueprint 별 config**. Blueprint 자체는 config 를 못 가짐. `current_app.config` 로 접근.
+
+> [!CAUTION]
+> **Nested blueprint 의 URL 계산**. url_prefix 가 chain 되어 예상보다 깊어질 수 있음. `flask routes` 로 확인.
+
+## 관련 위키
+
+- [[flask|Flask]] - 상위 개요
+- [[flask-app-factory|Flask App Factory]] - Blueprint 등록 순서
+- [[flask-routing|Flask Routing]] - Blueprint routing
+- [[flask-request-response|Flask Request/Response]] - Blueprint hooks
+- [[flask-extensions|Flask Extensions]] - Blueprint 로 배포되는 extension
+- [[fastapi-routing|FastAPI Routing]] - APIRouter (Blueprint 대응)

@@ -36,6 +36,22 @@ Thread T:  [────── blocking call ──────][다음 작업]
 
 T 스레드는 결과가 도착할 때까지 어떤 코드도 실행하지 않는다. CPU 는 다른 스레드를 처리한다.
 
+## 스레드 상태 전이
+
+Java 스레드 상태 중 blocking 이 발생하는 지점을 요약하면 다음과 같다.
+
+```mermaid
+flowchart LR
+    NEW --> RUNNABLE
+    RUNNABLE -->|"blocking call"| BLOCKED
+    BLOCKED -->|"I/O 완료 / 락 해제"| RUNNABLE
+    RUNNABLE -->|"Object.wait"| WAITING
+    WAITING -->|"notify / 인터럽트"| RUNNABLE
+    RUNNABLE -->|"완료"| TERMINATED
+```
+
+`BLOCKED`: I/O, lock 획득, sleep 시 진입. `WAITING`: 명시적 `wait()` / `join()` 시 진입. 두 상태 모두 CPU 를 점유하지 않는다. OS scheduler 가 다른 스레드에게 CPU 를 배분한다.
+
 ## 가장 흔한 예
 
 ### 파일 I/O (blocking)
@@ -199,6 +215,58 @@ Virtual thread 는:
 - **I/O 가 매우 느리고 가변적** (외부 API 등)
 - **백프레셔 제어 필요** (스트림 처리)
 - **함수형 / reactive 패러다임** 채택
+
+## 함정
+
+### 1. blocking + ThreadPoolExecutor 풀 고갈
+
+스레드 풀 안에서 blocking I/O 를 하면 모든 스레드가 block 되는 순간 새 요청은 큐에 쌓인다. 풀 크기를 I/O latency 기준으로 계산하지 않으면 타임아웃과 OOM 로 이어진다.
+
+Little's Law: `N = λ × W` (평균 동시 스레드 = 초당 요청 × 평균 응답 시간). I/O 가 느리면 N 이 커진다.
+
+### 2. synchronized 블록 내부에서 blocking I/O
+
+```java
+synchronized (lock) {
+    String data = socket.readLine();   // block 동안 lock 을 계속 보유
+}
+```
+
+lock 을 보유한 채로 block 되면, 다른 스레드가 같은 lock 을 기다리며 연쇄 block 발생. 가능하면 I/O 완료 후 sync 블록에 진입.
+
+### 3. Virtual Thread 와 synchronized pinning
+
+Java 21 Virtual Thread 는 blocking call 시 carrier thread 에서 unmount 하지만, **native synchronized 블록 안에서는 unmount 하지 못한다** (JDK 23 이전 기본값). 이를 "pinning" 이라 부르며, [[ReentrantLock]] 으로 교체하면 해소된다.
+
+```java
+// ✗ Virtual Thread 에서 pinning 발생
+synchronized (this) {
+    blockingCall();
+}
+
+// ✓ Virtual Thread 친화
+lock.lock();
+try { blockingCall(); }
+finally { lock.unlock(); }
+```
+
+### 4. InterruptedException 무시
+
+```java
+try {
+    q.take();
+} catch (InterruptedException e) {
+    // ✗ 무시하면 인터럽트 신호 소실
+}
+
+// ✓ 복원 필수
+} catch (InterruptedException e) {
+    Thread.currentThread().interrupt();
+    return;
+}
+```
+
+blocking 메서드는 대부분 `InterruptedException` 을 던진다. 무시하면 스레드 종료 신호가 사라져 graceful shutdown 이 불가능해진다.
 
 ## 참고
 

@@ -156,6 +156,112 @@ sequenceDiagram
 | `.pfx` / `.p12` | PKCS#12 (인증서 + private key) |
 | `.key` | private key 만 |
 
+## mTLS vs 대안 비교
+
+| 방식 | 강도 | 복잡도 | 주요 용도 |
+|---|---|---|---|
+| mTLS | 최강 (인증서 기반) | 높음 | 서비스 간 Zero Trust |
+| API Key | 중간 (공유 비밀) | 낮음 | 외부 API 파트너 |
+| JWT Bearer | 중간 (서명 검증) | 낮음 | 유저 인증, OIDC |
+| HMAC 서명 | 중간 (요청 무결성) | 중간 | Webhook |
+| IP Whitelist | 낮음 (위조 가능) | 낮음 | 최후 수단 |
+
+> [!IMPORTANT]
+> mTLS 는 *인증서 유효 + 개인키 보유*를 동시에 증명. API Key 는 *탈취 시 즉시 재사용 가능*. 고보안 서비스 간 통신에는 mTLS.
+
+## OCSP vs CRL vs 단기 인증서
+
+인증서 *폐지 확인* 3가지 방법:
+
+```mermaid
+flowchart TD
+    Verify["인증서 유효성 확인"]
+    Verify --> CRL["CRL 다운로드<br/>전체 폐지 목록"]
+    Verify --> OCSP["OCSP 단건 조회<br/>실시간 CA 확인"]
+    Verify --> Short["단기 인증서<br/>만료로 자동 폐지"]
+    CRL --> R1["큰 파일, 갱신 지연"]
+    OCSP --> R2["실시간, CA 의존성"]
+    Short --> R3["자동화 필수, 권장 방식"]
+```
+
+| 방식 | 확인 방법 | 단점 |
+|---|---|---|
+| CRL | CA 발행 폐지 목록 다운로드 | 큰 파일, 갱신 주기 지연 |
+| OCSP | 실시간 CA 단건 조회 | CA 다운 시 검증 불가 (Fail-Open 위험) |
+| OCSP Stapling | 서버가 미리 조회, 인증서에 첨부 | 서버 설정 필요 |
+| 단기 인증서 | 짧은 유효기간 (SPIFFE) | 자동화 없으면 운영 불가 |
+
+## 디버깅: openssl s_client
+
+```bash
+# 서버 인증서 확인
+openssl s_client -connect example.com:443 -showcerts
+
+# mTLS: 클라이언트 인증서 제시
+openssl s_client \
+  -connect api.example.com:443 \
+  -cert client.crt \
+  -key client.key \
+  -CAfile ca.crt
+
+# ALPN 협상 확인
+openssl s_client -alpn h2 -connect example.com:443 2>&1 | grep ALPN
+```
+
+주요 확인 포인트:
+- `Verify return code: 0 (ok)` = 검증 성공
+- `SSL-Session:` 안의 Protocol 및 Cipher Suite
+- `Peer certificate:` 서버 인증서 Subject / Issuer
+- `No client certificate CA names sent` = 서버가 클라이언트 인증서 요구 안 함
+
+## Istio PeerAuthentication (mTLS in K8s)
+
+```mermaid
+flowchart LR
+    subgraph SvcA["Service A Pod"]
+        AppA[App]
+        ProxyA["Envoy Proxy<br/>자동 mTLS"]
+    end
+    subgraph SvcB["Service B Pod"]
+        ProxyB["Envoy Proxy<br/>자동 mTLS"]
+        AppB[App]
+    end
+    AppA -->|"plain HTTP"| ProxyA
+    ProxyA -->|"mTLS (SPIFFE)"| ProxyB
+    ProxyB -->|"plain HTTP"| AppB
+```
+
+```yaml
+# PeerAuthentication: 네임스페이스 전체 STRICT mTLS 강제
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: production
+spec:
+  mtls:
+    mode: STRICT
+```
+
+| 모드 | 동작 |
+|---|---|
+| `PERMISSIVE` | mTLS + plain 혼용 (마이그레이션 중) |
+| `STRICT` | mTLS 강제 (권장 최종 상태) |
+| `DISABLE` | mTLS 비활성 |
+
+> [!TIP]
+> `PERMISSIVE` 로 시작 → 모니터링으로 확인 → `STRICT` 로 전환. 한 번에 STRICT 하면 레거시 서비스 차단 위험.
+
+## 구현 체크리스트
+
+- [ ] CA 인프라: 독립 Root CA, Intermediate CA 분리
+- [ ] 인증서 만료 모니터링: Datadog, Prometheus alert
+- [ ] 자동 갱신: SPIRE / cert-manager
+- [ ] grace period: 이전 인증서 30일 중복 신뢰
+- [ ] CRL 체크: OCSP Stapling 또는 단기 인증서
+- [ ] L7 LB 고려: passthrough 또는 `X-Forwarded-Client-Cert`
+- [ ] 폐기 절차: 침해 시 즉시 폐기 + 신규 발급 SLA
+
 ## 관련 위키
 
 - [[TLS]]

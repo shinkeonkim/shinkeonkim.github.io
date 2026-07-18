@@ -188,6 +188,87 @@ helmfile sync
 > 3. **chart upgrade 시 의도 외 변경** = `--reset-values` vs `--reuse-values` 명시.
 > 4. **hook 의 *cleanup 정책*** = hook resource 가 cluster 에 *영구 남음* 가능. `hook-delete-policy` 명시.
 
+## OCI Registry (Helm 3.8+)
+
+차트를 Docker Hub / ECR / GHCR 에 OCI Artifact 로 저장:
+
+```bash
+# Bitnami 공식 OCI 설치 예시
+helm install my-release oci://registry-1.docker.io/bitnamicharts/postgresql
+
+# 직접 패키지 + Push
+helm package ./my-chart                     # my-app-0.1.0.tgz 생성
+helm push my-app-0.1.0.tgz oci://ghcr.io/my-org/charts
+
+# Pull + Install
+helm install my-release oci://ghcr.io/my-org/charts/my-app --version 0.1.0
+```
+
+> *OCI 는 `helm repo add` 불필요*. 컨테이너 레지스트리가 그대로 차트 저장소.
+
+## 시크릿 관리
+
+### SOPS + Helm Secrets Plugin
+
+```bash
+helm plugin install https://github.com/jkroepke/helm-secrets
+
+# SOPS 로 암호화된 values 파일로 배포
+helm secrets upgrade my-release ./my-chart \
+  -f values.yaml \
+  -f secrets.enc.yaml
+```
+
+### External Secrets Operator (권장)
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: my-app-secret
+spec:
+  refreshInterval: 5m
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  target:
+    name: my-app-secret
+  data:
+    - secretKey: db_password
+      remoteRef:
+        key: prod/my-app
+        property: db_password
+```
+
+> [!WARNING]
+> `values.yaml` 에 평문 시크릿 절대 금지. SOPS 또는 External Secrets Operator 로 분리.
+
+## CI/CD 통합
+
+```mermaid
+flowchart LR
+    Dev["개발자 Push"] --> CI["CI 파이프라인"]
+    CI -->|"helm lint + template"| Valid["검증"]
+    Valid -->|staging| Stage["helm upgrade staging"]
+    Stage -->|"수동 승인"| Prod["helm upgrade prod"]
+    Prod -->|실패| Rollback["helm rollback"]
+```
+
+ArgoCD 를 통한 GitOps 패턴은 [[argocd]] 참조.
+
+## Helm 3 vs Helm 2
+
+| 항목 | Helm 2 | Helm 3 |
+|---|---|---|
+| Tiller | 클러스터 서버 컴포넌트 | 제거 (클라이언트만) |
+| 보안 | Tiller RBAC 복잡 | kubeconfig 권한 직접 사용 |
+| Release 저장 | ConfigMap | Secret (기본) |
+| 3-way merge | 미지원 | 지원 |
+| OCI 지원 | 없음 | 지원 (3.8+) |
+| Namespace | 글로벌 릴리스 | release 별 namespace |
+
+> Helm 2 는 2022 년 EOL. 신규 구축은 Helm 3 만 사용.
+
 ## 관련 위키
 
 - [[k8s-deployment]]

@@ -49,6 +49,26 @@ flowchart LR
 > [!TIP]
 > *JSONB 의 가장 흔한 인덱스*. `@>`, `?`, `?&`, `?|` 연산자 가속.
 
+### GIN fastupdate
+
+GIN 은 기본적으로 `fastupdate=on`: *INSERT 시 pending list 에 먼저 쌓고*, VACUUM / autovacuum 시 main index 에 병합.
+
+```sql
+-- fastupdate 비활성화: 쓰기 느리지만 읽기 일관성 높음
+CREATE INDEX idx_tags ON posts USING gin(tags) WITH (fastupdate=off);
+
+-- pending list 수동 flush
+SELECT gin_clean_pending_list('idx_tags'::regclass);
+```
+
+| 설정 | 쓰기 | 읽기 | 적합 |
+|---|---|---|---|
+| `fastupdate=on` (기본) | *빠름* | 약간 느림 (pending 포함) | 대량 INSERT |
+| `fastupdate=off` | 느림 | *빠름* | 읽기 집중 |
+
+> [!WARNING]
+> `fastupdate=on` 상태에서 *pending list 가 너무 커지면* 쿼리 성능 저하. `gin_pending_list_limit` (기본 4MB) 조정 또는 autovacuum 주기 단축.
+
 ## GiST (Generalized Search Tree)
 
 *tree 구조의 일반화*. 공간 + 범위 + 유사도 검색.
@@ -68,6 +88,21 @@ CREATE INDEX idx_name_trgm ON users USING gist(name gist_trgm_ops);
 SELECT * FROM users WHERE name % 'koa';   -- 유사 매치
 ```
 
+### pg_trgm: GIN vs GiST
+
+`pg_trgm` 은 *trigram 기반 유사도 / LIKE 검색*. GIN 과 GiST 모두 지원:
+
+| | `gin_trgm_ops` | `gist_trgm_ops` |
+|---|---|---|
+| 빌드 속도 | 느림 | *빠름* |
+| 인덱스 크기 | *작음* | 큼 |
+| `LIKE '%text%'` | *빠름* | 빠름 |
+| `%` (유사도) | *빠름* | 빠름 |
+| UPDATE 비용 | 높음 | *낮음* |
+
+> [!TIP]
+> *읽기 집중 + 대용량*: `gin_trgm_ops`. *쓰기 빈번*: `gist_trgm_ops`. 대부분 GIN 이 더 빠른 검색 제공.
+
 ## BRIN (Block Range Index)
 
 큰 테이블 + *물리 순서 ≈ 논리 순서* 일 때. *block 의 min/max* 만 저장.
@@ -85,6 +120,21 @@ SELECT * FROM events WHERE created_at >= '2026-06-25';
 
 > [!IMPORTANT]
 > *수억 row 의 시계열* 에서 *BRIN 이 B-tree 의 1/100 메모리*. 단 *INSERT 순서와 정렬 컬럼이 일치* 해야 효과.
+
+### BRIN pages_per_range 튜닝
+
+```sql
+-- 기본 pages_per_range=128. 작을수록 정밀, 클수록 인덱스 작음
+CREATE INDEX idx_created_brin ON events
+  USING brin(created_at) WITH (pages_per_range=32);
+
+-- 상관관계 확인 (1.0 에 가까울수록 BRIN 효과적)
+SELECT correlation
+FROM pg_stats
+WHERE tablename = 'events' AND attname = 'created_at';
+```
+
+`correlation` 이 *0.9 이상*이면 BRIN 효과적. 무작위 INSERT 테이블은 correlation 낮아 BRIN 효과 없음.
 
 ## Hash Index
 
@@ -158,6 +208,46 @@ flowchart TD
     plugins: { legend: { display: false } },
   }}
 />
+
+## 인덱스 모니터링
+
+```sql
+-- 사용 안 되는 인덱스 탐지
+SELECT schemaname, tablename, indexname, idx_scan
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+ORDER BY pg_relation_size(indexrelid) DESC;
+
+-- 인덱스 크기 확인
+SELECT indexname,
+       pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE tablename = 'events'
+ORDER BY pg_relation_size(indexrelid) DESC;
+
+-- 인덱스 bloat 확인 (VACUUM 필요 여부)
+SELECT relname, n_dead_tup, last_autovacuum
+FROM pg_stat_user_tables
+WHERE relname = 'events';
+```
+
+## Partial / Expression Index
+
+```sql
+-- Partial Index: 조건 만족 row 만 인덱싱
+CREATE INDEX idx_active_users ON users (email)
+  WHERE status = 'active';
+
+-- Expression Index: 함수 결과 인덱싱
+CREATE INDEX idx_lower_email ON users (lower(email));
+SELECT * FROM users WHERE lower(email) = 'koa@example.com';
+
+-- REINDEX CONCURRENTLY: 운영 중 재빌드 (잠금 없음)
+REINDEX INDEX CONCURRENTLY idx_tags;
+```
+
+> [!TIP]
+> *Partial Index* 는 *조건 만족 row 만 포함* 해 인덱스 크기를 대폭 줄임. `WHERE deleted_at IS NULL` 같은 *소프트 삭제 패턴* 에 특히 효과적.
 
 ## 흔한 함정
 

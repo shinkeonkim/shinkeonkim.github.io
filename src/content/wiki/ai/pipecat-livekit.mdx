@@ -205,6 +205,62 @@ flowchart TB
 > 3. **LiveKit 의 transcription frame** = STT 결과가 *partial vs final* 분리 안 보임. 명시 처리.
 > 4. **자체 구축 시 turn detection** = VAD 만으로 한계. 시맨틱 모델 필요. Pipecat / LK 가 내장한 이유.
 
+## 레이턴시 구성 요소
+
+voice agent 의 E2E 레이턴시는 각 단계가 직렬로 합산된다:
+
+| 단계 | 일반적 범위 | 메모 |
+|:---|:---|:---|
+| VAD 종료 감지 | 200-500ms | 너무 빠르면 발화 중 끊김 |
+| STT 첫 응답 | 300-600ms | streaming 시 단축됨 |
+| LLM 첫 토큰 | 500-2000ms | 모델 크기, 네트워크 의존 |
+| TTS 첫 청크 | 200-500ms | streaming TTS 시 단축됨 |
+| 버퍼 / 전송 지연 | 50-200ms | WebRTC jitter buffer |
+| **합계 최적화 전** | **1.2-3.8초** | - |
+
+```mermaid
+flowchart LR
+    VAD["VAD 종료 감지"] --> STT["STT 인식"]
+    STT --> LLM["LLM 첫 토큰"]
+    LLM -->|"streaming 출력"| TTS["TTS 합성"]
+    TTS --> Out["사용자 출력"]
+```
+
+LLM 첫 토큰 도착 즉시 TTS streaming 을 시작하면 LLM 생성 + TTS 합성이 병렬로 겹쳐 전체 체감 레이턴시가 줄어든다.
+
+## 레이턴시 최적화 전략
+
+1. **Streaming 파이프라인**: LLM 토큰 스트림 + TTS 동시 시작. Pipecat `LLMResponseAggregatorService` + `TTSService` 직결 시 자동 streaming.
+2. **VAD 임계값 튜닝**: 민감도 높으면 발화 중 끊김, 둔감하면 레이턴시 증가. `threshold=0.5`, `min_silence_duration_ms=300` 이 출발점.
+3. **모델 선택**: 짧은 응답은 GPT-4o-mini, 복잡한 추론만 GPT-4o. 한국어 TTS 는 Cartesia 가 ElevenLabs 보다 레이턴시 낮은 경우 많음.
+4. **지역 배포**: STT / TTS API 와 서버 리전을 맞춤. 한국 사용자면 `ap-northeast-2` 우선.
+5. **WebRTC 우선**: WebSocket 보다 P2P 최적 라우팅. LiveKit SFU 가 이를 담당.
+6. **워밍업 요청**: 첫 발화 전 LLM / TTS 서비스에 더미 요청해 cold start 제거.
+
+## 스택 선택 체크리스트
+
+| 체크포인트 | Vapi / Retell | Pipecat | LiveKit Agents |
+|:---|:---:|:---:|:---:|
+| 1주 내 PoC | ✅ | 보통 | 보통 |
+| 다중 참여자 룸 | 제한적 | 제한적 | ✅ |
+| 커스텀 VAD / STT | 제한적 | ✅ | ✅ |
+| 자체 인프라 운영 | 불가 | ✅ | ✅ |
+| 비용 예측 가능성 | 선불 요금 | 인프라만 | 인프라만 |
+| HIPAA / 컴플라이언스 | 미확인 | self-host 가능 | self-host 가능 |
+| Python 생태계 우선 | - | ✅ | 보통 |
+| Node / Go 지원 | - | 제한적 | ✅ |
+
+## 프로덕션 운영 팁
+
+> [!NOTE]
+> Pipecat / LiveKit 모두 asyncio 기반. 블로킹 I/O 를 asyncio loop 안에서 직접 호출하면 전체 파이프라인이 멈춘다. `asyncio.to_thread` 또는 전용 executor 로 분리.
+
+- **헬스 체크**: `/health` 엔드포인트 + LiveKit room 상태 폴링. 에이전트가 죽으면 참여자는 침묵만 들음.
+- **그레이스풀 종료**: `SIGTERM` 수신 시 현재 발화 완료 후 종료. Pipecat `PipelineRunner.stop_when_done()` 활용.
+- **분산 추적**: 각 Frame 에 `call_id`, `turn_id` 메타데이터 부착해 로그 연결.
+- **요금 폭발 방지**: 무응답 30초 후 자동 종료. Vapi / Retell idle timeout 설정 확인.
+- **에코 처리**: AEC (Acoustic Echo Cancellation) 는 transport layer 담당. Daily.co 는 내장, 직접 WebRTC 구현 시 별도 처리 필요.
+
 ## 관련 위키
 
 - [[voice-agent-architecture]]

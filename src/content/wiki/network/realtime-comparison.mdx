@@ -159,6 +159,95 @@ HTTP/3 (QUIC) 위 양방향 + *unreliable datagram* + *bidirectional streams*. *
   }}
 />
 
+## WebRTC 시그널링: STUN / TURN
+
+P2P 연결 수립을 위한 *시그널링 서버 + NAT traversal*.
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant Sig as Signaling Server
+    participant ST as STUN/TURN
+    participant B as Client B
+    A->>Sig: SDP Offer
+    Sig->>B: SDP Offer
+    B->>Sig: SDP Answer
+    Sig->>A: SDP Answer
+    A->>ST: STUN Binding Request
+    ST-->>A: Public IP:Port
+    B->>ST: STUN Binding Request
+    ST-->>B: Public IP:Port
+    A-->>B: ICE Candidates 교환
+    Note over A,B: P2P 연결 수립
+```
+
+| 컴포넌트 | 역할 |
+|---|---|
+| STUN | 공인 IP:Port 탐색 (cheap, UDP) |
+| TURN | NAT 뒤 relay (expensive, 모든 트래픽 경유) |
+| ICE | STUN + TURN 조합으로 최적 경로 탐색 |
+| SDP | 미디어 능력 / 코덱 협상 |
+
+> [!CAUTION]
+> TURN 서버 없으면 *Symmetric NAT (기업 방화벽)* 뒤 클라이언트 연결 불가. 실서비스는 TURN 필수. TURN 비용 = 전체 트래픽 relay.
+
+## 스케일링 전략
+
+각 패턴별 *서버 사이드 스케일링* 고려사항:
+
+```mermaid
+flowchart TD
+    LB[L7 Load Balancer]
+    LB -->|"SSE / WebSocket"| Sticky["Sticky Session 필요"]
+    LB -->|"Polling"| Stateless["완전 Stateless 분산"]
+    Sticky --> Redis["Redis Pub/Sub<br/>노드 간 메시지 팬아웃"]
+    Redis --> N1[Node 1]
+    Redis --> N2[Node 2]
+    Redis --> N3[Node 3]
+```
+
+| 패턴 | 스케일링 방식 | 핵심 도구 |
+|---|---|---|
+| Polling | Stateless, 그냥 확장 | 없음 |
+| Long Polling | Connection 수 관리 | Nginx keep-alive 튜닝 |
+| SSE | Sticky session + 팬아웃 | Redis Pub/Sub |
+| WebSocket | Sticky session + 팬아웃 | Redis Pub/Sub, Socket.IO |
+| WebRTC | 시그널링 서버 분리 | STUN/TURN 별도 |
+
+자세히는 [[redis-pubsub-vs-streams]], [[sticky-session]].
+
+## 구현 패턴 비교
+
+| 기술 | Node.js 서버 | 브라우저 클라이언트 |
+|---|---|---|
+| SSE | `res.write('data: ...\n\n')` | `new EventSource('/stream')` |
+| WebSocket | `ws`, `socket.io`, `uWebSockets.js` | `new WebSocket('wss://...')` |
+| Long Polling | 일반 HTTP, timeout 30s | `fetch` + 재시도 루프 |
+| WebRTC | `node-webrtc`, Mediasoup | `RTCPeerConnection` API |
+
+**SSE 연결 한계**: HTTP/1.1 = 브라우저당 도메인 6 연결 제한. *HTTP/2 에서는 다중 SSE 가능*.
+
+## 브라우저 지원 & 제약
+
+| 기능 | Chrome | Firefox | Safari | IE/Edge legacy |
+|---|---|---|---|---|
+| SSE | 지원 | 지원 | 지원 | SSE 없음 |
+| WebSocket | 지원 | 지원 | 지원 | IE11 지원 |
+| WebRTC | 지원 | 지원 | 지원 (iOS 제한) | 미지원 |
+| WebTransport | 지원 (실험) | 지원 (실험) | 미지원 | 미지원 |
+
+> [!NOTE]
+> iOS Safari 는 *SSE 응답 버퍼링 문제* 가 있음 (iOS 14 이전). `text/event-stream` + 작은 청크 크기로 완화. iOS WebRTC 는 *Audio 백그라운드 제한* 있음.
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **SSE + nginx 버퍼링** = 기본 response buffering 으로 *메시지 지연*. `X-Accel-Buffering: no` + `proxy_buffering off` 필수.
+> 2. **WebSocket + ALB 60s idle timeout** = *heartbeat ping/pong* 으로 연결 유지.
+> 3. **WebRTC + CORS** = 시그널링 서버 CORS 설정 + TURN 서버 credential 보호.
+> 4. **Long Polling 서버 연결 수** = 클라이언트 N명 = 서버 N개 연결 점유. *non-blocking I/O* (Node.js, async Python) 필수.
+> 5. **SSE 재연결 폭풍** = 서버 재시작 시 *모든 클라이언트 동시 재연결*. `Last-Event-ID` + *jitter* 로 분산.
+
 ## 관련 위키
 
 - [[SSE]], [[WebSocket]]

@@ -109,8 +109,8 @@ a=fingerprint:sha-256 AC:8D:...
 
 ```mermaid
 flowchart LR
-    A[Browser A] -->|behind NAT| Net[(Internet)]
-    B[Browser B] -->|behind NAT| Net
+    A[Browser A] -->|"behind NAT"| Net[(Internet)]
+    B[Browser B] -->|"behind NAT"| Net
     A -.STUN query.-> STUN[STUN server]
     STUN -.public IP/port.-> A
     A -.candidate exchange.-> B
@@ -127,6 +127,32 @@ flowchart LR
 | 예 | `stun:stun.l.google.com:19302` | coturn (self-host) |
 
 > 약 20% 의 사용자가 *symmetric NAT / 방화벽* 때문에 *TURN 필요*. coturn 운영 필수.
+
+### ICE Candidate 유형
+
+ICE 는 여러 후보를 수집해 우선순위 순으로 연결 시도합니다.
+
+| 유형 | 설명 | 예 |
+|:---|:---|:---|
+| **host** | 로컬 NIC IP/port | `192.168.1.5:50001` |
+| **srflx** (Server Reflexive) | STUN 으로 알아낸 공용 IP/port | `203.0.113.7:50001` |
+| **prflx** (Peer Reflexive) | 상대방이 받은 내 패킷에서 알아낸 주소 | NAT 연결 중 발견 |
+| **relay** | TURN 서버 주소 | `198.51.100.2:3478` |
+
+우선순위: host > srflx > prflx > relay. Symmetric NAT 이면 host/srflx 모두 실패하고 relay 로 fallback.
+
+### ICE Restart
+
+네트워크 변경 (wifi → LTE 전환 등) 시 기존 ICE 연결이 끊깁니다. `pc.restartIce()` 로 새 offer 를 만들어 ICE 를 재수집하면 연결을 유지할 수 있습니다.
+
+```javascript
+async function handleNetworkChange() {
+  pc.restartIce();
+  const offer = await pc.createOffer({ iceRestart: true });
+  await pc.setLocalDescription(offer);
+  // signaling 으로 offer 전송
+}
+```
 
 ## DataChannel (임의 데이터)
 
@@ -176,6 +202,46 @@ flowchart TB
 | 서버 비용 | 0 | *중간 (forwarding)* | *높음 (transcoding)* |
 | 예 | 일반 WebRTC | LiveKit, mediasoup, Janus | Jitsi Videobridge |
 
+## DTLS-SRTP (미디어 암호화)
+
+WebRTC 는 모든 미디어를 **DTLS-SRTP** 로 암호화합니다. DTLS 로 키 교환 후 SRTP 로 미디어 패킷을 암호화.
+
+- **DTLS**: UDP 위의 TLS. 핸드셰이크에서 `a=fingerprint:sha-256 ...` (SDP 에서 교환된 인증서 지문) 검증
+- **SRTP**: 대칭키로 RTP 패킷의 payload 암호화 + HMAC-SHA1 무결성
+
+> 브라우저에서 평문 WebRTC 는 표준상 불가. MITM 차단.
+
+## Simulcast / SVC (다중 해상도 스트림)
+
+SFU 에서 화면 크기가 다른 구독자에게 서로 다른 품질을 주기 위한 기술.
+
+- **Simulcast**: 송신자가 같은 영상을 여러 해상도 (720p, 360p, 180p) 로 동시 인코딩해 전송. SFU 가 선택.
+- **SVC (Scalable Video Coding)**: 레이어 구조로 인코딩, 하위 레이어 위에 상위 레이어를 쌓는 방식. 대역폭 효율 좋음 (예: AV1-SVC, H264-SVC).
+
+```mermaid
+flowchart TB
+    Sender["발신자"]
+    Sender -->|"720p stream"| SFU
+    Sender -->|"360p stream"| SFU
+    Sender -->|"180p stream"| SFU
+    SFU -->|"720p"| ClientHD["고대역폭 수신자"]
+    SFU -->|"360p"| ClientMD["중대역폭 수신자"]
+    SFU -->|"180p"| ClientLD["저대역폭 수신자"]
+```
+
+수신자 대역폭/CPU 에 따라 SFU 가 실시간으로 레이어를 전환해줍니다.
+
+## Bandwidth Estimation (REMB / TWCC)
+
+WebRTC 는 수신자의 네트워크 상태를 추정해 송신자가 비트레이트를 자동 조절합니다.
+
+| 알고리즘 | 방향 | 방식 |
+|:---|:---|:---|
+| **REMB** (Receiver Estimated Max Bitrate) | 수신 → 송신 | 수신자가 추정 최대 속도를 RTCP 로 전송 |
+| **TWCC** (Transport-Wide Congestion Control) | 수신 → 송신 | 수신 타임스탬프를 모두 보고, 송신측에서 추정 |
+
+TWCC 가 더 정확하고 최신 표준. GCC (Google Congestion Control) 알고리즘이 TWCC 피드백을 사용합니다.
+
 ## 음성 에이전트 + WebRTC
 
 ```mermaid
@@ -202,6 +268,30 @@ flowchart LR
 | 사용 | voice / video | 일반 | 차세대 |
 
 > *voice agent = WebRTC 가 거의 정답*. 단 *방화벽 UDP 차단 환경* 은 WebSocket fallback.
+
+## getStats() 로 품질 모니터링
+
+```javascript
+setInterval(async () => {
+  const stats = await pc.getStats();
+  stats.forEach(stat => {
+    if (stat.type === 'inbound-rtp' && stat.kind === 'audio') {
+      console.log('jitter', stat.jitter);
+      console.log('packetsLost', stat.packetsLost);
+      console.log('roundTripTime', stat.roundTripTime);
+    }
+  });
+}, 2000);
+```
+
+주요 지표:
+
+| 지표 | 기준 (음성 품질) |
+|:---|:---|
+| `jitter` | < 30ms 이면 양호 |
+| `packetsLost` (비율) | < 1% 이면 양호, > 5% 이면 품질 저하 |
+| `roundTripTime` | < 150ms 이면 양방향 통화에 OK |
+| `framesDropped` | 낮을수록 좋음 (영상) |
 
 ## 흔한 함정
 

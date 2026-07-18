@@ -3,12 +3,14 @@ title: "[Auth] Session Cookie: HttpOnly, SameSite, Secure flag"
 aliases: ["session cookie", "HttpOnly", "SameSite", "Secure cookie", "session ID", "cookie attributes"]
 tags: [session, cookie, auth, security, backend]
 category: auth-security
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "RFC 6265 / RFC 6265bis (Cookie)"
     url: "https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis"
   - title: "MDN: HTTP cookies"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies"
+  - title: "OWASP: Session Management Cheat Sheet"
+    url: "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html"
 ---
 
 ## 정의
@@ -37,6 +39,30 @@ Set-Cookie: SID=abc123; Path=/; Domain=example.com;
 | `Partitioned` *(2024+)* | 3rd-party cookie 격리 |
 | `__Host-` prefix | Secure + Path=/ + Domain 없음 강제 |
 
+## HTTP 세션 전체 흐름
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant W as WebServer
+    participant S as SessionStore
+
+    C->>W: POST /login (id, password)
+    W->>S: session.set(SID, userId and expiresAt)
+    W-->>C: 200 OK, Set-Cookie: SID=abc123, HttpOnly, Secure
+    C->>W: GET /profile (Cookie: SID=abc123)
+    W->>S: session.get(SID=abc123)
+    S-->>W: userId=42, expiresAt=...
+    W-->>C: 200 OK (profile data)
+    Note over C,W: 로그아웃
+    C->>W: POST /logout (Cookie: SID=abc123)
+    W->>S: session.delete(SID=abc123)
+    W-->>C: 200 OK, SID cleared (Max-Age=0)
+```
+
+> 로그아웃은 *반드시 서버 store 도 삭제*. 쿠키만 지우면 *SID 재사용 가능*.
+
 ## SameSite 3 모드
 
 ```mermaid
@@ -44,9 +70,9 @@ flowchart TB
     Strict["Strict<br/>같은 site 만 cookie 전송"]
     Lax["Lax (기본)<br/>top-level GET 만 허용"]
     None["None<br/>모든 cross-site 허용 (+Secure 필수)"]
-    Strict --> S1["가장 안전<br/>외부 링크 → 로그인 풀림"]
+    Strict --> S1["가장 안전<br/>외부 링크 접근 시 로그인 풀림"]
     Lax --> L1["보안 + UX 균형<br/>대부분 권장"]
-    None --> N1["3rd-party 통합<br/>(예: 임베드)"]
+    None --> N1["3rd-party 통합<br/>(예: 임베드 위젯)"]
 ```
 
 | | Strict | Lax | None |
@@ -58,6 +84,38 @@ flowchart TB
 | iframe POST | X | X | O |
 
 > 2020 부터 *Chrome 의 기본값 = Lax*. 명시하지 않은 옛 쿠키도 *Lax* 적용.
+
+## CSRF 공격과 방어
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant V as Victim
+    participant A as AttackerSite
+    participant B as BankSite
+
+    V->>B: 로그인 (SID=abc 쿠키 발급)
+    V->>A: 악성 사이트 방문
+    A-->>V: "<form action='bank.com/transfer' method='POST'> 자동 submit"
+    V->>B: POST /transfer (Cookie: SID=abc 자동 첨부, amount=100000)
+    Note over B: CSRF 취약하면 정상 처리됨
+```
+
+**방어 전략**:
+
+1. **SameSite=Lax/Strict**: 외부 POST 요청 시 쿠키 전송 차단
+2. **CSRF Token**: 서버가 생성한 토큰을 폼에 hidden 필드로 삽입, 요청 시 검증
+3. **Double Submit Cookie**: 쿠키와 헤더에 같은 토큰 → origin 확인 효과
+4. **Referer / Origin 헤더 검증**: 신뢰할 수 없는 origin 차단
+
+```html
+<!-- CSRF token 폼 예시 -->
+<form method="POST" action="/transfer">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="number" name="amount">
+  <button type="submit">송금</button>
+</form>
+```
 
 ## Session Store 패턴
 
@@ -79,11 +137,45 @@ flowchart LR
 | DB (Postgres / MySQL) | 단순 / 큰 부담 |
 | 클라이언트 (encrypted cookie) | *stateless 처럼*. Express의 cookie-session, Rails encrypted cookie |
 
-## Stateless vs Stateful
+## 구현 예시 (Node.js / Express)
 
-```anim:stateless-vs-stateful
-{}
+```typescript
+import session from "express-session";
+import RedisStore from "connect-redis";
+import { createClient } from "redis";
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+
+app.use(session({
+  store: new RedisStore({ client: redisClient }),
+  secret: process.env.SESSION_SECRET,  // 32+ bytes random
+  resave: false,
+  saveUninitialized: false,
+  name: "__Host-SID",  // __Host- prefix 강제 보안
+  cookie: {
+    httpOnly: true,
+    secure: true,           // HTTPS only
+    sameSite: "lax",        // CSRF 완화
+    maxAge: 1000 * 60 * 30, // 30분
+  },
+}));
 ```
+
+## Cookie Prefix (`__Host-`, `__Secure-`)
+
+| Prefix | 강제 속성 | 효과 |
+|---|---|---|
+| `__Host-` | Secure + Path=/ + Domain 없음 | *가장 강력*. 서브도메인 격리 |
+| `__Secure-` | Secure 만 | HTTPS 전송 보장 |
+
+```http
+Set-Cookie: __Host-SID=abc123; Path=/; Secure; HttpOnly; SameSite=Lax
+```
+
+> `__Host-` 사용 시 Domain 속성을 설정하면 *브라우저가 쿠키를 무시*. Path=/ 강제.
+
+## Stateless vs Stateful
 
 | 항목 | Session (cookie) | JWT |
 |---|---|---|
@@ -92,6 +184,25 @@ flowchart LR
 | Cookie 자동 첨부 | *예* | Bearer header 수동 |
 | CSRF | *위험* (SameSite 로 완화) | *덜 위험* (헤더면) |
 | XSS | *덜 위험* (HttpOnly) | localStorage 면 *위험* |
+
+## Session Fixation
+
+```mermaid
+sequenceDiagram
+    participant Att as Attacker
+    participant S as Site
+    participant V as Victim
+
+    Att->>S: GET /login (SID=ATTACK123)
+    S-->>Att: 응답
+    Att->>V: "이 링크로 로그인해" (SID=ATTACK123 박힌 링크)
+    V->>S: 로그인 + SID=ATTACK123 유지
+    S->>S: 인증 성공, SID=ATTACK123 가 권한 가짐
+    Att->>S: SID=ATTACK123 으로 접근
+    Note over Att,S: Victim 의 권한 행사
+```
+
+**방어**: *로그인 직후 새 SID 발급*. 옛 SID 무효화.
 
 ## 보안 체크리스트
 
@@ -103,31 +214,49 @@ flowchart LR
 ✓ session rotation        (privilege escalation 시 새 SID)
 ✓ session_id 충분히 랜덤   (128+ bits)
 ✓ 로그아웃 시 server-side 삭제
+✓ __Host- 또는 __Secure- prefix 사용
+✓ CSRF token 또는 SameSite=Strict
 ```
-
-## Session Fixation
-
-```mermaid
-sequenceDiagram
-    Attacker->>Site: GET /login (SID=ATTACKER123)
-    Site-->>Attacker: 응답
-    Attacker->>Victim: "이 링크로 로그인해" (SID=ATTACKER123 박힌 링크)
-    Victim->>Site: 로그인 + SID=ATTACKER123 유지
-    Site->>Site: 인증 성공, SID=ATTACKER123 가 권한 가짐
-    Attacker->>Site: SID=ATTACKER123 으로 접근
-    Note over Attacker,Site: Victim 의 권한 행사
-```
-
-**방어**: *로그인 직후 새 SID 발급*. 옛 SID 무효화.
 
 ## 흔한 함정
 
 > [!WARNING]
 > 1. **`HttpOnly` 없음** = XSS 1줄로 세션 탈취.
-> 2. **`Secure` 없음** = HTTP → HTTPS 전환에서 *평문 노출*.
+> 2. **`Secure` 없음** = HTTP 구간에서 *평문 노출*.
 > 3. **`SameSite` 미설정** = 옛 브라우저는 None 처럼 동작 → CSRF.
 > 4. **세션 *영구*** = Max-Age 없이 영구 쿠키. 사용자 비활성 후에도 위험.
 > 5. **로그아웃이 *cookie 만 삭제*** = server-side store 에 그대로. 토큰이 *재사용 가능*.
+> 6. **Session Fixation 미방어** = 로그인 후 SID 교체 안 하면 *공격자가 사전에 SID 심기 가능*.
+
+## Partitioned Cookie (CHIPS, 2024+)
+
+**CHIPS (Cookies Having Independent Partitioned State)**: 3rd-party 쿠키 퇴장 이후 임베드 시나리오를 위한 대안.
+
+```http
+Set-Cookie: __Host-widget_session=xyz; Secure; HttpOnly; SameSite=None; Partitioned
+```
+
+- 쿠키가 *top-level site 별로 격리*. `a.com` 에서 설정한 `widget.com` 쿠키는 `b.com` 에서 보이지 않음
+- *Chrome 118+ 기본 지원*, Firefox 지원 예정
+- 기존 `SameSite=None` 임베드 쿠키의 *미래 대안*
+
+## Redis 세션 만료 패턴
+
+```typescript
+// 비활성 만료: 활동 시마다 TTL 갱신
+async function touchSession(sid: string) {
+  const INACTIVE_TIMEOUT = 30 * 60; // 30분
+  await redis.expire(`session:${sid}`, INACTIVE_TIMEOUT);
+}
+
+// 절대 만료: 최초 설정 후 고정
+async function setSession(sid: string, data: object) {
+  const ABSOLUTE_TIMEOUT = 8 * 60 * 60; // 8시간
+  await redis.setex(`session:${sid}`, ABSOLUTE_TIMEOUT, JSON.stringify(data));
+}
+```
+
+> *비활성 timeout + 절대 timeout 을 모두 적용*하는 것이 정통. 비활성으로는 짧게 (30분), 절대값으로는 길게 (8시간).
 
 ## 관련 위키
 

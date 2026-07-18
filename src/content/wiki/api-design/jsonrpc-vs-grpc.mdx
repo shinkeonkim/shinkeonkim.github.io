@@ -3,10 +3,14 @@ title: "[API Design] JSON-RPC vs gRPC vs REST: RPC 패턴 비교"
 aliases: ["JSON-RPC", "RPC", "JSON-RPC 2.0", "RPC vs REST"]
 tags: [rpc, json-rpc, grpc, rest, api-design]
 category: api-design
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "JSON-RPC 2.0 스펙"
     url: "https://www.jsonrpc.org/specification"
+  - title: "gRPC 공식"
+    url: "https://grpc.io/docs/"
+  - title: "Protocol Buffers 가이드"
+    url: "https://protobuf.dev/programming-guides/proto3/"
 ---
 
 ## 정의
@@ -68,6 +72,87 @@ references:
 | -32603 | Internal error |
 | -32000 ~ -32099 | server error |
 
+## gRPC: Protobuf + HTTP/2
+
+**Protocol Buffers (.proto)** 로 서비스 정의:
+
+```protobuf
+syntax = "proto3";
+package user;
+
+service UserService {
+  // Unary: 단일 요청, 단일 응답
+  rpc GetUser(GetUserRequest) returns (User);
+  // Server streaming: 단일 요청, 스트림 응답
+  rpc ListUsers(ListUsersRequest) returns (stream User);
+  // Client streaming: 스트림 요청, 단일 응답
+  rpc CreateUsers(stream CreateUserRequest) returns (CreateUsersResponse);
+  // Bidirectional streaming: 양방향 스트림
+  rpc Chat(stream ChatMessage) returns (stream ChatMessage);
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  int64 created_at = 4;
+}
+```
+
+코드 생성:
+
+```bash
+# Go 코드 생성
+protoc --go_out=. --go-grpc_out=. user.proto
+
+# TypeScript 코드 생성
+protoc-gen-ts --ts_out=. user.proto
+
+# Python 코드 생성
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. user.proto
+```
+
+## gRPC 4가지 Streaming 모드
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: 1. Unary (단방향 단일)
+    C->>S: GetUser(id=42)
+    S-->>C: User{id=42, name=koa}
+
+    Note over C,S: 2. Server Streaming
+    C->>S: ListUsers(filter=active)
+    S-->>C: User{1}
+    S-->>C: User{2}
+    S-->>C: User{3}
+
+    Note over C,S: 3. Client Streaming
+    C->>S: CreateUser{name=a}
+    C->>S: CreateUser{name=b}
+    C->>S: CreateUser{name=c}
+    S-->>C: CreateUsersResponse{count=3}
+
+    Note over C,S: 4. Bidirectional Streaming
+    C->>S: ChatMessage{text=hello}
+    S-->>C: ChatMessage{text=hi}
+    C->>S: ChatMessage{text=bye}
+    S-->>C: ChatMessage{text=goodbye}
+```
+
+| 모드 | 요청 | 응답 | 사용 |
+|---|---|---|---|
+| Unary | 단일 | 단일 | CRUD, 일반 API |
+| Server Streaming | 단일 | 스트림 | 실시간 피드, 파일 다운로드 |
+| Client Streaming | 스트림 | 단일 | 파일 업로드, 배치 처리 |
+| Bidirectional | 스트림 | 스트림 | 실시간 채팅, 게임, 협업 도구 |
+
 ## 세 가지 RPC 비교
 
 | 항목 | JSON-RPC | gRPC | REST (RPC 스타일) |
@@ -81,12 +166,34 @@ references:
 | 브라우저 | 직접 | grpc-web 필요 | *직접* |
 | Batch | *기본 지원* | 없음 | 없음 |
 
+## HTTP/2 와 gRPC
+
+gRPC 는 HTTP/2 를 필수로 사용한다:
+
+```mermaid
+flowchart LR
+    C[Client] -->|"HTTP/2 단일 연결"| S[Server]
+    subgraph Connection[단일 TCP 연결]
+        S1["Stream 1: GetUser(1)"]
+        S2["Stream 2: GetUser(2)"]
+        S3["Stream 3: ListUsers()"]
+    end
+    C --> Connection
+```
+
+| HTTP/2 기능 | gRPC 에서의 효과 |
+|---|---|
+| 멀티플렉싱 | 단일 연결 다중 RPC (Head-of-Line blocking 없음) |
+| Header 압축 (HPACK) | gRPC metadata 오버헤드 감소 |
+| Binary framing | Protobuf 와 자연스럽게 결합 |
+| Server Push | streaming 기반 구현 |
+
 ## JSON-RPC 의 강점
 
 ```mermaid
 flowchart LR
-    A[가벼운 spec<br/>1 페이지] --> Use1[블록체인 노드<br/>예: Ethereum]
-    A --> Use2[IDE / 에디터 ↔ Language Server<br/>예: LSP]
+    A["가벼운 spec<br/>(1 페이지)"] --> Use1["블록체인 노드<br/>예: Ethereum"]
+    A --> Use2["IDE to Language Server<br/>예: LSP"]
     A --> Use3[VSCode extension API]
     A --> Use4[debugger DAP]
 ```
@@ -109,7 +216,7 @@ flowchart TD
     Q1{브라우저 직접 호출?}
     Q1 -->|예| Q2{내부 API?}
     Q2 -->|"아니오 (외부)"| REST[REST]
-    Q2 -->|예| Q3{스트리밍 / typed?}
+    Q2 -->|예| Q3{"스트리밍 / typed?"}
     Q3 -->|typed 강력 필요| RestOpenAPI[REST + OpenAPI]
     Q3 -->|아니오| REST
     Q1 -->|"아니오 (server-to-server)"| Q4{성능 critical?}
@@ -119,6 +226,49 @@ flowchart TD
     Q5 -->|아니오| GRPC
 ```
 
+## grpc-web: 브라우저에서 gRPC
+
+브라우저는 *HTTP/2 raw frame* 에 접근 불가 → **grpc-web** 프록시 필요:
+
+```mermaid
+flowchart LR
+    Browser["Browser<br/>(grpc-web client)"] -->|"HTTP/1.1 or HTTP/2"| Proxy["Envoy Proxy<br/>(grpc-web to grpc)"]
+    Proxy -->|"HTTP/2 gRPC"| Server[gRPC Server]
+```
+
+```yaml
+# Envoy 설정 (grpc-web 트랜스코딩)
+filters:
+  - name: envoy.filters.http.grpc_web
+  - name: envoy.filters.http.cors
+```
+
+## JSON-RPC TypeScript 구현 예시
+
+```typescript
+type JsonRpcRequest = {
+  jsonrpc: "2.0";
+  method: string;
+  params?: unknown;
+  id: string | number;
+};
+
+type JsonRpcResponse<T> =
+  | { jsonrpc: "2.0"; result: T; id: string | number }
+  | { jsonrpc: "2.0"; error: { code: number; message: string }; id: string | number };
+
+async function callRpc<T>(method: string, params?: unknown): Promise<T> {
+  const response = await fetch("/rpc", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: Date.now() }),
+  });
+  const data: JsonRpcResponse<T> = await response.json();
+  if ("error" in data) throw new Error(data.error.message);
+  return data.result;
+}
+```
+
 ## JSON-RPC 의 함정
 
 > [!WARNING]
@@ -126,6 +276,7 @@ flowchart TD
 > 2. **HTTP status code 무관** = JSON-RPC 는 *항상 200*. error 는 *body 의 error 객체*. 모니터링 도구가 *에러 못 잡음*.
 > 3. **Batch + notification 의 응답 매핑** = id 기반 매핑이 복잡. 잘못하면 응답이 *섞임*.
 > 4. **버전 관리 없음** = *spec 자체에 버전 없음*. 직접 method 이름에 *v2* 박는 식.
+> 5. **gRPC 브라우저 제약** = grpc-web 프록시 없으면 브라우저에서 직접 호출 불가.
 
 ## 관련 위키
 

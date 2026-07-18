@@ -156,6 +156,128 @@ ProfileReport(df).to_file('report.html')
 
 EDA 자동화. 대규모 데이터는 sample 후 사용.
 
+## 메모리 최적화: Downcasting
+
+`int64` 를 실제 범위에 맞는 작은 dtype 으로 축소.
+
+```python
+def downcast_df(df):
+    for col in df.select_dtypes('integer').columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer')
+    for col in df.select_dtypes('float').columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+    return df
+```
+
+| dtype | 범위 | 크기 |
+|:---|:---|:---|
+| `int8` | -128 ~ 127 | 1 byte |
+| `int16` | -32,768 ~ 32,767 | 2 bytes |
+| `int32` | -2.1B ~ 2.1B | 4 bytes |
+| `int64` | 기본값 | 8 bytes |
+| `float32` | 정밀도 낮음 | 4 bytes |
+| `float64` | 기본값 | 8 bytes |
+
+## 메모리 최적화: category dtype
+
+반복 문자열 컬럼은 `category` 로 전환하면 *대폭 절약*.
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+import numpy as np
+
+n = 500_000
+df = pd.DataFrame({
+    'city': np.random.choice(['Seoul', 'Busan', 'Daegu', 'Incheon'], n),
+})
+
+before = df.memory_usage(deep=True)['city']
+df['city'] = df['city'].astype('category')
+after = df.memory_usage(deep=True)['city']
+
+print(f'object : {before:>10,} bytes')
+print(f'category: {after:>10,} bytes')
+print(f'절약: {(1 - after/before)*100:.1f}%')`}
+  output={`object :  31,000,128 bytes
+category:    500,546 bytes
+절약: 98.4%`}
+/>
+
+> [!TIP]
+> unique 비율이 낮을수록 (카디널리티 작을수록) `category` 효과 극대화.
+
+## dtype 선택 흐름
+
+```mermaid
+flowchart TD
+    S["새 컬럼 dtype 결정"]
+    S --> Q1{"숫자?"}
+    Q1 -->|"No"| Q2{"반복 문자열<br/>(카디널리티 낮음)?"}
+    Q2 -->|"Yes"| Cat["category"]
+    Q2 -->|"No"| Obj["object (기본)"]
+    Q1 -->|"Yes"| Q3{"정수?"}
+    Q3 -->|"Yes"| Q4{"범위?"}
+    Q4 -->|"-128~127"| I8["int8"]
+    Q4 -->|"-32k~32k"| I16["int16"]
+    Q4 -->|"-2B~2B"| I32["int32"]
+    Q4 -->|"더 큼"| I64["int64 (기본)"]
+    Q3 -->|"No (float)"| Q5{"정밀도 중요?"}
+    Q5 -->|"Yes"| F64["float64 (기본)"]
+    Q5 -->|"No"| F32["float32"]
+```
+
+## 대용량 파일: chunked 읽기
+
+```python
+# 한 번에 못 올리는 파일은 chunk 로 처리
+chunks = pd.read_csv('huge.csv', chunksize=100_000)
+
+result = []
+for chunk in chunks:
+    # 각 chunk 에서 필요한 집계만
+    agg = chunk.groupby('city')['sales'].sum()
+    result.append(agg)
+
+final = pd.concat(result).groupby(level=0).sum()
+```
+
+```python
+# 열 선택으로 메모리 추가 절약
+df = pd.read_csv(
+    'huge.csv',
+    usecols=['city', 'sales', 'date'],   # 필요한 열만
+    dtype={'city': 'category', 'sales': 'float32'},
+)
+```
+
+## PyArrow backend (Pandas 2.0+)
+
+```python
+df = pd.read_parquet('data.parquet', dtype_backend='pyarrow')
+df.dtypes
+# city      string[pyarrow]
+# sales     double[pyarrow]
+# id        int64[pyarrow]
+```
+
+Arrow-backed 타입은 nullable 지원 + 일부 연산 더 빠름. 자세한 건 [[Pandas 성능 / 메모리 최적화]].
+
+## 메모리 탐색 권장 순서
+
+```mermaid
+flowchart LR
+    A["df.info(memory_usage='deep')"] --> B["memory_report 함수로 hog 파악"]
+    B --> C{"object 컬럼?"}
+    C -->|"카디널리티 낮음"| D["astype('category')"]
+    C -->|"카디널리티 높음"| E["그대로 / 외부 저장"]
+    B --> F{"int64 컬럼 범위 작음?"}
+    F -->|"Yes"| G["downcast_df()"]
+    G --> H["memory_usage(deep=True) 재확인"]
+    D --> H
+```
+
 ## 함정
 
 ### 1. memory_usage 의 inaccuracy

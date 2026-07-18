@@ -1,0 +1,368 @@
+---
+title: "[AWS] Amazon GuardDuty"
+aliases:
+  - "AWS GuardDuty"
+  - "Amazon GuardDuty"
+  - "GuardDuty"
+  - "GuardDuty Malware Protection"
+  - "GuardDuty EKS Protection"
+  - "GuardDuty S3 Protection"
+  - "GuardDuty RDS Protection"
+  - "GuardDuty Runtime Monitoring"
+  - "AWS 위협 탐지"
+  - "AWS 이상 탐지"
+tags: [aws, cloud, security, threat-detection, ml]
+category: cloud
+updated: 2026-07-07
+references:
+  - title: "Amazon GuardDuty User Guide"
+    url: "https://docs.aws.amazon.com/guardduty/latest/ug/what-is-guardduty.html"
+  - title: "GuardDuty Finding Types"
+    url: "https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_finding-types-active.html"
+  - title: "GuardDuty Malware Protection"
+    url: "https://docs.aws.amazon.com/guardduty/latest/ug/malware-protection.html"
+  - title: "GuardDuty Runtime Monitoring"
+    url: "https://docs.aws.amazon.com/guardduty/latest/ug/runtime-monitoring.html"
+---
+
+## 정의
+
+**Amazon GuardDuty** 는 AWS 계정 활동 로그를 **머신러닝** 과 **위협 인텔리전스** 로 지속 분석하여 악의적 활동/이상 행동을 감지하는 관리형 위협 탐지 서비스입니다.
+
+**한 줄 요약**: "**누가 이상하게** 뭘 하고 있나?" 에 답. 무엇을 저장하는지 (Macie) 가 아니라 **누가 어떻게 접근하는지** 를 봅니다.
+
+## 왜 GuardDuty 인가
+
+### 전통적 위협 탐지의 한계
+
+- **SIEM 자체 운영**: 로그 파싱, 규칙 작성, 튜닝 부담
+- **경보 피로**: false-positive 폭주
+- **놓친 위협**: 사람이 규칙으로 다 못 잡음
+- **지연**: 사고 발생 후 발견까지 며칠
+
+### GuardDuty 의 접근
+
+- **활성화 원클릭**: 로그 파이프라인 구성 없음
+- **AWS 자체 인텔리전스 + 3rd-party feed** (Proofpoint, CrowdStrike)
+- **ML anomaly detection**: baseline 학습 후 이탈 감지
+- **낮은 false-positive**: 지속 튜닝된 알고리즘
+
+## 데이터 소스 (자동 소비, 별도 저장 X)
+
+GuardDuty 는 다음 로그를 **자체 인프라 안에서** 소비. 계정 로그를 GuardDuty 로 복사 안 함:
+
+- **CloudTrail Management Events**: API 호출
+- **CloudTrail S3 Data Events** (optional)
+- **VPC Flow Logs**: 네트워크 흐름
+- **DNS Logs** (Route 53 Resolver): DNS 쿼리
+- **EKS Audit Logs** (optional)
+- **RDS Login Events** (optional)
+- **Lambda Network Activity** (optional)
+- **S3 Data Events** (optional)
+- **EBS Volume Data** (Malware Protection)
+- **Container Runtime** (Runtime Monitoring)
+
+**중요**: 이 로그들이 계정에 활성화 안 돼 있어도 GuardDuty 는 자체적으로 캡처 (별도 CloudTrail 활성 불필요, 별도 요금 없음).
+
+## 탐지 카테고리
+
+### 1. Reconnaissance (정찰)
+
+공격자의 정보 수집:
+- **Recon:EC2/PortProbeEMRUnprotectedPort**: EMR 포트 프로빙
+- **Recon:IAMUser/UserPermissions**: 권한 열거
+
+### 2. Instance Compromise (인스턴스 침해)
+
+EC2 가 통제되었을 가능성:
+- **UnauthorizedAccess:EC2/SSHBruteForce**: SSH 무차별 대입
+- **CryptoCurrency:EC2/BitcoinTool.B!DNS**: 암호화폐 채굴 도메인
+- **Backdoor:EC2/C&CActivity.B**: Command & Control 서버 통신
+
+### 3. Account Compromise (계정 침해)
+
+IAM credential 이 노출/오용:
+- **UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration**: EC2 credential 이 외부 IP 에서 사용
+- **Discovery:IAMUser/AnomalousBehavior**: 평소와 다른 API 호출 패턴
+- **UnauthorizedAccess:IAMUser/ConsoleLoginSuccess.B**: 특이 지역/디바이스에서 로그인
+
+### 4. S3 관련
+
+- **Policy:S3/BucketBlockPublicAccessDisabled**: public access block 해제
+- **UnauthorizedAccess:S3/MaliciousIPCaller**: 알려진 악의 IP 에서 S3 접근
+- **Discovery:S3/AnomalousBehavior**: 이상 S3 활동
+
+### 5. EKS 관련
+
+- **Persistence:Kubernetes/ContainerWithSensitiveMount**: hostPath 로 host filesystem mount
+- **PrivilegeEscalation:Kubernetes/PrivilegedContainer**: privileged container
+- **Policy:Kubernetes/AnonymousAccessGranted**: anonymous 접근 부여
+
+### 6. Malware (Malware Protection 활성 시)
+
+- **Trojan:EBS/EternalBlue!Trojan**: EternalBlue 감지
+- **CryptoCurrency:EBS/BitcoinTool!Miner**: 채굴기
+
+### 7. RDS 관련
+
+- **CredentialAccess:RDS/AnomalousBehavior.SuccessfulBruteForce**: DB 로그인 무차별
+- **Discovery:RDS/MaliciousIPCaller**: 악의 IP 에서 접속
+
+### 8. Runtime Monitoring (EC2/ECS/EKS)
+
+프로세스/파일/네트워크 실시간:
+- **Execution:Runtime/SuspiciousShellCreated**
+- **Impact:Runtime/CryptoMinerExecuted**
+- **Persistence:Runtime/UsingCoreCredentials**
+
+## 보호 계층 (Add-ons)
+
+기본 GuardDuty 외에 활성화 옵션:
+
+### Malware Protection for EC2
+
+의심 활동 감지 시 **EC2 EBS 볼륨 자동 스캔** (스냅샷 생성 -> Malware 시그니처 검사).
+
+- 별도 요금
+- 스캔 대상 자동 결정 (finding 기반)
+- 결과는 GuardDuty finding 으로
+
+### Malware Protection for S3
+
+S3 업로드 객체 실시간 malware 스캔:
+
+- **PutObject 이벤트 트리거**
+- **감염 시 tag 부여** (`GuardDutyMalwareScanStatus: THREATS_FOUND`) 또는 EventBridge 로 자동 격리
+
+### EKS Protection
+
+- EKS audit log 분석
+- Runtime monitoring 옵션 (Node agent)
+
+### RDS Protection
+
+RDS login 이상 감지 (Aurora MySQL/PostgreSQL, RDS MySQL/PostgreSQL).
+
+### Runtime Monitoring
+
+EC2/ECS/EKS 안 **프로세스, 파일, 네트워크** 실시간 감시. Agent 필요.
+
+- **Agent**: SSM 통해 자동 배포 (EKS 는 add-on)
+- **커널 이벤트** (eBPF) 기반
+
+### Lambda Protection
+
+Lambda 네트워크 활동 감시.
+
+### S3 Data Protection
+
+S3 API 호출 (Get/Put/Delete) 상세 분석.
+
+## Finding 예시
+
+```json
+{
+  "schemaVersion": "2.0",
+  "accountId": "123456789012",
+  "region": "us-east-1",
+  "partition": "aws",
+  "id": "abc123",
+  "type": "UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS",
+  "severity": 8.0,
+  "createdAt": "2026-07-07T10:15:32.000Z",
+  "title": "Credentials for EC2 instance are being used from an external IP",
+  "description": "Credentials created for i-abc123 are being used from a location outside AWS.",
+  "resource": {
+    "resourceType": "AccessKey",
+    "accessKeyDetails": {
+      "accessKeyId": "ASIA...",
+      "userName": "i-abc123",
+      "userType": "AssumedRole"
+    }
+  },
+  "service": {
+    "action": {
+      "actionType": "AWS_API_CALL",
+      "awsApiCallAction": {
+        "api": "ListBuckets",
+        "callerType": "Remote IP",
+        "remoteIpDetails": {
+          "ipAddressV4": "203.0.113.5",
+          "geoLocation": {"lat": 55.7, "lon": 37.6},
+          "country": {"countryName": "Russia"}
+        }
+      }
+    },
+    "count": 47
+  }
+}
+```
+
+이 finding = "EC2 인스턴스의 IMDSv2 credential 이 러시아 IP 에서 사용됨". 즉시 credential rotation + 인스턴스 격리.
+
+## 심각도 (Severity)
+
+| 심각도 | 점수 | 의미 |
+|:---|:---:|:---|
+| **High** | 7.0-8.9 | 즉시 조치 |
+| **Medium** | 4.0-6.9 | 조사 필요 |
+| **Low** | 1.0-3.9 | 낮은 우선순위 (그래도 검토) |
+
+## EventBridge 자동 대응
+
+```json
+{
+  "source": ["aws.guardduty"],
+  "detail-type": ["GuardDuty Finding"],
+  "detail": {
+    "severity": [{"numeric": [">=", 7]}]
+  }
+}
+```
+
+Lambda 로 자동:
+- 침해 EC2 격리 (Security Group 재설정)
+- IAM key 비활성화
+- SNS + PagerDuty 알림
+- Slack channel 게시
+
+## Multi-Account (Organizations)
+
+Delegated administrator 계정이 조직 전체 GuardDuty 관리:
+
+```bash
+aws organizations enable-aws-service-access \
+  --service-principal guardduty.amazonaws.com
+
+aws guardduty enable-organization-admin-account \
+  --admin-account-id 111111111111
+```
+
+- Central account 에서 모든 finding 통합
+- 새 계정 자동 활성
+- 계정별 정책 배포
+
+## Suppression Rules (억제 규칙)
+
+False-positive 나 이미 알려진 예외를 억제:
+
+```json
+{
+  "name": "Ignore internal-scanner",
+  "action": "ARCHIVE",
+  "criteria": {
+    "criterion": {
+      "type": {"eq": ["Recon:EC2/Portscan"]},
+      "resource.instanceDetails.tags.value": {"eq": ["internal-scanner"]}
+    }
+  }
+}
+```
+
+Finding 이 매칭되면 자동 archived (알람 X).
+
+## 요금
+
+- **Foundational** (기본): CloudTrail 이벤트 백만당, VPC Flow Logs GB 당, DNS Logs GB 당
+- **Malware Protection for EC2**: 스캔 GB 당
+- **Malware Protection for S3**: PutObject 이벤트 백만당 + 스캔 GB
+- **EKS Protection**: EKS audit event 백만당
+- **Runtime Monitoring**: vCPU 시간당
+- **RDS Protection**: RDS login 이벤트 백만당
+- **Lambda Protection**: Lambda invocation 백만당
+
+**주의**: Runtime Monitoring 은 vCPU 시간당 비싼 편. 크리티컬 워크로드만 선택 적용.
+
+## 활성화 실전
+
+```bash
+aws guardduty create-detector \
+  --enable \
+  --finding-publishing-frequency FIFTEEN_MINUTES \
+  --features Name=EKS_AUDIT_LOGS,Status=ENABLED \
+            Name=EBS_MALWARE_PROTECTION,Status=ENABLED \
+            Name=RDS_LOGIN_EVENTS,Status=ENABLED \
+            Name=EKS_RUNTIME_MONITORING,Status=ENABLED \
+            Name=LAMBDA_NETWORK_LOGS,Status=ENABLED \
+            Name=S3_DATA_EVENTS,Status=ENABLED
+```
+
+## Macie 와의 관계
+
+- **Macie**: S3 데이터 (**무엇**)
+- **GuardDuty**: 활동 (**누가/어떻게**)
+
+병행. Macie 가 발견한 민감 데이터 버킷을 GuardDuty 가 접근 이상으로 감시.
+
+## Inspector 와의 관계
+
+- **Inspector**: 취약점 (알려진 CVE, 설정 문제)
+- **GuardDuty**: 실시간 활동/위협
+
+Inspector 는 정적 (사전), GuardDuty 는 동적 (사후/실시간).
+
+## 실전 사용 사례
+
+### 1. 계정 침해 실시간 감지
+
+- 새 IAM user 대량 생성
+- 이상 지역에서 콘솔 로그인
+- Root 활동
+- Public snapshot 공유
+
+### 2. 컨테이너 위협
+
+EKS Runtime Monitoring:
+- 컨테이너에서 shell 실행
+- privileged pod 생성
+- host filesystem mount
+
+### 3. 데이터 유출 감지
+
+- 대량 S3 다운로드 (평소 대비)
+- 새로운 IP 에서 반복 접근
+- CloudTrail Data Events + GuardDuty
+
+### 4. Malware 감지
+
+- Crypto mining process
+- 알려진 malware family 시그니처
+- C2 서버와의 통신
+
+### 5. 컴플라이언스 (SOC 2, PCI)
+
+지속 위협 감지 증명. Audit Manager 에 evidence 자동 공급.
+
+## 함정
+
+> [!WARNING]
+> **비활성화하면 loss**. GuardDuty 는 활성 상태에서만 감지. 대량 요금 예상돼도 요금 관리 (feature 선택) 가 정답.
+
+> [!CAUTION]
+> **False positive 정기 튜닝**. Internal scanner, 정기 backup job 등 예외를 suppression rule 로.
+
+> [!WARNING]
+> **Runtime Monitoring 요금 큼**. vCPU 시간당. 모든 EKS/ECS 에 켜지 말고 크리티컬만.
+
+> [!IMPORTANT]
+> **Finding 은 정보, 자동 조치는 별도**. GuardDuty 자체는 alert 만. EventBridge + Lambda 로 자동 mitigation 필요.
+
+> [!CAUTION]
+> **Multi-region**. GuardDuty 는 region-specific. 모든 활성 리전에 활성화 필수.
+
+> [!WARNING]
+> **Finding 30일 보관**. 이후 삭제. 장기 보관은 S3 export.
+
+## 관련 위키
+
+- [[aws-macie|Macie]] - 데이터 민감성 (짝)
+- [[aws-inspector|Inspector]] - 취약점 스캔
+- [[aws-shield|Shield]] - DDoS 방어
+- [[aws-cloudtrail|CloudTrail]] - 활동 로깅 원천
+- [[aws-vpc|VPC]] - Flow Logs 원천
+- [[aws-iam|IAM]] - 관련 credential
+- [[aws-eventbridge|EventBridge]] - 자동 대응
+- [[aws-audit-manager|Audit Manager]] - 감사 증거
+- [[aws-config|Config]] - 리소스 구성 대비
+- [[aws-ecs|ECS]], [[aws-eks|EKS]] - 컨테이너 보호 대상
+- [[aws-lambda|Lambda]] - Lambda protection

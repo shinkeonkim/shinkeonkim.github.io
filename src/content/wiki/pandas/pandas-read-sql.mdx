@@ -1,9 +1,9 @@
 ---
 title: "[Pandas] read_sql / to_sql"
-aliases: ["Pandas read_sql", "Pandas to_sql", "SQL pandas", "pandas DB I/O"]
-tags: [python, pandas, io, sql, database]
+aliases: ["Pandas read_sql", "Pandas to_sql", "SQL pandas", "pandas DB I/O", "pandas 데이터베이스", "pandas SQL 읽기 쓰기"]
+tags: [python, pandas, io, sql, database, sqlalchemy]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "read_sql"
@@ -11,17 +11,44 @@ references:
 
 ## 정의
 
-- **`pd.read_sql(query, con)`** : SQL 결과 → DataFrame
-- **`DataFrame.to_sql(name, con)`** : DataFrame → DB 테이블
+- **`pd.read_sql(query, con)`** : SQL 결과 -> DataFrame
+- **`DataFrame.to_sql(name, con)`** : DataFrame -> DB 테이블
 
 SQLAlchemy 의 connection / engine 객체를 사용. 직접 sqlite3, psycopg2 의 `Connection` 도 가능 (제한적).
+
+## 사용 상황
+
+- **분석 환경**: DB 쿼리 결과를 바로 DataFrame 으로 받아 pandas 분석 시작
+- **ETL 파이프라인**: 가공된 DataFrame 을 DB 에 `to_sql` 로 적재
+- **대용량 처리**: `chunksize` 옵션으로 메모리 부담 없이 스트리밍 처리
+- **데이터 이관**: 테이블 복사, 백업, 변환 후 저장
+
+`pd.read_csv` -> `to_sql` 조합으로 CSV를 DB에 올리거나, 반대로 DB 결과를 CSV로 내려받을 때도 자주 쓰인다.
+
+## DB I/O 흐름 시각화
+
+```mermaid
+flowchart LR
+    DB["Database"] -->|"pd.read_sql()"| DF["DataFrame"]
+    DF -->|"df.to_sql()"| DB
+
+    subgraph "read_sql 흐름"
+        Q["SQL Query"] --> E["SQLAlchemy Engine"]
+        E --> DF
+    end
+
+    subgraph "to_sql 옵션"
+        DF --> OPT["if_exists: replace / append / fail"]
+        OPT --> DB
+    end
+```
 
 ## 의존성
 
 ```bash
 pip install sqlalchemy psycopg2-binary  # PostgreSQL
 pip install sqlalchemy pymysql           # MySQL
-pip install sqlalchemy                    # SQLite (내장 sqlite3)
+pip install sqlalchemy                   # SQLite (내장 sqlite3)
 ```
 
 ## 기본 사용
@@ -44,7 +71,7 @@ df.to_sql('users_backup', engine, if_exists='replace', index=False)
 | `params` | parameterized query 값 |
 | `parse_dates` | 날짜 컬럼 파싱 |
 | `chunksize` | 청크 단위 (generator) |
-| `dtype_backend` | 'numpy_nullable' / 'pyarrow' |
+| `dtype_backend` | `'numpy_nullable'` / `'pyarrow'` |
 
 ### parameterized query (SQL injection 방지)
 
@@ -56,17 +83,18 @@ df = pd.read_sql(
 )
 ```
 
-문자열 포맷 (`f-string`) 대신 반드시 params 사용.
+> [!WARNING]
+> f-string 또는 문자열 포맷으로 직접 값을 주입하면 SQL injection 위험이 있다. 반드시 `params` 를 사용해야 한다.
 
 ## to_sql 옵션
 
 | 옵션 | 의미 |
 |:---|:---|
-| `if_exists` | 'fail' (기본) / 'replace' / 'append' |
-| `index` | DataFrame index 도 저장? (보통 False) |
+| `if_exists` | `'fail'` (기본) / `'replace'` / `'append'` |
+| `index` | DataFrame index 도 저장? (보통 `False`) |
 | `dtype` | SQLAlchemy 타입 명시 |
 | `chunksize` | 청크 단위 INSERT |
-| `method` | 'multi' (한 INSERT 에 여러 row), psycopg2 의 `psql_insert_copy` |
+| `method` | `'multi'` (한 INSERT 에 여러 row), psycopg2 의 `psql_insert_copy` |
 
 ### 빠른 대량 삽입
 
@@ -107,7 +135,7 @@ for chunk in pd.read_sql('SELECT * FROM huge_table', engine, chunksize=50_000):
 
 수백만 행도 메모리 부담 없이.
 
-## SQLAlchemy 2.0 + 의 변화
+## SQLAlchemy 2.0+ 의 변화
 
 ```python
 # pandas 2.0+ 와 SA 2.0+
@@ -118,6 +146,102 @@ with engine.connect() as conn:
 
 문자열 대신 `text(...)` 권장.
 
+## 실전 패턴
+
+### 조건부 적재 (upsert 대체)
+
+```python
+import pandas as pd
+from sqlalchemy import create_engine
+
+engine = create_engine('sqlite:///example.db')
+df_new = pd.DataFrame({'id': [1, 2, 3], 'value': [10, 20, 30]})
+
+# 기존 테이블 삭제 후 재적재 (소규모)
+df_new.to_sql('my_table', engine, if_exists='replace', index=False)
+
+# 증분 추가 (대규모)
+df_new.to_sql('my_table', engine, if_exists='append', index=False)
+```
+
+### dtype 명시로 안전한 스키마 보장
+
+```python
+from sqlalchemy import types as sa_types
+
+dtype_map = {
+    'user_id': sa_types.Integer(),
+    'created_at': sa_types.DateTime(),
+    'amount': sa_types.Numeric(10, 2),
+    'name': sa_types.String(255),
+}
+
+df.to_sql('events', engine, if_exists='replace',
+    index=False, dtype=dtype_map)
+```
+
+### 청크 + 집계 패턴
+
+```python
+from sqlalchemy import create_engine, text
+import pandas as pd
+
+engine = create_engine('postgresql://user:pwd@host:5432/db')
+
+results = []
+query = text('SELECT date, region, amount FROM sales WHERE year = :y')
+
+with engine.connect() as conn:
+    for chunk in pd.read_sql(query, conn, chunksize=100_000,
+                             params={'y': 2025}):
+        agg = chunk.groupby(['date', 'region'])['amount'].sum()
+        results.append(agg)
+
+final = pd.concat(results).groupby(level=[0, 1]).sum()
+```
+
+### read_sql + parse_dates
+
+```python
+df = pd.read_sql(
+    'SELECT id, created_at, amount FROM orders',
+    engine,
+    parse_dates=['created_at'],
+)
+# created_at 이 datetime64 로 자동 변환
+df['month'] = df['created_at'].dt.to_period('M')
+```
+
+### pyarrow backend 로 성능 향상
+
+```python
+# pandas 2.x: pyarrow backend 사용
+df = pd.read_sql(
+    'SELECT * FROM large_table',
+    engine,
+    dtype_backend='pyarrow',
+)
+# 메모리 효율적, nullable 타입 지원
+```
+
+## 성능 비교
+
+| 방법 | 속도 | 비고 |
+|:---|:---:|:---|
+| `to_sql` 기본 | 느림 | row-by-row INSERT |
+| `to_sql(method='multi')` | 보통 | 한 번에 여러 row INSERT |
+| `to_sql(chunksize=N, method='multi')` | 빠름 | 청크 단위 multi-row INSERT |
+| PostgreSQL `COPY` (psql_insert_copy) | 매우 빠름 | 10-100x 빠름 |
+| `read_sql(chunksize=N)` | 메모리 효율 | generator, 합계/필터 스트리밍 |
+
+```python
+# 속도 비교 (예시)
+# 1M 행 기준:
+# 기본 to_sql: ~60초
+# method='multi' chunksize=10000: ~10초
+# COPY: ~2초
+```
+
 ## 함정
 
 ### 1. SQL injection
@@ -126,7 +250,11 @@ with engine.connect() as conn:
 # ❌ 위험
 df = pd.read_sql(f"SELECT * FROM t WHERE id = {user_input}", engine)
 # ✓ 안전
-df = pd.read_sql("SELECT * FROM t WHERE id = %(id)s", engine, params={'id': user_input})
+df = pd.read_sql(
+    "SELECT * FROM t WHERE id = %(id)s",
+    engine,
+    params={'id': user_input}
+)
 ```
 
 ### 2. to_sql 의 속도
@@ -135,10 +263,10 @@ df = pd.read_sql("SELECT * FROM t WHERE id = %(id)s", engine, params={'id': user
 
 ### 3. dtype mapping
 
-- `int64` (pandas) → BIGINT (SQL)
-- `object` (str) → TEXT
-- pandas datetime → TIMESTAMP
-- 명시적 `dtype={'col': sa.types.Integer}` 권장
+- `int64` (pandas) -> BIGINT (SQL)
+- `object` (str) -> TEXT
+- pandas datetime -> TIMESTAMP
+- 명시적 `dtype={'col': sa.types.Integer()}` 권장
 
 ### 4. timezone 처리
 
@@ -147,8 +275,25 @@ df = pd.read_sql("SELECT * FROM t WHERE id = %(id)s", engine, params={'id': user
 df['ts'] = df['ts'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul')
 ```
 
-## 참고
+### 5. SQLAlchemy 2.x 호환성
+
+> [!IMPORTANT]
+> SQLAlchemy 2.x 에서 `engine.execute()` 가 제거됐다. pandas 2.x 와 SA 2.x 사용 시 반드시 `with engine.connect() as conn:` 패턴으로 쿼리를 전달해야 한다.
+
+```python
+# ❌ SA 1.x 스타일 (deprecated)
+df = pd.read_sql('SELECT ...', engine)
+
+# ✓ SA 2.x 스타일
+from sqlalchemy import text
+with engine.connect() as conn:
+    df = pd.read_sql(text('SELECT ...'), conn)
+```
+
+## 관련 위키
 
 - [[Pandas read_csv]]
 - [[Pandas read_excel]]
 - [[Pandas read_parquet]]
+- [[Pandas DataFrame]]
+- [[Pandas 성능 / 메모리 최적화]]

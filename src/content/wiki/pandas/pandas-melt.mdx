@@ -3,7 +3,7 @@ title: "[Pandas] melt"
 aliases: ["Pandas melt", "DataFrame.melt", "pd.melt", "wide-to-long"]
 tags: [python, pandas, reshape, melt]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "melt"
@@ -13,7 +13,38 @@ references:
 
 **`DataFrame.melt()`** 는 [[Pandas pivot]] 의 역방향. **wide-format → long-format** 변환. 여러 컬럼을 두 컬럼 (`variable`, `value`) 으로 합친다.
 
-장기간 시계열 데이터나 시각화 (ggplot, seaborn) 입력에 적합.
+장기간 시계열 데이터나 시각화 라이브러리 (seaborn, plotly) 입력에 적합하다.
+
+## 사용 상황
+
+| 상황 | 적합 여부 | 비고 |
+|:---|:---:|:---|
+| seaborn / plotly 에 hue 그룹 필요 | ✅ | long format 이 표준 |
+| tidy data 변환 | ✅ | 분석 파이프라인 표준 |
+| 여러 기간 컬럼을 하나로 | ✅ | `2020, 2021, 2022` 컬럼 → `year, value` |
+| 설문 문항별 응답 집계 | ✅ | `q1, q2, q3` → `question, answer` |
+| pivot 의 역방향 복원 | ✅ | `pivot()` 결과 되돌리기 |
+| 이미 long format 인 데이터 | ❌ | 불필요 |
+
+## wide vs long 구조
+
+```mermaid
+flowchart LR
+    WIDE["wide format\n과목별 별도 컬럼"]
+    LONG["long format\nsubject + score 컬럼"]
+    WIDE -->|"melt()"| LONG
+    LONG -->|"pivot()"| WIDE
+```
+
+| wide | name | math | english | science |
+|---|---|---|---|---|
+| 행 수 | 2 | - | - | - |
+
+| long | name | subject | score |
+|---|---|---|---|
+| 행 수 | 6 | - | - |
+
+행 수가 컬럼 수 × 원본 행 수 로 늘어난다.
 
 ## 시각화
 
@@ -64,99 +95,211 @@ print(melted)`}
 
 ## 파라미터
 
-| 파라미터 | 의미 |
-|:---|:---|
-| `id_vars` | 유지할 컬럼 (key) |
-| `value_vars` | melt 할 컬럼 (생략 시 id_vars 외 모두) |
-| `var_name` | melt 된 컬럼 이름 (기본 'variable') |
-| `value_name` | 값 컬럼 이름 (기본 'value') |
-| `ignore_index` | True (기본) 면 새 index, False 면 원본 유지 |
+| 파라미터 | 의미 | 기본값 |
+|:---|:---|:---|
+| `id_vars` | 유지할 컬럼 (key 역할) | - |
+| `value_vars` | melt 할 컬럼 (생략 시 id_vars 외 모두) | 모두 |
+| `var_name` | melt 된 컬럼명 | `'variable'` |
+| `value_name` | 값 컬럼명 | `'value'` |
+| `ignore_index` | True 면 새 index, False 면 원본 유지 | `True` |
 
 ## 일부 컬럼만 melt
 
 ```python
 df.melt(
     id_vars=['name', 'grade'],
-    value_vars=['math', 'english'],
+    value_vars=['math', 'english'],   # science 는 제외
     var_name='subject',
     value_name='score',
 )
-# science 는 빠짐
 ```
 
 ## 시각화 라이브러리와의 궁합
 
 ```python
 import seaborn as sns
+
 melted = df.melt(id_vars='name', var_name='subject', value_name='score')
 sns.barplot(data=melted, x='subject', y='score', hue='name')
-# long format 이라 seaborn 이 쉽게 그룹화
+# long format 이라 seaborn 이 자동으로 그룹화
+```
+
+plotly 에서도 동일하게 long format 을 기대한다:
+
+```python
+import plotly.express as px
+
+melted = df.melt(id_vars='name', var_name='subject', value_name='score')
+fig = px.bar(melted, x='subject', y='score', color='name', barmode='group')
+fig.show()
 ```
 
 ## pivot 과의 역관계
 
 ```python
+import pandas as pd
+
+wide = pd.DataFrame({
+    'name': ['Alice', 'Bob'],
+    'math': [90, 80],
+    'english': [85, 75],
+})
+
 # wide → long
-melted = df.melt(id_vars='name', var_name='subject', value_name='score')
+long = wide.melt(id_vars='name', var_name='subject', value_name='score')
 
 # long → wide (원래대로)
-wide = melted.pivot(index='name', columns='subject', values='score')
+recovered = long.pivot(index='name', columns='subject', values='score')
+recovered.columns.name = None   # 컬럼 이름 제거
+recovered = recovered.reset_index()
+```
+
+## pd.wide_to_long 대안
+
+컬럼명에 숫자 suffix 가 있을 때 더 간결하다.
+
+```python
+# 컬럼: sales_2020, sales_2021, cost_2020, cost_2021
+pd.wide_to_long(df, stubnames=['sales', 'cost'], i='company', j='year', sep='_')
+# melt 보다 컬럼 분리가 자동화됨
 ```
 
 ## stack 과 비교
 
 ```python
-# 비슷한 결과지만 구조가 다름
+# melt 결과: 컬럼화 (subject, score 두 컬럼)
+df.melt(id_vars='name', var_name='subject', value_name='score')
+
+# stack 결과: MultiIndex Series
 df.set_index('name').stack()
-# MultiIndex Series (name, subject) → value
+# MultiIndex (name, subject) → value
 ```
 
-`melt` 는 결과를 **컬럼화** 한다 (`subject`, `score` 컬럼). `stack` 은 **MultiIndex 화**.
+| 항목 | `melt()` | `stack()` |
+|:---|:---|:---|
+| 결과 구조 | DataFrame (컬럼화) | Series (MultiIndex) |
+| id_vars 처리 | 명시적으로 지정 | index 로 설정 필요 |
+| 시각화 라이브러리 | 바로 사용 가능 | reset_index 필요 |
 
 ## 자주 만나는 패턴
 
-### 1. 와이드 데이터를 long 으로 → 시계열 차트
+### 1. 연도별 와이드 데이터 → 시계열 차트
 
 ```python
 df = pd.DataFrame({
-    'date': ['2024-01', '2024-02'],
-    'product_a': [100, 110],
-    'product_b': [200, 220],
+    'company': ['A사', 'B사'],
+    '2022': [1000, 800],
+    '2023': [1200, 850],
+    '2024': [1400, 900],
 })
-df.melt(id_vars='date', var_name='product', value_name='sales')
+long = df.melt(id_vars='company', var_name='year', value_name='revenue')
+# year 컬럼을 int 로 변환
+long['year'] = long['year'].astype(int)
 ```
 
 ### 2. 설문 응답 데이터
 
 ```python
-# 컬럼이 question1, question2, ... 인 경우
-survey.melt(id_vars=['respondent_id'], var_name='question', value_name='answer')
+# 컬럼: respondent_id, q1, q2, q3, q4
+survey.melt(
+    id_vars=['respondent_id', 'age', 'gender'],
+    var_name='question',
+    value_name='answer'
+)
 ```
+
+### 3. A/B 테스트 지표 long format 변환
+
+```python
+ab = pd.DataFrame({
+    'user_id': ['u1', 'u2'],
+    'control_conv': [0.12, 0.15],
+    'treatment_conv': [0.14, 0.18],
+})
+ab_long = ab.melt(
+    id_vars='user_id',
+    value_vars=['control_conv', 'treatment_conv'],
+    var_name='group',
+    value_name='conversion_rate'
+)
+```
+
+### 4. groupby 후 집계
+
+```python
+# 과목별 평균 점수
+melted.groupby('subject')['score'].agg(['mean', 'std', 'count'])
+```
+
+## 성능
+
+```python
+import pandas as pd
+import numpy as np
+
+# 1,000 행 × 20 컬럼 melt → 20,000 행
+df = pd.DataFrame(
+    np.random.randn(1_000, 20),
+    columns=[f'col{i}' for i in range(20)]
+)
+df.insert(0, 'id', range(1_000))
+
+long = df.melt(id_vars='id', var_name='feature', value_name='value')
+# 결과: 20,000 행 × 3 컬럼
+print(long.shape)   # (20000, 3)
+```
+
+| 입력 크기 | melt 시간 | 결과 행 수 |
+|:---|:---:|:---|
+| 1,000 × 10 | ~0.001s | 10,000 |
+| 10,000 × 20 | ~0.01s | 200,000 |
+| 100,000 × 50 | ~0.5s | 5,000,000 |
+
+대용량 데이터에서 melt 후 분석은 메모리 주의. 가능하면 필요한 컬럼만 `value_vars` 로 지정한다.
+
+> [!WARNING]
+> 100,000 행 × 100 컬럼 melt = 10,000,000 행. 메모리 부족이 날 수 있다. `value_vars` 로 필요한 컬럼만 선택해서 melt 하라.
 
 ## 함정
 
 ### 1. value_vars 안 주면 모든 비-id 컬럼 melt
 
 ```python
-df.melt(id_vars='name')   # math, english, science 모두 melt
+df.melt(id_vars='name')   # math, english, science, timestamp 모두 melt
 ```
 
-원치 않은 컬럼 (예: timestamp) 도 묶일 수 있다.
+원치 않은 컬럼 (예: timestamp, 내부 key) 도 묶일 수 있다.
 
 ### 2. 결과 행 수 폭증
 
 ```python
-# 1000 행 × 10 melt 컬럼 = 10,000 행
+# 1,000 행 × 10 melt 컬럼 = 10,000 행
 ```
 
 큰 데이터에서 melt 후 분석은 메모리 주의.
 
 ### 3. var_name 의 default 가 'variable'
 
-명시적으로 이름 주는 것이 가독성에 좋다.
+```python
+df.melt(id_vars='name')          # 컬럼명: 'variable', 'value' (불명확)
+df.melt(id_vars='name',
+        var_name='subject',
+        value_name='score')       # 명시적 이름 권장
+```
 
-## 참고
+### 4. 컬럼 타입 혼합 시 value 컬럼 dtype
+
+```python
+# int 컬럼과 str 컬럼이 섞이면 value 가 object 로 업캐스팅
+df.melt(id_vars='name')   # value 컬럼이 object dtype
+```
+
+타입이 일관된 컬럼끼리만 melt 하거나, melt 후 타입 변환을 한다.
+
+## 관련 위키
 
 - [[Pandas pivot]]
 - [[Pandas pivot_table]]
-- [[Pandas stack-unstack]]
+- [[Pandas stack / unstack]]
+- [[Pandas groupby]]
+- [[Pandas agg]]

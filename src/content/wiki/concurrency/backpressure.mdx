@@ -178,10 +178,102 @@ flowchart LR
 > 3. **Backpressure *전파 안 됨*** = 한 계층만 잡고 *위*에서 압박 지속. cascade fail.
 > 4. **Pull-based 의 *너무 큰 request(N)*** = 사실상 push 와 같음. *적절한 batch size*.
 
+## Java: Reactive Streams API 구현
+
+Project Reactor (Spring WebFlux 기반) 를 사용한 pull-based backpressure 예시:
+
+```java
+Flux<String> upstream = Flux.generate(sink -> sink.next(fetchNextItem()));
+
+upstream
+    .onBackpressureBuffer(1000)           // bounded buffer
+    .publishOn(Schedulers.boundedElastic())
+    .subscribe(new BaseSubscriber<String>() {
+        @Override
+        protected void hookOnSubscribe(Subscription subscription) {
+            request(50);  // 최초 50개 요청
+        }
+
+        @Override
+        protected void hookOnNext(String value) {
+            process(value);
+            request(1);   // 처리 완료 후 1개씩 추가 요청
+        }
+    });
+```
+
+`onBackpressureBuffer` / `onBackpressureDrop` / `onBackpressureLatest` 로 정책 선택:
+
+| 연산자 | 전략 | 사용 시나리오 |
+|---|---|---|
+| `onBackpressureBuffer(n)` | Bounded buffer | 순간 burst 허용, OOM 방지 |
+| `onBackpressureDrop()` | Drop newest | 실시간 센서 데이터, 손실 OK |
+| `onBackpressureLatest()` | Keep latest only | UI 화면 갱신, 최신값만 유의미 |
+| `onBackpressureError()` | 즉시 오류 | 손실 불허 파이프라인 |
+
+자세히는 [[spring-webflux]] 참고.
+
+## Kafka Producer 설정
+
+Kafka 에서 producer 의 backpressure 는 `max.block.ms` 와 `buffer.memory` 로 제어한다.
+
+```properties
+# Producer 설정
+buffer.memory=33554432        # 총 버퍼 크기 (32 MB)
+max.block.ms=60000            # 버퍼가 가득 찼을 때 block 최대 시간
+batch.size=16384              # batch 크기
+linger.ms=5                   # 배치 대기 시간
+```
+
+버퍼가 가득 차면 `KafkaProducer.send()` 가 `max.block.ms` 동안 blocking. 그래도 공간이 안 나면 `TimeoutException`. 이것이 Kafka producer 레벨의 backpressure. Consumer lag 기반 스케일링은 [[kafka-consumer-group]] 참고.
+
+## Resilience4j 와의 연계
+
+Backpressure 는 단독으로 사용하기보다 circuit breaker, rate limiter 와 조합한다.
+
+```mermaid
+flowchart LR
+    Client["클라이언트 요청"] --> RL["Rate Limiter\n초당 N건 제한"]
+    RL --> CB["Circuit Breaker\n실패율 임계 초과 시 차단"]
+    CB --> BP["Bulkhead\n동시 실행 수 제한"]
+    BP --> Svc["Service"]
+    Svc -.실패.-> CB
+    CB -.open.-> FBK["Fallback 응답"]
+```
+
+`Resilience4j` 에서 셋을 조합한 예시:
+
+```java
+Supplier<String> decorated = Decorators.ofSupplier(() -> remoteService.call())
+    .withRateLimiter(rateLimiter)
+    .withCircuitBreaker(circuitBreaker)
+    .withBulkhead(bulkhead)
+    .decorate();
+```
+
+[[circuit-breaker]] 와 [[rate-limiting]] 함께 설계해야 실질적인 cascade failure 방지가 된다.
+
+## 관찰 가능성 (Observability)
+
+Backpressure 가 발동하고 있는지 모르면 운영 중에 발견하지 못한다. 필수 메트릭:
+
+| 메트릭 | 설명 | 경보 기준 |
+|---|---|---|
+| `queue.size` / `buffer.used` | 현재 버퍼 점유율 | > 80% |
+| `drop.rate` | 초당 드롭된 메시지 수 | > 0 (손실 불허 시) |
+| `block.time` | producer block 시간 | > SLO 임계 |
+| `consumer.lag` | Kafka consumer lag | 지속 증가 |
+| `http.server.requests` + 429/503 비율 | HTTP 레이어 shed 비율 | 급증 시 알람 |
+
+Micrometer + Prometheus + Grafana 스택으로 위 메트릭을 시각화하면 backpressure 발동 시점과 원인을 즉시 파악할 수 있다.
+
 ## 관련 위키
 
 - [[connection-pool]]
 - [[circuit-breaker]]
 - [[rate-limiting]]
-- [[Kafka Consumer Group]] (lag 기반 scaling)
-- [[HTTP/2]] (flow control)
+- [[retry-with-backoff]]
+- [[spring-webflux]]
+- [[kafka-consumer-group]] (lag 기반 scaling)
+- [[http-2]] (flow control)
+- [[tcp]] (TCP sliding window)

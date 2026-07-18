@@ -181,6 +181,72 @@ python -m vllm.entrypoints.openai.api_server \
 | GPT-4o-mini (API) | 우수 | 200ms (API) | 일반 |
 | Gemini Flash 2.0 (API) | 우수 | 250ms (API) | 일반 |
 
+## Speculative Decoding
+
+작은 **draft model** 이 여러 토큰을 연속 생성하고, 큰 **target model** 이 한 번의 forward pass 로 전부 검증. 드래프트가 맞으면 한 번에 여러 토큰 확보, 틀리면 target 이 재생성.
+
+```mermaid
+flowchart LR
+    D["Draft model (소형)"] -->|"토큰 N개 예측"| V["Target model (대형)"]
+    V -->|"k개 수락"| OUT[출력]
+    V -->|"k+1번째 거절: 재생성"| D
+```
+
+| 항목 | 값 |
+|---|---|
+| 적합한 draft 크기 | target 파라미터의 10-20% |
+| 평균 수용률 | 60-85% |
+| decode 속도 향상 | 2-3x |
+| TTFT 영향 | 없음 (prefill 미변경) |
+
+vLLM 옵션: `--num-speculative-tokens 5 --speculative-model /path/to/draft`
+
+> draft 와 target 의 **tokenizer 가 반드시 동일**해야 함. 다르면 token ID mismatch.
+
+## Docker 배포
+
+```bash
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:latest \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --max-model-len 8192 \
+    --enable-prefix-caching \
+    --gpu-memory-utilization 0.9
+```
+
+multi-GPU (tensor parallel):
+
+```bash
+docker run --runtime nvidia --gpus all \
+    -p 8000:8000 --ipc=host \
+    vllm/vllm-openai:latest \
+    --model meta-llama/Llama-3.1-70B-Instruct \
+    --tensor-parallel-size 4
+```
+
+## 운영 지표
+
+```mermaid
+flowchart LR
+    vLLM["vLLM /metrics"] -->|scrape| Prom[Prometheus]
+    Prom --> Graf[Grafana]
+    Graf -->|"TTFT p99 대시보드"| Dashboard[대시보드]
+    Graf -->|"임계값 초과시"| Alert[알림]
+```
+
+| 지표 | 의미 | 경보 기준 |
+|---|---|---|
+| `vllm:time_to_first_token_seconds` | TTFT | p99 > 500ms |
+| `vllm:e2e_request_latency_seconds` | 전체 지연 | p99 > 3s |
+| `vllm:num_requests_running` | 처리 중 요청 수 | > max batch size |
+| `vllm:num_requests_waiting` | 대기 큐 | > 50 |
+| `vllm:gpu_cache_usage_perc` | KV cache 점유율 | > 90% |
+
+`--disable-log-requests` 플래그로 액세스 로그 비활성화. Prometheus 스크레이프는 `/metrics` 엔드포인트.
+
 ## 흔한 함정
 
 > [!WARNING]

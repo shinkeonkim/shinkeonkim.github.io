@@ -184,6 +184,100 @@ with grpc.secure_channel('clovaspeech-gw.ncloud.com:443', creds) as channel:
 > 4. **WebSocket idle timeout** = 침묵 시 connection close. ping/pong 주기적.
 > 5. **언어 자동 감지** = 짧은 발화 / 다국어 혼용 시 깨짐. *명시*.
 
+## 오디오 포맷
+
+| 항목 | 권장 | 이유 |
+|---|---|---|
+| Sample rate | 16,000 Hz | ASR 모델 학습 표준 |
+| Bit depth | 16-bit Linear PCM | 무손실, 변환 오버헤드 없음 |
+| Channels | 1 (mono) | 스테레오는 다운믹스 후 전송 |
+| Chunk 크기 | 100-200ms | partial 응답 주기와 균형 |
+| Codec | Raw PCM 또는 Opus | Opus 는 대역폭 절약 (WebRTC 표준) |
+
+```python
+# Web Audio API Float32 -> Linear PCM 16-bit 변환
+import numpy as np
+
+def float32_to_int16(audio: np.ndarray) -> bytes:
+    clipped = np.clip(audio, -1.0, 1.0)
+    return (clipped * 32767).astype(np.int16).tobytes()
+```
+
+## 연결 안정성
+
+스트리밍은 수 분~수 시간 연결 유지가 필요. 네트워크 상태에 따라 끊길 수 있음.
+
+### KeepAlive (WebSocket)
+
+```javascript
+// Deepgram: 10초마다 KeepAlive 메시지 전송, 침묵 시 연결 종료 방지
+let backoff = 1000;
+const keepAlive = setInterval(() => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'KeepAlive' }));
+  }
+}, 10_000);
+
+ws.onclose = () => {
+  clearInterval(keepAlive);
+  setTimeout(connect, Math.min(backoff * 2, 30_000)); // exponential backoff
+};
+```
+
+### gRPC Keepalive (Python)
+
+```python
+channel_options = [
+    ('grpc.keepalive_time_ms', 15_000),
+    ('grpc.keepalive_timeout_ms', 5_000),
+    ('grpc.keepalive_permit_without_calls', True),
+]
+channel = grpc.secure_channel(host, creds, options=channel_options)
+```
+
+## 화자 분리 (Diarization)
+
+여러 화자가 동시에 등장하는 환경 (회의, 콜센터) 에서 화자별 전사 필요.
+
+```javascript
+// Deepgram diarize=true 예시
+const ws = new WebSocket(
+  'wss://api.deepgram.com/v1/listen?diarize=true&model=nova-3&language=ko'
+);
+
+ws.onmessage = (e) => {
+  const { is_final, channel } = JSON.parse(e.data);
+  if (is_final) {
+    const words = channel.alternatives[0].words;
+    words.forEach(w => {
+      console.log(`[Speaker ${w.speaker}] ${w.word}`);
+    });
+  }
+};
+```
+
+| 상황 | 권장 |
+|---|---|
+| 사용자:AI 1:1 대화 | diarization 불필요 |
+| 회의 전사 | diarize=true + 화자 수 힌트 |
+| 콜센터 | 채널 분리 후 각 채널 별도 전사 |
+
+## 음성 에이전트 통합 아키텍처
+
+```mermaid
+flowchart TD
+    MIC["마이크 / 전화"] --> VAD["VAD (Silero)"]
+    VAD -->|"음성 구간 감지"| STT["STT 엔진"]
+    STT -->|partial| UI["UI 라이브 자막"]
+    STT -->|final| EP["Endpointing 모듈"]
+    EP -->|"발화 완료"| LLM["LLM"]
+    LLM -->|"응답 텍스트"| TTS["TTS 스트리밍"]
+    TTS --> SPK["스피커 / 전화"]
+    LLM -->|"barge-in 신호"| VAD
+```
+
+> partial 이 들어오는 동안 *barge-in* 감지 시 TTS 중단 + VAD 재활성화.
+
 ## 관련 위키
 
 - [[stt-models-overview]]

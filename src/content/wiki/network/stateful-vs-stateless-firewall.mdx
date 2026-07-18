@@ -1,0 +1,310 @@
+---
+title: "Stateful vs Stateless Firewall"
+aliases:
+  - "Stateful Firewall"
+  - "Stateless Firewall"
+  - "상태 저장 방화벽"
+  - "상태 비저장 방화벽"
+  - "connection tracking"
+  - "conntrack"
+  - "AWS SG vs NACL"
+tags: [network, security, firewall, packet-filtering, aws]
+category: network
+updated: 2026-07-07
+references:
+  - title: "AWS Security Groups vs NACLs"
+    url: "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html"
+  - title: "Linux Netfilter Conntrack"
+    url: "https://conntrack-tools.netfilter.org/"
+  - title: "RFC 793 TCP"
+    url: "https://datatracker.ietf.org/doc/html/rfc793"
+---
+
+## 정의
+
+**방화벽 (Firewall)** 은 네트워크 트래픽을 정책에 따라 허용/차단 하는 보안 장치. 상태 관리 방식으로 두 유형이 있습니다.
+
+- **Stateless (상태 비저장)**: 각 패킷을 **독립적** 으로 검사. 이전 패킷과 관계 없음.
+- **Stateful (상태 저장)**: **연결 (connection) 상태를 추적** 하여 관련 패킷을 인식.
+
+이 차이가 AWS VPC 의 **Security Group (stateful)** 과 **Network ACL (stateless)** 의 근본입니다.
+
+## 왜 상태 추적이 문제인가
+
+### TCP 통신은 양방향
+
+TCP 연결은 **3-way handshake** 이후 양방향 데이터 흐름:
+
+```
+Client (192.168.1.10:54321)                Server (10.0.0.5:443)
+       ─────── SYN ───────>
+       <──── SYN+ACK ─────
+       ─────── ACK ───────>
+       ─────── HTTP GET ─>
+       <──── HTTP 200 ────
+       ─────── FIN ───────>
+       <────── FIN ────────
+```
+
+방화벽 규칙 관점:
+- **Outbound (client → server)**: `dst 10.0.0.5:443 tcp`
+- **Inbound (server → client)**: `src 10.0.0.5:443 tcp` (응답)
+
+## Stateless Firewall
+
+**각 패킷을 규칙과 매칭**. 연결 개념 없음.
+
+### 특징
+
+- **양방향 규칙 명시 필수**: outbound 뿐 아니라 return traffic 도 별도 허용
+- **간단, 빠름**: 상태 테이블 없어 리소스 적음
+- **에페메랄 포트** 문제: 클라이언트 소스 포트가 랜덤 (32768-65535) 이라 방화벽이 예측 불가
+
+### 규칙 예시 (stateless)
+
+Client 가 `dst port 443` 으로 웹서핑 하려면:
+
+```
+Outbound:  ALLOW  proto=TCP  src=any:any  dst=any:443
+Inbound:   ALLOW  proto=TCP  src=any:443  dst=any:1024-65535   ← 응답 허용 별도
+```
+
+**Inbound 규칙 없으면** 웹 응답이 방화벽에 막힘. Stateless 는 대칭 규칙 필수.
+
+### 순서 & 우선순위
+
+Stateless 는 대개 **번호 기반 순서 매칭**. 첫 매칭 규칙이 적용:
+
+```
+100: ALLOW  tcp  src=any  dst=443
+110: ALLOW  tcp  src=443  dst=1024-65535
+120: DENY   tcp  src=any  dst=any                ← 남은 모두 차단
+```
+
+## Stateful Firewall
+
+**연결 테이블 (state table / conntrack)** 유지. 첫 패킷의 outbound 규칙이 통과하면 **관련 return traffic 은 자동 허용**.
+
+### 특징
+
+- **한 방향만 규칙 정의**: return 은 자동
+- **연결 추적**: TCP handshake, 진행 상태 인지
+- **UDP 유사 처리**: "요청/응답" 쌍을 시간 window 로 추적
+- **ICMP 도 매칭**: request/reply
+- **리소스 사용**: 연결당 상태 테이블 엔트리
+
+### 규칙 예시 (stateful)
+
+같은 웹 브라우징:
+
+```
+Outbound:  ALLOW  proto=TCP  dst=any:443
+```
+
+**Inbound 규칙 불필요**. 방화벽이 outbound 시 연결 등록 -> return 자동 인식.
+
+### Connection Tracking 상태
+
+Linux netfilter conntrack 이 관리하는 상태:
+
+- **NEW**: 첫 패킷 (SYN)
+- **ESTABLISHED**: 3-way handshake 완료, 데이터 전송 중
+- **RELATED**: 기존 연결의 파생 (FTP data 등)
+- **INVALID**: 알 수 없는 상태
+- **UNTRACKED**: 추적 안 함
+
+방화벽 규칙에서 `state ESTABLISHED,RELATED` 는 자동 허용의 근간.
+
+## Stateful vs Stateless 비교
+
+| 특성 | Stateless | Stateful |
+|:---|:---|:---|
+| **연결 인식** | X | O |
+| **양방향 규칙** | 명시 필요 | 자동 |
+| **에페메랄 포트** | 별도 처리 | 자동 |
+| **메모리 사용** | 낮음 | 연결당 |
+| **성능** | 빠름 | 상태 테이블 조회 |
+| **DDoS 저항** | 강함 (상태 소진 안 됨) | 상태 테이블 소진 가능 |
+| **관리 편의** | 규칙 많고 복잡 | 규칙 적고 명확 |
+| **디버깅** | 규칙 매칭 만 | 상태 + 규칙 |
+
+## AWS VPC 의 두 계층
+
+VPC 는 **두 방화벽 계층** 을 정의:
+
+### Security Group (SG) - Stateful
+
+- **인스턴스 (ENI) 단위**
+- **화이트리스트 (allow only)**: 명시 허용, 나머지 deny
+- **Stateful**: 응답 자동 허용
+- **인바운드 + 아웃바운드 규칙**
+- 기본: 모든 outbound 허용, 모든 inbound 차단
+- 여러 SG 를 한 ENI 에 붙일 수 있음 (union)
+
+### Network ACL (NACL) - Stateless
+
+- **서브넷 단위**
+- **allow / deny 둘 다** (블랙리스트 가능)
+- **Stateless**: 응답도 명시 규칙 필요
+- **번호 순서 매칭** (낮은 번호 우선)
+- 기본 NACL: all in/out 허용. Custom NACL: 기본 all deny.
+
+## SG vs NACL 상세 비교
+
+| 특성 | Security Group | Network ACL |
+|:---|:---|:---|
+| **범위** | ENI (인스턴스) | 서브넷 |
+| **상태** | Stateful | Stateless |
+| **규칙 유형** | Allow only | Allow + Deny |
+| **평가 순서** | 모든 규칙 (union) | 번호 순 (첫 매칭) |
+| **기본 정책** | Deny (in), Allow (out) | (Default NACL) Allow all |
+| **적용** | 인스턴스 시작 시 or 연결 | 자동 (서브넷) |
+| **개수 제한** | ENI 당 5 SG (기본) | 서브넷 당 1 NACL |
+| **규칙 개수** | SG 당 60 (기본) | NACL 당 20 (기본) |
+| **참조** | 다른 SG 참조 가능 | IP CIDR 만 |
+| **로깅** | VPC Flow Logs (간접) | 마찬가지 |
+
+## Stateful/Stateless 실전 시나리오
+
+### 시나리오 1: 웹 서버가 인터넷에서 요청 받기
+
+**Security Group (stateful)**:
+
+```
+Inbound:   ALLOW  TCP 80,443  from 0.0.0.0/0
+Outbound:  ALLOW  ALL         to   0.0.0.0/0   (기본)
+```
+
+응답 자동 허용. 끝.
+
+**Network ACL (stateless)**:
+
+```
+Inbound:   100 ALLOW  TCP 80,443       from 0.0.0.0/0
+           110 ALLOW  TCP 1024-65535   from 0.0.0.0/0   ← 서버 -> 클라 응답 (예:패키지 다운로드) 인바운드
+Outbound:  100 ALLOW  TCP 80,443       to   0.0.0.0/0   (server-side 응답)
+
+Actually with servers, the pattern is:
+Inbound:   100 ALLOW  TCP 80,443       from 0.0.0.0/0    (client → server 요청)
+           110 ALLOW  TCP 1024-65535   from 0.0.0.0/0    (server → client 응답의 대칭 트래픽 아님)
+Outbound:  100 ALLOW  TCP 1024-65535   to   0.0.0.0/0    (server → client 응답, 에페메랄 dst)
+           110 ALLOW  TCP 80,443       to   0.0.0.0/0    (서버가 outbound 요청 시)
+```
+
+Stateless 는 응답까지 명시 필요 = **에페메랄 포트 범위 허용** 필수.
+
+### 시나리오 2: 서버가 외부 API 호출
+
+Server (10.0.1.5) → api.example.com:443
+
+**Security Group** (stateful): outbound `TCP 443` 만.
+**NACL**: outbound `TCP 443` + inbound `TCP 1024-65535` (에페메랄).
+
+### 시나리오 3: DDoS 방어
+
+- **Stateless NACL**: 알려진 악의 IP 블랙리스트 (Deny 규칙). SG 는 deny 없음.
+- **Stateful SG**: 정상 트래픽 허용, 나머지 차단.
+
+두 계층 병행.
+
+## Defense in Depth (심층 방어)
+
+VPC 는 두 방화벽 계층 + 추가:
+
+```
+Internet
+  ↓
+[AWS WAF / Shield]              ← Layer 7 / DDoS
+  ↓
+[Route 53 / CloudFront]         ← DNS / Edge
+  ↓
+[Application Load Balancer]     ← LB SG
+  ↓
+[NACL (Subnet)]                 ← Layer 3/4 stateless
+  ↓
+[Security Group (ENI)]          ← Layer 3/4 stateful
+  ↓
+[Host firewall (iptables)]      ← OS 수준
+  ↓
+[Application-level auth]        ← 앱 인증
+```
+
+각 계층은 독립. 한 계층 실패해도 다른 계층 방어.
+
+## 다른 방화벽 예
+
+### Stateless
+
+- **AWS NACL**
+- **iptables INPUT chain without conntrack**
+- **AWS Global Accelerator flow rules**
+- **초기 라우터 ACL**
+
+### Stateful
+
+- **AWS Security Group**
+- **AWS Network Firewall** (stateful engine)
+- **iptables + conntrack** (Linux 기본)
+- **pf (BSD)**, **nftables**
+- **Palo Alto, Fortinet, Check Point** (모든 next-gen firewall)
+- **Windows Firewall**
+
+## 연결 테이블 크기
+
+Stateful 은 연결당 메모리:
+
+- Linux conntrack: ~300 bytes/entry
+- 100만 연결 = ~300 MB
+- DDoS: 대량 half-open 연결로 테이블 소진 유발
+
+방어:
+- `nf_conntrack_max` 증가
+- SYN cookies (Linux 기본)
+- 짧은 timeout
+
+## AWS Network Firewall (2020+)
+
+VPC 안의 **관리형 방화벽 서비스**. Stateful + Stateless 둘 다 지원.
+
+- **Stateless rule engine**: 5-tuple 매칭 (Suricata syntax 지원)
+- **Stateful rule engine**: 연결 추적, Suricata 규칙 (IDS/IPS)
+- **TLS SNI 검사**: 도메인 기반 필터
+- **위협 인텔리전스**: AWS managed feeds
+- **Gateway Load Balancer 통합**: 3rd-party appliance 뒤에
+
+Advanced 시나리오: NACL/SG 로 부족한 딥 검사.
+
+## 함정
+
+> [!WARNING]
+> **NACL 는 stateless**. 응답 트래픽 별도 허용 필수. Ephemeral port range (1024-65535 또는 32768-61000) 열어야.
+
+> [!CAUTION]
+> **SG 는 모든 규칙 union**. 여러 SG 붙이면 허용이 OR. 잘못 붙이면 예상보다 넓게 허용.
+
+> [!WARNING]
+> **SG deny 규칙 없음**. Whitelist 만. 특정 IP 차단은 NACL 로.
+
+> [!IMPORTANT]
+> **NACL 규칙 번호는 sparse 하게** (100, 200, 300). 나중 규칙 삽입 여지.
+
+> [!CAUTION]
+> **NACL 순서가 중요**. 낮은 번호가 먼저 매칭. Deny 를 아래 두면 위 allow 가 우선.
+
+> [!WARNING]
+> **Return traffic 잘 몰라서 NACL "AllowAll"** 로 두는 실수. Stateless 라서 그렇게 두면 방어 무의미.
+
+> [!IMPORTANT]
+> **SG 는 인스턴스 재부팅 없이 즉시 변경**. NACL 도 마찬가지. 신속한 대응 가능.
+
+## 관련 위키
+
+- [[aws-vpc|VPC]] - 네트워크 기본
+- [[aws-sg-vs-nacl|SG vs NACL]] - AWS 관점 상세 비교
+- [[aws-security-hub|Security Hub]] - 보안 자세 모니터링
+- [[aws-network-firewall|AWS Network Firewall]] - 관리형 stateful/stateless firewall
+- [[aws-shield|Shield]] - DDoS 방어
+- [[aws-privatelink|PrivateLink]] - VPC endpoint 대안
+- [[tcp|TCP]] - 연결 기반 프로토콜 배경
+- [[udp|UDP]] - Stateless 프로토콜
+- [[network-nat|NAT]] - 관련 상태 추적

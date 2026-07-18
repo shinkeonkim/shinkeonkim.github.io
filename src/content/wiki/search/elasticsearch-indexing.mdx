@@ -21,6 +21,25 @@ references:
 
 **Indexing** = JSON 문서를 *역색인에 등록* 하는 행위. *Lucene segment 빌드* + *refresh* + *flush* 의 흐름.
 
+## Lucene Segment 생명주기
+
+```mermaid
+flowchart LR
+    A["문서 도착"] --> B["In-memory buffer"]
+    B -->|"refresh 주기 (기본 1s)"| C["새 Segment 생성"]
+    C --> D["검색 가능 상태"]
+    D -->|"flush / translog 한계"| E["Segment 디스크 저장"]
+    E -->|"백그라운드 merge"| F["Segment 병합"]
+    F -->|"force_merge"| G["단일 Segment"]
+```
+
+| 단계 | 의미 |
+|:---|:---|
+| buffer | 메모리에만 존재, 검색 불가 |
+| refresh | 새 segment 오픈, 검색 가능 (디스크 미기록) |
+| flush | translog 비우고 segment 를 디스크에 fsync |
+| merge | 작은 segment 들을 하나로 합쳐 I/O 효율화 |
+
 ## 단일 인덱싱
 
 ```bash
@@ -190,6 +209,56 @@ POST /_aliases
 > 2. **`refresh=true` 매번** = 검색 즉시 가능하지만 *write throughput 폭락*.
 > 3. **수동 force_merge 자주** = I/O 폭증. *대량 인덱싱 후 1회* 만.
 > 4. **mapping 의 dynamic 폭증** = *수만 개 field* → 메모리 폭발. `dynamic: strict` 또는 *명시적 mapping*.
+
+## Bulk 오류 처리
+
+Bulk API 는 **부분 실패** 를 허용한다. 응답 `errors: true` 시 반드시 items 를 순회해야 함:
+
+```bash
+POST /_bulk
+{ "index": { "_index": "products", "_id": "sku-1" } }
+{ "name": "Keyboard" }
+{ "index": { "_index": "products", "_id": "sku-2" } }
+{ "invalid_field_type": 99999999999999999 }
+
+# 응답
+{
+  "errors": true,
+  "items": [
+    { "index": { "_id": "sku-1", "result": "created", "status": 201 } },
+    { "index": { "_id": "sku-2", "error": { "type": "mapper_parsing_exception" }, "status": 400 } }
+  ]
+}
+```
+
+| 오류 유형 | 원인 | 대처 |
+|:---|:---|:---|
+| `version_conflict_engine_exception` | 동시 업데이트 충돌 | `conflicts=proceed` 또는 retry |
+| `mapper_parsing_exception` | 잘못된 타입 | 데이터 정제 후 재시도 |
+| `circuit_breaking_exception` | 메모리 초과 | batch size 줄이기 |
+| `EsRejectedExecutionException` | 스레드 큐 초과 | 속도 제한 + retry backoff |
+
+## 인덱싱 모니터링
+
+```bash
+# 인덱싱 속도 점검
+GET /_cat/nodes?v&h=name,indexing.index_total,indexing.index_time
+
+# 인덱스별 문서 수
+GET /_cat/indices?v&h=index,docs.count,store.size&s=docs.count:desc
+
+# bulk write queue 상태
+GET /_cat/thread_pool/write?v&h=node_name,queue,rejected
+
+# 세그먼트 상태
+GET /products/_segments?verbose=false
+
+# 실시간 인덱싱 통계
+GET /products/_stats/indexing
+```
+
+`rejected` 카운트가 증가하면 bulk size 를 줄이거나 `index.write.wait_for_active_shards` 조정.
+`indexing.index_time_in_millis / indexing.index_total` 로 문서 당 평균 인덱싱 시간 계산 가능.
 
 ## 관련 위키
 

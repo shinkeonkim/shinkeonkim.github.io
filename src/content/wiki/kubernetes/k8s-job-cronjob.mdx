@@ -1,9 +1,9 @@
 ---
 title: "[K8s] Job / CronJob: 일회성 + 스케줄 작업"
-aliases: ["K8s Job", "K8s CronJob", "completions", "parallelism", "backoffLimit", "TTLAfterFinished"]
+aliases: ["K8s Job", "K8s CronJob", "completions", "parallelism", "backoffLimit", "TTLAfterFinished", "activeDeadlineSeconds"]
 tags: [kubernetes, job, cronjob, batch, k8s]
 category: kubernetes
-updated: 2026-06-25
+updated: 2026-07-16
 references:
   - title: "Kubernetes Docs: Jobs"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/job/"
@@ -18,6 +18,8 @@ references:
 | **Job** | *완료까지 실행하는 일회성 작업* |
 | **CronJob** | *스케줄 (cron) 에 따라 Job 생성* |
 
+Deployment 와 다른 점: *완료를 목표*로 함. pod 가 종료되어도 재시작 안 함.
+
 ## Job
 
 ```yaml
@@ -26,6 +28,7 @@ kind: Job
 metadata: { name: migrate }
 spec:
   backoffLimit: 3                # 실패 시 재시도 한도
+  activeDeadlineSeconds: 600     # 10분 초과 시 강제 종료
   ttlSecondsAfterFinished: 3600  # 완료 후 1시간 뒤 정리
   template:
     spec:
@@ -47,6 +50,29 @@ stateDiagram-v2
     Failed --> Cleaned: TTL 후
 ```
 
+## Job 생명주기 상세
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K as K8s API
+    participant J as Job controller
+    participant P as Pod
+
+    K->>J: Job 생성
+    J->>P: Pod 시작
+    P->>P: 작업 실행
+    alt 성공
+        P-->>J: exit 0
+        J->>K: Succeeded
+    else 실패 (backoffLimit 이내)
+        P-->>J: exit 1
+        J->>P: 재시도 Pod 생성
+    else backoffLimit 초과
+        J->>K: Failed
+    end
+```
+
 ## 병렬 실행 (parallelism / completions)
 
 ```yaml
@@ -62,14 +88,57 @@ spec:
 | `completions=N, parallelism=M < N` | 동시 M, 총 N |
 | `completions=null, parallelism=M` | 무한 (작업 큐 패턴) |
 
+## activeDeadlineSeconds
+
+```yaml
+spec:
+  activeDeadlineSeconds: 300    # 5분 초과 시 강제 종료
+  backoffLimit: 2
+```
+
+- *backoffLimit* = 실패 재시도 한도 (pod 수준)
+- *activeDeadlineSeconds* = 전체 Job 의 최대 실행 시간 (시간 초과 시 Failed)
+- 둘 다 지정 시 *먼저 도달하는 조건* 에 따라 종료
+
+## Job Suspend (1.24+)
+
+실행 중인 Job 을 *일시 정지* 후 재개 가능:
+
+```bash
+# 일시 정지
+kubectl patch job migrate -p '{"spec":{"suspend":true}}'
+# 재개
+kubectl patch job migrate -p '{"spec":{"suspend":false}}'
+```
+
+- 정지 시 *활성 pod 는 삭제*, 완료된 pod 는 유지
+- *CronJob 에도 적용*: `spec.suspend: true` 로 스케줄 중단
+
+## Failure Policy (1.26+)
+
+특정 종료 코드를 *성공 또는 영구 실패* 로 처리:
+
+```yaml
+spec:
+  podFailurePolicy:
+    rules:
+      - action: FailJob           # 즉시 전체 Job 실패
+        onExitCodes:
+          operator: In
+          values: [42]            # 비즈니스 오류 코드
+      - action: Ignore            # 무시 (재시도 카운트 안 함)
+        onPodConditions:
+          - type: DisruptionTarget  # node eviction 은 재시도
+```
+
 ## 작업 큐 패턴
 
 ```mermaid
 flowchart LR
-    Queue[(Job Queue<br/>Redis / SQS)] --> P1[Pod 1]
+    Queue[("Job Queue<br/>Redis / SQS")] --> P1[Pod 1]
     Queue --> P2[Pod 2]
     Queue --> P3[Pod 3]
-    P1 --> Output[(처리 완료)]
+    P1 --> Output[("처리 완료")]
     P2 --> Output
     P3 --> Output
 ```
@@ -128,6 +197,16 @@ spec:
 | `Forbid` | 이전 job 끝나기 전 *새 job skip* |
 | `Replace` | 이전 job 중단 + 새 job |
 
+## CronJob 누락 스케줄 처리
+
+K8s 컨트롤러가 *오프라인이었다가 복구* 되거나 *startingDeadlineSeconds 기간 내* 에 놓친 스케줄이 많을 때:
+
+- `startingDeadlineSeconds` 미설정: 마지막 스케줄 시간부터 현재까지 놓친 횟수를 계산, *100회 초과 시 CronJob 비활성화*
+- `startingDeadlineSeconds: 300`: 최근 5분 이내 놓친 횟수만 계산
+
+> [!WARNING]
+> `startingDeadlineSeconds` 를 설정하지 않으면 컨트롤러 장기 다운 후 복구 시 *CronJob 이 영구 비활성화* 될 수 있다.
+
 ## Cron 식
 
 ```
@@ -137,19 +216,32 @@ spec:
 │ │ │ ┌── 월 (1-12)
 │ │ │ │ ┌── 요일 (0-6, 0=Sun)
 │ │ │ │ │
-0 2 * * *    매일 2시
-*/15 * * * * 15분마다
-0 9 * * 1-5  평일 9시
+0 2 * * *     매일 2시
+*/15 * * * *  15분마다
+0 9 * * 1-5   평일 9시
+0 0 1 * *     매월 1일 자정
+@hourly       매시 (alias)
 ```
+
+## Job vs Deployment 선택 기준
+
+| 상황 | 선택 |
+|---|---|
+| DB 마이그레이션, 배치 처리 | Job |
+| 스케줄 리포트, 백업 | CronJob |
+| 상시 실행 API 서버 | Deployment |
+| 큐 소비 + 무한 대기 | Deployment |
+| 큐 소비 + 작업 완료 후 종료 | Job (parallelism) |
 
 ## 흔한 함정
 
 > [!WARNING]
 > 1. **`restartPolicy: Always`** = Job 의 의미 깨짐. `OnFailure` 또는 `Never`.
 > 2. **`ttlSecondsAfterFinished` 없음** = 완료된 Job 누적. cluster cluttered.
-> 3. **CronJob 의 *시간대*** = K8s 1.27+ 까지 *UTC 만*. timeZone 명시 권장.
+> 3. **CronJob 의 시간대** = K8s 1.27+ 까지 *UTC 만*. `timeZone` 명시 권장.
 > 4. **`concurrencyPolicy: Allow` + 무거운 작업** = job 들이 *겹쳐 시스템 부하*. `Forbid` 안전.
 > 5. **JOB 실패 알림 부재** = silent fail. Prometheus + Alertmanager 로 *failed Job* 알림.
+> 6. **activeDeadlineSeconds 미설정 + 무한 루프** = Job 이 영구 실행, 클러스터 자원 점유.
 
 ## 관련 위키
 

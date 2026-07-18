@@ -190,6 +190,65 @@ CPU 가 가상화를 도와주는 기능들:
 - 하드웨어 지원 이후 대부분의 워크로드에서 5% 미만
 - 예외: CPU 밀집형 (HFT), GPU 가상화 (NVIDIA vGPU 는 여전히 특수한 기술)
 
+## 가상화 레이어 스택
+
+현대 클라우드의 2단 계층 구조를 시각화합니다.
+
+```mermaid
+flowchart TB
+    HW["물리 하드웨어<br/>CPU / RAM / NIC / Disk"]
+    HW --> HV["Type 1 Hypervisor<br/>KVM, ESXi, Hyper-V"]
+    HV --> VM1["VM 1<br/>게스트 커널 + OS"]
+    HV --> VM2["VM 2<br/>게스트 커널 + OS"]
+    VM1 --> CRT["Container Runtime<br/>Docker, containerd"]
+    CRT --> C1["Container A"]
+    CRT --> C2["Container B"]
+    VM2 --> App["직접 실행 앱"]
+```
+
+물리 하드웨어 → Type 1 하이퍼바이저 → VM → 컨테이너 런타임 → 컨테이너 순서로 쌓이는 것이 AWS EC2 + ECS/EKS 구성의 실제 모습입니다.
+
+## 최신 동향: microVM
+
+일반 VM 보다 훨씬 가벼운 *microVM* 이 서버리스 / FaaS 의 테넌트 격리 계층이 되었습니다.
+
+### Firecracker (AWS Lambda, Fargate)
+
+AWS 가 Rust 로 작성한 초경량 KVM hypervisor.
+
+- 부팅 시간 **125 ms 이하** (일반 VM 수십 초 대비)
+- 메모리 오버헤드 **약 5 MB** (일반 hypervisor 수백 MB)
+- Lambda 는 각 함수 호출을 별도 microVM 에서 실행해 테넌트 격리
+- KVM 위에서 동작, x86-64 / aarch64 지원
+
+### gVisor (Google GKE Sandbox)
+
+컨테이너의 syscall 을 사용자 공간 커널이 처리하는 샌드박스.
+
+- 컨테이너가 host 커널을 직접 호출하지 않음 → 커널 취약점 공격면 축소
+- Go 로 작성, `runsc` OCI 런타임으로 containerd / CRI-O 와 통합
+- GKE Sandbox 옵션으로 활성화 가능
+
+### Kata Containers
+
+OCI 컨테이너 이미지를 경량 VM 안에서 실행하는 CNCF 프로젝트.
+
+- "컨테이너 API + VM 격리"를 함께 제공
+- QEMU / Firecracker / Cloud Hypervisor 백엔드 선택 가능
+- containerd + `kata-containers` shim 으로 기존 쿠버네티스 클러스터에 통합
+
+> [!TIP]
+> microVM 은 "컨테이너의 편의 + VM 의 격리"를 결합합니다. 멀티테넌트 FaaS 와 공개 클라우드에서 점점 표준이 되고 있습니다.
+
+## NUMA 와 가상화
+
+대용량 서버에서 VM 을 배치할 때 NUMA (Non-Uniform Memory Access) 를 무시하면 성능 저하가 큽니다.
+
+- **NUMA 노드**: CPU 와 해당 CPU 가 빠르게 접근하는 RAM 의 묶음
+- VM 이 여러 NUMA 노드에 걸치면 원격 메모리 접근 지연 발생
+- KVM / ESXi 는 NUMA topology 를 VM 에 반영하는 *pinning* 기능 제공
+- 컨테이너 수준: `numactl` 또는 쿠버네티스 Topology Manager 로 제어
+
 ## 참고
 
 - 관련 [[hypervisor|Hypervisor Type 1 vs Type 2]]

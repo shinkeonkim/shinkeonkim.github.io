@@ -56,6 +56,23 @@ references:
 {}
 ```
 
+```mermaid
+flowchart TB
+    subgraph T1["Type 1: Bare Metal"]
+        HW1["물리 하드웨어"]
+        HW1 --> HV1["Hypervisor"]
+        HV1 --> G1["Guest VM 1"]
+        HV1 --> G2["Guest VM 2"]
+    end
+    subgraph T2["Type 2: Hosted"]
+        HW2["물리 하드웨어"]
+        HW2 --> OS2["Host OS (macOS, Windows, Linux)"]
+        OS2 --> HV2["Hypervisor App (VirtualBox, VMware Fusion)"]
+        HV2 --> G3["Guest VM 1"]
+        HV2 --> G4["Guest VM 2"]
+    end
+```
+
 ### Type 1: Bare Metal Hypervisor
 
 **하드웨어 위에 직접** 올라갑니다. 그 자체가 OS 역할.
@@ -142,6 +159,28 @@ references:
 - **z/VM** (IBM 메인프레임)
 - **PowerVM** (IBM POWER)
 
+## Trap-and-Emulate (가상화 핵심 메커니즘)
+
+게스트 OS 가 특권 명령 (privileged instruction) 을 실행하려 할 때:
+
+1. CPU 가 **trap** 을 발생시켜 hypervisor 로 제어 이전
+2. Hypervisor 가 해당 명령을 **에뮬레이트** (실제 효과를 시뮬레이션)
+3. 결과를 게스트에게 돌려주고 게스트 실행 재개
+
+비특권 명령은 하드웨어에서 **직접 실행** (Popek & Goldberg "효율성" 조건).
+
+```mermaid
+flowchart LR
+    Guest["Guest OS\n(Ring 3 or Ring 1)"]
+    Guest -->|"일반 명령"| HW["하드웨어 직접 실행"]
+    Guest -->|"특권 명령 시도"| Trap["CPU Trap (VM-Exit)"]
+    Trap --> HV["Hypervisor (Ring -1)"]
+    HV -->|"에뮬레이트 후"| VMEntry["VM-Entry (게스트 복귀)"]
+    VMEntry --> Guest
+```
+
+VT-x/AMD-V 가 없던 시절 x86 은 일부 sensitive instruction 이 trap 을 발생시키지 않아 **binary translation** (실행 전 코드를 재작성) 이 필요했습니다.
+
 ## 하드웨어 지원
 
 Hypervisor 성능은 CPU 의 가상화 지원에 크게 의존합니다.
@@ -210,6 +249,35 @@ Hypervisor 성능은 CPU 의 가상화 지원에 크게 의존합니다.
 | **live migration** | 지원 (libvirt) | 지원 | 지원 (vMotion) | 지원 | 지원 안 함 |
 | **성능** | 우수 (하드웨어 가속 잘 활용) | 우수 (paravirt 특히) | 최상 | 우수 | 중간 |
 | **학습 곡선** | 중간 | 높음 | 낮음~중간 (UI 좋음) | 낮음 | 매우 낮음 |
+
+## microVM 트렌드 (Firecracker / gVisor)
+
+전통적인 VM 은 부팅에 수십 초가 걸려 서버리스/컨테이너 밀도에 적합하지 않았습니다. 이를 해결하기 위해 **microVM** 이 등장했습니다.
+
+| 제품 | 기반 | 부팅 | 격리 | 사용처 |
+|:---|:---|:---|:---|:---|
+| **Firecracker** | KVM + Rust | ~125ms | VM 수준 | AWS Lambda, Fargate |
+| **Cloud Hypervisor** | KVM + Rust | ~150ms | VM 수준 | Intel, MS Azure |
+| **gVisor** | 시스템콜 인터셉트 | 즉시 | OS 수준 (일부) | Google Cloud Run |
+| **Kata Containers** | KVM / QEMU | ~1s | VM 수준 | OCI 호환 컨테이너 런타임 |
+
+**Firecracker** 의 핵심 설계:
+- 디바이스 에뮬레이션 최소화 (virtio-net, virtio-blk 만)
+- 네트워크, 스토리지, 직렬 포트 외 미지원 (대신 가볍고 빠름)
+- Rust 로 작성해 메모리 안전성 보장
+
+**Kata Containers** 는 OCI/CRI 인터페이스를 그대로 사용하므로 Kubernetes 와 바로 통합됩니다.
+
+## Hypervisor 선택 가이드
+
+| 상황 | 권장 |
+|:---|:---|
+| Linux 서버 / 클라우드 기반 구성 | **KVM + libvirt** |
+| 엔터프라이즈 데이터센터, vMotion 필요 | **VMware ESXi / vSphere** |
+| Windows 서버 / Azure 연동 | **Hyper-V** |
+| 개발자 로컬 (데스크톱) | **VirtualBox** 또는 **Parallels (macOS)** |
+| 서버리스, 컨테이너 격리 강화 | **Firecracker** 또는 **Kata Containers** |
+| 크로스 아키텍처 에뮬레이션 (ARM on x86) | **QEMU** |
 
 ## 함정
 

@@ -164,9 +164,136 @@ SELECT * FROM "MyTable" WHERE PK = 'USER#42' AND begins_with("SK", 'ORDER#');
 > 3. **Scan 의존 쿼리** = 비용 폭발. GSI 추가.
 > 4. **eventual consistency 무시** = 방금 쓴 값이 *없을 수* 있음. strong read 명시 또는 *재시도*.
 
+## TTL (Time to Live)
+
+아이템에 `ttl` (Unix timestamp) 속성 추가 → 만료 시 *자동 삭제*.
+만료 후 최대 48시간 내 삭제 (정확한 시각 미보장).
+
+```bash
+aws dynamodb update-time-to-live \
+  --table-name Orders \
+  --time-to-live-specification "Enabled=true,AttributeName=ttl"
+```
+
+```python
+import time
+item = {
+    'PK': 'SESSION#xyz',
+    'SK': 'META',
+    'ttl': int(time.time()) + 3600   # 1시간 후 만료
+}
+```
+
+> [!TIP]
+> TTL 만료 전까지는 read 에서 *필터링이 필요*. DDB 는 만료 시각이 지나도 즉시 삭제 보장 안 됨.
+
+## Transactions
+
+*ACID 보장*, 최대 100 item, 동일/다른 테이블 가능.
+
+```python
+client.transact_write(
+    TransactItems=[
+        {
+            'Put': {
+                'TableName': 'Orders',
+                'Item': {'PK': {'S': 'ORDER#1'}, 'status': {'S': 'PLACED'}},
+                'ConditionExpression': 'attribute_not_exists(PK)',
+            }
+        },
+        {
+            'Update': {
+                'TableName': 'Inventory',
+                'Key': {'PK': {'S': 'ITEM#42'}},
+                'UpdateExpression': 'SET stock = stock - :d',
+                'ExpressionAttributeValues': {':d': {'N': '1'}},
+                'ConditionExpression': 'stock >= :d',
+            }
+        },
+    ]
+)
+```
+
+- `TransactWriteItems` / `TransactGetItems`.
+- *2배 WCU/RCU 비용*.
+- 실패 시 전체 롤백.
+
+## Conditional Writes
+
+낙관적 동시성 제어. 조건 실패 시 `ConditionalCheckFailedException`.
+
+```python
+table.update_item(
+    Key={'PK': 'USER#42', 'SK': 'PROFILE'},
+    UpdateExpression='SET version = :new, updatedAt = :ts',
+    ConditionExpression='version = :cur',
+    ExpressionAttributeValues={
+        ':cur': 1,
+        ':new': 2,
+        ':ts': '2026-06-17T10:00:00Z',
+    },
+)
+```
+
+낙관적 잠금 패턴: `version` 속성으로 *동시 업데이트 충돌 감지*.
+
+## Access Pattern 설계 워크플로
+
+```mermaid
+flowchart TB
+    A["1. Access pattern 정의"]
+    B["2. Entity 목록 확인"]
+    C["3. PK / SK 결정"]
+    D["4. SK range query 검토"]
+    E["5. GSI 필요 여부"]
+    F["6. 단일 테이블 통합"]
+    A --> B --> C --> D --> E --> F
+```
+
+> *entity 먼저 설계 후 access pattern 억지* = 나중에 전체 마이그레이션. 반드시 *access pattern 우선* 설계.
+
+## Global Tables
+
+*다중 리전 Active-Active* 복제. 글로벌 레이턴시 최소화.
+
+```bash
+aws dynamodb create-global-table \
+  --global-table-name Orders \
+  --replication-group \
+    RegionName=us-east-1 \
+    RegionName=ap-northeast-2
+```
+
+- 각 리전에서 *읽기/쓰기 모두 가능*.
+- *eventual consistency* (복제 지연 수백 ms).
+- 충돌 해결: *last-writer-wins* (timestamp 기반).
+
+## Backup / PITR
+
+```bash
+# On-demand 백업
+aws dynamodb create-backup \
+  --table-name Orders \
+  --backup-name orders-backup-20260617
+
+# PITR 활성화 (최대 35일 복구)
+aws dynamodb update-continuous-backups \
+  --table-name Orders \
+  --point-in-time-recovery-specification \
+    PointInTimeRecoveryEnabled=true
+
+# 특정 시각으로 복구
+aws dynamodb restore-table-to-point-in-time \
+  --source-table-name Orders \
+  --target-table-name Orders-Restored \
+  --restore-date-time 2026-06-15T10:00:00Z
+```
+
 ## 관련 위키
 
 - [[mongodb]] (문서 DB 대안)
 - [[Redis]] (KV 대안)
 - [[aws-iam]] (DDB 권한)
 - [[sharding-vs-partitioning]]
+- [[aws-lambda]] (Streams + Lambda CDC)
+- [[aws-s3]] (400KB 초과 데이터 저장)

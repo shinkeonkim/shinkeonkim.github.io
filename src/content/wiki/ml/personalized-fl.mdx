@@ -162,6 +162,78 @@ Trade-off: 클러스터 수 하이퍼파라미터, 클라이언트가 어느 클
 | **Ditto** | 로컬 모델 | 표준 + robust | 강함 (fair/robust) | Li 2021 |
 | **Clustered** | 클러스터 모델 | 클러스터별 | 중간 | Ghosh 2020 |
 
+## 시각화: 개인화 접근법 구조
+
+```mermaid
+flowchart LR
+    G["글로벌 서버"] --> FA["FedAvg<br/>단일 글로벌"]
+    G --> FP["FedPer<br/>레이어 분리"]
+    G --> PF["Per-FedAvg<br/>메타 초기화"]
+    G --> PM["pFedMe<br/>Moreau 정규화"]
+    G --> DT["Ditto<br/>공정성 강조"]
+    FA --> CA["클라이언트: 동일 모델"]
+    FP --> CB["클라이언트: Head 개인화"]
+    PF --> CC["클라이언트: 1-step 적응"]
+    PM --> CD["클라이언트: 로컬 모델 유지"]
+    DT --> CD
+```
+
+## 접근법 선택 기준
+
+데이터, 인프라, 목표에 따라 적합한 방법이 달라진다:
+
+| 조건 | 권장 방법 | 이유 |
+|:---|:---|:---|
+| 신규 프로젝트, 빠른 실험 | **Local Fine-tune** | 설정 최소, 기준점 수립 |
+| 모바일 배포, 통신 절약 | **FedPer** | Head 만 로컬, Body 공유 |
+| 즉시 개인화, MAML 경험 있음 | **Per-FedAvg** | 배포 후 1-step 으로 즉시 맞춤 |
+| Non-IID 심하고 수렴이 목적 | **pFedMe** | λ 로 글로벌/개인화 균형 조절 |
+| 공정성, 악의적 클라이언트 우려 | **Ditto** | Robust + Fair FL |
+| 클러스터 구조 의심 | **Clustered FL** | 분포 유사 그룹끼리 집계 |
+| 대형 모델 기반 | **LoRA / Adapter** | 파라미터 효율 개인화 |
+
+### λ 하이퍼파라미터 선택 (pFedMe, Ditto)
+
+λ 는 글로벌 모델에 얼마나 당겨올지를 결정한다:
+
+- **λ → ∞**: 로컬 모델이 글로벌 모델로 수렴. FedAvg 와 동일 효과.
+- **λ → 0**: 완전 로컬 학습. 과적합 위험.
+- **실전 탐색 범위**: λ ∈ {0.001, 0.01, 0.1, 1, 10} 에서 cross-validation.
+
+```python
+# pFedMe 로컬 학습 (단순화)
+def local_train(w_global, local_data, lam, lr, steps):
+    theta = w_global.clone()
+    for _ in range(steps):
+        x, y = sample(local_data)
+        grad = compute_grad(theta, x, y)
+        reg = lam * (theta - w_global)  # Moreau 정규화 항
+        theta = theta - lr * (grad + reg)
+    return theta
+```
+
+### Fine-tune step 수 선택 (Per-FedAvg)
+
+배포 시 몇 step 을 돌릴지 결정 기준:
+
+- **1 step**: 논문 기본값. 계산 빠름. 데이터 적은 클라이언트에 안정적.
+- **5~10 step**: 데이터 충분한 클라이언트는 더 많이 적응 가능.
+- **조기 종료**: validation loss 모니터링으로 over-adaptation 방지.
+- **실전**: 클라이언트별 데이터 크기에 비례한 step 수 적용.
+
+### 평가 프로토콜 표준화
+
+같은 방법도 평가 방식에 따라 숫자가 크게 달라진다. 논문 비교 시 주의:
+
+| 방법 | 평가 시점 | 평가 데이터 |
+|:---|:---|:---|
+| **FedAvg** | 글로벌 모델로 | IID test set |
+| **FedPer** | 개인화 Head 적용 후 | 로컬 test set |
+| **Per-FedAvg** | 1-step fine-tune 후 | 로컬 test set |
+| **pFedMe / Ditto** | 로컬 모델로 | 로컬 test set |
+
+비교할 때 **항상 동일 프로토콜** 을 사용해야 한다. 평균 accuracy 만 보면 개인화 이득을 놓친다. per-client 분포 (min, max, std) 도 함께 보고해야 한다.
+
 ## 평가 지표
 
 **중요**: Personalized FL 은 글로벌 accuracy 만 보면 오독합니다. 반드시:

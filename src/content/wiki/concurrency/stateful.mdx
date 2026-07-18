@@ -3,7 +3,7 @@ title: "Stateful"
 aliases: ["stateful", "상태유지", "Stateful 서버", "stateful server"]
 tags: [architecture, network, scaling]
 category: concurrency
-updated: 2026-06-13
+updated: 2026-07-15
 ---
 
 ## 정의
@@ -23,6 +23,38 @@ updated: 2026-06-13
 | **장애 복원** | 서버 다운 시 세션 손실 (외부 store 시 완화) |
 | **인증 정보** | 세션 ID 발급, 서버가 검증 |
 | **캐싱** | 사용자별 응답 → 캐시 효율 낮음 |
+
+## 수평 확장 시각화
+
+### Sticky Session 구성
+
+```mermaid
+flowchart LR
+    LB[Load Balancer]
+    C1[Client 1] --> LB
+    C2[Client 2] --> LB
+    C3[Client 3] --> LB
+    LB -->|sticky A| SA[Server A]
+    LB -->|sticky B| SB[Server B]
+    SA --> MemA[Session A]
+    SB --> MemB[Session B]
+```
+
+LB 가 쿠키 또는 IP hash 로 클라이언트를 특정 서버에 고정한다. Server A 가 다운되면 그 세션들이 모두 손실된다.
+
+### WebSocket 클러스터 (Pub/Sub 버스)
+
+```mermaid
+flowchart LR
+    C1[Client 1] --> SA[Server A]
+    C2[Client 2] --> SB[Server B]
+    SA -->|publish| Bus["Redis Pub/Sub"]
+    SB -->|subscribe| Bus
+    Bus -->|"broadcast"| SA
+    Bus -->|"broadcast"| SB
+```
+
+서버 A 가 클라이언트 B 에게 메시지를 전달해야 할 때, Redis Pub/Sub 버스를 통해 서버 B 가 대신 전달한다. Socket.IO + Redis Adapter 패턴이 전형.
 
 ## 어디에 상태가 사는가
 
@@ -99,6 +131,104 @@ A 에 'Y 에게 메시지' 도착 → Redis publish → B subscribe → Y 에게
 
 Socket.IO + Redis Adapter 패턴이 전형.
 
+## Kubernetes StatefulSet
+
+Stateful 워크로드는 Kubernetes `StatefulSet` 으로 운영한다. Deployment 와 달리 각 pod 에 **안정적인 이름과 순서**가 보장된다.
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chat-server
+spec:
+  serviceName: "chat"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: chat-server
+  template:
+    spec:
+      containers:
+        - name: chat-server
+          image: chat:latest
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+```
+
+StatefulSet 이 생성하는 pod 이름: `chat-server-0`, `chat-server-1`, `chat-server-2`.
+DNS 이름: `chat-server-0.chat.default.svc.cluster.local`.
+
+> [!IMPORTANT]
+> StatefulSet 은 *삭제 순서도 역순으로 보장*한다. 데이터베이스처럼 replica 순서가 중요한 시스템에 필수.
+
+[[k8s-statefulset]] 에서 더 자세한 설명을 볼 수 있다.
+
+## 세션 어피니티 (Sticky Session) 상세
+
+### NGINX sticky cookie
+
+```nginx
+upstream backend {
+    ip_hash;              # IP 기반 고정
+    server server1:8080;
+    server server2:8080;
+}
+
+# 또는 쿠키 기반
+upstream backend {
+    server server1:8080;
+    server server2:8080;
+    sticky cookie srv_id expires=1h;
+}
+```
+
+### AWS ALB sticky session
+
+```json
+{
+  "TargetGroupAttributes": [
+    { "Key": "stickiness.enabled", "Value": "true" },
+    { "Key": "stickiness.type", "Value": "lb_cookie" },
+    { "Key": "stickiness.lb_cookie.duration_seconds", "Value": "86400" }
+  ]
+}
+```
+
+고정이 너무 강하면 특정 서버에 트래픽이 쏠린다. `ip_hash` 보다 `least_conn` + sticky cookie 조합이 부하 분산에 유리하다.
+
+## 그레이스풀 드레인
+
+Stateful 서버를 재배포할 때 활성 세션을 잃지 않으려면 graceful drain 이 필수다.
+
+```
+1. LB 가 해당 인스턴스를 풀에서 제거 (신규 트래픽 차단)
+2. 기존 연결이 자연스럽게 끝나길 대기 (drain timeout: 보통 30-60s)
+3. drain timeout 초과 → 강제 종료 (SIGKILL)
+```
+
+```yaml
+# Kubernetes: terminationGracePeriodSeconds
+spec:
+  terminationGracePeriodSeconds: 60
+  containers:
+    - name: chat-server
+      lifecycle:
+        preStop:
+          exec:
+            command: ["/bin/sh", "-c", "sleep 5"]
+```
+
+WebSocket 의 경우 drain 신호를 받으면 클라이언트에게 `close frame` 을 보내 재연결을 유도한다.
+
 ## 실무 예시
 
 ### WebSocket 채팅 서버
@@ -168,9 +298,11 @@ wss.on('connection', (ws) => {
 
 지속 연결 기반 프로토콜은 본질적으로 Stateful.
 
-## 참고
+## 관련 위키
 
 - [[Stateless]]
-- [[Stateless vs Stateful]] (전체 비교, 애니메이션 포함)
+- [[Stateless vs Stateful]], 전체 비교
 - [[Sticky Session]], 수평 확장의 핵심 회피책
 - [[Pub/Sub bus]], WebSocket 클러스터 확장 패턴
+- [[k8s-statefulset]], Kubernetes StatefulSet 상세
+- [[connection-pool]], 외부 store 연결 관리

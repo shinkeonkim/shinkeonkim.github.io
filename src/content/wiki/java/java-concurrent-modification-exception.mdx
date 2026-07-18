@@ -11,11 +11,11 @@ references:
 
 ## 정의
 
-**`java.util.ConcurrentModificationException`** (CME) 는 [[fail-fast iterator]] 가 **컬렉션의 구조 변경을 탐지했을 때** 던지는 unchecked 예외 (`RuntimeException`).
+**`java.util.ConcurrentModificationException`** (CME) 는 [[java-fail-fast-iterator|fail-fast iterator]] 가 **컬렉션의 구조 변경을 탐지했을 때** 던지는 unchecked 예외 (`RuntimeException`).
 
 이름과 달리 **반드시 동시성 (멀티스레드) 문제일 때만 발생하는 것이 아니다.** 단일 스레드에서도 자기 자신을 잘못 수정하면 발생한다.
 
-`java.util` 의 거의 모든 컬렉션 ([[ArrayList]], [[LinkedList]], [[Vector]], `HashMap`, `TreeMap`, `HashSet`, `TreeSet`) 의 iterator 가 던질 수 있다.
+`java.util` 의 거의 모든 컬렉션 ([[java-arraylist|ArrayList]], [[java-linkedlist|LinkedList]], [[java-vector|Vector]], `HashMap`, `TreeMap`, `HashSet`, `TreeSet`) 의 iterator 가 던질 수 있다.
 
 ## 가장 흔한 두 시나리오
 
@@ -40,10 +40,32 @@ List<Integer> shared = new ArrayList<>();
 // Thread A
 for (Integer x : shared) { /* 읽기 */ }
 // Thread B (동시 실행)
-shared.add(99);  // ← Thread A 의 다음 next() 에서 CME
+shared.add(99);  // <- Thread A 의 다음 next() 에서 CME
 ```
 
-이 경우 CME 는 best-effort 신호. CME 가 안 나도 안전한 것은 아니다 (더 무서운 [silent corruption] 가능).
+이 경우 CME 는 best-effort 신호. CME 가 안 나도 안전한 것은 아니다 (더 무서운 silent corruption 가능).
+
+## modCount 메커니즘
+
+CME 는 `modCount` 라는 내부 카운터로 감지된다.
+
+```mermaid
+flowchart TD
+    A["ArrayList 생성<br/>modCount = 0"] --> B["iterator() 호출<br/>expectedModCount = modCount"]
+    B --> C["it.next() 호출"]
+    C --> D{modCount == expectedModCount?}
+    D -->|같음| E["정상 반환"]
+    D -->|다름| F["ConcurrentModificationException!"]
+    E --> C
+    G["list.add() / remove() 호출<br/>modCount++"] -.->|"구조 변경"| D
+```
+
+| 필드 | 위치 | 역할 |
+|---|---|---|
+| `modCount` | `AbstractList` | 컬렉션이 구조 변경될 때마다 증가 |
+| `expectedModCount` | `Itr` (inner class) | iterator 생성 시 복사한 스냅샷 |
+
+`modCount != expectedModCount` 이면 즉시 CME. 이 방식은 정확성을 **보장하지 않고** 최선을 다해 감지 (best-effort detection) 한다. JVM spec 상 CME 가 반드시 던져진다는 보장이 없다.
 
 ## 메시지에 없는 정보
 
@@ -115,6 +137,21 @@ Queue<Task> q = new ConcurrentLinkedQueue<>();
 
 이들은 CME 를 던지지 않으면서 동시 수정/순회를 지원한다.
 
+## 해결 패턴 비교
+
+```mermaid
+flowchart LR
+    CME["CME 발생"]
+    CME --> SC{단일 스레드?}
+    SC -->|예| F1["Iterator.remove()"]
+    SC -->|예| F2["removeIf"]
+    SC -->|예| F3["복사본 순회"]
+    SC -->|아니오| MT{읽기 비율?}
+    MT -->|읽기 압도적| COW["CopyOnWriteArrayList"]
+    MT -->|읽기/쓰기 혼합| CHM["ConcurrentHashMap<br/>ConcurrentLinkedQueue"]
+    MT -->|강한 일관성| LOCK["synchronized + Lock"]
+```
+
 ## 잡으면 안 된다
 
 ```java
@@ -168,11 +205,47 @@ for (Integer a : listA) {
 
 자주 놓치는 케이스, outer loop 에 영향.
 
+### Map.compute 로 안전하게 값 갱신
+
+`HashMap` 의 값만 변경할 때는 순회 대신 `compute` / `merge` 를 쓴다.
+
+```java
+// ❌ 순회 중 put
+for (var entry : scores.entrySet()) {
+    scores.put(entry.getKey(), entry.getValue() + 1);
+}
+
+// ✓ compute 사용 (구조 변경 없음)
+scores.replaceAll((k, v) -> v + 1);
+
+// ✓ 또는 merge
+scores.merge("Alice", 1, Integer::sum);
+```
+
+## 테스트 방법
+
+CME 는 best-effort 이므로 단위 테스트에서 재현이 불안정할 수 있다. 다음 방법 활용:
+
+```java
+@Test
+void shouldThrowCMEWhenModifiedDuringIteration() {
+    List<Integer> list = new ArrayList<>(List.of(1, 2, 3));
+    assertThrows(ConcurrentModificationException.class, () -> {
+        for (Integer x : list) {
+            list.remove(x);
+        }
+    });
+}
+```
+
+멀티스레드 CME 는 `CyclicBarrier` / `CountDownLatch` 로 타이밍을 맞춰 재현한다.
+
 ## 참고
 
-- [[fail-fast iterator]]
-- [[ArrayList]]
-- [[LinkedList]]
-- [[Vector]]
-- [[CopyOnWriteArrayList]]
+- [[java-fail-fast-iterator|fail-fast iterator]]
+- [[java-arraylist|ArrayList]]
+- [[java-linkedlist|LinkedList]]
+- [[java-vector|Vector]]
+- [[java-copyonwritearraylist|CopyOnWriteArrayList]]
+- [[java-concurrent-hashmap|ConcurrentHashMap]]
 - Brian Goetz, *Java Concurrency in Practice*, §5.1.2

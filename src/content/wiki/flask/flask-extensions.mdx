@@ -1,0 +1,433 @@
+---
+title: "[Flask] Extensions (SQLAlchemy, Login, Migrate, WTF, ...)"
+aliases:
+  - "Flask Extensions"
+  - "Flask-SQLAlchemy"
+  - "Flask-Login"
+  - "Flask-Migrate"
+  - "Flask-WTF"
+  - "Flask-Caching"
+  - "Flask-CORS"
+  - "Flask-JWT-Extended"
+  - "Flask-Limiter"
+  - "Flask-RESTful"
+  - "Flask-Smorest"
+  - "Flask 확장"
+tags: [python, flask, extension, orm, auth]
+category: flask
+updated: 2026-07-07
+references:
+  - title: "Flask Extensions Directory"
+    url: "https://flask.palletsprojects.com/en/latest/extensions/"
+  - title: "Flask-SQLAlchemy"
+    url: "https://flask-sqlalchemy.palletsprojects.com/"
+  - title: "Flask-Migrate"
+    url: "https://flask-migrate.readthedocs.io/"
+  - title: "Flask-WTF"
+    url: "https://flask-wtf.readthedocs.io/"
+  - title: "Flask-Login"
+    url: "https://flask-login.readthedocs.io/"
+---
+
+## 정의
+
+**Flask Extension** 은 코어에 없는 기능 (DB, 인증, 마이그레이션, 캐시 등) 을 표준 인터페이스로 통합하는 서드파티 패키지입니다. **`ext.init_app(app)`** 패턴이 관용이며, [[flask-app-factory|application factory]] 와 자연스럽게 조합됩니다.
+
+주요 extension 을 한 페이지에서 소개하고 실전 초기화 코드 를 정리합니다.
+
+## 초기화 패턴 (extensions.py)
+
+```python
+# myapp/extensions.py
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_login import LoginManager
+from flask_wtf.csrf import CSRFProtect
+from flask_caching import Cache
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+db = SQLAlchemy()
+migrate = Migrate()
+login = LoginManager()
+csrf = CSRFProtect()
+cache = Cache()
+cors = CORS()
+limiter = Limiter(key_func=get_remote_address)
+```
+
+```python
+# myapp/__init__.py
+from myapp.extensions import db, migrate, login, csrf, cache, cors, limiter
+
+def create_app():
+    app = Flask(__name__)
+    app.config.from_object("myapp.config.Config")
+
+    db.init_app(app)
+    migrate.init_app(app, db)
+    login.init_app(app)
+    csrf.init_app(app)
+    cache.init_app(app, config={"CACHE_TYPE": "RedisCache"})
+    cors.init_app(app, resources={r"/api/*": {"origins": "*"}})
+    limiter.init_app(app)
+
+    return app
+```
+
+**핵심**: extension 은 모듈 스코프에 인스턴스만 만들고, 앱 초기화는 `create_app` 안에서 `init_app` 으로. 이렇게 해야 여러 앱 인스턴스, 테스트에 유리.
+
+## Flask-SQLAlchemy 3.x
+
+Flask 앱과 SQLAlchemy ORM 통합. Flask-SQLAlchemy 3.0+ 은 SQLAlchemy 2.0 async 스타일 API 지원.
+
+### 설정
+
+```python
+# config.py
+class Config:
+    SQLALCHEMY_DATABASE_URI = "postgresql+psycopg://user:pass@host:5432/db"
+    SQLALCHEMY_ECHO = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_pre_ping": True,      # 연결 stale 감지
+        "pool_recycle": 3600,       # 1시간마다 재연결
+    }
+```
+
+### 모델
+
+```python
+# models.py
+from myapp.extensions import db
+from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
+
+class User(db.Model):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(unique=True, index=True)
+    password_hash: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<User {self.email}>"
+```
+
+### 쿼리 (SQLAlchemy 2.0 style)
+
+```python
+from sqlalchemy import select
+
+@app.get("/users/<int:id>")
+def get_user(id):
+    user = db.session.get(User, id)
+    if not user:
+        abort(404)
+    return {"email": user.email}
+
+@app.get("/users/")
+def list_users():
+    stmt = select(User).where(User.created_at > since).order_by(User.email)
+    users = db.session.scalars(stmt).all()
+    return [{"email": u.email} for u in users]
+
+@app.post("/users/")
+def create_user():
+    user = User(email=request.json["email"], password_hash=hash(request.json["password"]))
+    db.session.add(user)
+    db.session.commit()
+    return {"id": user.id}, 201
+```
+
+### 트랜잭션
+
+```python
+try:
+    db.session.add(user)
+    db.session.commit()
+except Exception:
+    db.session.rollback()
+    raise
+```
+
+또는 context manager:
+
+```python
+with db.session.begin():
+    db.session.add(user)
+    # commit 자동
+```
+
+## Flask-Migrate
+
+Alembic 을 Flask 앱에 통합.
+
+```bash
+pip install Flask-Migrate
+
+flask db init                          # migrations/ 폴더 생성 (초기 1회)
+flask db migrate -m "add users table"  # 자동 diff
+flask db upgrade                        # DB 적용
+flask db downgrade                      # 롤백
+flask db history                        # 히스토리
+```
+
+`Flask-Migrate` 는 SQLAlchemy 모델을 스캔해 마이그레이션 파일 자동 생성. 완벽하지 않으니 반드시 검토.
+
+## Flask-Login
+
+세션 기반 인증. 자세한 것은 [[flask-sessions|Flask Sessions]] 참조.
+
+```python
+class User(UserMixin, db.Model):
+    ...
+
+@login.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+@app.post("/login")
+def login():
+    user = User.query.filter_by(email=request.form["email"]).first()
+    if user and check_password(request.form["password"], user.password_hash):
+        login_user(user, remember=True)
+        return redirect(url_for("dashboard"))
+    return "invalid", 401
+```
+
+`login_view`, `login_message`, `session_protection` 등 설정 가능.
+
+## Flask-WTF
+
+폼 정의 + CSRF.
+
+```python
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField
+from wtforms.validators import DataRequired, Email, Length
+
+class LoginForm(FlaskForm):
+    email = StringField("이메일", validators=[DataRequired(), Email()])
+    password = PasswordField("비밀번호", validators=[DataRequired(), Length(min=8)])
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    form = LoginForm()
+    if form.validate_on_submit():
+        # POST + CSRF valid + fields valid
+        user = authenticate(form.email.data, form.password.data)
+        if user:
+            login_user(user)
+            return redirect(url_for("dashboard"))
+        form.email.errors.append("Invalid credentials")
+    return render_template("login.html", form=form)
+```
+
+템플릿:
+
+```html
+<form method="post">
+  {{ form.hidden_tag() }}
+  {{ form.email.label }} {{ form.email() }}
+  {% for error in form.email.errors %}<span>{{ error }}</span>{% endfor %}
+  {{ form.password.label }} {{ form.password() }}
+  <button>Login</button>
+</form>
+```
+
+## Flask-Caching
+
+메모리 / Redis / Memcached 캐시.
+
+```python
+cache = Cache(config={"CACHE_TYPE": "RedisCache", "CACHE_REDIS_URL": "redis://localhost:6379"})
+
+@app.get("/expensive/<int:id>")
+@cache.cached(timeout=60, key_prefix=lambda: f"expensive:{request.view_args['id']}")
+def expensive(id):
+    result = heavy_computation(id)
+    return {"result": result}
+
+@app.get("/items")
+@cache.memoize(300)
+def list_items():
+    return {"items": db.session.scalars(select(Item)).all()}
+
+# 수동 삭제
+cache.delete_memoized(list_items)
+```
+
+### CACHE_TYPE
+
+- `"SimpleCache"`: 인메모리 (단일 프로세스, dev 용)
+- `"RedisCache"`: Redis (권장)
+- `"MemcachedCache"`
+- `"FileSystemCache"`
+- `"NullCache"`: 캐시 안 함 (테스트)
+
+## Flask-CORS
+
+Cross-Origin Resource Sharing.
+
+```python
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["https://app.example.com"],
+        "methods": ["GET", "POST", "PUT", "DELETE"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True,
+    }
+})
+```
+
+또는 데코레이터 단위:
+
+```python
+from flask_cors import cross_origin
+
+@app.get("/public")
+@cross_origin()
+def public():
+    return "public"
+```
+
+## Flask-JWT-Extended
+
+JWT 인증 (세션 대신).
+
+```python
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+
+app.config["JWT_SECRET_KEY"] = "your-jwt-secret"
+jwt = JWTManager(app)
+
+@app.post("/login")
+def login():
+    if authenticate(...):
+        token = create_access_token(identity=user_id, expires_delta=timedelta(hours=1))
+        return {"access_token": token}
+    return "unauth", 401
+
+@app.get("/protected")
+@jwt_required()
+def protected():
+    return {"user_id": get_jwt_identity()}
+```
+
+Refresh token, blocklist, cookie mode 등 지원.
+
+## Flask-Limiter
+
+Rate limiting.
+
+```python
+limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
+limiter.init_app(app)
+
+@app.get("/expensive")
+@limiter.limit("10 per minute")
+def expensive():
+    ...
+
+@app.get("/exempt")
+@limiter.exempt
+def health():
+    return "ok"
+```
+
+Redis 를 storage 로 하면 다중 프로세스에서도 정확한 카운트:
+
+```python
+Limiter(
+    storage_uri="redis://localhost:6379",
+    key_func=get_remote_address,
+)
+```
+
+## Flask-Smorest / Flask-RESTX (OpenAPI)
+
+FastAPI 스타일 OpenAPI 자동화 to Flask:
+
+```python
+from flask_smorest import Api, Blueprint
+from marshmallow import Schema, fields
+
+app.config["API_TITLE"] = "My API"
+app.config["API_VERSION"] = "v1"
+app.config["OPENAPI_VERSION"] = "3.0.3"
+
+api = Api(app)
+bp = Blueprint("items", "items", url_prefix="/items")
+
+class ItemSchema(Schema):
+    id = fields.Int()
+    name = fields.Str(required=True)
+
+@bp.route("/")
+class ItemList(MethodView):
+    @bp.response(200, ItemSchema(many=True))
+    def get(self):
+        return db.session.scalars(select(Item)).all()
+
+    @bp.arguments(ItemSchema)
+    @bp.response(201, ItemSchema)
+    def post(self, data):
+        item = Item(**data)
+        db.session.add(item)
+        db.session.commit()
+        return item
+
+api.register_blueprint(bp)
+```
+
+Swagger UI 자동 생성 (`/docs`).
+
+## Flask-Talisman (보안 헤더)
+
+CSP, HSTS 등 자동 삽입:
+
+```python
+from flask_talisman import Talisman
+
+Talisman(app,
+    force_https=True,
+    strict_transport_security=True,
+    content_security_policy={
+        "default-src": "'self'",
+        "img-src": "* data:",
+        "script-src": ["'self'", "cdn.example.com"],
+    },
+)
+```
+
+## 함정
+
+> [!WARNING]
+> **`ext.init_app` 을 여러 번 호출하면 예상 밖 동작**. 앱 인스턴스마다 한 번만.
+
+> [!CAUTION]
+> **Flask-SQLAlchemy 3.x 는 Query 스타일 API deprecation**. `User.query.all()` 대신 `db.session.execute(select(User)).scalars().all()`. Marshaling 유의.
+
+> [!WARNING]
+> **Flask-Migrate 자동 마이그레이션은 완벽하지 않음**. 컬럼 rename, 데이터 변환 등 수동 처리 필요.
+
+> [!IMPORTANT]
+> **Cache invalidation**. `@cache.cached` 는 뷰 인자를 무시하고 URL 만 사용. `@cache.memoize` 는 함수 인자 포함. 잘못 선택하면 데이터 leak.
+
+> [!CAUTION]
+> **Rate limiter 는 프록시 뒤에서 remote_addr 을 잘못 인식**. `ProxyFix` 미들웨어 + `key_func` 를 `X-Forwarded-For` 신뢰 함수로.
+
+## 관련 위키
+
+- [[flask|Flask]] - 상위 개요
+- [[flask-app-factory|Flask App Factory]] - init_app 패턴
+- [[flask-blueprints|Flask Blueprints]] - Extension + Blueprint
+- [[flask-sessions|Flask Sessions]] - Flask-Login 세션 사용
+- [[flask-templates|Flask Templates]] - Flask-WTF 폼 렌더링
+- [[flask-testing|Flask Testing]] - Extension mocking
+- [[flask-deployment|Flask Deployment]] - 프록시 헤더
+- [[python|Python]]

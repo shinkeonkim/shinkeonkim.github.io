@@ -3,7 +3,7 @@ title: "[Distributed] NATS: 가벼움, JetStream, subject 라우팅"
 aliases: ["NATS", "NATS.io", "JetStream", "core NATS", "request-reply", "subject hierarchy", "NATS KV"]
 tags: [nats, message-broker, lightweight, edge, distributed]
 category: distributed-systems
-updated: 2026-06-25
+updated: 2026-07-16
 references:
   - title: "NATS.io"
     url: "https://nats.io/"
@@ -24,7 +24,7 @@ references:
 
 ## 두 모드: Core vs JetStream
 
-| | Core NATS | JetStream |
+| - | Core NATS | JetStream |
 |---|---|---|
 | 영속 | 없음 (in-memory) | *있음* |
 | 신뢰성 | at-most-once | at-least-once / exactly-once |
@@ -64,7 +64,7 @@ sequenceDiagram
     R->>N: PUB shop.getItem (reply=INBOX.abc)
     N->>S: deliver
     S->>S: 처리
-    S->>N: PUB INBOX.abc {결과}
+    S->>N: PUB INBOX.abc 결과
     N->>R: deliver
 ```
 
@@ -76,11 +76,13 @@ sequenceDiagram
 nats.subscribe('shop.getItem', { queue: 'shop' }, (msg) => { ... });
 ```
 
-## JetStream 메시지 흐름
+## JetStream 개요
+
+JetStream 은 NATS 에 내장된 *영속 스트리밍 레이어*:
 
 ```mermaid
 flowchart LR
-    P[Producer] -->|PUB orders.>| JS[(JetStream Stream)]
+    P[Producer] -->|"PUB orders.>"| JS[("JetStream Stream")]
     JS --> Consumer1[Push consumer]
     JS --> Consumer2[Pull consumer]
     JS --> Consumer3[Durable consumer]
@@ -92,6 +94,59 @@ flowchart LR
 | Pull | consumer 가 poll |
 | Ephemeral | 임시 (재접속 시 처음부터) |
 | Durable | 진행 상태 영속 |
+
+## JetStream Stream 설정
+
+```yaml
+# nats CLI 또는 API 로 Stream 생성
+stream:
+  name: ORDERS
+  subjects:
+    - orders.>
+  storage: file          # file (영속) / memory (빠름)
+  retention: limits      # limits / workqueue / interest
+  max_age: 24h           # 메시지 보존 기간
+  replicas: 3            # 노드 수 (HA 필수)
+  max_bytes: 10GB
+  discard: old           # 한계 초과 시 오래된 것 삭제
+```
+
+## JetStream 메시지 흐름 (Ack)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Producer
+    participant JS as JetStream
+    participant C as Consumer
+
+    P->>JS: PUB orders.created
+    JS-->>P: PubAck (seq=42)
+    JS->>C: deliver msg (seq=42)
+    C->>C: 처리
+    C->>JS: Ack
+    Note over JS: 해당 seq 완료 마킹
+    alt Ack 없이 timeout
+        JS->>C: redeliver (at-least-once)
+    end
+```
+
+## Consumer Ack 정책
+
+| AckPolicy | 동작 |
+|---|---|
+| `explicit` | 각 메시지 개별 Ack. 가장 안전 |
+| `all` | N번 Ack = 1~N 모두 확인 (배치 처리 효율) |
+| `none` | Ack 불필요. fire-and-forget |
+
+```js
+// Durable Consumer: 재연결 후 마지막 위치부터
+const consumer = await js.consumers.get('ORDERS', 'order-processor');
+for await (const msg of await consumer.consume()) {
+  await processOrder(msg.json());
+  msg.ack();   // explicit ack
+}
+```
 
 ## NATS KV / Object Store
 
@@ -110,6 +165,48 @@ await os.put('logo.png', readableStream);
 
 > *Redis 같은 KV*, *S3 같은 object store* 가 NATS 안에 통합. *작은 인프라* 친화.
 
+## NATS Cluster 구성
+
+```yaml
+# nats.conf (3-node cluster)
+cluster {
+  name: my-cluster
+  listen: 0.0.0.0:6222
+  routes: [
+    nats-route://nats-0:6222
+    nats-route://nats-1:6222
+    nats-route://nats-2:6222
+  ]
+}
+jetstream {
+  store_dir: /data/jetstream
+  max_memory_store: 4GB
+  max_file_store: 100GB
+}
+```
+
+- *3 노드 이상* 권장 (Raft 합의)
+- JetStream replica = *노드 수 이하* 로 설정 (보통 3)
+
+## Edge / IoT 패턴
+
+```mermaid
+flowchart TB
+    subgraph Edge["Edge devices (수천 ~ 수백만)"]
+        E1[Sensor 1]
+        E2[Sensor 2]
+        EN[Sensor N]
+    end
+    Edge --> NEdge["NATS edge cluster"]
+    NEdge --> Leaf["Leaf node"]
+    Leaf --> NCloud["NATS central cluster"]
+    NCloud --> Apps["Apps / Analytics"]
+```
+
+- *Leaf node* = *edge → central* 의 경량 게이트웨이.
+- *bandwidth 최적*: 같은 메시지 한 번만 전송.
+- *오프라인 buffer* + *재연결 시 sync*.
+
 ## NATS vs Kafka vs RabbitMQ
 
 | 항목 | NATS | Kafka | RabbitMQ |
@@ -121,25 +218,17 @@ await os.put('logo.png', readableStream);
 | 영속 | 옵션 (JS) | 항상 | 옵션 |
 | Replication | 빌트인 (JS) | 빌트인 | mirror queue |
 | 학습 곡선 | *낮음* | 높음 | 중간 |
+| Request-Reply | *네이티브 지원* | 어색 | 가능 |
+| Edge/IoT | *최적* | 부적합 | 가능 |
 
-## Edge / IoT 패턴
+Kafka 와 NATS 의 *핵심 차이*:
 
-```mermaid
-flowchart TB
-    subgraph Edge["Edge devices (수천 ~ 수백만)"]
-        E1[Sensor 1]
-        E2[Sensor 2]
-        EN[Sensor N]
-    end
-    Edge --> NEdge[NATS edge cluster]
-    NEdge --> Leaf[Leaf node]
-    Leaf --> NCloud[NATS central cluster]
-    NCloud --> Apps[Apps / Analytics]
-```
-
-- *Leaf node* = *edge → central* 의 경량 게이트웨이.
-- *bandwidth 최적*: 같은 메시지 한 번만 전송.
-- *오프라인 buffer* + *재연결 시 sync*.
+| - | NATS JetStream | Kafka |
+|---|---|---|
+| 설계 목적 | 빠른 메시징 + 선택적 영속 | 대용량 영속 로그 |
+| 장기 retention | 가능하지만 Kafka 만큼 최적화 안 됨 | 최적 (수개월) |
+| Offset 관리 | consumer 별 server-side | consumer 가 broker 에 commit |
+| Subject 라우팅 | 와일드카드 (`*`, `>`) | 없음 (topic = exact match) |
 
 ## 적합 / 부적합
 
@@ -147,7 +236,7 @@ flowchart TB
 flowchart TD
     Good[적합]
     Good --> G1[마이크로서비스 사이 메시징]
-    Good --> G2[Edge / IoT]
+    Good --> G2["Edge / IoT"]
     Good --> G3[Real-time telemetry]
     Good --> G4["작은 영속 큐 (JS)"]
     Bad[부적합]
@@ -158,10 +247,11 @@ flowchart TD
 ## 흔한 함정
 
 > [!WARNING]
-> 1. **Core NATS 의 *손실 가능성 무시*** = subscriber 없으면 *조용히 사라짐*. JS 로 가야.
+> 1. **Core NATS 의 손실 가능성 무시** = subscriber 없으면 *조용히 사라짐*. JS 로 가야.
 > 2. **JS replica 1** = 노드 다운 시 손실. RF 3 권장.
 > 3. **Wildcard 과도 사용** = `>` 가 *모든 메시지* 받음 → 클라이언트 부하.
 > 4. **Subject 표준화 없음** = 작은 팀에서는 OK, 큰 팀에서는 *충돌 / 중복*. 네임스페이스 가이드 필요.
+> 5. **JetStream max_age 미설정** = 디스크 무한 증가. retention 정책 명시 필수.
 
 ## 관련 위키
 

@@ -170,6 +170,136 @@ flowchart LR
 
 수신 측의 *멱등 보장*. Outbox 와 *대칭*.
 
+## 사용 상황
+
+| 상황 | 권장 방식 |
+|---|---|
+| 마이크로서비스 간 이벤트 | Outbox + CDC |
+| 레거시 DB (WAL 접근 불가) | Polling Publisher |
+| 실시간 latency < 100ms | CDC 권장 |
+| 단순 단일 서비스 | 불필요 (직접 publish) |
+| 이벤트 감사 로그 필요 | Outbox + archive 테이블 |
+
+## Polling vs CDC 선택
+
+```mermaid
+flowchart TD
+    S[Relay 방식 선택]
+    S --> Q1{"DB WAL/binlog<br/>접근 가능?"}
+    Q1 -->|"Yes"| Q2{"Latency 요구<br/>< 500ms?"}
+    Q1 -->|"No"| Poll["Polling Publisher<br/>(구현 단순)"]
+    Q2 -->|"Yes"| CDC["CDC (Debezium)<br/>(실시간, 저 latency)"]
+    Q2 -->|"No"| Poll2["Polling Publisher<br/>(latency 허용)"]
+```
+
+> [!TIP]
+> Debezium + PostgreSQL WAL 조합이 *2026 표준*. `wal_level=logical` 설정 필요.
+
+## 프레임워크 통합
+
+### Spring Boot + Spring Modulith
+
+```java
+// @ApplicationModuleListener 가 Outbox 자동 관리
+@ApplicationModuleListener
+public void on(OrderCreated event) {
+    // Spring Modulith 가 ApplicationEvent 를 Outbox 로 직렬화
+}
+```
+
+### Debezium Connector 설정
+
+```json
+{
+  "name": "outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "localhost",
+    "table.include.list": "public.outbox",
+    "transforms": "outbox",
+    "transforms.outbox.type":
+      "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.field.event.id": "id",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.type": "event_type"
+  }
+}
+```
+
+## 운영 고려사항
+
+### 1. Relay Lag 모니터링
+
+```sql
+-- 발행 안 된 건수 + 최고령 행 나이
+SELECT
+    COUNT(*) AS unpublished_count,
+    EXTRACT(EPOCH FROM (NOW() - MIN(occurred_at))) AS oldest_sec
+FROM outbox
+WHERE published = false;
+```
+
+> [!WARNING]
+> `oldest_sec` 이 SLA (예: 30초) 를 넘으면 *relay 가 막혔다는 신호*. 알람 설정 필수.
+
+### 2. Dead Letter 처리
+
+```sql
+ALTER TABLE outbox ADD COLUMN retry_count INT DEFAULT 0;
+ALTER TABLE outbox ADD COLUMN last_error TEXT;
+
+-- relay 에서 실패 시
+UPDATE outbox
+SET retry_count = retry_count + 1,
+    last_error  = 'Broker timeout'
+WHERE id = ?;
+
+-- retry_count > 5 → DLQ 이동
+```
+
+### 3. 대용량 정리 정책
+
+```mermaid
+flowchart LR
+    Pub[published 행 누적]
+    Pub --> A{"보관 정책?"}
+    A -->|"즉시"| Del["DELETE WHERE published=true<br/>(relay 직후)"]
+    A -->|"TTL"| TTL["DELETE WHERE published_at &lt; NOW()-7d<br/>(배치 job)"]
+    A -->|"Archive"| Arc["INSERT INTO outbox_archive<br/>+ DELETE FROM outbox"]
+```
+
+```sql
+-- 효율적 배치 삭제 (lock 최소화)
+DELETE FROM outbox
+WHERE published = true
+  AND published_at < NOW() - INTERVAL '7 days'
+LIMIT 10000;
+```
+
+## 테스트 전략
+
+```python
+# 통합 테스트: outbox 행 확인
+def test_order_creates_outbox_event(db, client):
+    resp = client.post('/orders', json={'item': 'Widget'})
+    assert resp.status_code == 201
+
+    rows = db.execute(
+        "SELECT event_type, payload FROM outbox WHERE published=false"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]['event_type'] == 'OrderCreated'
+
+# relay 테스트: 멱등성 확인
+def test_relay_idempotent(db, broker, relay):
+    db.execute("INSERT INTO outbox (event_type, payload) VALUES ('E', '{}')")
+    relay.run_once()  # 첫 번째 relay
+    relay.run_once()  # relay 가 crash 후 재시작 시나리오
+
+    msgs = broker.consumed_messages('events')
+    assert len(msgs) == 1  # 중복 없음 (consumer idempotent)
+```
+
 ## 흔한 함정
 
 > [!WARNING]

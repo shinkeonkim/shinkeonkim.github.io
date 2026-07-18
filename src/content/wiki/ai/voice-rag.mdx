@@ -8,7 +8,7 @@ aliases:
   - "voice latency RAG"
 tags: [voice-rag, rag, vector-db, latency, prefetch]
 category: ai
-updated: 2026-06-25
+updated: 2026-07-16
 references:
   - title: "VoiceAgentRAG (HAR)"
     url: "https://arxiv.org/abs/2403.03000"
@@ -18,18 +18,32 @@ references:
 
 **Voice RAG** = 음성 에이전트에 *RAG (Retrieval-Augmented Generation)* 결합. *벡터 DB 조회* 가 *지연 누적* 의 큰 원인이 되므로 *예측적 프리페치* 같은 패턴 필수.
 
-## 기본 흐름
+음성 응답 허용 지연(Time to First Audio)은 일반적으로 1.5-2초 이하를 목표로 하는데, 기존 RAG 파이프라인의 직렬 구조는 이 예산을 쉽게 초과합니다.
+
+## 언제 쓰이나
+
+- **도메인 지식 필요 음성 에이전트**: 콜센터, 의료 Q&A, 사내 챗봇
+- **실시간 대화 + 사실 근거**: 환각을 줄이고 정확한 출처 기반 답변 필요
+- **다회차 음성 대화**: 이전 발화 컨텍스트 + 외부 지식 결합
+
+## 전체 파이프라인
 
 ```mermaid
 sequenceDiagram
-    User->>STT: 발화
-    STT->>RAG: 질문 텍스트
-    RAG->>Embed: 임베딩
-    Embed->>VectorDB: kNN search
-    VectorDB-->>RAG: top-K chunks
-    RAG->>LLM: prompt + chunks
-    LLM-->>TTS: 응답 토큰
-    TTS-->>User: 음성
+    participant User as 사용자
+    participant VAD as VAD
+    participant STT as STT
+    participant RAG as RAG
+    participant LLM as LLM
+    participant TTS as TTS
+
+    User->>VAD: 음성 스트림
+    VAD-->>STT: End-of-Speech 감지
+    STT-->>RAG: 전사 텍스트
+    Note over STT,RAG: partial 수신 시 미리 prefetch
+    RAG-->>LLM: 질문 + 관련 청크
+    LLM-->>TTS: 응답 토큰 (streaming)
+    TTS-->>User: 음성 청크 (streaming)
 ```
 
 > *각 단계가 직렬*. RAG 추가 *200-1000ms* → 종단 지연 *2초+*.
@@ -38,21 +52,67 @@ sequenceDiagram
 
 | 단계 | 일반 | 최적 |
 |---|---|---|
+| STT (Whisper 등) | 200-500ms | 50ms (streaming + local) |
 | Embedding | 50-200ms | 30ms (로컬 small 모델) |
 | Vector DB query | 30-200ms | 10ms (Redis vector, ES kNN) |
 | Re-ranking | 100-500ms | 50ms (cross-encoder small) |
 | LLM prompt assembly | 5-20ms | 5ms |
+| LLM TTFT (first token) | 200-800ms | 100ms (cached prefix) |
+| TTS (first audio) | 100-300ms | 50ms (streaming) |
 | **RAG overhead** | **200-1000ms** | **< 100ms** |
+
+### 지연 예산 할당
+
+```mermaid
+flowchart LR
+    Budget["총 예산\n1500ms"] --> STT_b["STT\n100ms"]
+    Budget --> RAG_b["RAG\n100ms"]
+    Budget --> LLM_b["LLM TTFT\n200ms"]
+    Budget --> TTS_b["TTS first audio\n100ms"]
+    Budget --> Margin["마진\n1000ms"]
+```
+
+## VAD (Voice Activity Detection)
+
+발화 시작/종료를 감지하는 첫 단계. End-of-Speech 감지 정확도가 UX 를 결정합니다.
+
+```python
+import webrtcvad
+
+class VADHandler:
+    def __init__(self, aggressiveness: int = 3, sample_rate: int = 16000):
+        self.vad = webrtcvad.Vad(aggressiveness)  # 0~3, 3 = 가장 민감
+        self.sample_rate = sample_rate
+        self.frame_ms = 30  # 10, 20, 30ms 중 하나
+        self.speech_frames: list[bytes] = []
+        self.silence_count = 0
+        self.SILENCE_THRESHOLD = 20  # 연속 silence frame 수
+
+    def process_frame(self, frame: bytes) -> str | None:
+        """Return 'START', 'CONTINUE', 'END', or None"""
+        is_speech = self.vad.is_speech(frame, self.sample_rate)
+        if is_speech:
+            self.silence_count = 0
+            self.speech_frames.append(frame)
+            return "CONTINUE"
+        else:
+            self.silence_count += 1
+            if self.silence_count >= self.SILENCE_THRESHOLD and self.speech_frames:
+                audio = b"".join(self.speech_frames)
+                self.speech_frames = []
+                return "END"  # 발화 종료
+        return None
+```
 
 ## 예측적 프리페치 (Speculative Retrieval)
 
 ```mermaid
 flowchart LR
-    Partial[Partial transcript] --> Predict[가능 의도 예측]
+    Partial["Partial transcript"] --> Predict["가능 의도 예측"]
     Predict --> Pre["미리 fetch (병렬)"]
-    Final[Final transcript] --> Match{예측 매칭?}
-    Match -->|예| UsePre[프리페치 결과 사용]
-    Match -->|아니오| Re[다시 fetch]
+    Final["Final transcript"] --> Match{예측 매칭?}
+    Match -->|예| UsePre["프리페치 결과 사용"]
+    Match -->|아니오| Re["다시 fetch"]
 ```
 
 ```python
@@ -84,16 +144,16 @@ class SpeculativeRAG:
         return await self._retrieve(final)
 ```
 
-> *partial 받자마자 *추측 fetch** → final 시 *대부분 즉시 사용 가능*. RAG overhead → 0 에 가깝게.
+> *partial 받자마자 추측 fetch* → final 시 *대부분 즉시 사용 가능*. RAG overhead → 0 에 가깝게.
 
 ## 캐시 계층
 
 ```mermaid
 flowchart TB
     Q[Query] --> L1["L1: in-memory recent (LRU)"]
-    L1 -.miss.-> L2[L2: Redis semantic cache]
-    L2 -.miss.-> L3[L3: Vector DB]
-    L3 --> Pop[populate L2 + L1]
+    L1 -.miss.-> L2["L2: Redis semantic cache"]
+    L2 -.miss.-> L3["L3: Vector DB"]
+    L3 --> Pop["populate L2 + L1"]
 ```
 
 ### Semantic Cache
@@ -115,6 +175,31 @@ class SemanticCache:
 ```
 
 자세한 건 [[Redis Vector Search]] 의 semantic cache.
+
+## Streaming TTS 패턴
+
+LLM 응답을 기다렸다가 한번에 TTS 에 넘기면 추가 지연이 발생합니다. 토큰 단위로 스트리밍해 첫 문장이 완성되는 즉시 TTS 를 시작합니다.
+
+```python
+async def stream_response(llm_stream, tts_client):
+    """LLM 토큰을 문장 단위로 누적, 문장 완성 즉시 TTS 로 전달"""
+    buffer = ""
+    SENTENCE_END = {".", "!", "?", "。", "！", "？"}
+
+    async for token in llm_stream:
+        buffer += token
+        # 문장 끝 감지
+        if buffer and buffer[-1] in SENTENCE_END:
+            sentence = buffer.strip()
+            if sentence:
+                # 문장 완성 즉시 TTS 트리거 (비동기)
+                asyncio.create_task(tts_client.speak(sentence))
+            buffer = ""
+
+    # 남은 텍스트 처리
+    if buffer.strip():
+        await tts_client.speak(buffer.strip())
+```
 
 ## RAG 인덱스 선택 (음성 환경)
 
@@ -148,13 +233,15 @@ def chunk_for_voice(doc: str) -> list[str]:
     return chunks
 ```
 
+짧은 청크는 검색 정밀도를 높이고 LLM 이 짧고 자연스러운 음성 응답을 생성하도록 유도합니다.
+
 ## Re-ranking 의 trade-off
 
 ```mermaid
 flowchart LR
-    VS[Vector Search top 50] --> Re[Re-ranker]
-    Re --> Top5[top 5]
-    Re --> Cost[+100-500ms]
+    VS["Vector Search top 50"] --> Re["Re-ranker"]
+    Re --> Top5["top 5"]
+    Re --> Cost["+100-500ms"]
 ```
 
 > *정확도 ↑ vs 지연 ↑*. 음성 에이전트는 *작은 cross-encoder* (Cohere rerank-v3 light, BAAI bge-reranker-base) 권장.
@@ -163,9 +250,13 @@ flowchart LR
 
 > [!WARNING]
 > 1. **RAG 매 turn 동기 fetch** = 매 응답 200-1000ms 증가. *예측적 프리페치*.
-> 2. **거대 청크** = LLM 응답이 길어짐. 짧은 청크.
+> 2. **거대 청크** = LLM 응답이 길어짐. 짧은 청크 (100-300 tokens).
 > 3. **Cross-encoder rerank 무조건** = 500ms+ 부담. *trade-off* 결정.
 > 4. **결과 그대로 prompt** = 토큰 폭증. 요약 또는 selection.
+> 5. **VAD 미사용** = 발화 종료 감지가 느려 STT 에 불필요한 silence 포함. 지연 증가.
+
+> [!CAUTION]
+> **Semantic cache 유사도 임계값을 낮추면 오답 반환 위험이 생깁니다.** 0.92 이하에서는 의미가 다른 질의의 캐시 결과를 반환할 수 있습니다. 도메인 특성에 맞게 검증 후 설정하세요.
 
 ## 관련 위키
 
@@ -174,3 +265,4 @@ flowchart LR
 - [[elasticsearch-vector-search]]
 - [[Redis Vector Search]]
 - [[latency-percentiles]]
+- [[llm-rag|LLM RAG]] - 일반 RAG 파이프라인

@@ -188,6 +188,73 @@ $$
 > [!CAUTION]
 > **암호학적 primitive 를 직접 구현하지 마세요**. 검증된 라이브러리 (TFF, Flower, OpenMined) 를 사용. Side-channel 공격은 다이렉트 구현에서 흔한 위험.
 
+## 프로토콜 흐름 시각화
+
+```mermaid
+flowchart TD
+    R0["Round 0: 키 광고<br/>각 클라이언트, DH 공개키 서버 전송"]
+    R1["Round 1: 키 분배<br/>Shamir Secret Sharing, 임계값 t"]
+    R2["Round 2: 마스크된 업데이트<br/>pairwise mask + self mask 적용"]
+    R3["Round 3: 마스크 제거<br/>살아남은 클라이언트 b_j 공개, dropout 복원"]
+    Done["집계 완료: gradient 합만 노출"]
+    R0 --> R1 --> R2 --> R3 --> Done
+```
+
+### Dropout 처리 흐름
+
+```mermaid
+flowchart LR
+    Alive["살아남은 클라이언트 U"] -->|"b_j 제출"| Server[서버]
+    Dropped["Dropout 클라이언트"] -->|"Shamir 복원"| MaskRec["mask 재생성"]
+    MaskRec --> Server
+    Server --> Sum["sum(x_i for i in U)"]
+```
+
+## SecAgg+ 통신 복잡도
+
+| 프로토콜 | 클라이언트당 통신 | n=10^6 적합 |
+|:---|:---|:---|
+| Bonawitz SecAgg | O(n) | 불가 |
+| SecAgg+ (Bell 2022) | O(log n) | 가능 |
+| TEE 방식 | O(1) | 가능 (하드웨어 신뢰 필요) |
+
+SecAgg+ 는 각 클라이언트를 $k$-정규 그래프 이웃과만 연결. 이웃 수 $k = O(\log n)$ 로 전체 통신량이 대폭 감소.
+
+## 공격 방어 매핑
+
+| 공격 유형 | Secure Aggregation 대응 | 추가 방어 필요 |
+|:---|:---|:---|
+| Gradient inversion | 개별 gradient 미노출 | DP noise 병행 권장 |
+| Honest-but-curious server | 집계 값만 노출 | - |
+| Collusion (t 이하) | Shamir threshold 로 차단 | - |
+| Byzantine (값 오염) | 미대응 | Robust aggregation (Krum, Median) |
+| Model poisoning | 미대응 | 이상값 탐지 |
+| Dropout 공격 | t 이하 dropout 허용 | 임계값 조정 |
+
+> Secure Aggregation 은 **누가 무엇을 보는가** 를 제어. **무엇을 넣는가** 는 별도 방어 레이어가 필요.
+
+## 실전 구현 고려사항
+
+```python
+# TensorFlow Federated
+import tensorflow_federated as tff
+
+secure_sum = tff.aggregators.SecureModularSumFactory(
+    modulus=2**20,   # R: wrap-around 방지. gradient 합이 R 을 넘지 않도록 설정
+)
+
+# Flower: strategy 플러그인 방식으로 SecAgg 적용
+# from flwr.server.strategy import FedAvg + SecureAggregation adapter
+```
+
+클라이언트 수 $n$, 임계값 $t$, gradient 차원 $d$ 에 따라 통신 오버헤드 추정:
+
+$$
+\text{총 통신량} \approx n \cdot k \cdot d \cdot \text{element\_size}
+$$
+
+대규모 배포 전 $d \times n$ 통신량 계산 필수. 7B 모델 ($d \approx 10^7$) 에서 클라이언트당 수백 MB 발생.
+
 ## 관련 위키
 
 - [[federated-learning|Federated Learning]] - 상위 개념

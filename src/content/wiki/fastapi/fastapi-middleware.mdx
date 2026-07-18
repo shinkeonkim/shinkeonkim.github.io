@@ -1,0 +1,318 @@
+---
+title: "[FastAPI] Middleware"
+aliases:
+  - "FastAPI Middleware"
+  - "FastAPI CORS"
+  - "FastAPI GZip"
+  - "FastAPI Trusted Host"
+  - "BaseHTTPMiddleware"
+  - "ASGI middleware"
+  - "FastAPI 미들웨어"
+tags: [python, fastapi, middleware, asgi]
+category: fastapi
+updated: 2026-07-07
+references:
+  - title: "FastAPI Middleware"
+    url: "https://fastapi.tiangolo.com/tutorial/middleware/"
+  - title: "FastAPI CORS"
+    url: "https://fastapi.tiangolo.com/tutorial/cors/"
+  - title: "Starlette Middleware"
+    url: "https://www.starlette.io/middleware/"
+---
+
+## 정의
+
+**FastAPI Middleware** 는 모든 요청과 응답을 가로채 로깅, 인증, 압축, CORS 등 공통 처리를 하는 계층입니다. Starlette 의 ASGI middleware 를 그대로 사용하며, 함수 스타일 (`@app.middleware("http")`) 과 클래스 스타일 (`app.add_middleware`) 두 가지 API 를 제공합니다.
+
+## 함수 스타일
+
+```python
+import time
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+```
+
+`call_next(request)` 는 다음 미들웨어 또는 endpoint 로 요청을 넘김. 응답이 돌아오면 수정 후 반환.
+
+## 클래스 스타일
+
+```python
+from starlette.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://example.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+## 실행 순서
+
+**등록 순서의 역순으로 outer -> inner** 로 요청 시. 응답은 inner -> outer.
+
+```python
+app.add_middleware(A)  # 마지막에 나가는 outer
+app.add_middleware(B)
+app.add_middleware(C)  # 처음 들어오는 inner
+```
+
+요청 흐름: `C -> B -> A -> endpoint`. 응답 흐름: `endpoint -> A -> B -> C`.
+
+**따라서**: 인증은 outer 에 (요청 초입에서 검증), 로깅은 inner (엔드포인트 근처).
+
+## 내장 미들웨어
+
+### CORSMiddleware
+
+**Cross-Origin Resource Sharing**. 브라우저의 same-origin policy 를 위한 헤더 추가.
+
+```python
+from starlette.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://app.example.com", "https://admin.example.com"],
+    allow_origin_regex=r"https://.*\.example\.com",  # 대안
+    allow_credentials=True,        # cookie 허용
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["*"],
+    expose_headers=["X-Custom-Header"],
+    max_age=600,                   # preflight 캐시 (초)
+)
+```
+
+**주의**: `allow_credentials=True` + `allow_origins=["*"]` 조합은 브라우저가 거부. 명시적 origin 필요.
+
+### GZipMiddleware
+
+응답 gzip 압축. 클라이언트가 `Accept-Encoding: gzip` 을 보낼 때만 적용.
+
+```python
+from starlette.middleware.gzip import GZipMiddleware
+
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
+```
+
+- `minimum_size`: 이 크기 이상만 압축 (작은 응답은 압축 오버헤드가 이득 초과)
+- `compresslevel`: 1-9, 6 이 기본. 크기/속도 트레이드오프.
+
+### TrustedHostMiddleware
+
+Host header 검증. Host header 주입 공격 방어.
+
+```python
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["example.com", "*.example.com"],
+)
+```
+
+허용되지 않은 호스트는 400 반환.
+
+### HTTPSRedirectMiddleware
+
+HTTP -> HTTPS 리디렉트.
+
+```python
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+
+app.add_middleware(HTTPSRedirectMiddleware)
+```
+
+**주의**: 프록시 (ALB, CloudFront) 뒤에서는 `X-Forwarded-Proto` 를 신뢰하기 위해 프록시 미들웨어 필요. Uvicorn 의 `--proxy-headers` 옵션과 조합.
+
+### SessionMiddleware
+
+서버 side 없는 서명 쿠키 세션.
+
+```python
+from starlette.middleware.sessions import SessionMiddleware
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key="your-secret-key",
+    session_cookie="session",
+    max_age=14 * 24 * 3600,   # 14일
+    same_site="lax",
+    https_only=True,
+)
+
+@app.get("/set")
+def set_session(request: Request):
+    request.session["user_id"] = 42
+    return {"ok": True}
+
+@app.get("/get")
+def get_session(request: Request):
+    return {"user_id": request.session.get("user_id")}
+```
+
+## Custom Middleware 패턴
+
+### 로깅 미들웨어
+
+```python
+import logging, time, uuid
+
+logger = logging.getLogger("access")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+    start = time.time()
+
+    logger.info(f"[{request_id}] {request.method} {request.url.path}")
+
+    response = await call_next(request)
+
+    duration = time.time() - start
+    logger.info(
+        f"[{request_id}] {request.method} {request.url.path} "
+        f"-> {response.status_code} ({duration:.3f}s)"
+    )
+    response.headers["X-Request-ID"] = request_id
+    return response
+```
+
+### 요청 ID 전파
+
+```python
+from contextvars import ContextVar
+
+request_id_ctx: ContextVar[str] = ContextVar("request_id", default="")
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    token = request_id_ctx.set(rid)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = rid
+        return response
+    finally:
+        request_id_ctx.reset(token)
+```
+
+logger 에서 `request_id_ctx.get()` 로 참조. 분산 트레이싱의 시발점.
+
+### 인증 미들웨어
+
+미들웨어보다는 [[fastapi-dependency-injection|Dependency]] 로 하는 것이 표준. 다만 앱 전역 인증이 필요하면:
+
+```python
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # 인증 예외 경로
+        if request.url.path in {"/health", "/docs", "/openapi.json"}:
+            return await call_next(request)
+
+        token = request.headers.get("Authorization")
+        if not token:
+            return JSONResponse({"detail": "Missing token"}, status_code=401)
+
+        try:
+            user = validate_token(token)
+        except InvalidToken:
+            return JSONResponse({"detail": "Invalid token"}, status_code=401)
+
+        request.state.user = user      # request.state 로 전달
+        return await call_next(request)
+
+app.add_middleware(AuthMiddleware)
+```
+
+Endpoint 에서 `request.state.user` 로 접근. Dependency 조합도 가능.
+
+### Rate limiter
+
+```python
+from collections import defaultdict
+import time
+
+class RateLimiter(BaseHTTPMiddleware):
+    def __init__(self, app, calls: int = 100, period: int = 60):
+        super().__init__(app)
+        self.calls = calls
+        self.period = period
+        self.clients: dict[str, list[float]] = defaultdict(list)
+
+    async def dispatch(self, request: Request, call_next):
+        client_id = request.client.host
+        now = time.time()
+        self.clients[client_id] = [
+            t for t in self.clients[client_id] if now - t < self.period
+        ]
+        if len(self.clients[client_id]) >= self.calls:
+            return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+        self.clients[client_id].append(now)
+        return await call_next(request)
+
+app.add_middleware(RateLimiter, calls=100, period=60)
+```
+
+**주의**: 이 예시는 단일 프로세스용. 프로덕션은 Redis 기반 (`slowapi`, `fastapi-limiter`) 사용.
+
+## Exception Handler
+
+Middleware 는 아니지만 유사 위치:
+
+```python
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    return JSONResponse({"error": str(exc)}, status_code=400)
+
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    return JSONResponse({"detail": "Custom 404"}, status_code=404)
+```
+
+## Middleware 성능 팁
+
+- **Async 로 작성**: sync middleware 는 스레드풀 오버헤드
+- **`call_next` 는 반드시 await**: 안 하면 응답 못 감
+- **Response body 를 읽으면 새 Response 반환**: `StreamingResponse` 재구성 필요
+- **너무 많은 미들웨어**: 스택 오버헤드. 필수만.
+
+## 함정
+
+> [!WARNING]
+> **미들웨어에서 request body 를 여러 번 읽으면 안 됩니다**. Starlette Request 는 stream. `await request.body()` 는 한 번만. 다시 읽어야 하면 캐시.
+
+> [!CAUTION]
+> **`BaseHTTPMiddleware` 는 응답 스트리밍을 방해할 수 있음**. StreamingResponse 를 사용하는 endpoint 앞에서 이 미들웨어를 쓰면 응답 전체를 버퍼링. Pure ASGI middleware 로 대체 검토.
+
+> [!WARNING]
+> **CORS + credentials + wildcard** 는 브라우저가 막습니다. 명시적 origin 나열.
+
+> [!IMPORTANT]
+> **미들웨어 예외**. `call_next` 가 예외를 던지면 후속 미들웨어의 응답 처리 로직이 실행 안 됨. try/except 로 감싸거나 exception handler 사용.
+
+> [!CAUTION]
+> **미들웨어 순서**. 인증 -> 로깅 -> CORS 순서에 따라 프리플라이트 요청이 인증 전에 통과하지 못하는 문제. CORS 는 대개 outermost.
+
+## 관련 위키
+
+- [[fastapi|FastAPI]] - 상위 개요
+- [[fastapi-routing|FastAPI Routing]] - 라우터 단위 dependencies
+- [[fastapi-dependency-injection|FastAPI DI]] - 인증 대안
+- [[fastapi-async|FastAPI Async]] - async middleware
+- [[fastapi-testing|FastAPI Testing]] - middleware 테스트
+- [[fastapi-deployment|FastAPI Deployment]] - 프록시 헤더

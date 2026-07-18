@@ -195,6 +195,89 @@ public void wrong(Long id) {
 
 1차 캐시 (`spring-jpa-persistence-context`) 때문에 두 번째 find 는 SQL 안 나감 = stale 데이터. **트랜잭션 시작 시점의 stock** 으로 계산되는 함정. 트랜잭션을 짧게 유지하거나 `em.refresh()` 호출.
 
+## Optimistic Lock 충돌 흐름
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as 트랜잭션 A
+    participant DB as PostgreSQL
+    participant B as 트랜잭션 B
+
+    A->>DB: SELECT stock, version=1
+    B->>DB: SELECT stock, version=1
+    A->>DB: UPDATE SET stock=9, version=2 WHERE version=1
+    DB-->>A: 1 row updated
+    B->>DB: UPDATE SET stock=8, version=2 WHERE version=1
+    DB-->>B: 0 rows updated
+    B-->>B: OptimisticLockException 발생
+    Note over B: Retryable 재시도
+    B->>DB: SELECT stock, version=2
+    B->>DB: UPDATE SET stock=8, version=3 WHERE version=2
+    DB-->>B: 1 row updated
+```
+
+## 분산 환경 고려
+
+JPA Locking 은 **단일 DB instance** 전제. 서비스 규모가 커지면:
+
+| 상황 | 한계 | 해결책 |
+|:---|:---|:---|
+| DB 샤딩 / 분산 | row-level lock 범위 초과 | Redis SETNX 또는 ZooKeeper |
+| 마이크로서비스 | 트랜잭션 경계 없음 | Saga 패턴 + 보상 트랜잭션 |
+| 캐시 불일치 | version 이 캐시에도 존재 | Cache-aside + TTL 단축 |
+| 수평 확장 Pod | DB 연결 수 증가 | Connection Pool 최적화 |
+
+> [!CAUTION]
+> 분산 환경에서 `@Version` 만으로는 크로스 서비스 동시성 문제를 막을 수 없다. 외부 분산 락 또는 Saga 패턴을 병행 검토.
+
+### Redis 분산 락 (Redisson 예시)
+
+```java
+@Autowired RedissonClient redisson;
+
+public void decreaseStockWithLock(Long productId, int qty) {
+    RLock lock = redisson.getLock("product:lock:" + productId);
+    try {
+        if (lock.tryLock(3, 5, TimeUnit.SECONDS)) {
+            decreaseStock(productId, qty);   // 내부에서 JPA 트랜잭션
+        } else {
+            throw new RuntimeException("Lock 획득 실패");
+        }
+    } finally {
+        if (lock.isHeldByCurrentThread()) lock.unlock();
+    }
+}
+```
+
+Redis `SET NX PX` 기반. 단일 Redis 노드 장애 시 lock 소실 위험 → Redlock (N 개 Redis 과반 동의).
+
+## Version 관리 주의사항
+
+### 읽기 전용 API 에서 version 노출 금지
+
+```java
+// DTO 에 version 포함 (위험)
+record ProductResponse(Long id, int stock, Long version) {}
+
+// version 없이 (안전)
+record ProductResponse(Long id, int stock) {}
+```
+
+클라이언트가 stale version 을 기반으로 수정 요청을 보내면 예상치 못한 `OptimisticLockException`. API 설계 시 version 은 내부 구현 상세로 취급.
+
+### 벌크 업데이트와 version
+
+```java
+// 벌크 UPDATE 는 @Version 우회 (주의!)
+@Modifying
+@Query("UPDATE Product p SET p.stock = p.stock - :qty WHERE p.id = :id")
+int decreaseStockBulk(@Param("id") Long id, @Param("qty") int qty);
+// version 검증 없이 직접 SQL → Optimistic Lock 의미 없음
+```
+
+JPQL 벌크 업데이트는 영속성 컨텍스트를 우회. 의도적 최적화가 아니면 개별 엔티티 업데이트 사용.
+
 ## 함정과 베스트 프랙티스
 
 - **재고 차감 / 카운터** 같은 lost update 회피에는 둘 다 가능

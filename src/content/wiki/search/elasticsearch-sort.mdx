@@ -187,6 +187,98 @@ flowchart LR
 > 3. **`track_total_hits: true`** = 대량 매칭 시 *2배 느림*. 필요 없으면 *false* 또는 *10000*.
 > 4. **script sort 남용** = 매 쿼리 *Painless 컴파일*. *runtime field* 또는 *index 시 저장* 으로.
 
+## Nested Sort
+
+중첩 오브젝트 배열에서 조건부 정렬:
+
+```json
+{
+  "sort": [
+    {
+      "offers.price": {
+        "mode": "min",
+        "order": "asc",
+        "nested": {
+          "path": "offers",
+          "filter": { "term": { "offers.currency": "KRW" } }
+        }
+      }
+    }
+  ]
+}
+```
+
+> 한 문서에 여러 `offers` 가 있을 때, *KRW 통화 중 최저가* 로 정렬.
+
+## Collapse + Sort
+
+그룹별 대표 문서만 반환 (중복 제거):
+
+```json
+GET /products/_search
+{
+  "query": { "match": { "category": "노트북" } },
+  "sort": [{ "sold_count": "desc" }],
+  "collapse": {
+    "field": "brand.keyword",
+    "inner_hits": {
+      "name": "top_per_brand",
+      "size": 3,
+      "sort": [{ "price": "asc" }]
+    }
+  }
+}
+```
+
+> 브랜드별 판매량 1위 제품 + 브랜드 내 저가 3개. 쇼핑 검색 결과 UX.
+
+## Cursor Pagination 패턴
+
+`search_after` + PIT 로 대용량 데이터 순회:
+
+```python
+def paginate(client, index: str, query: dict, sort: list, page_size: int = 100):
+    pit = client.open_point_in_time(index=index, keep_alive="5m")["id"]
+    search_after = None
+    try:
+        while True:
+            body = {
+                "size": page_size,
+                "pit": {"id": pit, "keep_alive": "5m"},
+                "query": query,
+                "sort": sort,
+            }
+            if search_after:
+                body["search_after"] = search_after
+            resp = client.search(body=body)
+            hits = resp["hits"]["hits"]
+            if not hits:
+                break
+            yield hits
+            search_after = hits[-1]["sort"]
+    finally:
+        client.close_point_in_time(id=pit)
+```
+
+> *PIT + search_after* 조합은 *인덱스 변경에도 일관된 스냅샷* 보장.
+
+## Sort 성능 튜닝
+
+| 전략 | 설명 |
+|---|---|
+| doc_values 활성화 | 숫자, 날짜, keyword 기본 ON. text 는 OFF |
+| `_source` 최소화 | `fields` 파라미터로 필요한 필드만 |
+| script sort 제한 | 자주 쓰는 정렬은 index 시 계산해 저장 |
+| keyword sub-field | text 정렬 시 `title.raw` (keyword) 사용 |
+| size 최소화 | 불필요하게 큰 페이지 크기는 힙 낭비 |
+
+```mermaid
+flowchart LR
+    Q["쿼리"] -->|"doc_values"| Fast["빠름 (columnar)"]
+    Q -->|"fielddata on text"| Slow["느림 (heap 적재)"]
+    Q -->|"script sort"| Painless["가변 (Painless 실행)"]
+```
+
 ## 관련 위키
 
 - [[elasticsearch-query]]

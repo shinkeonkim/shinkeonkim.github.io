@@ -183,10 +183,114 @@ externalEmitter.once('error', reject);
 return promise;
 ```
 
+## 상태 전이 다이어그램
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: new Promise 생성
+    pending --> fulfilled: resolve 호출
+    pending --> rejected: reject 호출 또는 throw
+    fulfilled --> [*]
+    rejected --> [*]
+```
+
+한 번 `fulfilled` 또는 `rejected` 로 정착하면 다시 바뀌지 않는다. 이 불변성이 콜백 대비 가장 큰 안전성 이점.
+
+## 마이크로태스크 큐와의 관계
+
+Promise 의 `.then` / `.catch` / `.finally` 콜백은 *마이크로태스크 큐* 에 들어간다. 일반 태스크 (setTimeout 등) 보다 *먼저* 실행된다.
+
+```javascript
+console.log('1');
+
+setTimeout(() => console.log('2'), 0);
+
+Promise.resolve().then(() => console.log('3'));
+
+console.log('4');
+
+// 출력 순서: 1, 4, 3, 2
+```
+
+실행 순서:
+1. 동기 코드: `1`, `4`
+2. 마이크로태스크: `3` (Promise.then)
+3. 매크로태스크: `2` (setTimeout)
+
+> [!IMPORTANT]
+> Promise 체인이 길면 마이크로태스크가 쌓여 렌더링이 블로킹될 수 있다. 긴 체인은 `setTimeout(0)` 으로 분리 고려.
+
+## 에러 처리 패턴
+
+### 중앙 집중 에러 처리
+
+```javascript
+async function withErrorHandling(fn, fallback) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error('Error:', err.message);
+    return fallback;
+  }
+}
+
+const data = await withErrorHandling(
+  () => fetch('/api/data').then(r => r.json()),
+  []
+);
+```
+
+### 재시도 패턴
+
+```javascript
+async function retry(fn, times = 3, delay = 1000) {
+  for (let i = 0; i < times; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i === times - 1) throw err;
+      await new Promise(r => setTimeout(r, delay * (i + 1)));
+    }
+  }
+}
+
+const result = await retry(() => fetch('/api/unstable'));
+```
+
+### 타임아웃 래퍼
+
+```javascript
+function withTimeout(promise, ms) {
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+}
+
+const data = await withTimeout(fetch('/slow-api'), 5000);
+```
+
+## 실행 순서 보장
+
+```mermaid
+sequenceDiagram
+    participant JS as JS엔진
+    participant Micro as 마이크로태스크
+    participant Macro as 매크로태스크
+    JS->>JS: 동기 코드 실행
+    JS->>Micro: Promise.then 등록
+    JS->>Macro: setTimeout 등록
+    JS->>Micro: 마이크로태스크 전부 소진
+    JS->>Macro: 다음 매크로태스크 1개
+```
+
+자세한 이벤트 루프 동작은 [[js-event-loop]], [[js-microtask-queue]] 참조.
+
 ## 참고
 
-- [[이벤트 루프]]
-- [[Microtask Queue]]
-- [[콜백]]
-- [[async/await]]
+- [[js-event-loop]]
+- [[js-microtask-queue]]
+- [[js-callback]]
+- [[js-async-await]]
+- [[js-promise-methods]]
 - [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]

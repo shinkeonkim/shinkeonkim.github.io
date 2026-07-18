@@ -189,9 +189,114 @@ runs:
 > 3. **`uses: action@main`** = action 변경에 *영향 받음*. *SHA pinning*.
 > 4. **Self-hosted runner 의 *fork PR*** = 임의 코드 실행. *fork 차단* 또는 GitHub-hosted.
 
+## Cache와 Artifact
+
+### Cache
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: ~/.npm
+    key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+    restore-keys: |
+      ${{ runner.os }}-node-
+```
+
+- `key` 가 정확히 매칭되면 cache hit, 아니면 `restore-keys` 순서로 prefix 매칭.
+- `hashFiles('**/package-lock.json')` = lock 파일 변경 시 캐시 무효화.
+- `actions/setup-node@v4` 의 `cache: npm` 은 위를 자동으로 수행.
+
+### Artifact
+
+```yaml
+- uses: actions/upload-artifact@v4
+  with:
+    name: dist
+    path: ./dist
+    retention-days: 7
+
+# 다른 job 에서 다운로드
+- uses: actions/download-artifact@v4
+  with:
+    name: dist
+    path: ./dist
+```
+
+job 간 파일 공유. `needs` + artifact 로 build → deploy 파이프라인 연결.
+upload artifact 는 workflow 실행 당 5 GB, 기본 보존 90일.
+
+## Concurrency 제어
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+- 같은 branch 에서 새 push 가 오면 기존 실행 취소.
+- PR 에서 커밋 계속 올릴 때 이전 CI 낭비 방지.
+- `cancel-in-progress: false` 로 배포 job 직렬화 가능.
+
+## Environment와 Secret
+
+```yaml
+jobs:
+  deploy:
+    environment: production       # GitHub Environments 보호 규칙 적용
+    steps:
+      - name: Use secret
+        env:
+          API_KEY: ${{ secrets.API_KEY }}        # repository / org secret
+          DB_PASS: ${{ secrets.DB_PASS }}
+        run: deploy.sh
+```
+
+- `secrets.XXX` 는 로그에 자동 마스킹.
+- `environment` = 환경별 secret 분리 + 수동 승인 게이트.
+- `GITHUB_TOKEN` 은 Actions 가 자동 발급, 해당 repo 내 작업에만 유효.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write       # OIDC 필요 시
+```
+
+최소 권한 원칙. workflow 레벨 / job 레벨 모두 선언 가능.
+
+## 배포 파이프라인 흐름
+
+```mermaid
+flowchart LR
+    Push["코드 push"] --> CI["CI: lint + test + build"]
+    CI -->|"성공"| Stg["staging 배포"]
+    CI -->|"실패"| Fail["빌드 실패 알림"]
+    Stg -->|"승인 (Environment gate)"| Prod["prod 배포"]
+    Stg -->|"E2E 실패"| Rollback["롤백"]
+```
+
+## Expressions 와 Context
+
+| Context | 내용 |
+|---|---|
+| `github.ref` | 현재 branch/tag ref |
+| `github.sha` | commit SHA |
+| `github.actor` | trigger 한 사용자 |
+| `github.event_name` | push, pull_request 등 |
+| `runner.os` | Linux, macOS, Windows |
+| `env.MY_VAR` | 환경변수 접근 |
+
+```yaml
+# 조건부 실행
+if: github.ref == 'refs/heads/main' && success()
+if: contains(github.event.pull_request.labels.*.name, 'deploy')
+```
+
 ## 관련 위키
 
 - [[argocd]]
 - [[gitops-patterns]]
 - [[aws-sts-assume-role]]
 - [[docker]]
+- [[OpenTelemetry]]
+- [[zero-downtime deployment]]

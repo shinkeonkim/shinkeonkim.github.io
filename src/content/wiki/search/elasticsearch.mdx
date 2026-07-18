@@ -10,7 +10,7 @@ aliases:
   - "ES 9.x"
 tags: [elasticsearch, search, lucene, inverted-index, elk]
 category: search
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "Elastic 공식"
     url: "https://www.elastic.co/docs"
@@ -20,6 +20,8 @@ references:
   - title: "OpenSearch"
     url: "https://opensearch.org/"
     note: "AWS 의 ES 7.10 fork (Apache 2.0)."
+  - title: "Elasticsearch: The Definitive Guide"
+    url: "https://www.elastic.co/guide/en/elasticsearch/guide/current/index.html"
 ---
 
 ## 정의
@@ -66,7 +68,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     Doc[JSON Document] -->|index API| Analyze["Analyzer<br/>(tokenize, normalize)"]
-    Analyze --> Inv["Inverted Index<br/>(term → docs)"]
+    Analyze --> Inv["Inverted Index<br/>(term to docs)"]
     Inv --> Lucene[(Lucene segments)]
     Query[Query] -->|search API| Score[BM25 scoring]
     Score --> Sort[Sort by relevance]
@@ -79,6 +81,114 @@ flowchart LR
 - *RESTful + JSON*: HTTP 만 알면 사용.
 
 자세한 원리는 [[elasticsearch-basics]].
+
+## 역인덱스 (Inverted Index) 원리
+
+*역인덱스* = **term → 문서 ID 목록** 매핑. Lucene 이 구현, ES 가 분산 래핑.
+
+예시 문서:
+
+| doc | 내용 |
+|---|---|
+| doc1 | "quick brown fox" |
+| doc2 | "brown dog jumps" |
+| doc3 | "quick dog runs" |
+
+인덱스 결과:
+
+| Term | Posting list |
+|---|---|
+| `quick` | doc1, doc3 |
+| `brown` | doc1, doc2 |
+| `fox` | doc1 |
+| `dog` | doc2, doc3 |
+
+검색 `quick AND dog` → `{doc1,doc3} ∩ {doc2,doc3}` = `doc3`. *O(1) 조회*.
+
+텍스트 필드 분석 파이프라인:
+
+1. **Character filter**: HTML 제거, 문자 변환
+2. **Tokenizer**: 공백/구두점 기준 분리
+3. **Token filter**: lowercase, stemming, stopword 제거
+
+## 클러스터 / 노드 / 샤드 구조
+
+```mermaid
+flowchart LR
+    Client -->|"REST / ESQL"| Coord["Coordinating Node"]
+    Coord --> DN1["Data Node 1<br/>Primary P0, Replica R1"]
+    Coord --> DN2["Data Node 2<br/>Primary P1, Replica R0"]
+    Master["Master Node<br/>(클러스터 메타 관리)"] -.->|state| DN1
+    Master -.->|state| DN2
+    Ingest["Ingest Node<br/>(파이프라인)"] --> DN1
+```
+
+| 노드 역할 | 설명 |
+|---|---|
+| *Master* | 클러스터 상태, 인덱스 생성/삭제, 샤드 할당 관리 |
+| *Data* | 실제 문서 저장 + 검색 처리 |
+| *Coordinating* | 요청 파싱 + 샤드 분산 + 결과 집합 |
+| *Ingest* | 인덱싱 전처리 파이프라인 (Logstash 대안) |
+| *ML* | ML 모델 실행 (유료 기능) |
+
+**샤드 설계 원칙**:
+
+- 샤드 1개 권장 최대 크기: *20-50 GB* (hot tier)
+- 총 샤드 수 너무 많으면 클러스터 상태 비대화 → *오버샤딩이 최대 실수*
+- Replica 는 *가용성 + 읽기 처리량* 향상. 쓰기는 느려짐
+- `index.number_of_shards` 는 생성 시 결정. *변경 불가* (rollover 필요)
+
+```json
+PUT /my-index
+{
+  "settings": {
+    "number_of_shards": 3,
+    "number_of_replicas": 1
+  }
+}
+```
+
+샤드 라우팅 공식: `shard = hash(document_id) % number_of_primary_shards`
+
+## 인덱싱 라이프사이클
+
+```mermaid
+flowchart LR
+    Doc[문서 색인 요청] --> Buffer["In-memory Buffer<br/>(index.buffer_size)"]
+    Buffer -->|"refresh (기본 1초)"| Segment["Lucene Segment<br/>(불변, 검색 가능)"]
+    Buffer -->|write| TLog["Translog<br/>(복구용 WAL)"]
+    Segment -->|"flush (30분 or 512 MB)"| FSS["디스크 (fsync)"]
+    TLog -->|flush 후 초기화| FSS
+    Segment --> Merge["Segment Merge<br/>(백그라운드)"]
+    Merge --> Segment
+```
+
+| 단계 | 동작 | 기본값 |
+|---|---|---|
+| *Refresh* | 버퍼 → 세그먼트. 검색 가능 | `index.refresh_interval: 1s` |
+| *Flush* | translog + 세그먼트 → 디스크 commit | 30분 or 512 MB |
+| *Merge* | 작은 세그먼트 병합. 삭제 문서 실제 제거 | 백그라운드 자동 |
+
+> [!IMPORTANT]
+> *bulk 인덱싱 시 `refresh_interval: -1`* 설정 → 완료 후 수동 `POST /index/_refresh`. *5-10배 속도 향상*.
+
+## JVM Heap 설정
+
+```yaml
+# jvm.options
+-Xms16g
+-Xmx16g   # 반드시 Xms = Xmx (동적 확장 방지)
+```
+
+| 규칙 | 이유 |
+|---|---|
+| *총 RAM 의 50% 이하* | 나머지 50% → OS page cache (Lucene file I/O) |
+| *최대 30 GB* | JVM Compressed OOPs 활성 유지 |
+| *Xms = Xmx* | 런타임 확장 방지 (GC pause 최소화) |
+| *G1GC 기본 (7.0+)* | 큰 heap 의 pause time 안정화 |
+
+> [!CAUTION]
+> 32 GB 이상 heap 설정 시 compressed OOPs 비활성 → 포인터 크기 2배 → *오히려 느려짐*. 30 GB 이하 유지.
 
 ## ES vs 다른 DB
 
@@ -98,7 +208,7 @@ flowchart LR
 | **Vector** | dense_vector + kNN | quantization 자동, BBQ |
 | **ELSER** | 영문 모델 (sparse) | 다국어 + v2 |
 | **Inference API** | 외부 LLM 통합 | endpoint 확장 |
-| **Bytes**/**Cost** | 기본 | *Search AI Lake* (storage 분리) |
+| **Bytes/Cost** | 기본 | *Search AI Lake* (storage 분리) |
 | **Snapshots** | 지원 | searchable snapshots 강화 |
 
 ## 활용 카테고리
@@ -107,13 +217,23 @@ flowchart LR
 flowchart TB
     Use[ES 활용]
     Use --> Search[Site search, e-commerce, autocomplete]
-    Use --> Log[Logs: Filebeat → ES → Kibana]
+    Use --> Log[Logs: Filebeat to ES to Kibana]
     Use --> APM[APM, OpenTelemetry 통합]
     Use --> SIEM["Security (SIEM), threat detection"]
     Use --> Metrics[Metrics, Observability]
     Use --> Vector[Vector search, RAG, semantic]
     Use --> Geo[Geo search, maps]
 ```
+
+## 운영 함정
+
+> [!WARNING]
+> 1. **오버샤딩** = 샤드 수 / 노드 > 20 이상이면 클러스터 상태 비대 → master 부하. *작은 인덱스 = 적은 샤드*.
+> 2. **dynamic mapping 방치** = 예측 못한 필드 자동 매핑 → *매핑 폭발 + 타입 충돌*. `dynamic: strict` 로 관리.
+> 3. **deep pagination (`from: 10000+`)** = 메모리 + 속도 문제. *search_after* 또는 *scroll API* 사용.
+> 4. **Index 를 Alias 없이 직접 노출** = 인덱스 재생성 (rolling) 불가. 처음부터 *alias* 로 추상화.
+> 5. **snapshot 없는 운영** = 클러스터 다운 시 복구 방법 없음. *Snapshot + ILM* 필수.
+> 6. **heap 32 GB 초과** = compressed OOPs 비활성 → 성능 역전. 30 GB 이하 유지.
 
 ## 관련 위키 (이 클러스터)
 

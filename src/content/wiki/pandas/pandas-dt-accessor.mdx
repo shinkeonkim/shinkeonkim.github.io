@@ -3,7 +3,7 @@ title: "[Pandas] .dt accessor"
 aliases: ["Pandas dt", "Pandas .dt", "Pandas dt accessor", "datetime accessor"]
 tags: [python, pandas, datetime]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "dt accessor"
@@ -19,6 +19,27 @@ s.dt.month
 s.dt.day
 s.dt.hour
 s.dt.weekday
+```
+
+## 구성요소 분류 시각화
+
+```mermaid
+flowchart LR
+    DT["datetime Series\n.dt accessor"] --> DATE["날짜 계열"]
+    DT --> TIME["시간 계열"]
+    DT --> PERIOD["기간/기타"]
+
+    DATE --> D1["dt.year / dt.month / dt.day"]
+    DATE --> D2["dt.dayofweek / dt.day_name()"]
+    DATE --> D3["dt.quarter / dt.dayofyear"]
+    DATE --> D4["dt.is_month_end / dt.is_month_start"]
+
+    TIME --> T1["dt.hour / dt.minute / dt.second"]
+    TIME --> T2["dt.floor() / dt.ceil() / dt.round()"]
+    TIME --> T3["dt.tz_localize() / dt.tz_convert()"]
+
+    PERIOD --> P1["dt.to_period() - 월/분기 집계"]
+    PERIOD --> P2["dt.days / dt.total_seconds() - Timedelta"]
 ```
 
 ## 기본 컴포넌트
@@ -73,7 +94,11 @@ s.dt.round('15min')                        # 반올림
 s.dt.tz                                    # 현재 timezone
 s.dt.tz_localize('Asia/Seoul')             # naive → aware
 s.dt.tz_convert('UTC')                     # 다른 timezone 으로
+s.dt.tz_convert('America/New_York')        # 시간대 변환
 ```
+
+> [!IMPORTANT]
+> `tz_localize` 와 `tz_convert` 는 전혀 다른 연산이다. `tz_localize` 는 timezone 정보 없는 naive datetime 에 timezone 을 **부여**, `tz_convert` 는 이미 timezone 이 있는 aware datetime 을 **변환**. naive 에 `tz_convert` 를 부르면 `TypeError`.
 
 ## Timedelta 의 dt
 
@@ -85,13 +110,23 @@ td.dt.seconds        # 9000, 18000 (하루 안의 초)
 td.dt.total_seconds()  # 전체 초
 ```
 
-## 자주 쓰는 패턴
-
-### 월별 분석
+## Period accessor
 
 ```python
-df['month'] = df['created_at'].dt.to_period('M')   # PeriodIndex (2024-01, 2024-02, ...)
-df.groupby('month')['amount'].sum()
+# PeriodIndex 로 변환하면 .dt.start_time, .dt.end_time 등 사용 가능
+s_period = s.dt.to_period('M')           # monthly Period
+s_period.dt.start_time                   # 각 월의 첫째 날 Timestamp
+s_period.dt.end_time                     # 각 월의 마지막 날 Timestamp
+s_period.dt.quarter                      # 분기 (Period 용)
+```
+
+## 자주 쓰는 패턴
+
+### 월별 집계
+
+```python
+df['month'] = df['created_at'].dt.to_period('M')   # PeriodIndex (2024-01, ...)
+monthly = df.groupby('month')['amount'].sum()
 ```
 
 ### 요일별 트렌드
@@ -105,12 +140,74 @@ df.groupby('weekday')['orders'].mean()
 
 ```python
 df['is_weekend'] = df['date'].dt.dayofweek >= 5
+df['is_weekday'] = df['date'].dt.dayofweek < 5
 ```
 
 ### datetime 차이
 
 ```python
 df['days_since_signup'] = (pd.Timestamp.today() - df['signup_date']).dt.days
+df['age_years'] = (pd.Timestamp.today() - df['birth_date']).dt.days / 365.25
+```
+
+### 시간대별 분석
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+df = pd.DataFrame({
+    'ts': pd.date_range('2024-01-01', periods=6, freq='4h'),
+    'val': [10, 20, 5, 30, 15, 25],
+})
+df['hour_bucket'] = df['ts'].dt.hour // 6 * 6  # 0,6,12,18 구간
+print(df.groupby('hour_bucket')['val'].sum())`}
+  output={`hour_bucket
+0     30
+6     35
+12    40
+Name: val, dtype: int64`}
+/>
+
+### 날짜 범위 필터
+
+```python
+# 특정 월만
+mask = (df['date'].dt.year == 2024) & (df['date'].dt.month == 3)
+df[mask]
+
+# 특정 요일
+df[df['date'].dt.dayofweek == 0]   # 월요일만
+
+# 영업 시간 내
+df[(df['ts'].dt.hour >= 9) & (df['ts'].dt.hour < 18)]
+```
+
+### resample 과 결합
+
+```python
+# 일별 집계 (dt accessor + resample)
+df.set_index('date').resample('D')['amount'].sum()
+
+# 주별 집계
+df.set_index('date').resample('W')['amount'].mean()
+```
+
+자세히는 [[Pandas resample]].
+
+## 성능 팁
+
+```python
+# dt accessor 는 벡터 연산, 루프보다 훨씬 빠름
+# ❌ 느림
+df['year'] = df['date'].apply(lambda x: x.year)
+
+# ✓ 빠름
+df['year'] = df['date'].dt.year
+
+# datetime64 dtype 이면 dt 사용 가능, object 이면 to_datetime 먼저
+df['date'] = pd.to_datetime(df['date_str'])
+df['year'] = df['date'].dt.year
 ```
 
 ## 함정
@@ -141,8 +238,21 @@ s.dt.weekday      # 같음
 
 ISO 표준 (1=Mon) 은 `s.dt.isocalendar().day`.
 
-## 참고
+### 4. dt.week 는 deprecated
+
+```python
+s.dt.week      # DeprecationWarning (pandas 1.1+)
+# 대신 사용
+s.dt.isocalendar().week
+```
+
+> [!WARNING]
+> `dt.week` 와 `dt.weekofyear` 는 pandas 1.1 에서 deprecated, 2.x 에서 제거됐다. `dt.isocalendar().week` 를 사용할 것.
+
+## 관련 위키
 
 - [[Pandas to_datetime]]
 - [[Pandas resample]]
 - [[Pandas date_range]]
+- [[Pandas groupby]]
+- [[Pandas str accessor]]

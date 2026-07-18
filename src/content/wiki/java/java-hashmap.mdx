@@ -3,7 +3,7 @@ title: "[Java] HashMap"
 aliases: ["HashMap", "java.util.HashMap", "Java HashMap", "해시맵"]
 tags: [java, collection, map, hash, jcf]
 category: java
-updated: 2026-06-18
+updated: 2026-07-14
 references:
   - id: oracle-jdk-docs
     note: "HashMap (Java Platform SE 21)"
@@ -70,6 +70,26 @@ public V put(K key, V value) {
 }
 ```
 
+## put 흐름 다이어그램
+
+```mermaid
+flowchart TD
+    In["put(key, value)"] --> Hash["hash = spread(key.hashCode())"]
+    Hash --> Idx["index = hash & (n-1)"]
+    Idx --> Empty{"빈 버킷?"}
+    Empty -->|"예"| InsNew["새 Node 삽입"]
+    Empty -->|"아니오"| Chain["체인/트리 탐색"]
+    Chain --> SameKey{"같은 key?"}
+    SameKey -->|"예"| Update["value 갱신"]
+    SameKey -->|"아니오"| Add["끝에 추가"]
+    Add --> Treify{"체인 8개 이상?"}
+    Treify -->|"예"| Tree["treeify (RB-Tree 변환)"]
+    Treify -->|"아니오"| Check
+    InsNew & Update & Tree --> Check{"size 초과?"}
+    Check -->|"예"| Resize["resize (2x + rehash)"]
+    Check -->|"아니오"| Done["완료"]
+```
+
 ## 충돌 처리, chaining 과 treeify
 
 같은 버킷에 여러 key 가 매핑되면 (해시 충돌):
@@ -114,6 +134,77 @@ map.get(null);                 // 1
 
 [[ConcurrentHashMap]] 과의 가장 큰 차이.
 
+## hashCode 품질이 성능에 미치는 영향
+
+`spread()` 함수 (`h ^ (h >>> 16)`) 는 hashCode 의 상위 비트를 하위로 섞어 충돌을 줄이지만, **key 의 hashCode 자체가 잘 분포**해야 최적이다.
+
+```java
+// 나쁜 예: 같은 접두사를 가진 String 이 한 버킷에 몰릴 수 있음
+// → Effective Java Item 11 의 hashCode 구현 원칙 따르기
+
+// Java 17+ record 는 자동으로 필드 기반 hashCode 생성
+record Point(int x, int y) {}  // hashCode = Objects.hash(x, y) 와 유사
+```
+
+의심스러우면 `map.entrySet().stream().collect(Collectors.groupingBy(..., Collectors.counting()))` 으로 버킷 분포 직접 확인.
+
+## Java 8+ 개선: forEach, replaceAll, computeIfAbsent
+
+```java
+Map<String, List<String>> groups = new HashMap<>();
+
+// 기존 방식 (verbose)
+if (!groups.containsKey(key)) groups.put(key, new ArrayList<>());
+groups.get(key).add(value);
+
+// Java 8+ computeIfAbsent (원자적)
+groups.computeIfAbsent(key, k -> new ArrayList<>()).add(value);
+
+// merge: 키가 없으면 값 삽입, 있으면 함수 적용
+Map<String, Integer> counter = new HashMap<>();
+counter.merge("word", 1, Integer::sum);   // 단어 카운터
+
+// replaceAll: 모든 값에 함수 적용
+counter.replaceAll((k, v) -> v * 2);
+```
+
+> [!IMPORTANT]
+> `computeIfAbsent` 의 람다는 **해당 엔트리가 없을 때만** 실행. `putIfAbsent(key, expensiveObj())` 와 달리 비용이 발생하지 않는다.
+
+## 실전 패턴
+
+### 단어 빈도 카운터
+
+```java
+// Java 17+
+String[] words = text.split("\\s+");
+Map<String, Long> freq = Arrays.stream(words)
+    .collect(Collectors.groupingBy(w -> w, Collectors.counting()));
+```
+
+### 그룹핑 (multimap)
+
+```java
+record Person(String name, String dept) {}
+
+Map<String, List<Person>> byDept = new HashMap<>();
+people.forEach(p ->
+    byDept.computeIfAbsent(p.dept(), k -> new ArrayList<>()).add(p)
+);
+```
+
+### 캐시 (단일 스레드)
+
+```java
+private final Map<String, Data> cache = new HashMap<>();
+
+Data getData(String key) {
+    return cache.computeIfAbsent(key, this::loadFromDb);
+}
+```
+
+멀티스레드 환경이라면 [[ConcurrentHashMap]] 의 `computeIfAbsent` 사용.
+
 ## 함정
 
 ### 1. 가변 객체를 key 로 쓰면 안 됨
@@ -140,6 +231,25 @@ map.get(key);                    // null! (다른 버킷으로 가게 됨)
 
 순회 중 수정 → [[ConcurrentModificationException]].
 
+### 5. 초기 capacity 계산 실수
+
+```java
+// 잘못: capacity = 1000 은 실제로 약 750개 entry 에 resize 발생
+Map<String, String> map = new HashMap<>(1000);
+
+// 올바름: entry 수 / loadFactor 를 올림
+int expectedSize = 1000;
+Map<String, String> map2 = new HashMap<>((int)(expectedSize / 0.75f) + 1);
+```
+
+## JMM 와 동시성
+
+`HashMap` 은 스레드 안전하지 않다. JMM 관점에서:
+
+- 한 스레드가 `put` 하는 동안 다른 스레드가 `get` 하면 **부분 쓰기** 상태를 볼 수 있음
+- 특히 `resize()` 중 `table` 배열 교체가 non-atomic 이라 **다른 스레드가 새 table / 구 table 섞인 view** 를 볼 수 있음
+- Java 7 의 resize 버그: 링크드 리스트 역전으로 **무한 루프** 가능 (Java 8 에서 수정됐으나 여전히 unsafe)
+
 ## HashMap vs Hashtable vs ConcurrentHashMap
 
 | 항목 | HashMap | Hashtable | ConcurrentHashMap |
@@ -150,7 +260,7 @@ map.get(key);                    // null! (다른 버킷으로 가게 됨)
 | 성능 | 가장 빠름 | 느림 (전체 락) | 동시성 최적 |
 | 권장 | 단일 스레드 | 절대 X | 동시성 |
 
-## 참고
+## 관련 위키
 
 - [[Object]]
 - [[Iterable]]
@@ -159,7 +269,6 @@ map.get(key);                    // null! (다른 버킷으로 가게 됨)
 - [[LinkedHashMap]]
 - [[TreeMap]]
 - [[ConcurrentHashMap]]
-- [[Spring] ConcurrentReferenceHashMap]]
 - [[fail-fast iterator]]
 - [[ConcurrentModificationException]]
 - Joshua Bloch, *Effective Java* (3rd ed.), Items 10-11 (equals, hashCode)

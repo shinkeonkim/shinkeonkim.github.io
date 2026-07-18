@@ -83,6 +83,28 @@ S3 Vectors:
 
 일반 S3 와 동일한 99.999999999% (11 nines) 내구성. 다중 AZ 저장. 재해복구 걱정 없음.
 
+## RAG 파이프라인 아키텍처
+
+S3 Vectors 를 벡터 저장소로 쓰는 RAG 구성의 전체 흐름입니다.
+
+```mermaid
+flowchart LR
+    subgraph Ingest["데이터 수집 (오프라인)"]
+        Doc["원본 문서<br/>S3, SharePoint"] --> Chunk["청킹"]
+        Chunk --> Embed["임베딩 모델<br/>Titan, Cohere"]
+    end
+    Embed --> SV["S3 Vectors<br/>Vector Index"]
+    subgraph Query["실시간 검색"]
+        Q["사용자 질문"] --> QE["질문 임베딩"]
+        QE --> kNN["kNN 검색<br/>top-k + 메타데이터 filter"]
+        SV --> kNN
+        kNN --> LLM["LLM 응답 생성<br/>Bedrock Claude"]
+        LLM --> Ans["최종 답변"]
+    end
+```
+
+Bedrock Managed Knowledge Base 를 사용하면 청킹 ~ 임베딩 ~ 인덱싱을 자동으로 처리하며, S3 Vectors 를 벡터 저장소로 선택할 수 있습니다.
+
 ## Bedrock Knowledge Bases 통합
 
 **[[aws-bedrock|Bedrock]] Managed Knowledge Base** (2026 GA) 는 S3 Vectors 를 벡터 저장소 옵션 중 하나로 지원. 사용자는 데이터 소스 (S3, SharePoint, Confluence, Google Drive) 만 지정하고, 벡터 저장소는 관리형 기본값 (S3 Vectors) 또는 명시적 선택 (OpenSearch, Aurora pgvector, Pinecone, Redis, MongoDB Atlas) 을 사용.
@@ -164,6 +186,50 @@ for m in resp["vectors"]:
 - **벡터 upsert 처리량**: 병렬 요청으로 확장 가능
 - **Sub-second query**: p50 100 ms 이하 (top-10, 백만 벡터급 index)
 - **콜드 쿼리 시** 약간의 latency 초기 튐 (인덱스 워밍)
+
+## 비용 추정 시나리오
+
+S3 Vectors 는 세 축으로 요금이 발생합니다 (리전별 상이, 아래는 us-east-1 기준 근사치).
+
+| 항목 | 단위 | 참고 |
+|:---|:---|:---|
+| **벡터 저장** | GB-월 | 1536-dim FLOAT32 = 벡터당 ~6 KB |
+| **메타데이터 저장** | GB-월 | 벡터당 수 KB |
+| **upsert** | 벡터 1,000 건당 | 배치 upsert 로 최적화 |
+| **쿼리** | 요청당 | top-k, metadata filter 포함 |
+
+**백만 벡터 (1536-dim) 월 비용 추정 예시**:
+
+```
+저장: 1,000,000 벡터 × 6 KB ≈ 6 GB × GB-월 단가
+메타데이터: 1,000,000 × 2 KB ≈ 2 GB
+쿼리: 하루 10,000 회 × 30일 = 300,000 회 × 요청 단가
+```
+
+OpenSearch Serverless 최소 요금 (2 OCU = 월 ~$700+) 과 비교하면, S3 Vectors 는 **유휴 비용이 거의 없어** 저빈도 워크로드에 훨씬 유리합니다.
+
+> [!IMPORTANT]
+> 실제 비용은 [AWS 가격 계산기](https://calculator.aws/pricing/2/home)에서 용량과 요청량을 넣고 시뮬레이션. upsert 빈도와 쿼리 QPS 가 핵심 변수입니다.
+
+## 적합한 워크로드
+
+S3 Vectors 가 잘 맞는 유스케이스:
+
+| 유스케이스 | 이유 |
+|:---|:---|
+| **내부 문서 RAG** | 유휴 비용 최소, 대용량, latency 100-500 ms 허용 |
+| **오프라인 추천** | 배치 임베딩 후 S3 저장, 주기적 쿼리 |
+| **지식 베이스 백업** | 11 nines 내구성, 재해복구 자동 |
+| **멀티모달 임베딩 아카이브** | 이미지/오디오 임베딩 대규모 저장 |
+| **OpenSearch cold tier** | 자주 안 찾는 벡터를 S3 Vectors 로 티어링 |
+
+S3 Vectors 가 맞지 않는 유스케이스:
+
+| 유스케이스 | 대안 |
+|:---|:---|
+| **실시간 UI 자동완성 (< 50 ms)** | Redis Vector, OpenSearch Serverless |
+| **트랜잭션과 결합된 벡터 검색** | Aurora pgvector |
+| **하이브리드 키워드 + 벡터 검색** | OpenSearch (BM25 + kNN) |
 
 ## 다른 벡터 스토리지와 비교
 

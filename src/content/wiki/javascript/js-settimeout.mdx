@@ -3,7 +3,7 @@ title: "[Javascript] setTimeout"
 aliases: ["setTimeout", "settimeout", "set timeout", "타이머", "JavaScript setTimeout", "JS setTimeout", "window.setTimeout"]
 tags: [javascript, timer, async, web-api]
 category: javascript
-updated: 2026-06-14
+updated: 2026-07-14
 references:
   - id: mdn-web-docs
     note: "Web/API/Window/setTimeout"
@@ -16,6 +16,31 @@ references:
 **`setTimeout(callback, delay, ...args)`** 은 호스트 환경 (브라우저 또는 Node.js) 이 제공하는 타이머 API. 지정한 `delay` 밀리초가 지난 뒤 `callback` 을 [[이벤트 루프]] 의 매크로태스크 큐에 등록한다.
 
 자세한 흐름과 함정은 [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]] 글 참고.
+
+## 이벤트 루프 내 위치
+
+`setTimeout` 콜백은 매크로태스크 큐로 들어갑니다. 마이크로태스크보다 우선순위가 낮습니다.
+
+```mermaid
+flowchart TD
+    A["이벤트 루프 틱"] --> B["매크로태스크 하나 실행"]
+    B --> C["마이크로태스크 큐 모두 소진"]
+    C --> D["렌더링 처리"]
+    D --> E["다음 매크로태스크 대기"]
+    E --> A
+
+    F["setTimeout 콜백"] -->|"delay 경과 후"| G["매크로태스크 큐 추가"]
+    G --> B
+```
+
+```javascript
+console.log('1');
+setTimeout(() => console.log('2'), 0);
+Promise.resolve().then(() => console.log('3'));
+console.log('4');
+// 출력 순서: 1, 4, 3, 2
+// 이유: 동기 → 마이크로태스크 → 매크로태스크
+```
 
 ## 문법
 
@@ -57,7 +82,7 @@ setTimeout(() => console.log('B'), 100);
 const start = Date.now();
 while (Date.now() - start < 500) {} // 0.5초 동안 콜 스택 점유
 
-// → 100ms 가 지났어도 콜 스택이 비어야 B 가 실행된다 (≥500ms)
+// → 100ms 가 지났어도 콜 스택이 비어야 B 가 실행된다 (>=500ms)
 ```
 
 ### setTimeout(fn, 0) 은 즉시가 아니다
@@ -93,6 +118,64 @@ setTimeout(() => {
 ```
 
 브라우저 탭이 백그라운드면 보통 최소 1초로 throttle.
+
+## 드리프트와 setInterval 비교
+
+```mermaid
+flowchart LR
+    A["setInterval 호출"] --> B["1000ms 후 콜백 실행"]
+    B --> C["콜백 실행 시간 100ms"]
+    C --> D["900ms 후 다음 콜백"]
+
+    E["setTimeout 재호출"] --> F["1000ms 후 콜백 실행"]
+    F --> G["콜백 실행 시간 100ms"]
+    G --> H["콜백 끝난 뒤 1000ms 후"]
+```
+
+`setInterval` 은 콜백 실행 시간에 관계없이 고정 인터벌로 큐에 추가합니다. 콜백이 인터벌보다 오래 걸리면 드리프트가 발생합니다.
+
+```javascript
+// setInterval 드리프트 발생
+setInterval(() => {
+    doHeavyWork(); // 인터벌보다 오래 걸리면 큐가 쌓임
+}, 1000);
+
+// setTimeout 재호출: 드리프트 없음
+function poll() {
+    doHeavyWork();
+    setTimeout(poll, 1000); // 작업 끝난 뒤 다음 호출 예약
+}
+poll();
+```
+
+> [!WARNING]
+> `setInterval` 콜백이 인터벌보다 오래 걸리면 콜백이 큐에 누적됩니다. 긴 작업에는 `setTimeout` 재귀 호출이 안전합니다.
+
+## requestAnimationFrame 과 비교
+
+| 특성 | `setTimeout` | `requestAnimationFrame` |
+|:---|:---|:---|
+| 실행 시점 | 매크로태스크 큐 | 렌더 직전 |
+| 주사율 맞춤 | 없음 | 자동 |
+| 탭 비활성 시 | 계속 실행 (throttle 됨) | 정지 |
+| 용도 | 타이머, 지연 실행 | 애니메이션 |
+
+```javascript
+// 애니메이션에 setTimeout 쓰면 안 되는 이유
+let pos = 0;
+setInterval(() => {
+    pos += 5;
+    el.style.left = pos + 'px';
+}, 16); // 렌더와 동기화 안 됨 → 티어링
+
+// rAF 로 렌더와 동기화
+function animate(ts) {
+    pos += 5;
+    el.style.left = pos + 'px';
+    requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+```
 
 ## 자주 쓰이는 패턴
 
@@ -160,6 +243,25 @@ const controller = new AbortController();
 setTimeout(5000, undefined, { signal: controller.signal });
 ```
 
+### 5. 쓰로틀 (Throttle)
+
+지정한 시간 동안 최대 한 번만 실행.
+
+```javascript
+function throttle(fn, ms) {
+    let pending = false;
+    return (...args) => {
+        if (pending) return;
+        pending = true;
+        fn(...args);
+        setTimeout(() => { pending = false; }, ms);
+    };
+}
+
+const onScroll = throttle(() => updateHeader(), 100);
+window.addEventListener('scroll', onScroll);
+```
+
 ## clearTimeout
 
 타이머가 만료되기 전에 취소.
@@ -172,9 +274,29 @@ clearTimeout(id);
 
 이미 큐에 들어간 콜백은 취소되지 않는다 (브라우저 구현에 따라 다름).
 
+## 성능 주의사항
+
+```javascript
+// ❌ 클로저로 인한 메모리 누수
+function leaky() {
+    const bigData = new Array(1e6).fill('x');
+    setTimeout(() => {
+        console.log(bigData.length); // bigData 가 1초간 살아있음
+    }, 1000);
+}
+
+// ✅ 필요한 값만 추출
+function clean() {
+    const bigData = new Array(1e6).fill('x');
+    const len = bigData.length;
+    setTimeout(() => console.log(len), 1000); // bigData 가비지 컬렉션 가능
+}
+```
+
 ## 참고
 
 - [[setInterval]]
 - [[이벤트 루프]]
 - [[Microtask Queue]]
+- [[js-request-animation-frame|requestAnimationFrame]]
 - [[비동기와 타이밍, 콜백부터 async/await까지의 발전사]]

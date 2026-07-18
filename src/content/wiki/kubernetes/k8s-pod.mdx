@@ -180,6 +180,129 @@ Pod spec 의 대부분 필드 = immutable
 > 3. **Sidecar 가 main 보다 늦게 종료** = pre-stop hook + grace period 부족 → log 누락.
 > 4. **Init container 가 *느림*** = pod 시작 자체 지연.
 
+## Pod 보안 컨텍스트
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 2000
+  containers:
+    - name: app
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+```
+
+| 설정 | 의미 |
+|---|---|
+| `runAsNonRoot` | root 로 실행 금지 |
+| `runAsUser` | 특정 UID 로 실행 |
+| `readOnlyRootFilesystem` | 루트 파일시스템 읽기 전용 |
+| `allowPrivilegeEscalation` | 권한 상승 금지 |
+| `capabilities.drop` | Linux capability 제거 |
+
+> [!IMPORTANT]
+> CIS Kubernetes Benchmark 기준: `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false` 는 프로덕션 기본 설정.
+
+## Pod Disruption Budget
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: web
+```
+
+- 노드 드레인, 업그레이드 시 최소 가용 Pod 수 보장.
+- `minAvailable` 또는 `maxUnavailable` 중 하나 선택.
+- Deployment 와 함께 사용해야 의미 있음.
+
+## Grace Period 와 종료 순서
+
+```mermaid
+sequenceDiagram
+    K8s->>Pod: SIGTERM 전송
+    Pod->>App: SIGTERM
+    Note over Pod,App: terminationGracePeriodSeconds 대기, 기본 30초
+    App-->>Pod: 정상 종료
+    Pod-->>K8s: 종료 완료
+```
+
+- `terminationGracePeriodSeconds` 기본값: 30초.
+- 앱이 SIGTERM 을 받으면 graceful shutdown 처리 후 종료.
+- 시간 내 종료 안 되면 SIGKILL 강제 종료.
+- `preStop` hook 으로 종료 전 작업 가능.
+
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 5"]
+```
+
+## 실무 체크리스트
+
+```mermaid
+flowchart TD
+    Start["Pod 배포 전 확인"] --> R["resources 설정 여부"]
+    R -->|미설정| FR["requests/limits 추가"]
+    R -->|설정됨| P["readinessProbe 여부"]
+    P -->|없음| FP["readinessProbe 추가"]
+    P -->|있음| S["securityContext 여부"]
+    S -->|없음| FS["runAsNonRoot 등 추가"]
+    S -->|있음| OK["배포 OK"]
+```
+
+| 항목 | 이유 |
+|---|---|
+| `resources.requests/limits` | 스케줄링 + OOM 방지 |
+| `readinessProbe` | 트래픽 라우팅 정확성 |
+| `livenessProbe` | 데드락 자동 복구 |
+| `securityContext` | 최소 권한 원칙 |
+| `PodDisruptionBudget` | 롤링 업데이트 안전성 |
+
+## 멀티 컨테이너 패턴 요약
+
+| 패턴 | 구성 | 용도 |
+|---|---|---|
+| **Sidecar** | main + helper | 로그, 프록시, 인증 |
+| **Ambassador** | main + proxy | 외부 서비스 추상화 |
+| **Adapter** | main + transformer | 출력 형식 변환 |
+| **Init** | init 완료 후 종료 + main | 사전 준비 작업 |
+
+## Pod QoS Classes
+
+K8s 는 resource 설정에 따라 Pod 에 **세 가지 QoS 클래스** 를 자동으로 부여한다. 노드 리소스 부족 시 eviction 우선순위에 영향을 준다.
+
+| QoS Class | 조건 | 특징 |
+|---|---|---|
+| **Guaranteed** | 모든 컨테이너의 requests == limits | OOM 에서 마지막 희생 |
+| **Burstable** | 일부 컨테이너에 requests < limits | 중간 우선순위 |
+| **BestEffort** | requests / limits 모두 미지정 | 리소스 압박 시 첫 희생 |
+
+```mermaid
+flowchart TD
+    Q{"requests, limits 설정?"}
+    Q -->|"requests == limits (모든 컨테이너)"| G[Guaranteed]
+    Q -->|"requests 있지만 limits 다름"| B[Burstable]
+    Q -->|"모두 미지정"| BE[BestEffort]
+    G --> E1["OOM 발생 시: 마지막으로 종료"]
+    B --> E2["OOM 발생 시: 중간 순위"]
+    BE --> E3["OOM 발생 시: 첫 번째로 종료"]
+```
+
+> [!TIP]
+> 운영 환경 목표: **Guaranteed** 클래스. requests 와 limits 를 동일하게 설정하면 스케줄러 예측이 쉽고 OOM kill 위험이 줄어든다.
+
 ## 관련 위키
 
 - [[k8s-deployment]]

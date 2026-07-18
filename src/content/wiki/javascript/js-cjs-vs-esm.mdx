@@ -1,0 +1,339 @@
+---
+title: "[JavaScript] CommonJS vs ESM (package.json 설정 완전 정복)"
+aliases:
+  - "CommonJS vs ESM"
+  - "CJS vs ESM"
+  - "CJS ESM"
+  - "Node module systems"
+  - "package.json type module"
+  - "package.json exports"
+  - "package.json imports"
+  - "dual package"
+  - "ERR_REQUIRE_ESM"
+  - "__dirname ESM"
+  - "require ESM"
+tags: [javascript, node, module, esm, commonjs, packaging]
+category: javascript
+updated: 2026-07-07
+references:
+  - title: "Node.js Modules: ECMAScript Modules"
+    url: "https://nodejs.org/api/esm.html"
+  - title: "Node.js CommonJS Modules"
+    url: "https://nodejs.org/api/modules.html"
+  - title: "package.json Fields"
+    url: "https://nodejs.org/api/packages.html"
+  - title: "Node.js require(esm) (v22.12+)"
+    url: "https://nodejs.org/api/modules.html#loading-ecmascript-modules-using-require"
+---
+
+## 정의
+
+JavaScript 는 **두 개의 서로 다른 모듈 시스템** 을 가집니다.
+
+- **CommonJS (CJS)**: Node.js 초기 (2009) 부터 사용. `require()` / `module.exports`. 동기 로딩.
+- **ECMAScript Modules (ESM)**: 2015 (ES2015) 언어 표준. `import` / `export`. 정적 분석 가능, 비동기 로딩.
+
+이 이중 체제가 **Node.js 생태계의 가장 큰 파편화 원인**. 라이브러리 저자와 소비자 모두 이 문제를 이해해야 합니다.
+
+## 핵심 문법 비교
+
+### CommonJS
+
+```javascript
+// math.cjs
+function add(a, b) { return a + b; }
+module.exports = { add };
+// 또는
+module.exports.add = add;
+exports.add = add;   // 축약 (exports = module.exports 초기값)
+
+// main.cjs
+const { add } = require('./math.cjs');
+const math = require('./math.cjs');
+console.log(add(1, 2));
+```
+
+### ESM
+
+```javascript
+// math.mjs
+export function add(a, b) { return a + b; }
+export default { add };
+
+// main.mjs
+import { add } from './math.mjs';
+import math from './math.mjs';
+import * as mathNs from './math.mjs';
+console.log(add(1, 2));
+```
+
+## 근본 차이
+
+| 축 | CommonJS | ESM |
+|:---|:---|:---|
+| **로딩** | 동기 (blocking) | 비동기 (top-level await 가능) |
+| **평가 시점** | `require()` 호출 시 | 파싱 시 미리 분석, 실행은 나중 |
+| **정적 분석** | 어려움 (동적 `require`) | 강함 (import/export 는 top-level 만) |
+| **Tree shaking** | 어려움 | 자연스러움 |
+| **Circular import** | 부분 export | strict, undefined 참조 가능 |
+| **`this` 값** | `module.exports` | `undefined` |
+| **파일 확장자** | `.cjs`, `.js` (기본) | `.mjs`, `.js` (with `type: module`) |
+| **__dirname** | 있음 | 없음 (import.meta.url 사용) |
+| **JSON import** | `require('./x.json')` | `import x from './x.json' assert { type: 'json' }` |
+| **Conditional load** | `if (x) require(...)` | 정적, 조건부는 `await import()` |
+
+## package.json 설정
+
+이 곳이 CJS/ESM 지옥의 중심.
+
+### `type` 필드
+
+```json
+{ "type": "module" }
+```
+
+- `"type": "module"`: 이 패키지의 `.js` 파일은 **ESM** 으로 해석. `.cjs` 는 CJS.
+- `"type": "commonjs"` (또는 없음): `.js` 는 **CJS** (Node.js 기본). `.mjs` 는 ESM.
+
+**규칙**:
+- `.mjs` → 항상 ESM (`type` 무관)
+- `.cjs` → 항상 CJS
+- `.js` → `type` 필드에 따라
+
+### `main` (legacy)
+
+```json
+{ "main": "./dist/index.js" }
+```
+
+**단일 진입점**. 옛 관용. `require(pkg)` 시 이 파일. Dual package 를 못 만듦.
+
+### `exports` (모던, 권장)
+
+```json
+{
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./utils": {
+      "import": "./dist/utils.mjs",
+      "require": "./dist/utils.cjs"
+    },
+    "./package.json": "./package.json"
+  }
+}
+```
+
+**Conditional exports**:
+- `import`: ESM 로더가 사용
+- `require`: CJS 로더가 사용
+- `types`: TypeScript
+- `node`, `browser`, `default`: 환경별
+- `development`, `production`: NODE_ENV 기반
+
+**Encapsulation**: `exports` 명시된 것만 소비자가 import 가능. 내부 파일 접근 차단 (private).
+
+### `imports` (내부 alias)
+
+```json
+{
+  "imports": {
+    "#config": "./src/config/index.js",
+    "#utils/*": "./src/utils/*.js"
+  }
+}
+```
+
+패키지 안에서 `import config from '#config'` 사용. Deep relative path 회피.
+
+### 기타 필드
+
+- **`module`**: 번들러 힌트 (ESM 파일). Webpack/Rollup 이 우선 참조.
+- **`browser`**: 브라우저용 대체 진입점.
+- **`types` / `typings`**: TypeScript 선언.
+- **`sideEffects: false`**: Tree shaking 힌트.
+
+## 실전 패턴
+
+### 1. Pure ESM 라이브러리 (권장 for 신규)
+
+```json
+{
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  }
+}
+```
+
+**결과**: 소비자가 ESM 이어야 함. CJS 프로젝트는 `await import()` 로만 사용 가능 (Node 22.12 이전).
+
+### 2. Dual Package (CJS + ESM)
+
+```json
+{
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  }
+}
+```
+
+**결과**: 양쪽 다 지원. 하지만 **dual package hazard** (아래 참조).
+
+### 3. Pure CJS (legacy)
+
+```json
+{
+  "type": "commonjs",
+  "main": "./dist/index.js"
+}
+```
+
+여전히 유효. 하위 호환 우선.
+
+## 흔한 에러
+
+### `ERR_REQUIRE_ESM`
+
+**Node 22.12 이전**: CJS 파일에서 ESM 을 `require()` 시 오류.
+
+```javascript
+// CJS 파일에서
+const chalk = require('chalk'); // chalk v5+ 는 ESM only
+// Error [ERR_REQUIRE_ESM]: require() of ES Module ... not supported
+```
+
+**해결**:
+- Node 22.12+: `require(esm)` 지원 (실험적 → stable). 그냥 됩니다.
+- 이전: 프로젝트를 ESM 으로 변경 (`"type": "module"`) 또는 `await import()` 사용.
+
+### `ERR_UNKNOWN_FILE_EXTENSION`
+
+TypeScript 의 `.ts` 파일을 ESM 로더가 처리 못 함. `tsx`, `ts-node/esm`, `--loader` 등 필요.
+
+### `__dirname is not defined`
+
+ESM 은 `__dirname`, `__filename`, `require`, `module`, `exports` 미제공.
+
+**대체**:
+
+```javascript
+// ESM 에서 __dirname 흉내
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+```
+
+Node 20.11+ 는 `import.meta.dirname`, `import.meta.filename` 직접 제공.
+
+### Circular Dependency
+
+- **CJS**: 순환 시 이미 evaluate 된 부분만 export (partial). 나머지 undefined.
+- **ESM**: 정적 분석 후 실행. Live binding 이라 어느 순간에는 값이 존재하지만, 접근 순서 이슈 발생 가능.
+
+**해결**: 순환 자체를 refactor. `forwardRef` 스타일 지연 참조.
+
+### `dual package hazard`
+
+한 앱에서 라이브러리의 CJS 버전과 ESM 버전이 **동시에 로드**. 클래스 `instanceof` 실패, 싱글턴 두 번 초기화, 상태 불일치.
+
+**방어**:
+- 라이브러리를 **pure ESM** 으로 유지 (dual 회피)
+- 또는 **상태 없음** 확인 (pure function 만)
+- Client 에게 명확히 안내
+
+### `top-level await` in CJS
+
+```javascript
+// CJS 에서
+const data = await fetch(...);  // SyntaxError
+```
+
+CJS 는 top-level await 지원 X. ESM 만 가능.
+
+## Node 22.12+ `require(esm)` 지원
+
+2024년 말 stable. CJS 파일에서 ESM 을 `require()` 가능:
+
+```javascript
+const chalk = require('chalk');  // chalk v5 ESM ← 이제 됩니다
+```
+
+**주의**:
+- ESM 안에 top-level await 있으면 여전히 실패
+- ESM 이 다른 ESM 을 동기적으로 로드 못 하는 케이스는 실패
+- 라이브러리 저자 = 여전히 dual 배포 고려 (하위 Node 지원)
+
+## TypeScript 와의 관계
+
+`tsconfig.json` 의 `module` + `moduleResolution` 이 관건. 자세한 것은 [[ts-modules|TypeScript Modules]] 참조.
+
+**대표 조합**:
+- **Bundler**: `"module": "esnext", "moduleResolution": "bundler"` (Vite/Next 등)
+- **Node ESM**: `"module": "NodeNext", "moduleResolution": "NodeNext"` + `.js` 확장자 명시
+- **Legacy CJS**: `"module": "commonjs"`
+
+## 마이그레이션 전략
+
+### CJS → ESM
+
+1. `"type": "module"` 추가
+2. `require` → `import`
+3. `module.exports` → `export`
+4. `__dirname` 대체
+5. `.json` import 는 assert
+6. dependency 중 CJS-only 있으면 `await import` 나 upgrade
+7. 테스트 (Jest 는 ESM 지원 여전히 실험적, Vitest 로 이관 관용)
+
+### 라이브러리는?
+
+**2026 관용**:
+- 새 라이브러리: **pure ESM** (Node 20+ target)
+- 기존 라이브러리: dual 유지 (breaking change 최소화)
+- Node 22.12+ 보편화 이후 dual 부담 감소
+
+## 함정
+
+> [!WARNING]
+> **`.mjs` 확장자 필수 케이스**. `type: "commonjs"` 프로젝트 안에서 ESM 파일은 `.mjs` 로.
+
+> [!CAUTION]
+> **Jest + ESM**. Jest 는 여전히 ESM 지원이 실험적. 새 프로젝트는 Vitest 권장.
+
+> [!WARNING]
+> **exports 지정 시 `./package.json` 명시**. 안 하면 소비자가 `import('pkg/package.json')` 못 함 (버전 확인 등).
+
+> [!IMPORTANT]
+> **CJS → ESM 이관 시 `.js` 파일들의 상대 경로 확장자**. ESM 은 확장자 필수 (`./util.js`), 없으면 실패.
+
+> [!CAUTION]
+> **`sideEffects: false` 잘못 붙이면 tree shaking 이 필요한 코드 제거**. 실제 side effect 있는 파일은 명시.
+
+## 관련 위키
+
+- [[js-es-modules|ES Modules]] - ESM 상세
+- [[js-bundling|JS 번들링]] - 번들러 관점
+- [[js-webpack|Webpack]] - CJS 시대 표준
+- [[js-vite|Vite]] - ESM 우선
+- [[js-esbuild|esbuild]]
+- [[ts-modules|TypeScript Modules]] - tsconfig 대응
+- [[node|Node.js]]
+- [[js-import-export|import/export]]
+- [[typescript|TypeScript]]

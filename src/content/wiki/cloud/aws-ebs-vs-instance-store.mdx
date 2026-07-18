@@ -119,6 +119,193 @@ aws ec2 modify-volume --volume-id vol-xxx --multi-attach-enabled
 - 같은 EBS volume → *여러 EC2 동시 attach* (최대 16개)
 - *분산 파일시스템 (GFS2, OCFS2) 필요*. 단순 ext4 가 동시 mount 면 *손상*.
 
+## 스토리지 선택 결정 트리
+
+```mermaid
+flowchart TD
+    Q1{"영속성 필요?"}
+    Q1 -->|예| Q2{"고성능 랜덤 I/O?"}
+    Q1 -->|아니오| IS[Instance Store NVMe]
+    Q2 -->|예| Q3{"IOPS 16k 초과?"}
+    Q2 -->|아니오| Q4{"대용량 순차 I/O?"}
+    Q3 -->|예| IO2[io2 Block Express]
+    Q3 -->|아니오| GP3[gp3]
+    Q4 -->|예| ST1[st1 HDD]
+    Q4 -->|아니오| SC1[sc1 Cold HDD]
+
+    style IS fill:#fef3c7
+    style IO2 fill:#fee2e2
+    style GP3 fill:#d1fae5
+    style ST1 fill:#dbeafe
+    style SC1 fill:#e0e7ff
+```
+
+| 결과 | 주요 용도 |
+|:---|:---|
+| Instance Store NVMe | Spark shuffle, 캐시, 임시 빌드 |
+| io2 Block Express | Oracle RAC, 고성능 OLTP, SAP HANA |
+| gp3 | 일반 앱 서버, MySQL/PostgreSQL, OS 디스크 |
+| st1 HDD | DW, Kafka, Hadoop, 대용량 스트리밍 |
+| sc1 Cold HDD | 아카이브, 콜드 로그, 비용 최소화 |
+
+## EBS 심화: gp3 성능 최적화
+
+gp3 는 크기(GB)와 성능(IOPS/처리량)이 독립적으로 구매됩니다.
+
+```bash
+# gp3 볼륨 생성 (IOPS 6,000 + 처리량 500 MB/s 지정)
+aws ec2 create-volume \
+  --volume-type gp3 \
+  --size 500 \
+  --iops 6000 \
+  --throughput 500 \
+  --availability-zone us-east-1a
+
+# 기존 gp2 를 gp3 로 변환 (무중단)
+aws ec2 modify-volume \
+  --volume-id vol-12345678 \
+  --volume-type gp3 \
+  --iops 3000 \
+  --throughput 125
+```
+
+### gp3 vs gp2 비교
+
+| 항목 | gp2 | gp3 |
+|:---|:---|:---|
+| 기본 IOPS | 볼륨 크기 x 3 (최대 16,000) | 고정 3,000 |
+| 추가 IOPS | 불가 (크기만 늘려야 함) | 독립 구매 가능 (최대 16,000) |
+| 기본 처리량 | 250 MB/s | 125 MB/s |
+| 추가 처리량 | 불가 | 독립 구매 가능 (최대 1,000 MB/s) |
+| 요금 | $0.10/GB-월 | $0.08/GB-월 |
+
+> [!TIP]
+> gp2 에서 gp3 로 마이그레이션하면 동일 크기 기준 **약 20% 비용 절감**. EC2 재시작 불필요, `ModifyVolume` 호출 즉시 변환 시작.
+
+### io2 선택 기준
+
+```
+IOPS 16,000 초과 필요? → io2
+Multi-Attach 필요 (복수 EC2)?  → io2
+내구성 99.999% 필요 (금융, 의료)? → io2
+```
+
+## Snapshot 자동화 (DLM)
+
+**Data Lifecycle Manager (DLM)** 로 스냅샷 일정 자동화:
+
+```json
+{
+  "ExecutionRoleArn": "arn:aws:iam::123456789012:role/dlm-role",
+  "Description": "Daily EBS snapshots - 7day retention",
+  "State": "ENABLED",
+  "PolicyDetails": {
+    "PolicyType": "EBS_SNAPSHOT_MANAGEMENT",
+    "ResourceTypes": ["VOLUME"],
+    "TargetTags": [{"Key": "Backup", "Value": "true"}],
+    "Schedules": [{
+      "Name": "Daily",
+      "CreateRule": {
+        "Interval": 24,
+        "IntervalUnit": "HOURS",
+        "Times": ["03:00"]
+      },
+      "RetainRule": {"Count": 7},
+      "CopyTags": true,
+      "CrossRegionCopyRules": [{
+        "TargetRegion": "us-west-2",
+        "Encrypted": true,
+        "CopyTags": true,
+        "RetainRule": {"Count": 3}
+      }]
+    }]
+  }
+}
+```
+
+- `Backup: true` 태그 달린 볼륨 자동 대상
+- 7일 보관 후 자동 삭제
+- Cross-region 복사로 DR 확보 (3일 보관)
+
+스냅샷 아키텍처:
+
+```mermaid
+flowchart LR
+    Vol[EBS Volume] -->|DLM 자동 트리거| Snap["Snapshot (증분)"]
+    Snap -->|"첫 번째: 전체"| S3[S3 내부 저장]
+    Snap -->|"이후: 변경 블록만"| S3
+    S3 -->|"Cross-region 복사"| S3W["S3 (us-west-2)"]
+    S3 -->|"복원"| NewVol[새 EBS Volume]
+    S3 -->|"AMI 생성"| AMI[Amazon Machine Image]
+```
+
+> [!WARNING]
+> 스냅샷은 S3에 저장되지만 일반 S3 버킷에서는 보이지 않습니다. EC2 콘솔/API 로만 접근 가능.
+
+### Fast Snapshot Restore (FSR)
+
+스냅샷에서 볼륨 복원 시 기본적으로 블록을 lazily 로드합니다 (read 시 S3에서 가져옴). FSR 활성화 시 즉시 full performance.
+
+```bash
+aws ec2 enable-fast-snapshot-restores \
+  --source-snapshot-ids snap-12345678 \
+  --availability-zones us-east-1a us-east-1b
+```
+
+FSR 은 AZ 당 요금 발생 ($0.75/snapshot-hour 수준).
+
+## EFS vs S3 대비
+
+| 항목 | EBS | EFS | S3 |
+|:---|:---|:---|:---|
+| **유형** | 블록 스토리지 | 네트워크 파일시스템 | 객체 스토리지 |
+| **동시 접근** | 단일 EC2 | 여러 EC2/Lambda 동시 | 무제한 클라이언트 |
+| **OS 마운트** | Linux/Windows | Linux (NFSv4) | SDK/API |
+| **Latency** | 1ms 미만 | 수 ms | 수십 ms |
+| **최대 크기** | 64 TB/볼륨 | 페타바이트 (자동 확장) | 무제한 |
+| **요금 기준** | GB 단위 고정 | GB 사용량 | GB 저장량 + 요청 |
+| **주요 용도** | OS, DB, 앱 데이터 | 공유 파일, CMS, 컨테이너 | 정적 자산, 백업, 빅데이터 |
+
+### 선택 가이드
+
+- **단일 EC2의 OS 디스크/DB 데이터**: EBS
+- **여러 EC2/컨테이너가 같은 파일 공유**: EFS
+- **정적 웹 파일, 로그 아카이브, 데이터 레이크**: S3
+
+## 비용 최적화 패턴
+
+### 1. gp2 볼륨 일괄 gp3 마이그레이션
+
+```bash
+# 모든 gp2 볼륨 조회
+aws ec2 describe-volumes \
+  --filters Name=volume-type,Values=gp2 \
+  --query 'Volumes[*].[VolumeId,Size,Iops,AvailabilityZone]' \
+  --output table
+
+# 개별 변환
+aws ec2 modify-volume \
+  --volume-id vol-xxxxxxxx \
+  --volume-type gp3
+```
+
+### 2. 미사용 볼륨 정리
+
+```bash
+# EC2 미연결 볼륨 (available 상태) 조회
+aws ec2 describe-volumes \
+  --filters Name=status,Values=available \
+  --query 'Volumes[*].[VolumeId,Size,CreateTime,AvailabilityZone]' \
+  --output table
+```
+
+EC2 terminate 후 루트 볼륨은 `DeleteOnTermination=true` (기본값) 이면 자동 삭제. 추가로 attach 한 볼륨은 수동 삭제 필요.
+
+### 3. 스냅샷 비용 관리
+
+- DLM 으로 오래된 스냅샷 자동 삭제
+- S3 Intelligent-Tiering 급 아카이브 스냅샷: `aws ec2 modify-snapshot-tier` 로 Archived 상태로 전환 (70% 비용 절감, 복원 24-72시간)
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -127,8 +314,16 @@ aws ec2 modify-volume --volume-id vol-xxx --multi-attach-enabled
 > 3. **Instance Store 를 영속처럼** = stop/start = 데이터 손실 (reboot 은 OK).
 > 4. **IOPS *너무 작음*** = 워크로드 IOPS 측정 후 결정.
 
+> [!CAUTION]
+> **Multi-Attach io2 + 일반 파일시스템** = 데이터 손상. 반드시 GFS2, OCFS2 같은 cluster-aware 파일시스템 사용.
+
+> [!IMPORTANT]
+> **EC2 stop vs reboot**: stop 시 Instance Store 데이터 소멸. reboot 은 보존. 스케줄 유지보수 시 주의.
+
 ## 관련 위키
 
 - [[aws-ec2]]
 - [[aws-s3]]
+- [[aws-rds]]
+- [[aws-ec2-instance-types]]
 - [[wal-write-ahead-log]] (DB fsync 와 EBS)

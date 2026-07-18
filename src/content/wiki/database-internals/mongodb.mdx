@@ -1,12 +1,23 @@
 ---
 title: "[DB] MongoDB: 문서 DB, WiredTiger, replica set, aggregation"
-aliases: ["MongoDB", "BSON", "WiredTiger", "replica set", "sharding", "aggregation pipeline", "Atlas"]
+aliases:
+  - "MongoDB"
+  - "BSON"
+  - "WiredTiger"
+  - "replica set"
+  - "sharding"
+  - "aggregation pipeline"
+  - "Atlas"
+  - "oplog"
+  - "change streams"
 tags: [mongodb, nosql, document, database]
 category: database-internals
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "MongoDB Manual"
     url: "https://www.mongodb.com/docs/manual/"
+  - title: "WiredTiger Architecture"
+    url: "https://www.mongodb.com/docs/manual/core/wiredtiger/"
 ---
 
 ## 정의
@@ -25,11 +36,46 @@ references:
 | JOIN | `$lookup` (aggregation) |
 | Foreign key | 없음 (수동 관리) |
 
+## BSON 형식
+
+*Binary JSON* = JSON 의 바이너리 직렬화. JSON 보다 *빠른 파싱, 타입 정보 내장*.
+
+```mermaid
+flowchart LR
+    BSON["BSON Document"] --> Types
+    subgraph Types
+        ObjId["ObjectId (12B)<br/>timestamp(4) + random(5) + counter(3)"]
+        BoolT["Boolean (1B)"]
+        Int32["Int32 (4B)"]
+        Int64["Int64 (8B)"]
+        Double["Double (8B)"]
+        Str["String (UTF-8 + len)"]
+        Date["Date (int64 ms)"]
+        BinData["BinData (bytes)"]
+        Array["Array"]
+        EmbDoc["Embedded Document"]
+    end
+```
+
+| BSON 타입 | JSON 대응 | 특징 |
+|---|---|---|
+| ObjectId | string | 12 bytes. 시간 포함 → 정렬 가능 |
+| Date | string | int64 (ms). 타입 보존 |
+| Int32 / Int64 | number | 정수 타입 구분 |
+| Decimal128 | number | 고정소수점 (금융) |
+| BinData | string (base64) | 바이너리 직접 저장 |
+
+```js
+// ObjectId 구조
+const id = new ObjectId("64a7b3c1d2e3f4a5b6c7d8e9");
+id.getTimestamp();  // Date: 2023-07-06T...
+```
+
 ## 문서 모델
 
 ```json
 {
-  "_id": ObjectId("..."),
+  "_id": "ObjectId(64a7...)",
   "name": "koa",
   "email": "koa@x.com",
   "addresses": [
@@ -37,7 +83,7 @@ references:
     { "type": "work", "city": "SF" }
   ],
   "tags": ["admin", "pro"],
-  "createdAt": ISODate("2026-06-25T00:00:00Z")
+  "createdAt": "ISODate(2026-06-25T00:00:00Z)"
 }
 ```
 
@@ -47,53 +93,106 @@ references:
 
 ```mermaid
 flowchart TB
-    Op[op] --> WT[WiredTiger]
-    WT --> Cache["메모리 cache (~50% RAM)"]
-    WT --> Journal["Journal (WAL)"]
-    WT --> Snappy[Snappy 압축]
-    WT --> DataFiles[(BTree 데이터 파일)]
+    Op["Read / Write"] --> WT["WiredTiger"]
+    WT --> Cache["Internal Cache<br/>(기본 ~50% RAM, B-tree pages)"]
+    WT --> Journal["Journal (WAL)<br/>128MB 단위 rotate"]
+    WT --> Snappy["Block Compressor<br/>(Snappy / Zstd / None)"]
+    WT --> DataFiles[("B-tree 데이터 파일")]
+    Cache -.->|"eviction"| DataFiles
+    Journal -.->|"checkpoint"| DataFiles
 ```
 
-- B-tree 인덱스.
-- *Document-level locking* (이전 글로벌 lock 에서 진화).
-- Snappy / Zstd 압축.
+### 내부 체크포인트
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Cache as WT Cache
+    participant Journal as Journal (WAL)
+    participant Disk
+
+    App->>Cache: Write
+    Cache->>Journal: Journal record (WAL)
+    Journal-->>App: COMMIT OK
+    Note over Cache,Disk: 60초 또는 2GB 마다 checkpoint
+    Cache->>Disk: Dirty pages flush (checkpoint)
+    Journal->>Journal: 이전 journal segment 제거
+```
+
+- *Document-level locking* (이전 MongoDB < 3.2 의 글로벌 lock 에서 진화).
+- Snappy (기본) / Zstd 압축으로 *디스크 사용 50-70% 절감*.
+- `wiredTigerCacheSizeGB` = 기본 min(50% RAM - 1GB, 256MB) 이상.
 
 ## Replica Set
 
 ```mermaid
 flowchart LR
-    P[(Primary)] -->|oplog| S1[(Secondary 1)]
-    P -->|oplog| S2[(Secondary 2)]
+    P[("Primary")] -->|oplog| S1[("Secondary 1")]
+    P -->|oplog| S2[("Secondary 2")]
     Client -->|write| P
     Client -->|"read (옵션)"| S1
     Client -->|"read (옵션)"| S2
+    P & S1 & S2 -->|heartbeat| Election["Election<br/>(primary 장애 시)"]
 ```
 
 - 1 primary + N secondary.
-- *자동 failover* (election).
-- *읽기 분산* 옵션 (read preference).
+- *oplog (operations log)* = capped collection. 변경 연산 순서 보존.
+- *자동 failover*: primary 응답 없으면 election → 새 primary.
+- *읽기 분산*: `readPreference: secondaryPreferred`.
+
+```js
+// Read preference 예시
+db.orders.find({ status: "paid" }).readPref("secondaryPreferred")
+
+// Write concern
+db.orders.insertOne(doc, { writeConcern: { w: "majority", j: true } })
+```
+
+## Read / Write Concern
+
+| Write Concern | 의미 |
+|---|---|
+| `w: 1` | primary 기록 후 OK (기본) |
+| `w: "majority"` | 과반 secondary 복제 후 OK |
+| `j: true` | journal (WAL) fsync 후 OK |
+
+| Read Concern | 의미 |
+|---|---|
+| `local` | primary 의 최신 (기본, 복제 무관) |
+| `majority` | 과반이 commit 한 데이터만 |
+| `linearizable` | 가장 강력, 느림 |
+| `snapshot` | 트랜잭션 내 일관 뷰 |
+
+> [!TIP]
+> 금융/재고 등 *강한 일관성* 필요 → `w: majority` + `j: true` + `readConcern: majority`. 느리지만 데이터 손실 없음.
 
 ## Sharding
 
 ```mermaid
 flowchart TB
     Client --> Mongos["mongos<br/>(라우터)"]
-    Mongos --> Config[(Config Servers)]
-    Mongos --> Shard1[(Shard 1)]
-    Mongos --> Shard2[(Shard 2)]
-    Mongos --> Shard3[(Shard 3)]
+    Mongos --> Config[("Config Servers<br/>(3-node replica set)")]
+    Mongos --> Shard1[("Shard 1")]
+    Mongos --> Shard2[("Shard 2")]
+    Mongos --> Shard3[("Shard 3")]
+    Config -->|chunk map| Mongos
 ```
 
-- *shard key* 로 분산.
-- `hashed`, `ranged`, `zone` 정책.
-- *chunk* 단위 자동 balancing.
+- *shard key* 로 분산 (ranged / hashed / zone sharding).
+- *chunk* 단위 (기본 128MB) 자동 balancing.
+- mongos 는 *stateless router*. Config server 에서 라우팅 정보 조회.
 
 ## Aggregation Pipeline
 
 ```js
 db.orders.aggregate([
   { $match: { status: "paid" } },
-  { $lookup: { from: "users", localField: "userId", foreignField: "_id", as: "user" } },
+  { $lookup: {
+      from: "users",
+      localField: "userId",
+      foreignField: "_id",
+      as: "user"
+  }},
   { $unwind: "$user" },
   { $group: { _id: "$user.country", total: { $sum: "$amount" } } },
   { $sort: { total: -1 } },
@@ -112,6 +211,7 @@ db.orders.aggregate([
 | `$unwind` | 배열 분해 |
 | `$facet` | 다중 sub-pipeline |
 | `$bucket` | 범위 그룹화 |
+| `$setWindowFields` | 윈도우 함수 (5.0+) |
 
 > [!TIP]
 > *aggregation 순서 최적화*: `$match` 와 `$project` 를 *최대한 일찍*. 인덱스 활용 + 처리량 감소.
@@ -132,16 +232,48 @@ db.orders.aggregate([
 ```js
 db.orders.createIndex({ userId: 1, createdAt: -1 });
 db.events.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 });
+
+// Explain 로 인덱스 활용 확인
+db.orders.find({ userId: "abc" }).explain("executionStats");
+// COLLSCAN → IXSCAN 확인
 ```
+
+## Change Streams
+
+*실시간 데이터 변경 스트림*. CDC (Change Data Capture) 패턴.
+
+```js
+// 컬렉션 변경 감지
+const changeStream = db.orders.watch([
+  { $match: { "operationType": { $in: ["insert", "update"] } } }
+]);
+
+changeStream.on("change", (change) => {
+  console.log(change.fullDocument);
+  console.log(change.updateDescription.updatedFields);
+});
+```
+
+| 필드 | 의미 |
+|---|---|
+| `operationType` | `insert` / `update` / `delete` / `replace` |
+| `fullDocument` | 변경 후 전체 문서 |
+| `updateDescription` | 변경된 필드 목록 |
+| `resumeToken` | 스트림 재개 위치 |
+
+> Change Streams 는 *oplog* 기반. *Replica Set / Sharded Cluster* 에서만 동작.
 
 ## Transactions (4.0+, 4.2+ sharded)
 
 ```js
 const session = db.startSession();
-session.startTransaction();
+session.startTransaction({
+  readConcern: { level: "snapshot" },
+  writeConcern: { w: "majority" }
+});
 try {
   await coll1.updateOne({ _id: 1 }, { $inc: { x: 1 } }, { session });
-  await coll2.insertOne({ ... }, { session });
+  await coll2.insertOne({ ref: 1 }, { session });
   await session.commitTransaction();
 } catch (e) {
   await session.abortTransaction();
@@ -151,17 +283,43 @@ try {
 > [!CAUTION]
 > *과거 MongoDB = 트랜잭션 없음* 이미지가 강했으나, 4.0+ 부터 *multi-document ACID*. *Sharded 트랜잭션은 비용 큼*, *document 안에 묶을 수 있으면 그게 정통*.
 
+## 쿼리 최적화
+
+```mermaid
+flowchart LR
+    Query["쿼리"] --> QP["Query Planner"]
+    QP --> Plans["후보 실행 계획들"]
+    Plans --> Winner["승자 계획 (캐시)"]
+    Winner --> Exec["실행"]
+    Exec --> Stats["통계 갱신"]
+    Stats -.->|"evict 조건"| Plans
+```
+
+```js
+// 실행 계획 확인
+db.orders.find({ status: "paid", userId: "abc" }).explain("allPlansExecution")
+
+// 인덱스 강제 사용
+db.orders.find({ status: "paid" }).hint({ status: 1 })
+
+// 쿼리 통계 (Atlas / mongod)
+db.setProfilingLevel(2)  // 모든 쿼리 로깅
+db.system.profile.find().sort({ millis: -1 }).limit(5)
+```
+
 ## 흔한 함정
 
 > [!WARNING]
-> 1. **`_id` 의 ObjectId 가 *random* 으로 *clustered index 미친 분포*** = MongoDB 는 *_id index 의 random 분포* 가 의도. 옛 PK 사고 패턴.
-> 2. ***join 이 무거움*** = `$lookup` 은 NoSQL 답지 않은 비용. *임베드 (embedding) 가 정통 패턴*.
-> 3. **transaction 남용** = single document 안의 동작은 *항상 atomic*. transaction 은 *진짜 필요할 때만*.
-> 4. **shard key 잘못 선택** = *재선택 가능* 했지만 옛 버전은 *불가*. *write 분포가 균등하지 않은 키* 가 가장 큰 함정.
+> 1. **`_id` ObjectId 의 random 분포** = MongoDB 는 `_id` index 의 *단조 증가 (timestamp prefix)* 설계. UUID v4 를 `_id` 로 쓰면 random insert = B-tree 분할 폭증.
+> 2. **`$lookup` (join) 남용** = NoSQL 답지 않은 비용. *임베드 (embedding) 가 정통 패턴*.
+> 3. **transaction 남용** = single document 안의 동작은 *항상 atomic*. transaction 은 진짜 필요할 때만.
+> 4. **shard key 잘못 선택** = *write 분포가 균등하지 않은 키* 가 가장 큰 함정. 변경 불가 (6.0+ 재선택 가능).
+> 5. **Change Stream 없이 polling** = `find({updatedAt: {$gt: ...}})` 루프 = 인덱스 있어도 부하. Change Streams 가 push 방식으로 효율적.
+> 6. **Write Concern w:1 + 재시작** = primary 장애 시 *1초 미만 데이터 손실*. 중요 데이터는 `w: majority`.
 
 ## 관련 위키
 
 - [[postgresql]] (대안)
 - [[dynamodb]] (NoSQL 대안)
-- [[Redis]] (KV)
+- [[cassandra]] (분산 NoSQL)
 - [[sharding-vs-partitioning]]

@@ -184,6 +184,86 @@ CoT 를 **사후 학습 (RL)** 으로 내재화하고, 추론 시 훨씬 길고 
 - **temperature**: 단답 CoT 는 0-0.3, Self-Consistency 는 0.5-0.8.
 - **평가는 sample 여러 개 평균**: CoT 는 분산이 큽니다. n=3~5 로 여러 번 돌린 평균이 신뢰할 만합니다.
 
+## CoT 변형 계보
+
+```mermaid
+flowchart TD
+    Std[Standard Few-shot]
+    CoT["Few-shot CoT (Wei 2022)"]
+    ZSCoT["Zero-shot CoT (Kojima 2022)"]
+    SC["Self-Consistency (Wang 2022)"]
+    LtM["Least-to-Most (Zhou 2022)"]
+    ToT["Tree of Thoughts (Yao 2023)"]
+    PAL["PAL / PoT (Gao 2022)"]
+    ReAct["ReAct (Yao 2022)"]
+    RM["Reasoning Models (o1/R1/Claude)"]
+
+    Std --> CoT
+    Std --> ZSCoT
+    CoT --> SC
+    CoT --> LtM
+    CoT --> ToT
+    CoT --> PAL
+    CoT --> ReAct
+    SC --> RM
+    ToT --> RM
+    ReAct --> RM
+```
+
+위 계보는 논문 발표 순서를 대략 반영합니다. 하위로 내려갈수록 추론 구조가 복잡해지며, "Reasoning Models" 계열에서는 이 기법들이 강화학습으로 내재화됩니다.
+
+## 벤치마크별 CoT 효과
+
+CoT 가 특히 효과적인 태스크와 그렇지 않은 태스크:
+
+| 벤치마크 | 태스크 성격 | CoT 효과 |
+|:---|:---|:---|
+| **GSM8K** | 초등 산술 문장 문제 | 매우 큼: PaLM 540B 17.9% → 58.1% |
+| **MATH** | 고등 수학 경시 문제 | 큼: 다단계 증명에 적합 |
+| **ARC-Challenge** | 4지선다 과학 | 중간: Self-Consistency 병행 시 효과적 |
+| **StrategyQA** | 암묵적 다단계 추론 | 큼 |
+| **CommonsenseQA** | 상식 추론 | 중간 |
+| **HotpotQA** | 다단계 Wikipedia 추론 | 큼 |
+| **TriviaQA** | 단순 사실 조회 | 거의 없음 |
+| **NaturalQuestions** | 단순 사실 조회 | 없음 또는 음수 |
+
+단순 사실 조회에서 CoT 가 오히려 노이즈를 늘려 정확도가 낮아지는 케이스도 관측됩니다.
+
+## 프롬프트 구성 흐름
+
+```mermaid
+flowchart LR
+    U[사용자 질문] --> PB[프롬프트 빌더]
+    PB --> E1["예시 1: Q + 추론 + A"]
+    PB --> E2["예시 2: Q + 추론 + A"]
+    PB --> TQ[대상 질문]
+    TQ --> LLM[LLM 생성]
+    LLM --> CH[중간 추론 사슬]
+    CH --> AE[답 추출]
+    AE --> OUT[최종 답]
+```
+
+`two-stage` 방식에서는 1단계에서 사슬만 생성하고, 2단계에서 사슬을 붙여 "따라서 답은" 형태로 답만 추출합니다. 이렇게 하면 답 파싱이 안정적이고 출력 길이를 제어하기 쉽습니다.
+
+## Self-Consistency 샘플링 전략
+
+| 샘플 수 | temperature | 권장 상황 |
+|:---|:---|:---|
+| 5 | 0.5 | 빠른 검증, 비용 절감 우선 |
+| 20 | 0.7 | 중간 신뢰도, 프로덕션 일반 |
+| 40 | 0.7-0.8 | 논문 수준 평가, 비용 큼 |
+
+다수결 집계는 numeric answer 에만 정규식으로 추출합니다. 자유 형식 답변에는 LLM-as-judge 로 별도 합의를 구합니다.
+
+## 프로덕션 구현 체크리스트
+
+- [ ] **answer extraction**: 최종 답만 파싱 (정규식 또는 extraction prompt 분리)
+- [ ] **max_tokens 설정**: 사슬이 너무 길면 잘림 방지를 위해 여유분 확보
+- [ ] **fallback**: CoT 사슬이 비어 오면 zero-shot 재시도
+- [ ] **응답 캐시**: 동일 질문 반복이면 CoT 결과 캐시로 비용 절감
+- [ ] **eval 로그**: temperature > 0 이므로 n=5 결과 평균으로 정확도 측정
+- [ ] **streaming**: 긴 사슬은 streaming 응답으로 사용자 경험 개선
+
 ## 다른 프롬프팅 기법과 관계
 
 | 기법 | 관계 |

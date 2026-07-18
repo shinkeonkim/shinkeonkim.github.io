@@ -1,0 +1,359 @@
+---
+title: "[Flask] Request & Response"
+aliases:
+  - "Flask Request"
+  - "Flask Response"
+  - "Flask jsonify"
+  - "Flask make_response"
+  - "Flask streaming response"
+  - "Flask 요청 응답"
+tags: [python, flask, web-framework, request, response]
+category: flask
+updated: 2026-07-07
+references:
+  - title: "Flask Request Object"
+    url: "https://flask.palletsprojects.com/en/latest/api/#flask.Request"
+  - title: "Flask Response Object"
+    url: "https://flask.palletsprojects.com/en/latest/api/#flask.Response"
+  - title: "Werkzeug Wrappers"
+    url: "https://werkzeug.palletsprojects.com/en/latest/wrappers/"
+---
+
+## 정의
+
+**Flask Request/Response** 는 Werkzeug 의 `Request` / `Response` 래퍼를 확장한 것입니다. Thread-local 프록시 `flask.request` 로 뷰 함수 어디서든 현재 요청에 접근하고, return 값을 자동으로 Response 로 변환합니다.
+
+## Request 객체
+
+### 기본 속성
+
+```python
+from flask import request
+
+@app.post("/inspect")
+def inspect():
+    # URL & method
+    method = request.method              # "POST"
+    url = request.url                    # "http://.../inspect?x=1"
+    path = request.path                  # "/inspect"
+    full_path = request.full_path        # "/inspect?x=1"
+
+    # Query string
+    q = request.args.get("q", default="")
+    tags = request.args.getlist("tag")   # 여러 값
+
+    # JSON body
+    data = request.get_json(silent=True)     # 실패 시 None
+    data_or_error = request.get_json()       # 실패 시 400
+
+    # Form (application/x-www-form-urlencoded, multipart/form-data)
+    name = request.form.get("name")
+
+    # 파일 업로드
+    upload = request.files.get("file")
+    if upload:
+        upload.save(f"/tmp/{upload.filename}")
+
+    # 원본 body
+    raw = request.data                    # bytes
+    text = request.get_data(as_text=True) # str
+
+    # Headers
+    ua = request.headers.get("User-Agent")
+
+    # Cookies
+    sid = request.cookies.get("session")
+
+    # 원격
+    remote_addr = request.remote_addr
+
+    # 프록시 뒤에서는
+    forwarded_for = request.headers.get("X-Forwarded-For")
+
+    return {"ok": True}
+```
+
+### JSON body
+
+```python
+data = request.get_json()             # 실패 시 400
+data = request.get_json(silent=True)  # 실패 시 None
+data = request.get_json(force=True)   # Content-Type 무시
+```
+
+`silent=True` 를 기본으로 하고 자체 검증하는 편이 안전.
+
+### Form 과 파일
+
+```python
+@app.post("/upload")
+def upload():
+    file = request.files.get("upload")
+    if not file:
+        return {"error": "no file"}, 400
+    if not file.filename:
+        return {"error": "empty filename"}, 400
+
+    from werkzeug.utils import secure_filename
+    filename = secure_filename(file.filename)   # 보안 처리
+    file.save(f"/uploads/{filename}")
+    return {"filename": filename}
+```
+
+**`secure_filename`**: 슬래시, 유니코드, 특수문자 제거. 절대 raw filename 을 파일 경로에 쓰지 마세요.
+
+### Multipart 여러 파일
+
+```python
+@app.post("/uploads")
+def uploads():
+    files = request.files.getlist("files")
+    for f in files:
+        f.save(f"/uploads/{secure_filename(f.filename)}")
+    return {"count": len(files)}
+```
+
+### 큰 요청 제한
+
+```python
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024   # 10 MB
+```
+
+초과 시 413 자동 반환. 파일 업로드 서버에서 반드시 설정.
+
+## Response 반환 형식
+
+Flask 는 뷰 함수의 return 값을 유연하게 해석합니다.
+
+### 문자열
+
+```python
+@app.get("/")
+def index():
+    return "Hello"                   # 200, text/html
+    # 또는
+    return "Hello", 201              # status code
+    # 또는
+    return "Hello", 201, {"X-A": "1"}  # + headers
+```
+
+### Dict / list (JSON 자동)
+
+```python
+@app.get("/api")
+def api():
+    return {"key": "value"}          # 200 application/json
+    # 또는
+    return [1, 2, 3]                 # 200 application/json
+    # 또는
+    return {"key": "value"}, 201, {"X-Custom": "yes"}
+```
+
+Flask 2.0+ 는 dict/list 자동 jsonify. 이전에는 `jsonify()` 명시 필요.
+
+### `jsonify()`
+
+```python
+from flask import jsonify
+
+@app.get("/api")
+def api():
+    return jsonify({"key": "value"})           # 200
+    return jsonify(key="value", n=42)          # kwargs 형태
+    return jsonify(["a", "b"])                 # array
+```
+
+`jsonify()` 는 `application/json` Content-Type 을 명시적으로 설정. datetime, Decimal, UUID 등도 자동 직렬화 (Flask 3.x 개선).
+
+### `make_response`
+
+세밀한 응답 제어:
+
+```python
+from flask import make_response
+
+@app.get("/custom")
+def custom():
+    resp = make_response({"data": 123})
+    resp.status_code = 201
+    resp.headers["X-Custom"] = "value"
+    resp.set_cookie("session", "abc", httponly=True, secure=True, samesite="Lax")
+    return resp
+```
+
+### Response 객체 직접
+
+```python
+from flask import Response
+
+@app.get("/xml")
+def xml():
+    return Response(
+        "<xml><a>1</a></xml>",
+        mimetype="application/xml",
+        status=200,
+    )
+```
+
+## 리디렉트
+
+```python
+from flask import redirect, url_for
+
+@app.get("/old")
+def old():
+    return redirect(url_for("new"), code=308)   # 기본 302
+
+@app.get("/new")
+def new():
+    return "new page"
+```
+
+- 301: Moved Permanently (SEO 영향)
+- 302: Found (기본, 임시)
+- 307: Temporary Redirect (method 유지)
+- 308: Permanent Redirect (method 유지, SEO 영향)
+
+## abort
+
+```python
+from flask import abort
+
+@app.get("/secret/<int:id>")
+def secret(id):
+    if not authorized():
+        abort(403, description="Forbidden")
+    if not exists(id):
+        abort(404)
+    return "..."
+```
+
+`abort` 는 `HTTPException` 서브클래스 raise. `errorhandler` 로 커스텀 처리:
+
+```python
+@app.errorhandler(404)
+def not_found(e):
+    return {"error": "not found"}, 404
+
+@app.errorhandler(Exception)
+def any_error(e):
+    return {"error": str(e)}, 500
+```
+
+## Streaming Response
+
+```python
+from flask import stream_with_context, Response
+
+@app.get("/stream")
+def stream():
+    def generate():
+        for i in range(100):
+            yield f"chunk {i}\n"
+    return Response(stream_with_context(generate()), mimetype="text/plain")
+```
+
+`stream_with_context` 는 generator 안에서 `request` 접근을 유지. 안 쓰면 request context 이탈.
+
+### Server-Sent Events (SSE)
+
+```python
+@app.get("/events")
+def events():
+    def stream_events():
+        while True:
+            data = get_next_event()
+            yield f"data: {json.dumps(data)}\n\n"
+            time.sleep(1)
+    return Response(stream_with_context(stream_events()), mimetype="text/event-stream")
+```
+
+## File Download
+
+```python
+from flask import send_file, send_from_directory
+
+@app.get("/download/<name>")
+def download(name):
+    return send_file(
+        f"/data/{name}.pdf",
+        as_attachment=True,
+        download_name=f"{name}.pdf",
+        mimetype="application/pdf",
+    )
+
+@app.get("/uploads/<path:filename>")
+def uploaded(filename):
+    return send_from_directory("/uploads/", filename)
+```
+
+`send_from_directory` 는 path traversal 방지 (`..` 차단).
+
+## Before/After Request
+
+```python
+@app.before_request
+def before_each_request():
+    g.request_id = str(uuid.uuid4())
+    g.start = time.time()
+
+@app.after_request
+def after_each_request(response):
+    duration = time.time() - g.start
+    response.headers["X-Duration"] = f"{duration:.3f}"
+    response.headers["X-Request-ID"] = g.request_id
+    return response
+
+@app.teardown_request
+def teardown(exc):
+    if exc:
+        logger.exception(exc)
+```
+
+- **before_request**: 요청 처리 전. 인증, DB 세션 시작.
+- **after_request**: 응답 반환 전. 헤더 추가, 로깅.
+- **teardown_request**: request context 종료 시 (예외 여부 무관). 리소스 정리.
+
+Blueprint 는 자기만의 `before_request` / `after_request` 가능:
+
+```python
+@bp.before_request
+def before_bp():
+    ...
+```
+
+## Response class 커스터마이제이션
+
+```python
+class ApiResponse(Response):
+    default_mimetype = "application/json"
+
+app.response_class = ApiResponse
+```
+
+## 함정
+
+> [!WARNING]
+> **`request.form` vs `request.get_json()`**. Content-Type 에 따라 다름. 클라이언트가 잘못 보내면 실패. 양쪽 지원 시 명시 코드.
+
+> [!CAUTION]
+> **`stream_with_context`** 안 쓰면 generator 안에서 `request` 접근 시 오류. 스트리밍 시 필수.
+
+> [!WARNING]
+> **파일 업로드 filename 은 신뢰 불가**. 반드시 `secure_filename` + 확장자 화이트리스트.
+
+> [!IMPORTANT]
+> **`get_json(silent=True)` 를 기본으로**. 실패 시 400 자동 대신 앱에서 처리하는 편이 유연.
+
+> [!CAUTION]
+> **`send_file` 절대 경로 사용**. 상대 경로는 flask app root 기준으로 오해. 명확히 절대 경로.
+
+## 관련 위키
+
+- [[flask|Flask]] - 상위 개요
+- [[flask-routing|Flask Routing]] - URL 매핑
+- [[flask-blueprints|Flask Blueprints]] - Blueprint hook
+- [[flask-templates|Flask Templates]]
+- [[flask-sessions|Flask Sessions]] - 쿠키
+- [[flask-testing|Flask Testing]]
+- [[fastapi-routing|FastAPI Routing]] - 대비

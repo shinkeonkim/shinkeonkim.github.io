@@ -1,0 +1,346 @@
+---
+title: "[Flask] Sessions & Cookies"
+aliases:
+  - "Flask Sessions"
+  - "Flask Session"
+  - "Flask Cookies"
+  - "Flask secure cookie"
+  - "Flask-Session"
+  - "itsdangerous"
+  - "Flask CSRF"
+tags: [python, flask, session, cookie, security]
+category: flask
+updated: 2026-07-07
+references:
+  - title: "Flask Sessions"
+    url: "https://flask.palletsprojects.com/en/latest/quickstart/#sessions"
+  - title: "itsdangerous"
+    url: "https://itsdangerous.palletsprojects.com/"
+  - title: "Flask-Session"
+    url: "https://flask-session.readthedocs.io/"
+  - title: "Flask-Login"
+    url: "https://flask-login.readthedocs.io/"
+---
+
+## 정의
+
+**Flask Session** 은 요청 간 상태를 유지하는 방법입니다. 기본 구현은 **서명된 쿠키 (secure cookie)** 로 클라이언트에 저장 (server-less). `Flask-Session` extension 으로 서버 저장소 (Redis, DB) 로 전환 가능.
+
+## 기본 Secure Cookie 세션
+
+```python
+from flask import Flask, session
+
+app = Flask(__name__)
+app.secret_key = "your-secret-key"   # 반드시 설정!
+
+@app.get("/login")
+def login():
+    session["user_id"] = 42
+    session["email"] = "a@b.com"
+    return "logged in"
+
+@app.get("/me")
+def me():
+    if "user_id" not in session:
+        return "not logged in", 401
+    return {
+        "user_id": session["user_id"],
+        "email": session.get("email"),
+    }
+
+@app.get("/logout")
+def logout():
+    session.clear()
+    return "logged out"
+```
+
+### 어떻게 작동하는가
+
+1. Flask 가 `session` dict 을 JSON 직렬화
+2. `secret_key` 로 HMAC 서명 (`itsdangerous`)
+3. Base64 인코딩 후 쿠키에 저장
+4. 다음 요청에서 쿠키 -> 서명 검증 -> 원본 dict 복원
+
+**핵심**: 데이터는 클라이언트에 저장. 서버는 저장 안 함. 하지만 **서명** 이므로 클라이언트가 값을 조작할 수 없음 (검증 실패).
+
+### 장단점
+
+**Pros**:
+- 서버 상태 없음 (수평 확장 자유)
+- Redis/DB 인프라 불필요
+
+**Cons**:
+- **암호화 아님** (서명만): 클라이언트가 세션 값을 읽을 수 있음 (수정만 못 함)
+- **크기 제한**: 브라우저 쿠키 크기 상한 (~4 KB)
+- **매 요청 전체 전송**: 큰 세션은 대역폭 부담
+- **취소 불가**: 서명된 쿠키는 만료 전까지 유효. 서버에서 개별 세션 강제 로그아웃 불가
+
+**결론**: 소량 (user_id, csrf_token) 만 저장. 큰 데이터는 서버 세션.
+
+## Session 설정
+
+```python
+from datetime import timedelta
+
+app.config.update(
+    SECRET_KEY="your-secret-key",
+    SESSION_COOKIE_NAME="session",
+    SESSION_COOKIE_DOMAIN=None,          # 자동
+    SESSION_COOKIE_PATH="/",
+    SESSION_COOKIE_HTTPONLY=True,        # XSS 방어 (필수)
+    SESSION_COOKIE_SECURE=True,          # HTTPS 만 (프로덕션)
+    SESSION_COOKIE_SAMESITE="Lax",       # CSRF 방어 ("Lax" or "Strict")
+    PERMANENT_SESSION_LIFETIME=timedelta(days=14),
+)
+```
+
+### permanent session
+
+기본 세션은 브라우저 종료 시 만료. `permanent=True` 로 lifetime 을 명시:
+
+```python
+@app.get("/login")
+def login():
+    session.permanent = True
+    session["user_id"] = 42
+    return "..."
+```
+
+이제 `PERMANENT_SESSION_LIFETIME` (기본 31일) 만큼 유지.
+
+## Flask-Session (서버측 세션)
+
+큰 데이터, 강제 로그아웃, 암호화된 세션을 원하면 서버측 저장.
+
+```bash
+pip install Flask-Session redis
+```
+
+```python
+from flask import Flask
+from flask_session import Session
+import redis
+
+app = Flask(__name__)
+app.config.update(
+    SESSION_TYPE="redis",
+    SESSION_REDIS=redis.from_url("redis://localhost:6379/0"),
+    SESSION_KEY_PREFIX="sess:",
+    SESSION_PERMANENT=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=14),
+    SESSION_USE_SIGNER=True,          # 세션 ID 서명 (탈취 감지)
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,
+)
+
+Session(app)
+```
+
+이제 세션 데이터는 Redis 에, 쿠키에는 세션 ID 만.
+
+### SESSION_TYPE 옵션
+
+- `"redis"`: Redis 저장 (권장)
+- `"memcached"`: Memcached
+- `"filesystem"`: 로컬 파일 (단일 인스턴스만)
+- `"mongodb"`: MongoDB
+- `"sqlalchemy"`: DB
+
+### 서버측 세션의 강제 로그아웃
+
+특정 세션 ID 를 서버에서 삭제하면 즉시 로그아웃:
+
+```python
+redis_client.delete(f"sess:{session_id}")
+```
+
+## Cookie 직접 조작
+
+`request.cookies` 로 읽기, `response.set_cookie` 로 설정.
+
+```python
+from flask import make_response
+
+@app.get("/set-cookie")
+def set_cookie():
+    resp = make_response("cookie set")
+    resp.set_cookie(
+        "user_pref",
+        "dark_mode",
+        max_age=86400 * 30,           # 30일
+        expires=None,                 # max_age 우선
+        path="/",
+        domain=None,
+        secure=True,                  # HTTPS
+        httponly=True,                # JS 접근 불가 (XSS 방어)
+        samesite="Lax",               # CSRF 방어
+    )
+    return resp
+
+@app.get("/read-cookie")
+def read_cookie():
+    return {"pref": request.cookies.get("user_pref", "light")}
+
+@app.get("/delete-cookie")
+def delete_cookie():
+    resp = make_response("deleted")
+    resp.delete_cookie("user_pref")
+    return resp
+```
+
+## SameSite 정책
+
+CSRF 방어의 핵심.
+
+| 값 | 의미 |
+|:---|:---|
+| **`Strict`** | Cross-site 요청에 쿠키 안 감. 완전 격리 |
+| **`Lax`** (기본) | 최상위 navigation (링크 클릭) 은 허용, 그 외 cross-site 차단 |
+| **`None`** | 항상 전송. `Secure=True` 필수 |
+
+**관용**:
+- 일반 앱: `Lax`
+- 강한 보안 (은행): `Strict`
+- Third-party 임베드 (iframe) 필요: `None` + `Secure`
+
+## CSRF 방어
+
+세션이 있는 앱은 CSRF 취약. 방어 방식:
+
+1. **CSRF token** (Flask-WTF): 폼마다 서명된 토큰 삽입, 서버가 검증
+2. **SameSite cookie**: `Lax` / `Strict` (필수 조합)
+3. **Origin/Referer 헤더 검증** (부가)
+
+### Flask-WTF CSRF
+
+```python
+from flask_wtf import CSRFProtect
+
+csrf = CSRFProtect(app)
+```
+
+폼 템플릿:
+
+```html
+<form method="post">
+  {{ form.csrf_token }}     <!-- 또는 form.hidden_tag() 가 자동 -->
+  ...
+</form>
+```
+
+AJAX (JSON POST) 는 헤더로:
+
+```javascript
+fetch("/api", {
+  method: "POST",
+  headers: {"X-CSRFToken": csrfToken},
+  body: JSON.stringify({...}),
+});
+```
+
+## Flask-Login (인증 통합)
+
+```python
+from flask_login import LoginManager, UserMixin, login_user, logout_user, current_user, login_required
+
+login_manager = LoginManager(app)
+login_manager.login_view = "auth.login"
+
+class User(UserMixin):
+    def __init__(self, id: int, email: str):
+        self.id = id
+        self.email = email
+
+@login_manager.user_loader
+def load_user(user_id: str) -> User | None:
+    return db.query(User).get(int(user_id))
+
+@app.post("/login")
+def login():
+    user = authenticate(request.form["email"], request.form["password"])
+    if user:
+        login_user(user, remember=True)
+        return redirect(url_for("dashboard"))
+    return "invalid credentials", 401
+
+@app.get("/dashboard")
+@login_required
+def dashboard():
+    return f"Hello, {current_user.email}"
+
+@app.post("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
+```
+
+Flask-Login 은 내부적으로 session 을 사용해 사용자 ID 저장. `user_loader` 가 매 요청마다 DB 에서 사용자 로드.
+
+## Session 크기 제한 확인
+
+```python
+import sys
+
+@app.before_request
+def check_session_size():
+    if sys.getsizeof(dict(session)) > 3800:   # 4 KB 근사 상한
+        session.clear()
+        abort(500, "Session too large")
+```
+
+## Signed Cookie (세션 밖 서명)
+
+민감하지 않지만 조작 방지가 필요한 값 (예: 방문 카운터):
+
+```python
+from itsdangerous import URLSafeTimedSerializer
+
+serializer = URLSafeTimedSerializer(app.secret_key, salt="visit-counter")
+
+@app.get("/set")
+def set_():
+    resp = make_response("...")
+    token = serializer.dumps({"count": 5})
+    resp.set_cookie("counter", token, httponly=True)
+    return resp
+
+@app.get("/get")
+def get_():
+    token = request.cookies.get("counter")
+    try:
+        data = serializer.loads(token, max_age=86400)
+    except Exception:
+        data = None
+    return {"data": data}
+```
+
+## 함정
+
+> [!WARNING]
+> **`secret_key` 를 소스에 하드코딩 금지**. 환경변수 또는 Secrets Manager. 유출 시 서명 위조 -> 세션 탈취.
+
+> [!CAUTION]
+> **세션 쿠키는 서명만, 암호화 아님**. `session["email"]` 을 클라이언트가 base64 디코드해 읽을 수 있음. 민감 정보 (전화, 주소) 저장 금지.
+
+> [!WARNING]
+> **`SESSION_COOKIE_SECURE=True`** 인 상태에서 개발 시 HTTP 로컬 접근하면 세션 안 됨. `.env` 로 dev/prod 분리.
+
+> [!IMPORTANT]
+> **강제 로그아웃 불가** (secure cookie 방식). 필요하면 Flask-Session (Redis) 로 이관.
+
+> [!CAUTION]
+> **CSRF 토큰 없이 폼 처리 금지**. Flask-WTF 사용 강력 권장.
+
+> [!WARNING]
+> **`SameSite=None`** 은 `Secure=True` 없이는 브라우저가 무시. 크로스 오리진 임베드 필요 시 두 옵션 함께.
+
+## 관련 위키
+
+- [[flask|Flask]] - 상위 개요
+- [[flask-request-response|Flask Request/Response]] - Cookie 조작
+- [[flask-extensions|Flask Extensions]] - Flask-Login, Flask-WTF
+- [[flask-templates|Flask Templates]] - CSRF token in form
+- [[flask-blueprints|Flask Blueprints]] - Blueprint 별 세션 hook
+- [[flask-deployment|Flask Deployment]] - 프록시 뒤 secure cookie

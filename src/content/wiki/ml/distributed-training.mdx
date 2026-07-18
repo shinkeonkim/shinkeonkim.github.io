@@ -3,7 +3,7 @@ title: "분산 학습"
 aliases: ["Distributed Training", "distributed training", "분산 훈련", "model parallelism", "tensor parallelism", "pipeline parallelism", "data parallelism"]
 tags: [ai, training, parallelism, scaling]
 category: ml
-updated: 2026-06-14
+updated: 2026-07-18
 references:
   - title: "Megatron Core Parallelism Guide"
     url: "https://docs.nvidia.com/megatron-core/developer-guide/0.17.0/user-guide/parallelism-guide.html"
@@ -27,9 +27,36 @@ references:
 {}
 ```
 
+## 문제 상황과 동기
+
+단일 GPU 학습의 한계:
+
+| 제약 | 설명 |
+|:---|:---|
+| **VRAM 한계** | A100 80GB 기준, Llama 70B float16 = 140GB. 한 GPU 불가. |
+| **컴퓨트 한계** | 1조 token 학습에 A100 1대로 수십 년. |
+| **통신 병목** | 대규모 batch 는 gradient 크기가 너무 커서 동기화 자체가 부담. |
+
+이를 해결하기 위해 데이터, 레이어, 텐서, 시퀀스 차원을 각각 나눠 수천 개 GPU 를 동시에 활용한다.
+
 ## 핵심 4가지 병렬화 전략
 
 대규모 모델 학습은 보통 **4가지 (이상의) parallelism 을 조합**해서 사용한다.
+
+```mermaid
+flowchart TD
+    All["분산 학습 전략"]
+    All --> DP["Data Parallelism (DP)"]
+    All --> TP["Tensor Parallelism (TP)"]
+    All --> PP["Pipeline Parallelism (PP)"]
+    All --> ZeRO["ZeRO / FSDP"]
+    All --> CP["Context Parallelism (CP)"]
+    All --> EP["Expert Parallelism (EP)"]
+    DP --> DPnote["전체 모델 복제, 데이터만 분할"]
+    TP --> TPnote["레이어 내 행렬 분할"]
+    PP --> PPnote["레이어 단위 분할"]
+    ZeRO --> ZeROnote["Optimizer/Grad/Param sharding"]
+```
 
 ### 1. Data Parallelism (DP), 가장 단순
 
@@ -193,6 +220,24 @@ all-to-all:  matrix transpose 같은 전체 재분배
 | GPT-4 (추정) | DP + TP + PP + EP |
 | Gemini 1.5 Pro (1M context) | DP + TP + CP |
 | DeepSeek V3 (671B MoE) | DP + EP + TP |
+
+## 함정
+
+### 1. TP degree 와 NVLink
+
+Tensor Parallelism 은 forward 마다 통신이 발생해 **노드 내 NVLink** 가 없으면 성능이 급락한다. TP degree 는 노드 내 GPU 수 (보통 8) 를 초과하지 않는 것이 원칙.
+
+### 2. Pipeline bubble
+
+PP 에서 micro-batch 수가 적으면 GPU idle 시간(bubble) 이 커진다. bubble fraction = (PP-1) / (PP-1+microbatches). microbatches 를 늘리거나 interleaved schedule 적용 필요.
+
+### 3. ZeRO-3 와 메모리 재집합 비용
+
+ZeRO-3 는 parameter 를 분산하므로 각 forward 단계에서 all-gather 가 필요. 작은 batch size 에서 통신이 오히려 bottleneck 이 될 수 있다.
+
+### 4. 체크포인트 복잡도
+
+TP+PP+DP 조합에서 체크포인트는 각 rank 마다 다른 파일이 생긴다. 학습 재개 시 정확히 같은 parallelism 설정이 필요하거나 변환 스크립트 필요.
 
 ## CS 에 미친 영향
 

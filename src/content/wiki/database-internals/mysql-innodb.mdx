@@ -1,9 +1,19 @@
 ---
 title: "[DB] MySQL / InnoDB: clustered index, redo log, MVCC"
-aliases: ["MySQL", "InnoDB", "clustered index", "secondary index", "redo log", "undo log", "buffer pool", "binlog"]
+aliases:
+  - "MySQL"
+  - "InnoDB"
+  - "clustered index"
+  - "secondary index"
+  - "redo log"
+  - "undo log"
+  - "buffer pool"
+  - "binlog"
+  - "doublewrite buffer"
+  - "adaptive hash index"
 tags: [mysql, innodb, database, sql]
 category: database-internals
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "MySQL Reference"
     url: "https://dev.mysql.com/doc/refman/8.4/en/"
@@ -18,15 +28,20 @@ references:
 
 ```mermaid
 flowchart TB
-    Client --> Server["MySQL Server<br/>(parser, optimizer)"]
+    Client --> Server["MySQL Server<br/>(parser, optimizer, query cache)"]
     Server --> InnoDB
-    subgraph InnoDB
-        BufferPool["Buffer Pool<br/>(메모리 캐시)"]
-        RedoLog["Redo Log<br/>(WAL 류)"]
+    subgraph InnoDB["InnoDB Storage Engine"]
+        direction LR
+        BP["Buffer Pool<br/>(메모리 캐시)"]
+        AHI["Adaptive Hash Index"]
+        CL["Change Buffer"]
+        RedoLog["Redo Log<br/>(WAL)"]
         UndoLog["Undo Log<br/>(MVCC)"]
-        DataFiles[(ibd 데이터 파일)]
+        DWB["Doublewrite Buffer"]
+        DataFiles[("ibd 데이터 파일")]
+        BP --> DWB --> DataFiles
     end
-    Server -->|writes| Binlog[(Binlog<br/>replication)]
+    Server -->|writes| Binlog[("Binlog<br/>replication")]
 ```
 
 ## Clustered Index (vs PostgreSQL)
@@ -35,20 +50,20 @@ flowchart TB
 |---|---|---|
 | Primary 데이터 저장 | heap + 별도 인덱스 | *primary key 의 B-tree leaf* |
 | Secondary index → 데이터 | `tid` (heap 위치) | *primary key 값* |
-| 결과 | secondary index lookup = *1 hop* | secondary index lookup = *2 hop* (인덱스 → PK → 데이터) |
+| Secondary lookup | 1 hop | *2 hop* (인덱스 → PK → 데이터) |
 | PK 영향 | 작음 | *큼* (변경 시 secondary index 도 갱신) |
 
 ```mermaid
 flowchart TB
     subgraph InnoDB
-        PK[Primary Key B-tree<br/>= 실제 row 데이터]
-        Sec[Secondary Index B-tree<br/>= PK 값을 leaf 에]
-        Sec -->|PK lookup| PK
+        PK["Primary Key B-tree<br/>leaf = 실제 row 데이터"]
+        Sec["Secondary Index B-tree<br/>leaf = PK 값"]
+        Sec -->|"PK lookup (2 hop)"| PK
     end
 ```
 
 > [!IMPORTANT]
-> InnoDB 의 PK 선택은 *결정적*. *큰 PK* (UUID) = 모든 secondary index 가 *큰 leaf*. *AUTO_INCREMENT BIGINT* 가 보통 정답.
+> InnoDB 의 PK 선택은 *결정적*. *큰 PK* (UUID v4) = 모든 secondary index 가 *큰 leaf*. *AUTO_INCREMENT BIGINT* 가 보통 정답.
 
 ## Redo Log + Undo Log
 
@@ -64,9 +79,67 @@ sequenceDiagram
 
 | 로그 | 역할 |
 |---|---|
-| Redo Log | crash recovery, *WAL* |
+| Redo Log | crash recovery, WAL |
 | Undo Log | MVCC + rollback |
 | Binlog | replication, point-in-time recovery |
+
+### MySQL 8.0.30+ Redo Log 개선
+
+- Redo log 는 *순환 파일 (기본 2개)* → *동적 크기* 로 변경.
+- `innodb_redo_log_capacity` 단일 파라미터로 제어 (옛 `innodb_log_file_size × innodb_log_files_in_group`).
+
+## Doublewrite Buffer
+
+*페이지 손상 (partial write)* 방지:
+
+```mermaid
+sequenceDiagram
+    InnoDB->>DWB: dirty page 먼저 doublewrite buffer 에 기록
+    DWB->>SystemTablespace: flush
+    InnoDB->>DataFile: 실제 데이터 파일에 쓰기
+    Note over InnoDB: crash 시 DWB 로 복구 가능
+```
+
+- OS 가 4KB 단위로 쓰지만 InnoDB page 는 16KB → *partial write* 발생 가능.
+- Doublewrite buffer 는 *atomic write 보장 SSD* (FusionIO 등) 에서 비활성화 가능.
+
+```sql
+-- 8.0.20+ 별도 파일로 분리됨
+SHOW VARIABLES LIKE 'innodb_doublewrite%';
+```
+
+## Adaptive Hash Index (AHI)
+
+```mermaid
+flowchart LR
+    Query["반복 동일 조건 쿼리"] --> AHI["Adaptive Hash Index<br/>(메모리 해시)"]
+    AHI -->|"hit (O(1))"| Row["Row (Buffer Pool)"]
+    AHI -.->|"miss"| BTree["B-tree 탐색 (O(log N))"]
+```
+
+- *자동으로* 핫 B-tree 패턴을 *해시 테이블* 로 캐시.
+- *동일 쿼리 패턴 반복* 시 B-tree depth 생략.
+- *write-heavy* 환경에서 오히려 경합 → 비활성화 검토.
+
+```sql
+SHOW ENGINE INNODB STATUS\G  -- AHI 사용률 확인
+SET GLOBAL innodb_adaptive_hash_index = OFF;  -- 비활성화
+```
+
+## Change Buffer (Insert Buffer)
+
+*보조 인덱스 페이지* 가 메모리에 없을 때 *나중에 일괄 적용*:
+
+```mermaid
+flowchart LR
+    Insert["INSERT / UPDATE"] --> Check{보조 인덱스 페이지<br/>Buffer Pool에?}
+    Check -->|있음| Direct["즉시 적용"]
+    Check -->|없음| CB["Change Buffer<br/>(시스템 테이블스페이스)"]
+    CB -.->|"페이지 로드 시 merge"| Direct
+```
+
+- 대량 INSERT 시 random I/O 감소 효과.
+- `innodb_change_buffer_max_size` (기본 25% of buffer pool).
 
 ## Isolation Level (InnoDB 기본)
 
@@ -85,14 +158,30 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    Disk[(ibd files)] --> BP[Buffer Pool]
+    Disk[("ibd files")] --> BP["Buffer Pool<br/>(innodb_buffer_pool_size)"]
     BP -->|hit| Client
-    BP -.->|LRU eviction| Disk
+    BP -.->|"LRU eviction"| Disk
+    BP --> Young["Young 리스트<br/>(최근 접근)"]
+    BP --> Old["Old 리스트<br/>(eviction 후보)"]
 ```
 
 - 메모리에 *page 단위 (16KB) 캐시*.
 - `innodb_buffer_pool_size` = *총 RAM 의 70-80%* 가 운영 표준.
-- *Hit ratio* `Innodb_buffer_pool_read_requests / Innodb_buffer_pool_reads`.
+- *Hit ratio* 확인: `Innodb_buffer_pool_read_requests / Innodb_buffer_pool_reads`.
+- 대용량 서버: `innodb_buffer_pool_instances = 8` 로 경합 분산.
+
+```sql
+-- 버퍼 풀 히트율 확인
+SELECT FORMAT((1 - (Innodb_buffer_pool_reads / Innodb_buffer_pool_read_requests)) * 100, 2)
+  AS hit_ratio
+FROM (
+  SELECT VARIABLE_VALUE AS Innodb_buffer_pool_reads
+  FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_reads'
+) r, (
+  SELECT VARIABLE_VALUE AS Innodb_buffer_pool_read_requests
+  FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_read_requests'
+) rr;
+```
 
 ## Lock
 
@@ -113,10 +202,10 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    Primary --> Binlog[(binlog)]
-    Binlog --> Replica1[Replica 1]
-    Binlog --> Replica2[Replica 2]
-    Binlog --> Replica3[Replica 3]
+    Primary --> Binlog[("binlog")]
+    Binlog --> R1["Replica 1"]
+    Binlog --> R2["Replica 2"]
+    Binlog --> R3["Replica 3"]
 ```
 
 - *Async* (기본): primary 가 즉시 OK
@@ -132,7 +221,7 @@ flowchart LR
 | 확장성 (extension) | 적음 | *매우 많음* |
 | JSON 인덱싱 | OK | *JSONB + GIN 우수* |
 | 복제 | binlog 기반 | streaming WAL |
-| 트랜잭션 DDL | 옛 버전 X (8.0+ 부분) | *대부분 트랜잭션* |
+| 트랜잭션 DDL | 8.0+ 부분 | *대부분 트랜잭션* |
 | 운영 도구 | percona, mysql workbench | psql + 풍부한 ecosystem |
 | 라이센스 | GPL (commercial 도) | PostgreSQL License |
 
@@ -140,9 +229,11 @@ flowchart LR
 
 > [!WARNING]
 > 1. **PK = UUID v4** = clustered index *random write* → 페이지 분할 폭증. ULID / 정렬 가능 UUID 또는 *BIGINT*.
-> 2. **`SELECT * `의 *MVCC* 비용** = old version chain 따라가기. unused 컬럼 안 가져오기.
-> 3. **deadlock 무시** = `SHOW ENGINE INNODB STATUS` 의 *LATEST DEADLOCK* 모니터링.
+> 2. **`SELECT *` 의 MVCC 비용** = old version chain 따라가기. unused 컬럼 안 가져오기.
+> 3. **deadlock 무시** = `SHOW ENGINE INNODB STATUS\G` 의 *LATEST DEADLOCK* 모니터링.
 > 4. **binlog format 이 `STATEMENT`** = 비결정적 함수 (NOW(), UUID()) → replica 와 *다른 결과*. ROW 또는 MIXED 권장.
+> 5. **Doublewrite Buffer 비활성화 (일반 SSD)** = partial write 위험. atomic write 지원 스토리지가 아닌 이상 활성화 유지.
+> 6. **innodb_flush_log_at_trx_commit = 0 or 2** = crash 시 최대 1초 데이터 손실. 기본값 1 (fsync per commit) 권장.
 
 ## 관련 위키
 

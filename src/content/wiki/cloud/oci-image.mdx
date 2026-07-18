@@ -1,9 +1,9 @@
 ---
 title: "[Container] OCI Image: spec, manifest, layer 표준"
-aliases: ["OCI", "Open Container Initiative", "OCI image spec", "image manifest", "image index", "OCI distribution", "containerd"]
+aliases: ["OCI", "Open Container Initiative", "OCI image spec", "image manifest", "image index", "OCI distribution", "containerd", "Cosign", "SBOM"]
 tags: [oci, container, docker, image, cloud]
 category: cloud
-updated: 2026-06-25
+updated: 2026-07-16
 references:
   - title: "OCI Spec"
     url: "https://github.com/opencontainers/image-spec"
@@ -12,6 +12,17 @@ references:
 ## 정의
 
 **OCI (Open Container Initiative)** = *컨테이너 표준* (Linux Foundation, 2015). *image format + runtime + distribution* 3가지 spec.
+
+## 사용 상황
+
+| 상황 | 핵심 개념 |
+|---|---|
+| 멀티 아키 이미지 빌드 (AMD64 + ARM64) | Image Index, BuildKit + QEMU |
+| 이미지 공급망 보안 | Cosign 서명, SBOM |
+| 이미지 경량화 | Dockerfile 레이어 최적화 |
+| 취약점 스캔 자동화 | Trivy, Grype |
+| Registry 비용 최적화 | Lifecycle Policy |
+| Docker 외 런타임 사용 (K8s, K3s) | containerd, CRI-O |
 
 ## 3개 OCI Spec
 
@@ -35,11 +46,11 @@ manifest.json
 ```mermaid
 flowchart TB
     Idx["Image Index (멀티 아키)"]
-    Idx --> Mfst_amd64[Manifest amd64]
-    Idx --> Mfst_arm64[Manifest arm64]
-    Mfst_amd64 --> Cfg_a[Config JSON]
-    Mfst_amd64 --> L1_a[Layer tarball 1]
-    Mfst_amd64 --> L2_a[Layer tarball 2]
+    Idx --> Mfst_amd64["Manifest amd64"]
+    Idx --> Mfst_arm64["Manifest arm64"]
+    Mfst_amd64 --> Cfg_a["Config JSON"]
+    Mfst_amd64 --> L1_a["Layer tarball 1"]
+    Mfst_amd64 --> L2_a["Layer tarball 2"]
 ```
 
 ## Image Index (멀티 아키)
@@ -86,12 +97,12 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    OCI[OCI Distribution] --> Image["OCI Image (전통 컨테이너)"]
+    OCI["OCI Distribution"] --> Image["OCI Image (전통 컨테이너)"]
     OCI --> Artifact["OCI Artifact (임의 데이터)"]
     Artifact --> Helm[Helm chart]
     Artifact --> WASM[WebAssembly]
     Artifact --> SBOM[SBOM]
-    Artifact --> Sig[Cosign signature]
+    Artifact --> Sig["Cosign signature"]
 ```
 
 > *OCI registry 가 *컨테이너 image 만이 아닌* 일반 artifact store* 로 진화. Helm chart, WASM, SBOM, signature 모두.
@@ -117,8 +128,182 @@ layer digest = sha256(layer tarball)
 > *tag* 는 *변할 수* 있지만 *digest* 는 *불변*. *프로덕션 배포* 는 항상 *digest* 로:
 
 ```
-nginx:1.27                            ← tag (mutable)
-nginx@sha256:abc123...                ← digest (immutable)
+nginx:1.27                            # tag (mutable)
+nginx@sha256:abc123...                # digest (immutable)
+```
+
+## Dockerfile 레이어 최적화
+
+레이어는 캐시됨. 변경 빈도 낮은 것을 위에.
+
+```dockerfile
+# 잘못된 순서 (매번 deps 재설치)
+FROM node:20-alpine
+COPY . .
+RUN npm install
+
+# 올바른 순서 (package.json 변경 없으면 캐시 재사용)
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+
+# 멀티스테이지: 빌드 산출물만 최종 이미지에 포함
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+CMD ["node", "dist/index.js"]
+```
+
+레이어 크기 확인:
+
+```bash
+docker history myapp:latest
+dive myapp:latest   # dive 툴로 레이어별 상세 분석
+```
+
+## BuildKit + QEMU (멀티 아키 빌드)
+
+```bash
+# buildx + QEMU 설치
+docker buildx create --name multi-arch --driver docker-container --use
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+# AMD64 + ARM64 동시 빌드 + push
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --tag myregistry/myapp:1.0.0 \
+  --push \
+  .
+```
+
+CI/CD (GitHub Actions) 에서:
+
+```yaml
+- uses: docker/setup-qemu-action@v3
+- uses: docker/setup-buildx-action@v3
+- uses: docker/build-push-action@v6
+  with:
+    platforms: linux/amd64,linux/arm64
+    push: true
+    tags: myregistry/myapp:${{ github.sha }}
+    cache-from: type=gha
+    cache-to: type=gha,mode=max
+```
+
+## Image 취약점 스캔 (Trivy)
+
+```bash
+# 이미지 스캔
+trivy image --severity HIGH,CRITICAL nginx:1.27
+
+# CI에서 CRITICAL 발견 시 실패
+trivy image \
+  --exit-code 1 \
+  --severity CRITICAL \
+  --ignore-unfixed \
+  myapp:latest
+
+# SBOM 출력
+trivy image --format cyclonedx --output sbom.json myapp:latest
+```
+
+```mermaid
+flowchart LR
+    Build["docker build"] --> Scan["trivy scan"]
+    Scan --> Pass{결과}
+    Pass -->|"CRITICAL 없음"| Push["registry push"]
+    Pass -->|"CRITICAL 발견"| Fail["빌드 실패"]
+```
+
+## Cosign 이미지 서명
+
+공급망 보안. 이미지 무결성, 출처 검증.
+
+```bash
+# keyless 서명 (OIDC 기반, Sigstore)
+cosign sign \
+  --yes \
+  myregistry/myapp@sha256:abc123...
+
+# 검증
+cosign verify \
+  --certificate-identity-regexp "https://github.com/myorg/myrepo/.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  myregistry/myapp:latest
+```
+
+GitHub Actions에서 자동 서명:
+
+```yaml
+- uses: sigstore/cosign-installer@v3
+- name: Sign image
+  env:
+    COSIGN_EXPERIMENTAL: 1
+  run: |
+    cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+```
+
+> keyless 서명은 private key 관리 불필요. OIDC token으로 Fulcio CA가 단기 인증서 발급.
+
+## SBOM (Software Bill of Materials)
+
+이미지에 포함된 소프트웨어 목록. 취약점 추적, 규정 준수.
+
+```bash
+# syft로 SBOM 생성
+syft myapp:latest -o cyclonedx-json > sbom.json
+syft myapp:latest -o spdx-json > sbom.spdx.json
+
+# SBOM을 OCI Artifact로 registry에 첨부
+cosign attach sbom \
+  --sbom sbom.json \
+  myregistry/myapp@sha256:abc123...
+
+# Grype로 SBOM 기반 취약점 스캔
+grype sbom:sbom.json
+```
+
+## Registry Lifecycle Policy (ECR 예시)
+
+오래된 이미지 자동 삭제로 스토리지 비용 절감.
+
+```json
+{
+  "rules": [
+    {
+      "rulePriority": 1,
+      "description": "30일 이상 된 untagged 이미지 삭제",
+      "selection": {
+        "tagStatus": "untagged",
+        "countType": "sinceImagePushed",
+        "countUnit": "days",
+        "countNumber": 30
+      },
+      "action": { "type": "expire" }
+    },
+    {
+      "rulePriority": 2,
+      "description": "최근 10개 tagged 이미지 유지",
+      "selection": {
+        "tagStatus": "tagged",
+        "tagPrefixList": ["v"],
+        "countType": "imageCountMoreThan",
+        "countNumber": 10
+      },
+      "action": { "type": "expire" }
+    }
+  ]
+}
 ```
 
 ## 흔한 함정
@@ -128,6 +313,10 @@ nginx@sha256:abc123...                ← digest (immutable)
 > 2. **Image scan 누락** = 취약점 image. Trivy / Grype / Clair.
 > 3. **Cross-arch test 안 함** = AMD64 만 build → ARM 노드 실패.
 > 4. **Layer 너무 많음** = layer 한도 (보통 127). 가능하면 묶기.
+> 5. **root로 실행** = Dockerfile 에 `USER nonroot` 없으면 컨테이너가 root 권한으로 실행. 보안 위험.
+> 6. **base image 업데이트 안 함** = OS 취약점 방치. 정기 `FROM ubuntu:24.04` 재빌드.
+> 7. **빌드 시 secrets 레이어에 남음** = `RUN --mount=type=secret` 사용. ENV로 비밀 전달 금지.
+> 8. **SBOM/서명 없는 배포** = K8s Policy (Kyverno) 로 서명 없는 이미지 배포 차단 권장.
 
 ## 관련 위키
 
@@ -135,3 +324,6 @@ nginx@sha256:abc123...                ← digest (immutable)
 - [[cgroups-namespaces]]
 - [[container-image-best-practices]]
 - [[k8s-pod]]
+- [[k8s-architecture]]
+- [[vm-vs-container]]
+- [[aws-ecr]]

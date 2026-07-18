@@ -1,25 +1,85 @@
 ---
 title: "[비교] JPA EAGER vs Rails eager_load"
-aliases: ["convex-hull-trick", "JPA vs Rails eager loading", "EAGER 비교", "fetch type Rails", "Rails eager_load JPA"]
+aliases:
+  - "JPA vs Rails eager loading"
+  - "EAGER 비교"
+  - "fetch type Rails"
+  - "Rails eager_load JPA"
+  - "N+1 JPA Rails"
+  - "jpa rails n+1"
 tags: [jpa, rails, hibernate, active-record, n-plus-one, comparison]
 category: frameworks
-updated: 2026-06-23
+updated: 2026-07-15
 references:
   - title: "Jakarta Persistence FetchType"
     url: "https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1#fetchtype"
     note: "JPA FetchType 명세"
   - id: rails-guides
     note: "Eager Loading Associations - https://guides.rubyonrails.org/active_record_querying.html#eager-loading-associations"
+  - title: "Hibernate User Guide: Fetching"
+    url: "https://docs.jboss.org/hibernate/orm/6.4/userguide/html_single/Hibernate_User_Guide.html#fetching"
 ---
 
 ## 정의
 
 JPA 와 Rails 는 둘 다 "eager" 라는 용어를 ORM 의 연관 로딩 전략에 사용한다. **이름은 비슷하지만 의미는 정반대**.
 
+## N+1 문제란
+
+N+1 문제는 연관 객체를 지연 로딩(lazy loading)할 때 발생하는 성능 패턴이다. 부모 목록 1회 쿼리 후, 각 부모의 연관 객체를 N번 추가 쿼리하는 구조다.
+
+```mermaid
+sequenceDiagram
+    participant APP as 애플리케이션
+    participant DB as 데이터베이스
+
+    APP->>DB: SELECT * FROM posts (1번)
+    DB-->>APP: [post1, post2, post3, ... postN]
+
+    loop N번 반복
+        APP->>DB: SELECT * FROM users WHERE id = ?
+        DB-->>APP: author
+    end
+
+    Note over APP,DB: 총 N+1번 쿼리 발생
+```
+
+N=100 이면 101번 쿼리. N=1000 이면 1001번 쿼리. ORM의 편리함이 성능 문제의 원인이 된다.
+
 - **JPA `FetchType.EAGER`**: 매핑 선언 시점에 영구 설정. 그 entity 를 조회할 때마다 항상 자동으로 함께 로드. 끄는 게 권장.
 - **Rails `eager_load`**: 쿼리 시점에 옵트인. 그 쿼리에서만 JOIN 으로 함께 로드. 권장 패턴.
 
 이름이 같아 혼동하기 쉬워 별도 페이지로 정리한다.
+
+## 로딩 전략 비교 시각화
+
+```mermaid
+flowchart LR
+    subgraph JPA["JPA 전략"]
+        JL["FetchType.LAZY<br/>(기본 권장)"]
+        JE["FetchType.EAGER<br/>(기본값, 위험)"]
+        JF["JOIN FETCH<br/>(쿼리 시점 명시)"]
+        JB["@BatchSize<br/>(IN절 묶음)"]
+        JG["EntityGraph<br/>(동적 fetch)"]
+    end
+
+    subgraph RAILS["Rails 전략"]
+        RL["lazy (기본)"]
+        RPL["preload<br/>(2쿼리 IN절)"]
+        REL["eager_load<br/>(LEFT OUTER JOIN)"]
+        RI["includes<br/>(자동 선택)"]
+    end
+
+    JE -->|"N+1 유발"| PROBLEM["N+1 문제"]
+    RL -->|"N+1 유발"| PROBLEM
+
+    JF -->|"해결"| SOL["N+1 해결"]
+    JB -->|"해결"| SOL
+    JG -->|"해결"| SOL
+    RPL -->|"해결"| SOL
+    REL -->|"해결"| SOL
+    RI -->|"해결"| SOL
+```
 
 ## 1줄 비교
 
@@ -135,6 +195,124 @@ end
 
 `bullet` gem 처럼 자동 N+1 알림 도구가 JPA 진영엔 약함. 직접 통합 테스트에서 Statement count 측정.
 
+## JPA: EntityGraph (동적 Fetch 전략)
+
+`@NamedEntityGraph` 또는 동적 EntityGraph로 쿼리별 fetch 전략을 지정한다:
+
+```java
+// 정적 선언
+@Entity
+@NamedEntityGraph(
+  name = "Post.withAuthor",
+  attributeNodes = @NamedAttributeNode("author")
+)
+class Post {
+  @ManyToOne(fetch = FetchType.LAZY)
+  User author;
+
+  @OneToMany(fetch = FetchType.LAZY)
+  List<Comment> comments;
+}
+
+// 사용
+EntityGraph graph = em.getEntityGraph("Post.withAuthor");
+Map<String, Object> hints = Map.of("jakarta.persistence.fetchgraph", graph);
+List<Post> posts = em.createQuery("SELECT p FROM Post p", Post.class)
+  .setHint("jakarta.persistence.fetchgraph", graph)
+  .getResultList();
+```
+
+Spring Data JPA에서:
+
+```java
+@Repository
+public interface PostRepository extends JpaRepository<Post, Long> {
+
+  @EntityGraph(attributePaths = {"author"})
+  List<Post> findAll();
+
+  @EntityGraph(attributePaths = {"author", "comments"})
+  Optional<Post> findById(Long id);
+}
+```
+
+EntityGraph 타입:
+- `FETCH`: 명시한 필드는 EAGER, 나머지는 LAZY
+- `LOAD`: 명시한 필드는 EAGER, 나머지는 매핑 기본값 유지
+
+## JPA: @BatchSize (N+1 완화)
+
+`@BatchSize`는 N+1을 완전히 없애지는 않지만, N번 쿼리를 IN절 묶음으로 줄인다:
+
+```java
+@Entity
+class Post {
+  @OneToMany
+  @BatchSize(size = 25)
+  List<Comment> comments;
+}
+```
+
+`SELECT * FROM comments WHERE post_id IN (1, 2, ..., 25)` 형태로 25개씩 묶어서 조회. N=100 이면 100번 → 4번으로 감소.
+
+전역 배치 크기 설정 (Hibernate):
+
+```yaml
+# application.yml
+spring:
+  jpa:
+    properties:
+      hibernate.default_batch_fetch_size: 100
+```
+
+## Rails: includes / preload / eager_load 선택 기준
+
+세 메서드는 동작 방식이 다르다:
+
+```ruby
+# preload: 항상 2번 쿼리 (부모 SELECT + IN절 자식 SELECT)
+Post.preload(:author)
+# → SELECT * FROM posts
+# → SELECT * FROM users WHERE id IN (1, 2, 3, ...)
+
+# eager_load: 항상 JOIN 1번 쿼리
+Post.eager_load(:author)
+# → SELECT posts.*, users.* FROM posts
+#     LEFT OUTER JOIN users ON posts.author_id = users.id
+
+# includes: Rails가 상황에 따라 preload 또는 eager_load 자동 선택
+Post.includes(:author)
+# where 조건에 연관 테이블 컬럼 사용 시 → eager_load
+# 그 외 → preload
+Post.includes(:author).where('users.active = ?', true).references(:author)
+# → eager_load 강제
+```
+
+중첩 연관 로딩:
+
+```ruby
+# posts → author → profile 까지 한번에
+Post.includes(author: :profile)
+
+# 여러 연관 동시에
+Post.includes(:author, :comments, :tags)
+
+# 3단계 중첩
+Post.includes(comments: { author: :profile })
+```
+
+Rails `strict_loading` (6.1+):
+
+```ruby
+# 모델에서 lazy loading 완전 차단 (개발/테스트 환경에서 N+1 조기 발견)
+class ApplicationRecord < ActiveRecord::Base
+  self.strict_loading_by_default = true
+end
+
+# 특정 쿼리에만 적용
+Post.strict_loading.all
+```
+
 ## 함정 비교
 
 ### JPA 함정
@@ -170,6 +348,60 @@ end
 | 둘 다 N+1 해결책인가? | Rails eager_load 는 명백한 해결책. JPA EAGER 는 종종 N+1 의 원인. |
 
 이름이 미묘하게 같아서 "EAGER 면 빠른 것" 으로 단순화하지 말 것. 두 ORM 의 정반대 권장 사항을 기억.
+
+## 쿼리 로그로 N+1 확인
+
+### JPA / Hibernate
+
+```yaml
+# application.yml
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+```
+
+```java
+// p6spy로 실제 파라미터까지 확인
+// pom.xml: p6spy 의존성 추가 후
+// spy.properties: appender=com.p6spy.engine.spy.appender.Slf4JLogger
+```
+
+### Rails
+
+```ruby
+# config/environments/development.rb
+config.log_level = :debug  # SQL 쿼리 전부 출력
+
+# bullet gem: N+1 자동 감지 (개발 환경)
+# Gemfile
+gem 'bullet', group: :development
+
+# config/environments/development.rb
+config.after_initialize do
+  Bullet.enable = true
+  Bullet.alert = true
+  Bullet.rails_logger = true
+end
+```
+
+bullet gem이 N+1을 감지하면 로그에:
+```
+USE eager loading detected
+  Post => [:author]
+  Add to your query: .includes([:author])
+```
+
+## 전략 선택 요약
+
+| 상황 | JPA 선택 | Rails 선택 |
+|:---|:---|:---|
+| 부모 < 10개 + 연관 1개 | `JOIN FETCH` | `eager_load` |
+| 부모 수백 개 + 연관 1개 | `@BatchSize` 또는 `JOIN FETCH` | `preload` 또는 `includes` |
+| 연관 컬럼으로 WHERE 필터링 | `JOIN FETCH` + JPQL where | `eager_load` + `where` |
+| 페이지네이션 + 연관 | `EntityGraph` (컬렉션 제외) | `includes` (컬렉션 주의) |
+| 다단계 중첩 | 단계별 쿼리 + `@BatchSize` | `preload` 단계 분리 |
+| 개발 중 N+1 조기 감지 | Hibernate Statistics / p6spy | bullet gem + `strict_loading` |
 
 ## 관련 위키
 

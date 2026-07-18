@@ -189,6 +189,119 @@ FROM logs-*
 
 > 일반 검색 직관. ES 도 같은 *query → ranking → top-K* 흐름.
 
+## 중첩 문서 쿼리
+
+문서 안에 배열 객체가 있을 때 `nested` 타입 + `nested` query 가 필요합니다.
+
+```json
+// 매핑
+{
+  "mappings": {
+    "properties": {
+      "reviews": { "type": "nested" }
+    }
+  }
+}
+```
+
+```json
+// nested query: 같은 리뷰 객체 내에서 author + score 조합 매칭
+{
+  "query": {
+    "nested": {
+      "path": "reviews",
+      "query": {
+        "bool": {
+          "must": [
+            { "match": { "reviews.author": "kim" } },
+            { "range": { "reviews.score": { "gte": 4 } } }
+          ]
+        }
+      },
+      "score_mode": "avg"
+    }
+  }
+}
+```
+
+`nested` 를 쓰지 않으면 서로 다른 배열 원소의 필드가 cross-match 되는 "객체 평탄화" 버그가 발생합니다.
+
+## 하이브리드 검색
+
+벡터 유사도와 키워드 검색을 결합하는 **RRF (Reciprocal Rank Fusion)** 방식:
+
+```mermaid
+flowchart LR
+    Q[검색 쿼리] --> BM[BM25 키워드 검색]
+    Q --> Vec[kNN 벡터 검색]
+    BM --> R1[랭킹 리스트 1]
+    Vec --> R2[랭킹 리스트 2]
+    R1 --> RRF[RRF 합산]
+    R2 --> RRF
+    RRF --> Final[최종 결과]
+```
+
+```json
+GET /products/_search
+{
+  "retriever": {
+    "rrf": {
+      "retrievers": [
+        {
+          "standard": {
+            "query": { "match": { "description": "lightweight keyboard" } }
+          }
+        },
+        {
+          "knn": {
+            "field": "embedding",
+            "query_vector_builder": {
+              "text_embedding": {
+                "model_id": "sentence-transformers__msmarco-minilm-l-12-v3",
+                "model_text": "lightweight keyboard"
+              }
+            },
+            "num_candidates": 100
+          }
+        }
+      ],
+      "rank_window_size": 100,
+      "rank_constant": 60
+    }
+  }
+}
+```
+
+> [!TIP]
+> RRF 는 두 랭킹 리스트를 `1 / (rank_constant + rank)` 점수로 합산합니다. 가중치 튜닝 없이도 안정적인 성능을 냅니다.
+
+## 쿼리 성능 최적화
+
+### Profile API
+
+느린 쿼리 원인 분석:
+
+```json
+GET /products/_search
+{
+  "profile": true,
+  "query": { "match": { "title": "keyboard" } }
+}
+```
+
+응답의 `profile.shards[].searches[].query` 에서 각 단계의 소요 시간을 확인합니다.
+
+### 성능 원칙 요약
+
+| 원칙 | 구체 방법 |
+|:---|:---|
+| **Score 불필요 조건은 filter** | `must` 대신 `filter` context |
+| **와일드카드 최소화** | `edge_ngram` 분석기로 prefix 검색 대체 |
+| **필요한 필드만 반환** | `_source: { includes: ["title", "price"] }` |
+| **Shard 수 최적화** | 과다한 shard 수 = 쿼리 오버헤드 |
+| **routing 활용** | 특정 테넌트 데이터는 routing 으로 단일 shard 접근 |
+| **Query 캐시** | filter 결과는 자동 캐시: 반복 filter 는 빠름 |
+
 ## 흔한 함정
 
 > [!WARNING]

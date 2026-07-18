@@ -171,10 +171,91 @@ flowchart LR
 > 3. **string vs bytes** = string 은 *UTF-8 검증*. binary 데이터는 *bytes*.
 > 4. **stream 의 *완료 표시*** = 클라이언트 stream 은 *반드시 half-close (closeSend)* 해야 서버가 finalize.
 
+## Interceptor (미들웨어)
+
+```python
+# Python: 서버 interceptor, 인증 검사
+class AuthInterceptor(grpc.ServerInterceptor):
+    def intercept_service(self, continuation, handler_call_details):
+        metadata = dict(handler_call_details.invocation_metadata)
+        if metadata.get('authorization') != 'Bearer valid-token':
+            def deny(request, context):
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, 'Invalid token')
+            return grpc.unary_unary_rpc_method_handler(deny)
+        return continuation(handler_call_details)
+```
+
+> *Interceptor = gRPC 의 미들웨어*. 인증, 로깅, 메트릭, retry 등 횡단 관심사 처리. 체인 가능.
+
+## Metadata (Header 역할)
+
+```python
+# 클라이언트: metadata 전송
+metadata = [
+    ('request-id', 'abc-123'),
+    ('x-tenant-id', 'org-1'),
+]
+response = stub.GetItem(req, metadata=metadata)
+
+# 서버: metadata 수신
+def GetItem(self, request, context):
+    md = dict(context.invocation_metadata())
+    tenant = md.get('x-tenant-id')
+    ...
+```
+
+> *Metadata = HTTP 헤더 역할*. 요청마다 전달되며 Interceptor 에서도 읽기 가능.
+
+## Health Check Protocol
+
+```protobuf
+// grpc.health.v1.Health 표준
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+}
+```
+
+```yaml
+# K8s 1.24+ 네이티브 gRPC probe
+livenessProbe:
+  grpc:
+    port: 50051
+    service: shop.v1.Shop
+  initialDelaySeconds: 5
+```
+
+```bash
+grpc_health_probe -addr=:50051 -service=shop.v1.Shop
+```
+
+## Load Balancing
+
+```mermaid
+flowchart LR
+    Client --> Envoy["Envoy / L7 LB"]
+    Envoy -->|round-robin| B1[Backend 1]
+    Envoy -->|round-robin| B2[Backend 2]
+    Envoy -->|round-robin| B3[Backend 3]
+```
+
+HTTP/2 multiplexing 때문에 *TCP 레벨 (L4) LB 는 단일 서버로 몰림*. L7 LB 또는 클라이언트 사이드 LB 필요.
+
+| 방식 | 설명 | 사용 |
+|---|---|---|
+| 클라이언트 사이드 | DNS 조회 후 round-robin | gRPC core 기본 지원 |
+| Envoy proxy | sidecar 패턴, Istio | 서비스 메시 환경 |
+| K8s HeadlessService | Pod IP 직접 노출 | 클라이언트 LB 와 조합 |
+
+## ConnectRPC (gRPC 대안)
+
+> *ConnectRPC* (buf.build) = HTTP/1.1, HTTP/2 모두 지원. curl 로 테스트 가능. gRPC 호환. 브라우저 직접 호출 (grpc-web proxy 불필요). 2026 시점 생태계 성장 중.
+
 ## 관련 위키
 
 - [[HTTP/2]]
-- [[Protobuf]] (별도 자료)
 - [[REST API Design]]
 - [[GraphQL]]
 - [[Microservices]]
+- [[load-balancer]]
+- [[jsonrpc-vs-grpc]]

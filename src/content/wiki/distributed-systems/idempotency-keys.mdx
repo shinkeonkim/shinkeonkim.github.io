@@ -176,9 +176,133 @@ flowchart LR
 > 3. **TTL 너무 짧음** = 24시간 뒤 *재시도* 시 *중복 처리*.
 > 4. **in-progress 처리** = 그동안 동일 key 가 또 오면 *대기 vs 거절* 정책. 보통 409.
 
+## Key 생성 전략
+
+```javascript
+import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
+
+// 클라이언트에서 생성 (가장 일반적)
+const idempotencyKey = uuidv4();   // 무작위, 충돌 거의 없음
+
+// 결정론적 key (UUID v5 = namespace + 입력의 SHA-1)
+const NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+const key = uuidv5(`payment:${userId}:${orderId}:${amount}`, NAMESPACE);
+// 같은 입력이면 항상 같은 key = 재시도 시 동일 key 재사용 가능
+```
+
+| 방식 | 장점 | 단점 |
+|---|---|---|
+| UUID v4 (랜덤) | 간단, 충돌 거의 없음 | 재시작 시 새 key 생성됨 |
+| UUID v5 (해시) | 결정론적, 재시도 가능 | namespace 관리 필요 |
+| `${requestId}` | 직관적 | 클라이언트 구현 필요 |
+
+> [!WARNING]
+> 클라이언트가 *retry 마다 새 key 를 생성* = idempotency 의미 없음. retry 시 반드시 *같은 key 재사용*.
+
+## 클라이언트 구현 패턴
+
+```typescript
+// Axios interceptor: 자동 idempotency-key 추가
+import axios from 'axios';
+import { v4 as uuidv4 } from 'uuid';
+
+const api = axios.create({ baseURL: '/api' });
+
+api.interceptors.request.use(config => {
+    const method = config.method?.toLowerCase() ?? '';
+    if (['post', 'patch', 'put'].includes(method)) {
+        // ??= 로 retry 시 같은 key 유지
+        config.headers['Idempotency-Key'] ??= uuidv4();
+    }
+    return config;
+});
+```
+
+```python
+# Python + httpx + tenacity retry
+import httpx, uuid
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+def charge(amount: int, key: str | None = None):
+    key = key or str(uuid.uuid4())
+    # retry 할 때 외부에서 key 를 넘겨야 같은 key 재사용
+    response = httpx.post(
+        '/v1/charges',
+        json={'amount': amount},
+        headers={'Idempotency-Key': key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+# 올바른 재시도: key 를 먼저 생성 후 함수에 전달
+key = str(uuid.uuid4())
+result = charge(5000, key=key)
+```
+
+## Idempotency 라이프사이클
+
+```mermaid
+flowchart TD
+    A["클라이언트: key 생성 (UUID v4)"] --> B["요청 전송"]
+    B --> C{"Store 조회"}
+    C -->|"없음"| D["IN_PROGRESS 저장"]
+    D --> E["비즈니스 로직 실행"]
+    E -->|"성공"| F["COMPLETED + 응답 저장"]
+    E -->|"실패"| G["DELETE or FAILED 저장"]
+    F --> H["응답 반환"]
+    G --> I["에러 반환, 재시도 가능"]
+    C -->|"COMPLETED"| J["캐시된 응답 즉시 반환"]
+    C -->|"IN_PROGRESS"| K["409 Conflict 반환"]
+    B2["재시도 (같은 key)"] --> C
+```
+
+## 테스트 전략
+
+```python
+import pytest
+
+class TestIdempotency:
+    def test_first_call_processes(self, client):
+        key = "test-key-1"
+        res = client.post('/charges', json={'amount': 100},
+                          headers={'Idempotency-Key': key})
+        assert res.status_code == 200
+        assert res.json()['id'] is not None
+
+    def test_retry_returns_same_response(self, client):
+        key = "test-key-2"
+        res1 = client.post('/charges', json={'amount': 100},
+                           headers={'Idempotency-Key': key})
+        res2 = client.post('/charges', json={'amount': 100},
+                           headers={'Idempotency-Key': key})
+        # 응답 동일
+        assert res1.json()['id'] == res2.json()['id']
+        # DB 에 결제 1건만
+        assert count_charges() == 1
+
+    def test_different_keys_create_different_charges(self, client):
+        res1 = client.post('/charges', json={'amount': 100},
+                           headers={'Idempotency-Key': 'key-A'})
+        res2 = client.post('/charges', json={'amount': 100},
+                           headers={'Idempotency-Key': 'key-B'})
+        assert res1.json()['id'] != res2.json()['id']
+        assert count_charges() == 2
+
+    def test_body_mismatch_same_key_returns_400(self, client):
+        key = "test-key-3"
+        client.post('/charges', json={'amount': 100},
+                    headers={'Idempotency-Key': key})
+        res = client.post('/charges', json={'amount': 999},
+                          headers={'Idempotency-Key': key})
+        # 같은 key + 다른 body = 거절
+        assert res.status_code == 400
+```
+
 ## 관련 위키
 
-- [[REST API Design]]
 - [[outbox-pattern]]
 - [[saga-pattern]]
-- [[kafka]], [[Redis Pub Sub vs Streams]]
+- [[kafka]]
+- [[redis-distributed-lock]]

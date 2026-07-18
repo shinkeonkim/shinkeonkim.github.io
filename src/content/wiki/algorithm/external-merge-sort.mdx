@@ -20,6 +20,16 @@ references:
 
 RDBMS 가 `ORDER BY`, `GROUP BY`, `DISTINCT`, `UNION` 을 처리할 때의 주력 알고리즘. 자세한 메커니즘과 Oracle/PostgreSQL/SQL Server 의 구현 차이는 [[정렬·해시는 메모리가 부족하면 어디로 새는가, PGA, work_mem, Workspace Memory]] 글 참고.
 
+## 문제 상황
+
+**언제 필요한가**: 데이터가 가용 메모리를 초과하는 정렬 작업.
+
+- 로그 파일 100 GB 를 8 GB RAM 으로 정렬
+- RDBMS 쿼리에서 `ORDER BY` 대상 데이터가 `work_mem` (PostgreSQL) / Sort Area (Oracle) 를 초과
+- Hadoop / Spark 의 Shuffle 단계, 분산 정렬
+
+**핵심 통찰**: 데이터 전체를 메모리에 올리지 않아도, 각 Run 의 head 버퍼만 있으면 전체를 정렬된 순서로 출력할 수 있다.
+
 ## 시각화
 
 ```anim:external-merge-sort
@@ -79,6 +89,26 @@ Run 4: [0, 12, 14, 15, ...]   head = 0
 ```
 
 priority queue (min-heap) 로 K 개 중 최솟값을 O(log K) 에 찾는다.
+
+### 2단계 External Merge Sort 개요
+
+```mermaid
+flowchart LR
+    subgraph "1단계: Run 생성"
+        D["대용량 데이터"] --> C1["청크 1: Quicksort"]
+        D --> C2["청크 2: Quicksort"]
+        D --> C3["청크 K: Quicksort"]
+        C1 --> R1["Run 1 파일"]
+        C2 --> R2["Run 2 파일"]
+        C3 --> R3["Run K 파일"]
+    end
+    subgraph "2단계: K-way Merge"
+        R1 --> PQ["Priority Queue"]
+        R2 --> PQ
+        R3 --> PQ
+        PQ --> OUT["정렬된 출력"]
+    end
+```
 
 ## 복잡도
 
@@ -179,12 +209,80 @@ K 가 커지면 priority queue 의 O(log K) 가 무시 못할 비용. K=1000 이
 
 PostgreSQL 은 sort 노드가 이미 정렬된 입력을 감지하면 skip. Oracle 은 인덱스 기반 ORDER BY 가 정렬을 회피.
 
+## 구현 예시
+
+K-way merge 의 동작을 Python 으로 시뮬레이션. 실제 DBMS 에서는 디스크 I/O 가 있지만, 알고리즘 구조는 동일하다.
+
+<CodeWithOutput
+  variants={[
+    {
+      language: "python",
+      label: "Python",
+      code: `import heapq
+
+def external_merge_sort(data, chunk_size):
+    """External merge sort simulation.
+    chunk_size = 가용 메모리 (원소 수 기준)
+    """
+    # 1단계: Run 생성 (청크별 in-memory 정렬)
+    runs = []
+    for i in range(0, len(data), chunk_size):
+        runs.append(sorted(data[i:i + chunk_size]))
+
+    # 2단계: K-way merge (min-heap)
+    # heap: (value, run_index)
+    heap = []
+    pos = [0] * len(runs)
+    for i, run in enumerate(runs):
+        if run:
+            heapq.heappush(heap, (run[0], i))
+
+    result = []
+    while heap:
+        val, ri = heapq.heappop(heap)
+        result.append(val)
+        pos[ri] += 1
+        if pos[ri] < len(runs[ri]):
+            heapq.heappush(heap, (runs[ri][pos[ri]], ri))
+    return result
+
+n, k = map(int, input().split())
+data = list(map(int, input().split()))
+print(*external_merge_sort(data, k))`,
+    },
+  ]}
+  cases={[
+    {
+      label: "10개 원소, chunk=3",
+      input: `10 3
+5 2 8 1 9 3 7 4 6 0`,
+      output: `0 1 2 3 4 5 6 7 8 9`,
+    },
+    {
+      label: "이미 정렬됨",
+      input: `5 2
+1 2 3 4 5`,
+      output: `1 2 3 4 5`,
+    },
+  ]}
+/>
+
 ## 역사
 
 - **1945**: John von Neumann 이 Merge Sort 발명
 - **1950s-60s**: 자기 테이프 시대에 외부 머지 정렬이 사실상 유일한 정렬 방법
 - **1970s**: 디스크 시대, K-way merge 의 메모리 최적화 활발
 - **현재**: 클라우드 DW (BigQuery, Snowflake, Spark) 도 같은 패턴. 다만 디스크 대신 분산 노드로 확장
+
+## BOJ 연습 문제
+
+External Merge Sort 자체를 PS 에서 직접 구현하는 경우는 드물지만, K-way merge 응용은 자주 등장한다.
+
+| 번호 | 제목 | 핵심 |
+|:---|:---|:---|
+| BOJ 2250 | 트리의 높이와 너비 | 정렬 응용 |
+| BOJ 1167 | 트리의 지름 | 우선순위 큐 + 병합 패턴 |
+| BOJ 23843 | 콘센트 | K-way merge 유사 패턴 |
 
 ## 참고
 

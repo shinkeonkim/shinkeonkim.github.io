@@ -17,6 +17,32 @@ references:
 
 Spring 의 DI, Jackson 의 직렬화, JPA 의 entity 매핑, JUnit 의 테스트 메서드 호출 모두 reflection 위에서 동작. 단, 성능 비용 + 캡슐화 위반 + JVM 최적화 방해 같은 단점이 있어 일반 코드에서는 피하고 framework 가 대신 써 준다.
 
+## 사용 상황
+
+| 상황 | 접근 |
+|:---|:---|
+| 클래스 이름이 런타임에 결정됨 | `Class.forName` |
+| private 필드 읽기/쓰기 (테스트) | `getDeclaredField + setAccessible` |
+| 어노테이션 기반 처리기 구현 | `getDeclaredMethods + getAnnotation` |
+| interface 기반 AOP 프록시 | `Proxy.newProxyInstance` |
+| hot path 동적 호출 | `MethodHandle` |
+| 플러그인/DI 프레임워크 내부 | reflection + cache |
+
+## Reflection vs MethodHandle 선택
+
+```mermaid
+flowchart TD
+    A["동적 호출 필요"] --> B{호출 빈도}
+    B -->|"초기화 1회"| C["Reflection 허용"]
+    B -->|"hot path / 반복"| D{"interface 있음?"}
+    D -->|Yes| E["Proxy + MethodHandle"]
+    D -->|No| F["MethodHandle 직접 사용"]
+    C --> G["Method.invoke + 캐시"]
+    E --> H["JIT 최적화 가능"]
+    F --> H
+    G -->|성능 부족 시| F
+```
+
 ## Class 객체 얻기
 
 ```java
@@ -180,6 +206,59 @@ Reflection (cached): 5-10x
 framework 들이 Method 객체를 캐싱해 두는 이유. 매번 `getMethod()` 호출은 절대 금물.
 
 JDK 17 이후 JIT 가 많이 개선돼 cached reflection 의 차이는 줄었지만 여전히 hot path 에서는 피하는 게 좋다.
+
+## Record 와 Reflection (JDK 16+)
+
+`record` 는 컴포넌트 정보를 직접 조회하는 API 제공:
+
+```java
+record Point(int x, int y) {}
+
+Class<?> c = Point.class;
+
+// record 컴포넌트 조회
+RecordComponent[] comps = c.getRecordComponents();
+for (RecordComponent rc : comps) {
+    System.out.printf("%s: %s%n", rc.getName(), rc.getType().getSimpleName());
+}
+// x: int
+// y: int
+
+// 역직렬화 패턴
+Constructor<?> ctor = c.getDeclaredConstructor(int.class, int.class);
+Object p = ctor.newInstance(3, 4);
+
+Method xMethod = c.getMethod("x");
+System.out.println(xMethod.invoke(p));  // 3
+```
+
+Jackson, Gson 같은 직렬화 라이브러리가 Record 지원에 이 API 활용.
+
+## GraalVM Native Image 와 Reflection
+
+GraalVM AOT 컴파일 시 reflection 사용 클래스는 미리 힌트 등록 필요:
+
+```json
+// src/main/resources/META-INF/native-image/reflect-config.json
+[
+  {
+    "name": "com.example.User",
+    "allDeclaredFields": true,
+    "allDeclaredMethods": true,
+    "allDeclaredConstructors": true
+  }
+]
+```
+
+```java
+// Spring + GraalVM: @RegisterReflectionForBinding 어노테이션
+@RegisterReflectionForBinding(User.class)
+@Configuration
+public class AppConfig { }
+```
+
+미등록 클래스를 런타임에 reflection 으로 접근하면 `MissingReflectionRegistrationError` 발생.
+`-agentlib:native-image-agent` 로 실행하면 자동 힌트 파일 생성 가능.
 
 ## 함정과 베스트 프랙티스
 

@@ -1,0 +1,322 @@
+---
+title: "[PLT] Parsing & Grammars"
+aliases:
+  - "Parsing"
+  - "Parser"
+  - "BNF"
+  - "EBNF"
+  - "CFG"
+  - "context-free grammar"
+  - "recursive descent"
+  - "LL parser"
+  - "LR parser"
+  - "LALR"
+  - "PEG"
+  - "parser combinator"
+  - "구문 분석"
+  - "파싱"
+tags: [plt, compiler, parser, grammar, cfg, bnf]
+category: plt
+updated: 2026-07-07
+references:
+  - title: "Crafting Interpreters - Parsing Expressions"
+    url: "https://craftinginterpreters.com/parsing-expressions.html"
+  - title: "Dragon Book, Chapter 4"
+    author: "Aho et al."
+---
+
+## 정의
+
+**Parsing (구문 분석)** 은 lexer 의 **토큰 스트림** 을 언어의 **문법 규칙** 에 따라 구조화된 트리 (**AST**, Abstract Syntax Tree) 로 조립하는 과정입니다.
+
+- 토큰들이 **어떤 구문 구조** 를 이루는가
+- 우선순위 (precedence): `2 + 3 * 4` = `2 + (3 * 4)`
+- 결합성 (associativity): `1 - 2 - 3` = `(1 - 2) - 3` (좌결합)
+
+## 문법 (Grammar)
+
+프로그래밍 언어의 **문법 규칙 을 형식적으로 기술** 하는 표기법.
+
+### BNF (Backus-Naur Form)
+
+가장 기초적인 표기:
+
+```
+<expression> ::= <term> | <expression> "+" <term>
+<term>       ::= <factor> | <term> "*" <factor>
+<factor>     ::= <number> | "(" <expression> ")"
+<number>     ::= [0-9]+
+```
+
+- **`::=`**: "정의"
+- **`|`**: "또는"
+- **`<...>`**: 비단말 (non-terminal, 다른 규칙 참조)
+- **문자열**: 단말 (terminal, 실제 토큰)
+
+### EBNF (Extended BNF)
+
+`?` (선택), `*` (0+), `+` (1+) 확장:
+
+```
+expression = term ( "+" term )*
+term       = factor ( "*" factor )*
+factor     = number | "(" expression ")"
+number     = digit+
+digit      = "0" | "1" | ... | "9"
+```
+
+정규식 같이 간결.
+
+### CFG (Context-Free Grammar)
+
+BNF/EBNF 의 이론 이름. **문맥 자유** = 규칙 적용이 주변 문맥과 무관.
+
+프로그래밍 언어 대부분이 CFG (완전히는 아니고 근사).
+
+## 시각화: 파싱
+
+**입력**: `2 + 3 * 4`
+
+**토큰**: `[NUM 2] [PLUS] [NUM 3] [STAR] [NUM 4]`
+
+**파스 트리** (문법 규칙 따라):
+
+```
+                expression
+               /    |     \
+            term   "+"   term
+             |            |  \  \
+           factor       factor "*" factor
+             |            |         |
+           NUM 2        NUM 3     NUM 4
+```
+
+**AST** (더 간결):
+
+```
+        +
+       / \
+      2   *
+         / \
+        3   4
+```
+
+**AST** 는 파스 트리에서 불필요한 노드 (`expression`, `term`, `factor` 같은 중간) 제거.
+
+## Ambiguity (모호성)
+
+같은 입력이 여러 파스 트리를 가지면 문법이 **모호**.
+
+**예**: `2 + 3 * 4` 를 아래 문법으로:
+
+```
+expr ::= expr op expr | number
+op   ::= "+" | "*"
+```
+
+두 파스 트리 가능:
+- `(2 + 3) * 4 = 20`
+- `2 + (3 * 4) = 14`
+
+**해결**: 우선순위/결합성 반영한 문법 재작성 (위의 `expression → term → factor` 계층).
+
+## 하향식 vs 상향식
+
+### Top-Down (하향식)
+
+**Start 규칙** 부터 시작해 규칙 적용:
+- **LL(k)**: Left-to-right, Leftmost derivation, k 토큰 lookahead
+- **Recursive Descent**: 재귀 함수로 각 규칙 표현
+- **Predictive Parser**: 다음 토큰 보고 어떤 규칙 적용할지 결정
+
+### Bottom-Up (상향식)
+
+**토큰** 부터 시작해 규칙으로 결합:
+- **LR(k)**: Left-to-right, Rightmost derivation reversed
+- **LALR(1)**: LR 축약, yacc/bison 이 채택
+- **SLR**: LR 의 단순 변종
+
+## Recursive Descent (가장 흔한 실전 방식)
+
+각 non-terminal 을 함수로:
+
+```text
+function parseExpression():
+    left = parseTerm()
+    while peek() is "+":
+        consume("+")
+        right = parseTerm()
+        left = BinaryOp("+", left, right)
+    return left
+
+function parseTerm():
+    left = parseFactor()
+    while peek() is "*":
+        consume("*")
+        right = parseFactor()
+        left = BinaryOp("*", left, right)
+    return left
+
+function parseFactor():
+    if peek() is number:
+        return NumberLiteral(consumeNumber())
+    if peek() is "(":
+        consume("(")
+        expr = parseExpression()
+        consume(")")
+        return expr
+    error("expected number or '('")
+```
+
+**장점**:
+- 손으로 쉽게 작성
+- 에러 메시지 세밀 제어
+- 디버깅 쉬움
+- 재귀 자연스러움
+
+**단점**:
+- 좌측 재귀 (`expr → expr + term`) 처리 어려움 → while loop 로 변환
+- 문법 규모 크면 코드도 큼
+
+대부분 실전 언어 (Rust, TypeScript, Go, Swift) 는 recursive descent.
+
+## 연산자 우선순위 (Pratt Parser / Precedence Climbing)
+
+Recursive descent 의 확장. 각 연산자에 우선순위 부여, 하나의 함수로 처리.
+
+```text
+function parseExpr(minPrec):
+    left = parsePrimary()
+    while peek() is operator and precedence(peek()) >= minPrec:
+        op = consume()
+        rightPrec = precedence(op) + (rightAssociative(op) ? 0 : 1)
+        right = parseExpr(rightPrec)
+        left = BinaryOp(op, left, right)
+    return left
+```
+
+- 여러 연산자 (`+`, `-`, `*`, `/`, `**`) 를 한 함수로
+- 우선순위 표 관리만 하면 됨
+
+Vaughan Pratt 의 원래 알고리즘. Rust, Kotlin, Swift 등에서 사용.
+
+## LR Parser (자동 생성)
+
+Yacc, Bison, ANTLR 이 사용.
+
+**LR(1) 파서**: 상향식, 1 토큰 lookahead. 대부분 실용 문법 수용.
+
+**Shift-Reduce**:
+- **Shift**: 다음 토큰을 스택에.
+- **Reduce**: 스택 상단이 규칙 우변과 매치되면 좌변으로 축약.
+
+**LALR(1)**: LR(1) 상태를 병합해 크기 축소. Yacc/Bison 기본.
+
+**장점**: 어떤 CFG 든 처리, 자동 생성.
+**단점**: 에러 메시지 어색, 디버깅 어려움, 상태 폭발 가능.
+
+**2020년대 트렌드**: 파서 생성기 → 수동 recursive descent. 이유는 UX.
+
+## PEG (Parsing Expression Grammar)
+
+CFG 대안. **결정적 파싱** (모호성 없음). Ordered choice: `a | b` 는 `a` 먼저 시도.
+
+```
+Expr    <- Term ('+' Term)*
+Term    <- Factor ('*' Factor)*
+Factor  <- Number / '(' Expr ')'
+```
+
+- **`/`**: ordered choice (좌 우선)
+- **`&`**: positive lookahead
+- **`!`**: negative lookahead
+
+**Packrat parsing**: 메모이제이션으로 선형 시간. Peg 스타일 대표.
+
+**도구**: Pest (Rust), TatSu (Python), PEG.js.
+
+## Parser Combinator
+
+파서를 값처럼 다루는 접근. Haskell 스타일:
+
+```
+expr = do
+  left <- term
+  rest <- many (do op <- symbol "+"; t <- term; return (op, t))
+  return (foldl (BinaryOp) left rest)
+```
+
+**장점**: 파싱 로직 조합, 언어 임베딩.
+**단점**: 에러 메시지, 성능.
+
+**도구**: parsec (Haskell), Chumsky (Rust), nom (Rust).
+
+## AST 생성
+
+파서의 **출력물** 은 AST. 노드 예시:
+
+```typescript
+type ASTNode =
+  | { kind: 'Number'; value: number }
+  | { kind: 'Identifier'; name: string }
+  | { kind: 'BinaryOp'; op: '+' | '-' | '*' | '/'; left: ASTNode; right: ASTNode }
+  | { kind: 'Assignment'; target: ASTNode; value: ASTNode }
+  | { kind: 'If'; cond: ASTNode; then: ASTNode; else?: ASTNode }
+  | { kind: 'While'; cond: ASTNode; body: ASTNode[] }
+  | { kind: 'Function'; name: string; params: string[]; body: ASTNode[] }
+  | { kind: 'Call'; callee: ASTNode; args: ASTNode[] }
+```
+
+자세한 것은 [[plt-abstract-syntax-tree|AST]] 참조.
+
+## 에러 복구
+
+파서가 오류 만나면:
+- **Panic mode**: 다음 세미콜론까지 건너뜀
+- **Phrase-level recovery**: 특정 토큰 삽입/삭제
+- **Error productions**: 문법에 흔한 오류 규칙 추가
+
+좋은 컴파일러는 **한 파일에 여러 오류를 함께 보고**. 하나 발견 후 즉시 중단 X.
+
+## 실전 파서 예시
+
+### TypeScript
+
+Recursive descent. `parser.ts` 안에 각 `parseXXX` 함수.
+
+### Rust
+
+`rustc_parse` crate. Pratt 스타일 우선순위 처리.
+
+### Python
+
+**PEG parser** (Python 3.9+). 이전에는 LL(1). PEP 617 이 이관.
+
+### JavaScript (V8, SpiderMonkey)
+
+수동 recursive descent, 성능 극도로 튜닝.
+
+## 함정
+
+> [!WARNING]
+> **좌측 재귀** 는 recursive descent 에서 무한 재귀. `expr → expr + term` 은 while loop 로 재작성.
+
+> [!CAUTION]
+> **우선순위 오류**. `2 + 3 * 4` 가 20 이 나오면 문법 재점검.
+
+> [!WARNING]
+> **에러 메시지 개선을 후순위로**. 실전에서는 좋은 에러가 언어 채택 좌우. 초기 설계부터.
+
+> [!IMPORTANT]
+> **Comment / trailing comma** 등 언어 UX. 문법 규칙에 명시 필요.
+
+> [!CAUTION]
+> **파서 생성기의 유혹**. 초기엔 빠르지만 유지보수 어려움. 수동 recursive descent 검토.
+
+## 관련 위키
+
+- [[programming-language-theory|PLT 개요]]
+- [[plt-lexical-analysis|Lexical Analysis]]
+- [[plt-abstract-syntax-tree|AST]]
+- [[plt-semantic-analysis|Semantic Analysis]]
+- [[discrete-mathematics|이산수학]] - CFG 이론 배경

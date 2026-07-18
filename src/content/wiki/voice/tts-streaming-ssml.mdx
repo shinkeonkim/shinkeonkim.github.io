@@ -181,6 +181,62 @@ ws.onmessage = (e) => {
 };
 ```
 
+## 클라이언트 재생 파이프라인
+
+```mermaid
+flowchart LR
+    TTS_API["TTS API"] -->|"PCM 청크"| RingBuf["링 버퍼"]
+    RingBuf -->|"충분히 채워짐"| Player["AudioWorklet / WebAudio API"]
+    Player --> Speaker[스피커]
+    VAD["VAD 감지"] -->|"발화 시작"| Drain["버퍼 비움 + 재생 중단"]
+    Drain --> RingBuf
+```
+
+## 지연 시간 분석
+
+| 단계 | 일반 수치 | 최적화 방법 |
+|:---|:---|:---|
+| LLM 첫 토큰 | 200-600ms | 작은 모델 / 투기적 실행 |
+| 문장 집계 | 0-200ms | 구두점 감지 임계값 낮춤 |
+| TTS API TTFB | 100-400ms | 지역 근접 endpoint |
+| 오디오 버퍼 채움 | 50-150ms | PCM direct, chunk 크기 최소화 |
+| **전체 E2E** | **약 500-1200ms** | 비동기 파이프라인으로 단축 |
+
+> [!TIP]
+> LLM 토큰 생성과 TTS 합성을 **비동기 파이프라인**으로 연결하면 TTFB 를 LLM TTFT (Time-to-First-Token) + TTS TTFB 수준으로 단축 가능.
+
+## SSML 지원 현황 (2026)
+
+| TTS 공급자 | SSML | 스트리밍 | 한국어 |
+|:---|:---:|:---:|:---:|
+| Google Cloud TTS | 완전 | ✅ | ✅ |
+| AWS Polly | 완전 | ✅ | ✅ |
+| ElevenLabs | 일부 | ✅ HTTP stream | ✅ |
+| Cartesia | 일부 | ✅ WebSocket | ✅ |
+| OpenAI TTS | 미지원 | ✅ | ✅ |
+| Naver Clova | 완전 | ✅ | ✅ |
+
+## Barge-in 처리
+
+사용자가 AI 말 중간에 끼어들기:
+
+```python
+# Pipecat 기반 예시
+class BargeInHandler:
+    def __init__(self, player, vad):
+        self.playing = False
+        vad.on_speech_start = self.on_user_speech
+
+    def on_user_speech(self):
+        if self.playing:
+            player.stop()           # 현재 재생 즉시 중단
+            player.clear_buffer()   # 대기 청크 제거
+            self.playing = False
+```
+
+VAD 가 사용자 음성 시작 감지 → 즉시 TTS 재생 중단 + LLM context 에 발화 추가 → 새 응답 생성.
+[[turn-detection-barge-in]] 의 상세 구현 참조.
+
 ## 발음 제어 패턴
 
 ```python

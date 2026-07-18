@@ -206,6 +206,172 @@ JSON.parse(JSON.stringify(obj))
 
 JSON 의 확장 (주석, 후행 쉼표). 표준이 아니라 라이브러리 필요. tsconfig.json 이 JSONC 사용.
 
+## 직렬화 흐름 시각화
+
+```mermaid
+flowchart LR
+    JS["JS 값\n(object, array, ...)"]
+    STR["JSON 문자열\n(text)"]
+    JS -->|"JSON.stringify(value, replacer, space)"| STR
+    STR -->|"JSON.parse(text, reviver)"| JS
+```
+
+```mermaid
+flowchart TD
+    V["입력 값"]
+    V --> HasToJSON{"toJSON 메서드?"}
+    HasToJSON -->|"있음"| CallToJSON["toJSON() 호출"]
+    HasToJSON -->|"없음"| TypeCheck["타입 확인"]
+    CallToJSON --> TypeCheck
+    TypeCheck -->|"string / number / boolean / null"| Literal["리터럴로 출력"]
+    TypeCheck -->|"Array"| ArrayLoop["각 원소 재귀 직렬화"]
+    TypeCheck -->|"Object"| ObjLoop["각 키-값 재귀 직렬화"]
+    TypeCheck -->|"undefined / Function / Symbol"| Skip["생략 (키 제외 / null)"]
+    TypeCheck -->|"BigInt"| Throw["TypeError"]
+    TypeCheck -->|"순환 참조"| Throw2["TypeError"]
+```
+
+## structuredClone 과 비교
+
+ES2022 에서 도입된 `structuredClone` 은 JSON 경유 없는 진짜 깊은 복사.
+
+```javascript
+const obj = {
+    date: new Date(),
+    fn: () => {},
+    x: undefined,
+    big: 9007199254740993n,
+};
+
+// JSON 방식 - 문제 많음
+const via_json = JSON.parse(JSON.stringify(obj));
+// { date: '2024-...', x 없음, fn 없음 }  ← Date 가 string, BigInt 는 에러
+
+// structuredClone - 권장
+const clone = structuredClone({ date: new Date(), x: [1, 2] });
+// { date: Date, x: [1, 2] }   ← 타입 보존
+```
+
+| 항목 | JSON 방식 | structuredClone |
+|:---|:---|:---|
+| Date | string 변환 | Date 보존 |
+| undefined | 키 제외 | undefined 보존 |
+| Function | 키 제외 | 지원 안 함 |
+| RegExp | `{}` 로 변환 | RegExp 보존 |
+| Map / Set | `{}` / `[]` | 보존 |
+| BigInt | TypeError | 보존 |
+| 순환 참조 | TypeError | 보존 |
+| ArrayBuffer | base64 표현 필요 | 보존 |
+
+단순 직렬화 목적 외 깊은 복사는 `structuredClone` 우선.
+
+## 에러 처리 패턴
+
+```javascript
+// JSON.parse 는 잘못된 JSON 에서 SyntaxError
+function safeJsonParse(str, fallback = null) {
+    try {
+        return JSON.parse(str);
+    } catch {
+        return fallback;
+    }
+}
+
+// optional chaining 과 함께
+const user = safeJsonParse(localStorage.getItem('user'), {});
+const name = user?.name ?? 'anonymous';
+```
+
+## 커스텀 직렬화 패턴
+
+### Map / Set 직렬화
+
+```javascript
+function replacer(key, value) {
+    if (value instanceof Map) {
+        return { __type: 'Map', value: [...value.entries()] };
+    }
+    if (value instanceof Set) {
+        return { __type: 'Set', value: [...value] };
+    }
+    return value;
+}
+
+function reviver(key, value) {
+    if (value && value.__type === 'Map') {
+        return new Map(value.value);
+    }
+    if (value && value.__type === 'Set') {
+        return new Set(value.value);
+    }
+    return value;
+}
+
+const data = { m: new Map([['a', 1]]), s: new Set([1, 2]) };
+const json = JSON.stringify(data, replacer);
+const restored = JSON.parse(json, reviver);
+```
+
+### BigInt 직렬화 (별도 처리)
+
+```javascript
+// BigInt 는 기본 JSON.stringify 에서 TypeError
+// replacer 로 처리
+const json = JSON.stringify(bigIntValue, (key, value) =>
+    typeof value === 'bigint' ? value.toString() + 'n' : value
+);
+
+// reviver 로 복원
+const restored = JSON.parse(json, (key, value) => {
+    if (typeof value === 'string' && /^\d+n$/.test(value)) {
+        return BigInt(value.slice(0, -1));
+    }
+    return value;
+});
+```
+
+## 성능 고려
+
+| 상황 | 팁 |
+|:---|:---|
+| 큰 객체 stringify | replacer 배열로 필요한 키만 포함 |
+| 반복 직렬화 | 결과를 캐시하거나 불변 객체 사용 |
+| 스트림 처리 | Node.js 의 `stream-json` 같은 라이브러리 |
+| 정밀 숫자 | BigInt 또는 string 처리 |
+
+```javascript
+// replacer 배열로 화이트리스트 - 불필요한 키 직렬화 생략
+const lean = JSON.stringify(bigObj, ['id', 'name', 'email']);
+```
+
+## JSON Schema (타입 검증)
+
+JSON 문서의 구조를 검증하는 표준. 직접 JSON 이 아닌 별도 스키마 레이어.
+
+```json
+{
+    "type": "object",
+    "required": ["id", "name"],
+    "properties": {
+        "id":   { "type": "integer" },
+        "name": { "type": "string", "minLength": 1 }
+    }
+}
+```
+
+JS 에서는 `ajv`, `zod.parse`, `@sinclair/typebox` 등으로 런타임 검증.
+
+```javascript
+import { z } from 'zod';
+
+const UserSchema = z.object({
+    id:   z.number().int(),
+    name: z.string().min(1),
+});
+
+const user = UserSchema.parse(JSON.parse(raw));  // 검증 + 타입 추론
+```
+
 ## 참고
 
 - [[JS Object]]

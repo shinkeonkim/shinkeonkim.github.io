@@ -36,6 +36,22 @@ references:
 
 VM 은 [[docker|container]] 와 달리 **자체 커널** 을 실행합니다. 이것이 VM 의 강한 격리와 큰 오버헤드의 근본 이유입니다.
 
+## 계층 구조
+
+```mermaid
+flowchart TB
+    HW["물리 하드웨어\n(CPU, RAM, NIC, Disk)"]
+    HW --> HV["Hypervisor (KVM, ESXi, Hyper-V)"]
+    HV --> VM1["VM 1\nGuest OS: Ubuntu 24.04"]
+    HV --> VM2["VM 2\nGuest OS: Windows Server 2022"]
+    HV --> VM3["VM 3\nGuest OS: RHEL 9"]
+    VM1 --> App1["App: nginx"]
+    VM2 --> App2["App: IIS"]
+    VM3 --> App3["App: Oracle DB"]
+```
+
+각 VM 은 독립 커널을 갖고, hypervisor 가 물리 자원을 시분할/격리합니다.
+
 ## 구성 요소
 
 ### vCPU
@@ -139,11 +155,42 @@ runcmd:
 > [!WARNING]
 > **프로덕션에서 스냅샷을 오래 유지하면 안 됩니다.** qcow2 는 스냅샷이 쌓일수록 CoW 체인이 길어져 I/O 성능이 크게 저하됩니다. VMware 도 스냅샷 delta 파일이 커지면 문제. 스냅샷은 짧게 쓰고 지우거나 백업 파일로 export 하세요.
 
+## 성능 오버헤드
+
+현대 VM (KVM + virtio) 의 실제 오버헤드는 생각보다 낮습니다.
+
+| 자원 | 오버헤드 | 원인 및 완화 |
+|:---|:---|:---|
+| **CPU** | 1-5% | VT-x 로 대부분 직접 실행. 잦은 VM-exit 는 tune 가능 |
+| **메모리** | 2-8% | EPT 로 하드웨어 변환. 대규모 페이지 (hugepage) 로 TLB miss 감소 |
+| **네트워크 (virtio)** | ~5% | virtio-net. SR-IOV 쓰면 near-native |
+| **디스크 (qcow2)** | 10-20% | CoW 오버헤드. raw 포맷 또는 직접 블록 디바이스 사용 시 개선 |
+
+> 고성능이 필요한 DB 워크로드에는 raw 디스크 + 대용량 페이지 (2MB hugepage) 조합이 효과적.
+
 ## Live Migration
 
 실행 중인 VM 을 **거의 무중단** 으로 다른 물리 서버로 옮기는 기술.
 
 ### Pre-copy 방식 (표준)
+
+```mermaid
+sequenceDiagram
+    participant Src as 원본 서버
+    participant VM as VM (실행 중)
+    participant Dst as 대상 서버
+
+    Src->>Dst: 메모리 페이지 bulk copy 시작
+    loop dirty page 반복 복사
+        VM->>Src: 페이지 write (dirty)
+        Src->>Dst: dirty page 재전송
+    end
+    Note over Src,Dst: dirty rate 낮아지면
+    Src->>VM: VM 일시 중지 (수십 ms)
+    Src->>Dst: 남은 메모리 + CPU 상태
+    Dst->>VM: VM 재개
+    Src->>VM: 원본 VM 종료
+```
 
 1. 원본 서버에서 메모리 페이지를 백그라운드로 대상 서버에 복사 시작
 2. VM 계속 실행 중이므로 dirty page 발생
@@ -193,6 +240,24 @@ virsh migrate --live web01 qemu+ssh://target-host/system
 # 콘솔 접속
 virsh console web01
 ```
+
+## 이미지 관리 (qcow2 체인 주의)
+
+qcow2 는 스냅샷을 CoW (Copy-on-Write) 체인으로 구현합니다. 스냅샷이 쌓이면 읽기 시 체인을 순회해 성능이 저하됩니다.
+
+```bash
+# 체인 병합 (단일 파일로 평탄화)
+qemu-img convert -f qcow2 -O qcow2 vm-with-snapshots.qcow2 vm-flat.qcow2
+
+# 디스크 정보 확인 (backing file 체인 확인)
+qemu-img info --backing-chain vm.qcow2
+
+# 사용 실제 크기 vs 가상 크기
+qemu-img info vm.qcow2 | grep -E 'virtual|disk'
+```
+
+> [!IMPORTANT]
+> 프로덕션에서 스냅샷을 주기적으로 flatten 하거나, 백업은 `qemu-img convert` 로 별도 파일로 내보내세요. 스냅샷은 임시 수단입니다.
 
 ## VM 이 컨테이너보다 유리한 경우
 

@@ -174,6 +174,25 @@ public void destroy() {
 
 Tomcat 의 `Connector` + `Executor` 가 worker thread pool 을 관리. 기본 200 개. `server.tomcat.threads.max` 로 조정.
 
+## 생명주기 상태 전이
+
+```mermaid
+flowchart TD
+    Start["컨테이너 시작"] --> Check{"load-on-startup > 0?"}
+    Check -->|"예"| Eager["인스턴스 생성 + init()"]
+    Check -->|"아니오"| Lazy["첫 요청 대기 (lazy)"]
+    Lazy --> FirstReq["첫 요청 도달"]
+    FirstReq --> Eager
+    Eager -->|"init() 성공"| Ready["서비스 가능: service() 동시 호출"]
+    Eager -->|"ServletException"| Disabled["비활성 (unavailable)"]
+    Ready --> Shutdown["undeploy / server shutdown"]
+    Shutdown --> Destroy["destroy() 호출, 진행 중 요청 대기"]
+    Destroy --> GC["GC 대상"]
+    Disabled --> GC
+```
+
+핵심 관찰: `Ready` 상태에서 **여러 worker thread 가 동시에 같은 인스턴스의 `service()` 를 호출**한다. 인스턴스 필드를 수정하면 race condition 이 발생하므로 로컬 변수 또는 thread-safe 자료구조만 허용된다.
+
 ## hot deploy 와 ClassLoader
 
 Spring Boot DevTools 가 코드 변경 감지 시:
@@ -200,6 +219,47 @@ protected void doGet(HttpServletRequest req, HttpServletResponse resp) {
 ```
 
 worker thread 는 풀로 복귀. 응답 완료는 `ac.complete()` 호출 시. timeout 도 컨테이너가 관리.
+
+## Spring MVC 와 DispatcherServlet
+
+Spring MVC 는 Servlet 생명주기 위에서 동작한다. `DispatcherServlet` 이 **Front Controller** 역할:
+
+```
+컨테이너 시작
+  └─ DispatcherServlet.init()
+       └─ WebApplicationContext 초기화
+            └─ @Controller, @Service, @Repository Bean 생성
+
+요청 도달
+  └─ DispatcherServlet.service()
+       └─ HandlerMapping 으로 Handler 결정
+       └─ HandlerAdapter 로 @RequestMapping 메서드 호출
+       └─ ViewResolver 또는 @ResponseBody 처리
+```
+
+`DispatcherServlet` 은 `loadOnStartup = 1` 이 기본값 (Spring Boot). 첫 요청 전에 WebApplicationContext 가 완성된다. `@SpringBootApplication` 의 내장 Tomcat 설정도 동일한 Servlet 생명주기를 따른다.
+
+### Spring Boot 의 내장 서버
+
+```java
+// 내장 Tomcat (EmbeddedWebApplicationContext) 흐름
+@SpringBootApplication
+public class App {
+    public static void main(String[] args) {
+        SpringApplication.run(App.class, args);
+        // 1. EmbeddedTomcat 시작
+        // 2. DispatcherServlet 등록 (loadOnStartup=1)
+        // 3. init() -> WebApplicationContext refresh
+        // 4. HTTP 수신 대기
+    }
+}
+```
+
+`server.shutdown=graceful` 설정 시:
+- SIGTERM 수신
+- 신규 요청 거부 (Tomcat Connector pause)
+- 진행 중 요청이 `spring.lifecycle.timeout-per-shutdown-phase` (기본 30s) 내에 완료되길 대기
+- `DispatcherServlet.destroy()` 호출 후 Context 종료
 
 ## 함정과 베스트 프랙티스
 

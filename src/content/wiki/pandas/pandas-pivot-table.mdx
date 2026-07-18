@@ -3,7 +3,7 @@ title: "[Pandas] pivot_table"
 aliases: ["Pandas pivot_table", "pd.pivot_table", "Excel pivot"]
 tags: [python, pandas, reshape, pivot, aggregation]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "pivot_table"
@@ -12,6 +12,27 @@ references:
 ## 정의
 
 **`DataFrame.pivot_table(...)`** 는 [[Pandas pivot]] 의 확장. **집계 함수를 동반** 해 중복 (index, columns) 도 처리. Excel 의 피벗 테이블과 가장 가까운 기능.
+
+## pivot_table 처리 흐름
+
+```mermaid
+flowchart LR
+    A["원본 DataFrame\n(행이 많고 중복 존재)"] --> B["index 로 행 분류"]
+    B --> C["columns 로 열 분류"]
+    C --> D["aggfunc 로 집계"]
+    D --> E["2D 요약 테이블"]
+    D --> F["margins=True 로 합계 행/열 추가"]
+```
+
+## 사용 상황
+
+| 상황 | 패턴 |
+|:---|:---|
+| 월별/카테고리별 매출 요약 | `index='month', columns='category'` |
+| 두 차원 교차 분석 | `index=A, columns=B, aggfunc='count'` |
+| Excel 피벗과 동일한 결과 | `margins=True` |
+| 코호트 분석 | `index='cohort', columns='period'` |
+| 결측 조합을 0 으로 채우기 | `fill_value=0` |
 
 ## 기본
 
@@ -55,6 +76,8 @@ df.pivot_table(
     aggfunc=['sum', 'mean', 'count'],
 )
 ```
+
+결과는 최상위 컬럼이 함수 이름인 MultiIndex.
 
 ## margins (총계)
 
@@ -106,7 +129,18 @@ df.pivot_table(index='date', columns='product', values='sales', aggfunc='sum')
 df.groupby(['date', 'product'])['sales'].sum().unstack('product')
 ```
 
-## 자주 쓰는 패턴
+## crosstab 과의 관계
+
+[[Pandas crosstab]] 은 `pivot_table` 의 빈도 특화 버전.
+
+```python
+# 두 컬럼의 빈도 교차표
+pd.crosstab(df['region'], df['product'])
+# pivot_table 로 동일하게:
+df.pivot_table(index='region', columns='product', aggfunc='size', fill_value=0)
+```
+
+## 실전 패턴
 
 ### 월별/카테고리별 매출 보고서
 
@@ -127,7 +161,55 @@ report.to_excel('monthly_report.xlsx')
 ```python
 df['cohort'] = df['signup_month']
 df['period'] = (df['active_month'] - df['cohort']).dt.days // 30
-df.pivot_table(index='cohort', columns='period', values='user_id', aggfunc='nunique')
+cohort_table = df.pivot_table(
+    index='cohort',
+    columns='period',
+    values='user_id',
+    aggfunc='nunique',
+)
+```
+
+### 여러 값 동시 + 누락 컬럼 채우기
+
+```python
+pivot = df.pivot_table(
+    index='week',
+    columns='channel',
+    values=['revenue', 'orders'],
+    aggfunc={'revenue': 'sum', 'orders': 'count'},
+    fill_value=0,
+    margins=True,
+)
+```
+
+### 결과 컬럼 평탄화
+
+```python
+pivot = df.pivot_table(
+    index='date',
+    columns='product',
+    values='sales',
+    aggfunc=['sum', 'mean'],
+)
+# MultiIndex 컬럼 평탄화
+pivot.columns = ['_'.join(c).strip() for c in pivot.columns]
+# ['sum_A', 'sum_B', 'mean_A', 'mean_B']
+```
+
+### pandas 2.x: 정렬 + reset
+
+```python
+result = (
+    df.pivot_table(
+        index='date',
+        columns='region',
+        values='revenue',
+        aggfunc='sum',
+        fill_value=0,
+    )
+    .sort_index()
+    .reset_index()
+)
 ```
 
 ## 함정
@@ -154,12 +236,43 @@ pandas 2.x 에서는 `observed=False` 가 deprecated, 명시 권장.
 
 ```python
 df.pivot_table(index='date', columns='product', values='sales', dropna=False)
-# NaN 행을 보존
+# NaN 행을 보존 (기본은 드롭)
 ```
 
-## 참고
+### 4. values 생략 시 전체 컬럼
+
+```python
+df.pivot_table(index='date', columns='product', aggfunc='sum')
+# values 생략 시 수치 컬럼 전부 집계 → 과도한 MultiIndex 컬럼
+```
+
+항상 `values` 를 명시하는 것이 안전.
+
+### 5. sort=False 와 컬럼 순서
+
+```python
+df.pivot_table(index='date', columns='product', values='sales',
+               aggfunc='sum', sort=False)
+# sort=False: 원본 등장 순서 유지 (기본은 정렬)
+```
+
+### 6. margins + 여러 aggfunc
+
+```python
+df.pivot_table(
+    ...,
+    aggfunc=['sum', 'mean'],
+    margins=True,
+)
+# margins 의 'All' 행/열은 sum 에만 적용됨
+# mean 의 'All' 은 예상과 다를 수 있음 (행 평균의 평균)
+```
+
+## 관련 위키
 
 - [[Pandas pivot]]
 - [[Pandas melt]]
 - [[Pandas groupby]]
 - [[Pandas crosstab]]
+- [[Pandas stack / unstack]]
+- [[Pandas agg]]

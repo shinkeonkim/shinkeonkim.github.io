@@ -64,6 +64,48 @@ public interface Iterator<E> {
 2. **`remove()` 는 직전 `next()` 호출이 있어야** 호출 가능, 아니면 `IllegalStateException`
 3. **`remove()` 두 번 연속 호출 금지**, 다음 `next()` 가 있어야 다시 가능
 
+## 계층 구조
+
+`Iterable` 이 최상위에 있고 `Collection`, `List`, 구체 클래스 순으로 상속된다.
+
+```mermaid
+classDiagram
+    class Iterable {
+        <<interface>>
+        +iterator() Iterator
+        +forEach(Consumer) void
+        +spliterator() Spliterator
+    }
+    class Iterator {
+        <<interface>>
+        +hasNext() boolean
+        +next() T
+        +remove() void
+    }
+    class Collection {
+        <<interface>>
+        +size() int
+        +add(E) boolean
+        +remove(Object) boolean
+    }
+    class List {
+        <<interface>>
+        +get(int) E
+        +set(int, E) E
+        +indexOf(Object) int
+    }
+    class ArrayList {
+        -Object[] elementData
+        -int size
+    }
+    Iterable <|-- Collection : extends
+    Collection <|-- List : extends
+    List <|-- ArrayList : implements
+    Iterable ..> Iterator : creates
+```
+
+`Iterable` 자체는 컬렉션이 아니다. 크기(`size()`), 추가(`add()`), 삭제(`remove()`) 를 정의하는 것은 `Collection` 부터다. 따라서 커스텀 타입이 순회만 필요하다면 `Iterable` 만 구현해도 충분하다.
+
 ## 사용자 정의 Iterable
 
 `Iterable` 구현은 매우 간단하다. 예: 1 부터 N 까지 정수를 순회하는 타입.
@@ -160,6 +202,85 @@ for (long x : new Fibonacci()) {
 ```
 
 `Iterable` 의 강점은 이런 lazy / 무한 시퀀스도 자연스럽게 표현되는 점.
+
+## Iterable 조합 패턴
+
+### 여러 컬렉션 이어 순회
+
+두 `List` 를 이어서 순회하는 `ConcatIterable`:
+
+```java
+public class ConcatIterable<T> implements Iterable<T> {
+    private final Iterable<T> first;
+    private final Iterable<T> second;
+
+    public ConcatIterable(Iterable<T> first, Iterable<T> second) {
+        this.first = first;
+        this.second = second;
+    }
+
+    @Override
+    public Iterator<T> iterator() {
+        return new Iterator<>() {
+            final Iterator<T> a = first.iterator();
+            final Iterator<T> b = second.iterator();
+
+            @Override public boolean hasNext() { return a.hasNext() || b.hasNext(); }
+            @Override public T next() {
+                if (a.hasNext()) return a.next();
+                return b.next();
+            }
+        };
+    }
+}
+
+// 사용
+Iterable<String> all = new ConcatIterable<>(list1, list2);
+for (String s : all) { System.out.println(s); }
+```
+
+### 필터 순회
+
+조건을 만족하는 원소만 순회하는 `FilterIterable`:
+
+```java
+public class FilterIterable<T> implements Iterable<T> {
+    private final Iterable<T> source;
+    private final Predicate<T> pred;
+
+    public FilterIterable(Iterable<T> source, Predicate<T> pred) {
+        this.source = source;
+        this.pred = pred;
+    }
+
+    @Override
+    public Iterator<T> iterator() {
+        return new Iterator<>() {
+            final Iterator<T> it = source.iterator();
+            T next = null;
+            boolean found = false;
+
+            private void advance() {
+                while (it.hasNext()) {
+                    T v = it.next();
+                    if (pred.test(v)) { next = v; found = true; return; }
+                }
+                found = false;
+            }
+
+            { advance(); }  // 초기화 블록
+
+            @Override public boolean hasNext() { return found; }
+            @Override public T next() {
+                T r = next; advance(); return r;
+            }
+        };
+    }
+}
+```
+
+> [!NOTE]
+> `Stream.filter()` 가 같은 역할을 더 간결하게 수행하지만, `Iterable` 구현체는 `for-each` 루프에서 직접 쓸 수 있고 `Stream` 처럼 1회 소비 제한이 없다는 장점이 있다.
 
 ## Stream 으로 변환
 

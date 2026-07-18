@@ -207,6 +207,141 @@ API 가 비슷하지만 다른 점.
 
 Spring 안에서는 Spring 의 것을 그대로 쓰는 것이 호환성과 통합 면에서 최선.
 
+## 구조 시각화
+
+```mermaid
+flowchart TD
+    MVM["MultiValueMap&lt;K, V&gt;\nextends Map&lt;K, List&lt;V&gt;&gt;"]
+    LMVM["LinkedMultiValueMap&lt;K, V&gt;"]
+    HH["HttpHeaders"]
+    LHM["LinkedHashMap&lt;K, List&lt;V&gt;&gt;"]
+    AL["ArrayList&lt;V&gt;\n(per key)"]
+    MVM -->|"구현"| LMVM
+    LMVM -->|"상속"| HH
+    LMVM -->|"내부 보관"| LHM
+    LHM -->|"값 저장"| AL
+```
+
+```mermaid
+flowchart LR
+    subgraph "Map<K, List<V>> 내부 구조"
+        K1["Accept"] --> V1["[text/html, application/json]"]
+        K2["Content-Type"] --> V2["[application/json]"]
+        K3["X-Custom"] --> V3["[v1, v2]"]
+    end
+    API["add / set / getFirst\naddAll / toSingleValueMap"]
+    API --> K1
+    API --> K2
+    API --> K3
+```
+
+## WebClient 와 함께
+
+Spring WebFlux 의 `WebClient` 에서 MultiValueMap 은 쿼리 파라미터, 폼 데이터 전송에 핵심.
+
+```java
+// 쿼리 파라미터
+MultiValueMap<String, String> params = new LinkedMultiValueMap<>();
+params.add("status", "active");
+params.add("status", "pending");
+
+WebClient.create()
+    .get()
+    .uri(uriBuilder -> uriBuilder
+        .path("/api/users")
+        .queryParams(params)
+        .build())
+    .retrieve()
+    .bodyToFlux(User.class);
+
+// 폼 전송 (application/x-www-form-urlencoded)
+MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+form.add("username", "alice");
+form.add("role", "admin");
+form.add("role", "user");
+
+WebClient.create()
+    .post()
+    .uri("/submit")
+    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+    .body(BodyInserters.fromFormData(form))
+    .retrieve()
+    .toBodilessEntity();
+```
+
+## RestTemplate 과 함께
+
+```java
+HttpHeaders headers = new HttpHeaders();
+headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+headers.add("X-Request-ID", "abc-123");
+
+MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+body.add("field1", "value1");
+body.add("tag", "A");
+body.add("tag", "B");
+
+HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
+
+restTemplate.postForEntity("/api/endpoint", request, Void.class);
+```
+
+## @RequestParam 에서의 역할
+
+Spring MVC 에서 같은 이름 파라미터 여러 개를 `MultiValueMap` 이나 `List` 로 받는다.
+
+```java
+// GET /search?tag=spring&tag=java&tag=jpa
+@GetMapping("/search")
+public List<Article> search(@RequestParam MultiValueMap<String, String> params) {
+    List<String> tags = params.get("tag");     // [spring, java, jpa]
+    String sort = params.getFirst("sort");      // null if absent
+    return articleService.search(tags, sort);
+}
+
+// 또는 List 로 바로
+@GetMapping("/search")
+public List<Article> search(@RequestParam(name = "tag") List<String> tags) {
+    return articleService.findByTags(tags);
+}
+```
+
+## UriComponentsBuilder 패턴
+
+URL 생성 시 MultiValueMap 으로 쿼리 파라미터 빌드.
+
+```java
+MultiValueMap<String, String> query = new LinkedMultiValueMap<>();
+query.add("category", "spring");
+query.add("category", "java");
+query.add("page", "0");
+query.add("size", "20");
+
+String url = UriComponentsBuilder
+    .fromHttpUrl("https://api.example.com/articles")
+    .queryParams(query)
+    .encode()
+    .toUriString();
+// → https://api.example.com/articles?category=spring&category=java&page=0&size=20
+```
+
+## 불변 view 패턴
+
+읽기 전용 MultiValueMap 이 필요할 때.
+
+```java
+MultiValueMap<String, String> mutable = new LinkedMultiValueMap<>();
+mutable.add("key", "val1");
+mutable.add("key", "val2");
+
+// Spring 의 읽기 전용 view
+MultiValueMap<String, String> readOnly = CollectionUtils.unmodifiableMultiValueMap(mutable);
+
+// HttpHeaders 에서 읽기 전용
+HttpHeaders readOnlyHeaders = HttpHeaders.readOnlyHttpHeaders(headers);
+// readOnlyHeaders.add("x", "y");  ← UnsupportedOperationException
+```
+
 ## 참고
 
 - [[Collection]]

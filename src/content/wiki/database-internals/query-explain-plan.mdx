@@ -159,6 +159,126 @@ EXPLAIN (
 > 3. **`Hash Join` 의 *큰 memory*** = work_mem 부족 시 disk spill. 그래도 *Nested Loop 보다 빠를 수* 있다.
 > 4. **planner hint 부재** = PostgreSQL 은 *공식 hint 없음*. SET 변수로 *간접 제어*. (MySQL 은 `STRAIGHT_JOIN` 등 hint 직접.)
 
+## PostgreSQL Cost Model
+
+플래너가 계획을 선택하는 *비용 단위*:
+
+| 파라미터 | 기본값 | 의미 |
+|---|---|---|
+| `seq_page_cost` | 1.0 | 순차 페이지 읽기 단위 비용 |
+| `random_page_cost` | 4.0 | 랜덤 페이지 읽기 (SSD 환경 1.1 권장) |
+| `cpu_tuple_cost` | 0.01 | row 처리 비용 |
+| `cpu_index_tuple_cost` | 0.005 | 인덱스 항목 처리 비용 |
+| `cpu_operator_cost` | 0.0025 | 연산자 실행 비용 |
+
+> [!TIP]
+> SSD 환경: `random_page_cost = 1.1` 로 낮추면 *Index Scan 선호*. HDD 기본값 4.0 은 *Seq Scan 을 과도하게 선호*할 수 있음. `postgresql.conf` 또는 session 단위 설정 가능.
+
+## 통계 (Statistics)
+
+플래너는 *통계* 기반으로 plan 선택. 통계가 오래되면 *잘못된 plan* 선택.
+
+```mermaid
+flowchart LR
+    Table["테이블 변경<br/>INSERT / UPDATE / DELETE"]
+    Table --> AutoVacuum["autovacuum analyze<br/>자동 통계 갱신"]
+    AutoVacuum --> PgStats["pg_statistic<br/>pg_stats 뷰"]
+    PgStats --> Planner["Query Planner<br/>Plan 선택"]
+```
+
+```sql
+-- 수동 통계 갱신
+ANALYZE users;
+
+-- 특정 컬럼만
+ANALYZE users (created_at, status);
+
+-- 통계 확인
+SELECT tablename, attname, n_distinct, correlation
+FROM pg_stats
+WHERE tablename = 'users';
+```
+
+| 지표 | 의미 |
+|---|---|
+| `n_distinct` | 유니크 값 수 추정 (-1 = 선형 비례) |
+| `correlation` | 물리 순서와 논리 순서 상관 (1 = 완전 일치) |
+| `most_common_vals` | 가장 흔한 값 목록 |
+| `histogram_bounds` | 균등 분포 히스토그램 경계 |
+
+> [!IMPORTANT]
+> `EXPLAIN rows=100` 인데 `actual rows=100000` → *통계 부정확*. `ANALYZE` + `default_statistics_target` 증가 (기본 100, 최대 10000) 로 해결.
+
+## Parallel Query
+
+PostgreSQL 9.6+ 에서 *대형 Seq Scan / Aggregate / Join 의 병렬 실행*.
+
+```mermaid
+flowchart TD
+    Gather["Gather<br/>결과 수집 (Leader)"]
+    Gather --> W1["Worker 1<br/>Partial Seq Scan"]
+    Gather --> W2["Worker 2<br/>Partial Seq Scan"]
+    Gather --> W3["Worker 3<br/>Partial Seq Scan"]
+```
+
+```
+Gather  (cost=1000.00..5000.00 rows=50000 width=8)
+  Workers Planned: 3
+  ->  Parallel Seq Scan on big_table
+        Filter: (status = 'active')
+        Rows Removed by Filter: 1234
+```
+
+| 파라미터 | 의미 |
+|---|---|
+| `max_parallel_workers_per_gather` | gather 당 최대 worker (default 2) |
+| `max_parallel_workers` | 전체 최대 병렬 worker |
+| `parallel_tuple_cost` | 병렬 row 전달 비용 |
+| `min_parallel_table_scan_size` | 병렬 스캔 최소 테이블 크기 |
+
+> [!NOTE]
+> 병렬 쿼리는 *읽기 전용 쿼리*. `INSERT`, `UPDATE`, `DELETE` 는 병렬 불가. `GATHER MERGE` 는 *정렬된 결과 병렬 병합*.
+
+## 인덱스 선택 팁
+
+```sql
+-- Partial Index: 조건 좁히기
+CREATE INDEX idx_pending ON orders (created_at)
+WHERE status = 'pending';
+
+-- Covering Index: Index Only Scan 유도
+CREATE INDEX idx_cover ON users (created_at) INCLUDE (name, email);
+
+-- 복합 인덱스: 카디널리티 높은 컬럼 먼저
+CREATE INDEX idx_multi ON logs (user_id, created_at);
+-- user_id 조건으로 범위 좁힌 후 created_at 정렬
+```
+
+| 인덱스 종류 | 언제 쓰나 |
+|---|---|
+| B-Tree (기본) | 등가, 범위, 정렬 |
+| GIN | 배열, JSONB, 전문 검색 |
+| GiST | 지리, 범위 타입 |
+| Hash | 등가만 (PostgreSQL 10+) |
+
+자세히는 [[btree-indexing]], [[gin-gist-hash-indexes]].
+
+## EXPLAIN 실전 워크플로
+
+```mermaid
+flowchart TD
+    Start["느린 쿼리 발견<br/>pg_stat_statements"]
+    Start --> E1["EXPLAIN ANALYZE BUFFERS 실행"]
+    E1 --> Check{"예상 vs 실제 rows<br/>10배 이상 차이?"}
+    Check -->|"예"| Analyze["ANALYZE table_name<br/>통계 갱신"]
+    Check -->|"아니오"| Scan{"Seq Scan on 큰 테이블?"}
+    Analyze --> E1
+    Scan -->|"예"| Index["인덱스 추가 또는<br/>Partial Index 검토"]
+    Scan -->|"아니오"| Sort{"Sort Disk spill?"}
+    Sort -->|"예"| WorkMem["work_mem 증가"]
+    Sort -->|"아니오"| Done["최적화 완료"]
+```
+
 ## 관련 위키
 
 - [[btree-indexing]], [[gin-gist-hash-indexes]]

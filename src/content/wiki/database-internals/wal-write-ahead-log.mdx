@@ -1,9 +1,20 @@
 ---
 title: "[DB] WAL: Write-Ahead Log, crash recovery, replication 의 토대"
-aliases: ["WAL", "Write-Ahead Log", "redo log", "binlog", "journal", "checkpoint", "fsync", "group commit"]
+aliases:
+  - "WAL"
+  - "Write-Ahead Log"
+  - "redo log"
+  - "binlog"
+  - "journal"
+  - "checkpoint"
+  - "fsync"
+  - "group commit"
+  - "LSN"
+  - "log sequence number"
+  - "ARIES"
 tags: [wal, durability, recovery, replication, database]
 category: database-internals
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "ARIES: A Transaction Recovery Method"
     url: "https://www.cs.berkeley.edu/~brewer/cs262/Aries.pdf"
@@ -21,9 +32,9 @@ references:
 
 ```mermaid
 flowchart LR
-    Op[UPDATE row] --> Decide{쓰는 순서}
-    Decide -->|"WAL first"| Safe[안전: crash 시 replay]
-    Decide -->|"Data first"| Unsafe[위험: 부분 쓰기 후 crash → 불일치]
+    Op["UPDATE row"] --> Decide{"쓰는 순서"}
+    Decide -->|"WAL first"| Safe["안전: crash 시 replay"]
+    Decide -->|"Data first"| Unsafe["위험: 부분 쓰기 후 crash = 불일치"]
 ```
 
 *데이터 페이지를 디스크에 쓰는 건 비쌈*. *로그는 sequential append 라 빠름*. *commit = 로그 fsync* 만 보장하면 *crash 후에도 복구 가능*.
@@ -50,24 +61,63 @@ sequenceDiagram
     Page-.->Disk: 나중에 flush
 ```
 
-## Crash Recovery (ARIES 기반)
+## LSN (Log Sequence Number)
+
+*WAL 내 각 레코드의 단조 증가 번호*. 모든 WAL 기반 DB 의 핵심 좌표.
+
+```mermaid
+flowchart LR
+    WAL["WAL 파일"] --> L1["LSN 0001<br/>BEGIN tx=1"]
+    WAL --> L2["LSN 0015<br/>UPDATE x=42 tx=1"]
+    WAL --> L3["LSN 0032<br/>COMMIT tx=1"]
+    WAL --> L4["LSN 0045<br/>BEGIN tx=2"]
+    L3 --> Ckpt["Checkpoint LSN<br/>(이 이전 WAL 회수 가능)"]
+```
+
+| DB | LSN 이름 | 형식 |
+|---|---|---|
+| PostgreSQL | LSN | `X/YYYYYYYY` (hex, 64bit) |
+| MySQL InnoDB | Log Sequence Number | 64bit int |
+| SQLite | WAL frame counter | frame index |
+
+```sql
+-- PostgreSQL: 현재 WAL 위치
+SELECT pg_current_wal_lsn();
+SELECT pg_walfile_name(pg_current_wal_lsn());
+
+-- MySQL: 현재 binlog 위치
+SHOW MASTER STATUS;
+```
+
+## Crash Recovery: ARIES 알고리즘
+
+*Algorithms for Recovery and Isolation Exploiting Semantics* (Mohan et al., 1992) - 모든 모던 RDB 의 복구 기반.
 
 ```mermaid
 flowchart TB
-    Crash[Crash 발생] --> Analyze[Analysis<br/>마지막 checkpoint 이후 로그 스캔]
-    Analyze --> Redo[Redo<br/>committed 트랜잭션 적용]
-    Redo --> Undo[Undo<br/>uncommitted 트랜잭션 롤백]
-    Undo --> Ready[(서비스 가능)]
+    Crash["Crash 발생"] --> Phase1["1. Analysis Phase<br/>마지막 checkpoint 이후 로그 스캔<br/>트랜잭션 상태 + dirty page 복원"]
+    Phase1 --> Phase2["2. Redo Phase<br/>모든 변경 재적용 (committed + uncommitted)"]
+    Phase2 --> Phase3["3. Undo Phase<br/>uncommitted 트랜잭션 롤백"]
+    Phase3 --> Ready[("서비스 가능")]
 ```
 
-| 단계 | 의미 |
-|---|---|
-| **Analysis** | 마지막 checkpoint 이후의 로그 스캔. 트랜잭션 상태 복원 |
-| **Redo** | committed 트랜잭션의 변경 *재적용* |
-| **Undo** | uncommitted 트랜잭션 *롤백* |
+| 단계 | 의미 | 핵심 원리 |
+|---|---|---|
+| **Analysis** | 마지막 checkpoint 이후 로그 스캔. 트랜잭션/dirty page 상태 복원 | `winner` (committed) / `loser` (uncommitted) 분류 |
+| **Redo** | *모든* 변경 재적용 (committed + uncommitted 둘 다) | "steal + no-force" 정책 기반 |
+| **Undo** | uncommitted 트랜잭션 역순 롤백 | CLR (Compensation Log Record) 기록 |
 
 > [!IMPORTANT]
-> *모든 modern DB* 가 ARIES 또는 변형. *최초 commit 후 즉시 fsync* 가 *D (Durability) 의 정의*.
+> ARIES 는 *steal + no-force* 정책: *commit 전 dirty page 도 disk 에 쓸 수 있음* (steal), *commit 시 dirty page 강제 flush 안 함* (no-force). 이 덕분에 buffer pool 을 자유롭게 운용.
+
+### Steal / No-force 정책
+
+| 정책 | steal | no-steal | force | no-force |
+|---|---|---|---|---|
+| 의미 | commit 전 page 를 disk 에 써도 됨 | 안 됨 | commit 시 모든 dirty page flush | 안 해도 됨 |
+| ARIES | *steal* | | | *no-force* |
+| 장점 | buffer pool 자유 관리 | | | commit latency 최소 |
+| 복구 필요 | Undo 필요 (uncommitted 가 disk 에) | | Redo 불필요 | Redo 필요 |
 
 ## Checkpoint
 
@@ -78,12 +128,22 @@ sequenceDiagram
         Checkpointer->>Disk: flush dirty page
     end
     Checkpointer->>WAL: checkpoint record 기록
-    Note over WAL: checkpoint 이전 WAL 회수 가능
+    Note over WAL: checkpoint LSN 이전 WAL 회수 가능
 ```
 
 *checkpoint = recovery 시작점*. 자주 하면 *recovery 빠름 + I/O 부담*. 드물게 하면 *I/O 적음 + recovery 길음*.
 
-## fsync 의 비용과 group commit
+```sql
+-- PostgreSQL checkpoint 튜닝
+checkpoint_timeout = 15min       -- checkpoint 간격
+max_wal_size = 4GB               -- WAL 최대 크기 (초과 시 강제 checkpoint)
+checkpoint_completion_target = 0.9  -- checkpoint I/O 를 interval 의 90% 분산
+
+-- 수동 checkpoint
+CHECKPOINT;
+```
+
+## fsync 의 비용과 Group Commit
 
 ```mermaid
 sequenceDiagram
@@ -108,42 +168,97 @@ sequenceDiagram
 > [!CAUTION]
 > *`fsync = off`* 는 *벤치마크 외 절대 금지*. crash 시 *DB 복구 불가* 가능.
 
+## Physical vs Logical WAL
+
+| | Physical WAL | Logical WAL |
+|---|---|---|
+| 단위 | *page 단위 변경* | *행 단위 변경* |
+| 크기 | 큼 (페이지 전체) | 작음 |
+| 복구 | 1:1 page restore | 행 단위 apply |
+| 용도 | primary → replica (streaming) | CDC, 필터링 복제 |
+| 예 | PG streaming replication | PG logical replication, Debezium |
+
+```sql
+-- PostgreSQL 논리적 복제 슬롯
+SELECT pg_create_logical_replication_slot('myslot', 'pgoutput');
+SELECT * FROM pg_logical_slot_get_changes('myslot', NULL, NULL);
+```
+
+## DB별 WAL 구현 비교
+
+```mermaid
+flowchart TB
+    WAL["WAL 개념"] --> PG["PostgreSQL WAL<br/>physical + logical<br/>streaming replication"]
+    WAL --> MY["MySQL InnoDB<br/>Redo Log (crash recovery)<br/>Binlog (replication)<br/>Undo Log (MVCC)"]
+    WAL --> SQ["SQLite WAL<br/>journal_mode=WAL<br/>WAL file + shm"]
+    WAL --> MG["MongoDB<br/>WiredTiger Journal<br/>oplog (replica set)"]
+```
+
+| DB | WAL 이름 | 특징 |
+|---|---|---|
+| PostgreSQL | WAL | physical + logical 분리. streaming replication |
+| MySQL InnoDB | redo log + undo log + binlog | 3 종 분리. binlog 로 replication |
+| SQLite | journal / WAL mode | `journal_mode=WAL`. WAL + shm 파일 |
+| Redis | AOF | 옵션. append-only file |
+| LMDB | (copy-on-write, no WAL) | 다른 모델 |
+| RocksDB | WAL | LSM-tree 에 WAL 조합 |
+| etcd / CockroachDB | Raft log | consensus + WAL |
+
+### MySQL InnoDB 구현 차이
+
+MySQL 은 WAL 이 *세 가지*:
+
+```mermaid
+flowchart LR
+    TX["트랜잭션"] --> Redo["Redo Log<br/>(InnoDB crash recovery)"]
+    TX --> Undo["Undo Log<br/>(MVCC + rollback)"]
+    TX --> Binlog["Binlog<br/>(replication + PITR)"]
+    Redo & Binlog -->|"XA 2PC"| Commit["COMMIT 완료"]
+```
+
+- Redo + Binlog 를 *2PC (two-phase commit)* 로 원자 커밋 → *split-brain 방지*.
+- `innodb_flush_log_at_trx_commit = 1` (기본) = Redo fsync per commit.
+- `sync_binlog = 1` = Binlog fsync per commit.
+
+### SQLite WAL 구현
+
+```mermaid
+sequenceDiagram
+    participant W as Writer
+    participant WAL as -wal file
+    participant SHM as -shm file
+    participant DB as .db file
+
+    W->>WAL: append changed pages
+    SHM->>SHM: update WAL index (readers 공유)
+    Note over W: commit = WAL fsync
+    W->>DB: checkpoint (WAL -> DB, 1000 frames 기본)
+```
+
 ## WAL → Replication
 
 ```mermaid
 flowchart LR
-    Primary --> WAL[(WAL)]
-    WAL -->|streaming| R1[Replica 1]
-    WAL -->|streaming| R2[Replica 2]
-    WAL -->|archive| Archive[(S3 archive)]
-    Archive -->|PITR| Restore[Point-in-Time Recovery]
+    Primary --> WAL[("WAL")]
+    WAL -->|streaming| R1["Replica 1"]
+    WAL -->|streaming| R2["Replica 2"]
+    WAL -->|archive| Archive[("S3 archive")]
+    Archive -->|PITR| Restore["Point-in-Time Recovery"]
 ```
 
 - *Physical replication*: WAL 그대로 전송
 - *Logical replication*: 행 단위 변경 (필터링 / 변환 가능)
 - *Point-in-Time Recovery*: archive + WAL = 임의 시점 복원
 
-자세한 건 [[postgresql]] / [[mysql-innodb]] / [[Redis Replication]].
-
-## WAL 의 형태별 비교
-
-| DB | WAL 이름 | 비고 |
-|---|---|---|
-| PostgreSQL | WAL | physical + logical |
-| MySQL InnoDB | redo log + undo log + binlog | 3 종 분리 |
-| SQLite | journal / WAL mode | journal_mode=WAL |
-| Redis | AOF | 옵션 |
-| LMDB | (copy-on-write, no WAL) | 다른 모델 |
-| RocksDB | WAL | LSM-tree |
-| etcd / CockroachDB | Raft log | consensus + WAL |
+자세한 건 [[postgresql]] / [[mysql-innodb]] 참고.
 
 ## fsync 만 = 안전?
 
 ```mermaid
 flowchart LR
-    App[App] -->|write| OS[OS Page Cache]
-    OS -->|fsync| Disk[Disk Cache]
-    Disk -->|Battery / FUA| Platter[Persistent]
+    App["App"] -->|write| OS["OS Page Cache"]
+    OS -->|fsync| Disk["Disk Cache"]
+    Disk -->|"Battery / FUA"| Platter["Persistent Storage"]
 ```
 
 > *Disk cache* 까지가 전제. *power loss 시 disk cache 손실* → *battery-backed cache 또는 SSD 의 power-loss-protection (PLP)* 필요.
@@ -151,15 +266,16 @@ flowchart LR
 ## 흔한 함정
 
 > [!WARNING]
-> 1. **fsync 안 함 + 빠르다고 자랑** = 사실 *D 가 사라진* 상태. 벤치마크 무의미.
-> 2. **WAL archive 보관 부족** = PITR 시 *복원 시점 없음*. *최소 3-7일* 보관.
+> 1. **fsync 안 함 + 빠르다고 자랑** = 사실 *D (Durability) 가 사라진* 상태. 벤치마크 무의미.
+> 2. **WAL archive 보관 부족** = PITR 시 *복원 시점 없음*. 최소 3-7일 보관.
 > 3. **Checkpoint 너무 자주** = I/O spike. PG `checkpoint_timeout`, `max_wal_size` 튜닝.
 > 4. **Group commit 안 켬 (MySQL)** = throughput 1/N. `innodb_flush_log_at_trx_commit` + binlog group commit.
+> 5. **LSN 불일치로 replica 깨짐** = MySQL GTID 또는 PG streaming replication 슬롯 관리 필요.
+> 6. **WAL 세그먼트 파일 수동 삭제** = PITR / replica 연결 끊김. pg_archivecleanup 등 도구 사용.
 
 ## 관련 위키
 
-- [[postgresql]], [[mysql-innodb]]
+- [[postgresql]], [[mysql-innodb]], [[sqlite]]
 - [[mvcc]]
-- [[Redis Persistence]] (Redis 의 AOF)
-- [[Redis Replication]]
-- [[distributed-systems-consensus]] (Raft)
+- [[redis-persistence]] (Redis 의 AOF)
+- [[redis-replication]]

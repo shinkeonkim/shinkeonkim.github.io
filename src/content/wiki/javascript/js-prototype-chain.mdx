@@ -198,8 +198,105 @@ delete child.x;
 child.x   // 1 (parent 의 x 가 다시 보임)
 ```
 
-## 참고
+## 체인 시각화
 
-- [[JS Object]]
-- [[JS Class]]
-- [[Lexical Environment]]
+```mermaid
+flowchart LR
+    dog["dog 인스턴스<br/>(barks: true)"]
+    DogProto["Dog.prototype<br/>(bark 메서드)"]
+    AnimalProto["Animal.prototype<br/>(eat 메서드)"]
+    ObjProto["Object.prototype<br/>(toString, hasOwnProperty)"]
+    Null[null]
+
+    dog -->|"[[Prototype]]"| DogProto
+    DogProto -->|"[[Prototype]]"| AnimalProto
+    AnimalProto -->|"[[Prototype]]"| ObjProto
+    ObjProto -->|"[[Prototype]]"| Null
+```
+
+속성 lookup 은 왼쪽에서 오른쪽으로, `null` 에 도달할 때까지 순서대로 탐색합니다.
+
+## Mixin 패턴
+
+prototype chain 은 단일 상속만 지원합니다. 여러 소스에서 기능을 합치려면 **mixin** 을 씁니다.
+
+```javascript
+const Serializable = {
+    serialize() { return JSON.stringify(this); },
+    deserialize(s) { return Object.assign(this, JSON.parse(s)); }
+};
+
+const Validatable = {
+    validate() { return Object.keys(this).every(k => this[k] !== null); }
+};
+
+class User {
+    constructor(name, email) {
+        this.name = name;
+        this.email = email;
+    }
+}
+
+Object.assign(User.prototype, Serializable, Validatable);
+
+const u = new User('Kim', 'kim@example.com');
+u.serialize();   // '{"name":"Kim","email":"kim@example.com"}'
+u.validate();    // true
+```
+
+주의: mixin 으로 추가한 메서드는 `instanceof` 로 식별이 안 됩니다. 타입 체킹이 필요하다면 Symbol 을 태그로 사용하거나 명시적 플래그를 남깁니다.
+
+## Object.create vs new
+
+| 방법 | 특징 |
+|:---|:---|
+| `new Constructor()` | 생성자 로직 실행 + `[[Prototype]]` 설정 |
+| `Object.create(proto)` | 생성자 없이 `[[Prototype]]` 만 설정 |
+| `Object.create(null)` | prototype 없는 순수 딕셔너리 |
+
+```javascript
+// Object.create 로 상속
+const animal = {
+    speak() { return `${this.name} makes a noise.`; }
+};
+
+const dog = Object.create(animal);
+dog.name = 'Buddy';
+dog.speak();   // 'Buddy makes a noise.'
+
+// 순수 딕셔너리 (prototype 오염 없음)
+const map = Object.create(null);
+map['toString'] = 'custom';   // Object.prototype.toString 충돌 없음
+'toString' in map;             // true (chain 없이 own 만 확인됨)
+```
+
+`Object.create(null)` 로 만든 객체는 `hasOwnProperty` 등 Object.prototype 메서드를 직접 호출할 수 없으므로 `Object.hasOwn(map, key)` 를 씁니다.
+
+## 성능 고려사항
+
+- **Chain 깊이**: 너무 깊으면 lookup 비용 증가. 실무에서는 3-5 depth 이내로 유지.
+- **setPrototypeOf 금지**: 런타임 변경은 V8 의 Hidden Class (IC) 를 무효화하여 심각한 성능 저하를 일으킵니다. 처음부터 `Object.create` 로 설계하는 것이 올바른 방향입니다.
+- **메서드는 prototype 에**: 인스턴스마다 함수를 복사하면 메모리 낭비입니다.
+
+```javascript
+// 나쁜 예: 인스턴스마다 함수 복사
+class Bad {
+    constructor() {
+        this.greet = () => 'hello';   // 메모리 낭비
+    }
+}
+
+// 좋은 예: prototype 에 한 번만 저장
+class Good {
+    greet() { return 'hello'; }    // Good.prototype.greet
+}
+```
+
+## 관련 위키
+
+- [[JS Object]] - 객체 리터럴과 Object 메서드
+- [[JS Class]] - ES6+ class 문법과 내부 동작
+- [[Lexical Environment]] - 스코프와 클로저의 기반
+- [[js-closure]] - 렉시컬 스코프와 환경 캡처
+- [[js-this-binding]] - 런타임 this 결정 규칙
+- [[js-scope-chain]] - 변수 lookup 과 비교

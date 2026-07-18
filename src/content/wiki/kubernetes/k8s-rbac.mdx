@@ -3,7 +3,7 @@ title: "[K8s] RBAC: Role, ClusterRole, ServiceAccount, RoleBinding"
 aliases: ["Kubernetes RBAC", "RBAC", "K8s RBAC", "ServiceAccount", "Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"]
 tags: [kubernetes, rbac, security, k8s, iam]
 category: kubernetes
-updated: 2026-06-25
+updated: 2026-07-15
 references:
   - title: "K8s Docs: RBAC"
     url: "https://kubernetes.io/docs/reference/access-authn-authz/rbac/"
@@ -13,14 +13,38 @@ references:
 
 **RBAC (Role-Based Access Control)** = K8s 의 *권한 부여 모델*. *주체 + 권한 + 바인딩*.
 
+## 사용 시나리오
+
+| 상황 | RBAC 역할 |
+|---|---|
+| CI/CD 파이프라인 | SA 에 최소 권한만 부여, 배포 자동화 |
+| 멀티팀 클러스터 | 팀별 namespace 관리 권한 격리 |
+| Operator / Controller | CRD read/write 권한만 허용 |
+| 감사 준비 | 누가 어떤 자원에 접근하는지 추적 |
+
+## API 요청 처리 흐름
+
+```mermaid
+flowchart LR
+    Req["API 요청<br/>(kubectl / pod)"]
+    Auth["Authentication<br/>(인증: 누구?)"]
+    Authz["Authorization<br/>(인가: 허용?)"]
+    Adm["Admission Control"]
+    ETCD["etcd 저장"]
+
+    Req --> Auth --> Authz --> Adm --> ETCD
+```
+
+> RBAC 는 *Authorization 단계* 에서만 작동. Authentication 은 *별도 플러그인* (X.509, OIDC 등).
+
 ## 4 객체
 
 ```mermaid
 flowchart LR
     User[User / Group<br/>또는 ServiceAccount] -->|RoleBinding| Role
     User -->|ClusterRoleBinding| CRole[ClusterRole]
-    Role -->|namespace 안| API[API resources]
-    CRole -->|cluster 전체| API
+    Role -->|"namespace 안"| API[API resources]
+    CRole -->|"cluster 전체"| API
 ```
 
 | 객체 | 범위 |
@@ -43,6 +67,13 @@ metadata:
 - Pod 가 *K8s API 호출* 할 때의 identity.
 - 기본은 `default` SA. *명시 권장*.
 - 모든 SA 는 *토큰 자동 마운트* (`/var/run/secrets/kubernetes.io/serviceaccount/token`).
+
+```yaml
+# Pod 에 SA 연결
+spec:
+  serviceAccountName: app-sa
+  automountServiceAccountToken: false  # API 호출 안 하면 false 권장
+```
 
 ## Role 예시
 
@@ -111,6 +142,34 @@ roleRef:
   name: namespace-admin
 ```
 
+## 최소 권한 패턴
+
+```mermaid
+flowchart TD
+    Goal["최소 권한 원칙"]
+    Goal --> P1["필요한 verb 만<br/>(get, list 등)"]
+    Goal --> P2["필요한 resource 만<br/>(pods 지정)"]
+    Goal --> P3["필요한 namespace 만<br/>(Role 우선)"]
+    Goal --> P4["별도 SA 사용<br/>(default SA 금지)"]
+```
+
+CI/CD SA 예시: 배포만 하는 SA 에 최소 권한 부여:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: production
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, patch, update]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+```
+
 ## 검사 / 디버깅
 
 ```bash
@@ -123,6 +182,10 @@ kubectl auth can-i get pods --as=system:serviceaccount:default:app-sa
 
 # 누가 어떤 권한?
 kubectl get rolebinding,clusterrolebinding -A | grep alice
+
+# SA 의 모든 RoleBinding 조회
+kubectl get rolebindings -A -o json | \
+  jq '.items[] | select(.subjects[]?.name=="app-sa")'
 ```
 
 ## Aggregated ClusterRole
@@ -138,6 +201,41 @@ rules: [...]
 ```
 
 > 다른 ClusterRole 이 *자동 결합*. 운영 도구의 *plugin 권한 추가* 패턴.
+
+## Workload Identity (IRSA / GKE WI)
+
+클라우드 SA 를 K8s SA 와 연동해 *AWS/GCP 권한 획득*. *토큰 직접 관리 불필요*.
+
+```mermaid
+flowchart LR
+    Pod["pod (SA: app-sa)"]
+    STS["AWS STS<br/>(token 교환)"]
+    OIDC["K8s OIDC Provider"]
+    IAM["AWS IAM Role"]
+    S3["AWS S3"]
+
+    Pod -->|"SA token"| STS
+    STS -->|"OIDC 검증"| OIDC
+    STS -->|"Role 확인"| IAM
+    STS -->|"임시 credential"| Pod
+    Pod -->|"임시 credential"| S3
+```
+
+**AWS IRSA (EKS):**
+
+```yaml
+# ServiceAccount 에 IAM Role ARN 어노테이션
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-sa
+  namespace: default
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/app-role
+```
+
+> [!TIP]
+> GKE Workload Identity, Azure Workload Identity 도 동일 패턴. *인스턴스 프로파일 없이 pod 단위 IAM 제어* 가능.
 
 ## 흔한 함정
 

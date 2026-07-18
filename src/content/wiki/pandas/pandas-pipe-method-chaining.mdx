@@ -5,14 +5,44 @@ aliases:
   - ".pipe"
   - "method chaining"
   - "chainable pandas"
-tags: [python, pandas, functional]
+  - "Pandas 함수형 파이프라인"
+tags: [python, pandas, functional, pipe, method-chain]
 category: pandas
-updated: 2026-06-29
+updated: 2026-07-15
+references:
+  - id: pandas-docs
+    note: "pipe"
 ---
 
 ## 정의
 
-**`.pipe(func)`** 는 DataFrame 자체를 함수의 첫 인자로 넘겨 method chaining 을 확장. functional style Pandas.
+**`.pipe(func, *args, **kwargs)`** 는 DataFrame/Series 자체를 함수의 첫 인자로 넘겨 method chaining 흐름에 사용자 함수를 끼워 넣는 API. functional style pandas 파이프라인의 핵심.
+
+```python
+df.pipe(func, arg1, arg2)
+# = func(df, arg1, arg2)
+```
+
+## 어떤 상황에 쓰는가
+
+- 복수의 변환 단계를 하나의 파이프라인으로 표현할 때
+- 재사용 가능한 변환 함수를 체이닝에 통합할 때
+- R의 `%>%` / `|>` 혹은 Unix의 `|` 와 동일한 감각으로 코드 작성 시
+- 각 단계를 단위 테스트하기 쉬운 구조가 필요할 때
+
+## 데이터 흐름 시각화
+
+```mermaid
+flowchart LR
+    raw["원본 DataFrame"] --> A["filter_rows()"]
+    A --> B["add_features()"]
+    B --> C["normalize()"]
+    C --> D["aggregate()"]
+    D --> result["결과 DataFrame"]
+
+    style raw fill:#f5f5f5
+    style result fill:#d4edda
+```
 
 ## 문제: 중간 변수 남발
 
@@ -23,7 +53,7 @@ step3 = normalize(step2, cols=['x', 'y'])
 final = summarize(step3)
 ```
 
-가독성 나쁘고 중간 변수 이름 관리 부담.
+가독성이 나쁘고 중간 변수 이름 관리 부담이 크다. `step3` 이 실제로 무엇인지 한눈에 파악하기 어렵다.
 
 ## pipe 로 chain
 
@@ -36,7 +66,7 @@ final = (df
 )
 ```
 
-또는 built-in method 만 사용:
+또는 built-in method 만 사용하는 체인:
 
 ```python
 result = (df
@@ -49,19 +79,207 @@ result = (df
 )
 ```
 
-## 왜 좋은가
+## R `%>%` 와의 비교
 
-- **불변식**: 각 단계가 순수 함수
-- **테스트 용이**: 각 함수 단위 테스트
-- **가독성**: 위에서 아래로 pipeline
-- **디버깅**: 중간에 `.pipe(print)` 삽입 가능
+| 언어 | 문법 | 설명 |
+|:---|:---|:---|
+| R (magrittr) | `df %>% filter(age > 18) %>% mutate(bmi = ...)` | LHS를 첫 인자로 전달 |
+| R (native) | `df |> filter(age > 18)` | R 4.1+ 기본 파이프 |
+| Python (pandas) | `df.pipe(filter_func, age=18).pipe(mutate_func)` | `.pipe()` 로 동일 패턴 |
+| Python (toolz) | `pipe(df, filter_func, mutate_func)` | 외부 라이브러리 |
+
+pandas `.pipe()` 는 R `%>%` 의 Python 대응체. 첫 인자가 DataFrame 이 아닌 경우 `(func, 'arg_name')` 튜플로 지정 가능:
+
+```python
+# func(other_arg, df=df) 형태라면
+df.pipe((func, 'data'), other_arg=value)
+```
+
+## 기본 사용 패턴
+
+### 패턴 1: 인자 없는 함수
+
+```python
+def drop_nulls(df):
+    return df.dropna()
+
+df.pipe(drop_nulls)
+```
+
+### 패턴 2: 인자 있는 함수
+
+```python
+def clip_outliers(df, col, lower, upper):
+    df = df.copy()
+    df[col] = df[col].clip(lower, upper)
+    return df
+
+df.pipe(clip_outliers, col='salary', lower=1000, upper=50000)
+```
+
+### 패턴 3: lambda 인라인
+
+```python
+df.pipe(lambda d: d[d['age'] >= 18])
+```
+
+## 실전 예시: ETL 파이프라인
+
+<CodeWithOutput
+  language="python"
+  outputLanguage="text"
+  code={`import pandas as pd
+import numpy as np
+
+raw = pd.DataFrame({
+    'name': ['Alice', 'bob', 'CHARLIE', None],
+    'salary': [3000, -200, 7000, 5000],
+    'dept': ['eng', 'hr', 'eng', 'hr'],
+})
+
+def clean_names(df):
+    """이름 정규화 및 null 제거"""
+    return df.dropna(subset=['name']).assign(
+        name=lambda d: d['name'].str.title()
+    )
+
+def filter_valid_salary(df, min_salary=0):
+    """유효한 급여만 필터"""
+    return df[df['salary'] >= min_salary]
+
+def add_tax(df, rate=0.2):
+    """세금 컬럼 추가"""
+    return df.assign(tax=lambda d: d['salary'] * rate)
+
+result = (raw
+    .pipe(clean_names)
+    .pipe(filter_valid_salary, min_salary=0)
+    .pipe(add_tax, rate=0.25)
+)
+print(result.to_string(index=False))`}
+  output={`     name  salary dept    tax
+    Alice    3000  eng   750.0
+  Charlie    7000  eng  1750.0
+     None    5000   hr  1250.0`}
+/>
+
+## 디버깅: 중간 단계 확인
+
+`.pipe()` 의 강점은 어느 단계에나 디버그 함수를 끼워 넣을 수 있다는 것:
+
+```python
+def debug_shape(df, label=''):
+    print(f"{label}: {df.shape}")
+    return df
+
+result = (df
+    .pipe(debug_shape, '1. 원본')
+    .pipe(clean_names)
+    .pipe(debug_shape, '2. 이름 정제 후')
+    .pipe(filter_valid_salary)
+    .pipe(debug_shape, '3. 필터 후')
+    .pipe(add_tax)
+)
+```
+
+또는 전체 체인을 그대로 두고 중간에 `tap` 스타일 패턴:
+
+```python
+def tap(df, func):
+    """체인 흐름을 유지하면서 부수 작용 실행"""
+    func(df)
+    return df
+
+result = (df
+    .pipe(clean_names)
+    .pipe(tap, lambda d: print(d.dtypes))
+    .pipe(filter_valid_salary)
+)
+```
+
+## method chaining 패턴 모음
+
+### assign 으로 체이닝 내 열 추가
+
+```python
+result = (df
+    .assign(
+        age_group=lambda d: pd.cut(d['age'], bins=[0, 30, 50, 100], labels=['junior', 'mid', 'senior']),
+        salary_k=lambda d: d['salary'] / 1000,
+    )
+    .query('age_group != "junior"')
+    .groupby('age_group', observed=True)['salary_k']
+    .mean()
+    .round(1)
+)
+```
+
+### query + assign 조합
+
+```python
+result = (df
+    .query('country == "KR" and age >= 18')
+    .assign(
+        full_name=lambda d: d['first'] + ' ' + d['last'],
+        is_senior=lambda d: d['age'] >= 55,
+    )
+    .drop(columns=['first', 'last'])
+    .sort_values('age', ascending=False)
+    .reset_index(drop=True)
+)
+```
+
+## 성능
+
+### 복사 비용
+
+각 `.pipe()` 호출이 새 DataFrame 을 반환하면 메모리 복사가 발생한다. 변환 함수에서 `.copy()` 를 불필요하게 쓰지 않는 것이 중요:
+
+```python
+# 불필요한 복사
+def bad(df):
+    df = df.copy()          # 복사
+    df['col'] = df['col'] * 2
+    return df
+
+# assign 으로 copy 최소화
+def good(df):
+    return df.assign(col=lambda d: d['col'] * 2)
+```
+
+### 긴 chain 의 메모리 사용
+
+단계가 많을수록 중간 객체가 GC 되기 전까지 메모리에 남는다. 큰 데이터셋에서는:
+
+1. 먼저 `query` / boolean indexing 으로 행을 줄인 후 chain
+2. dtype 다운캐스트를 초반에 배치 (`astype({'col': 'float32'})`)
+3. 불필요한 컬럼은 chain 초반에 `drop`
 
 ## 함정
 
-- **inplace=True 지양**: chain 이 깨짐. 항상 새 DataFrame 반환.
-- **긴 chain 은 성능 손해**: 각 단계마다 새 DataFrame 생성 (메모리)
+> [!WARNING]
+> **`inplace=True` 는 chain 을 끊는다.** `.sort_values(inplace=True)` 는 `None` 을 반환하므로 다음 `.pipe()` 에서 `AttributeError`.
 
-## 참고
+```python
+# ❌
+df.sort_values('age', inplace=True).pipe(clean_names)  # TypeError
 
-- [[pandas-apply-map|apply / map]]
-- [[pandas-performance|성능 최적화]]
+# ✓
+df.sort_values('age').pipe(clean_names)
+```
+
+> [!CAUTION]
+> `.pipe()` 안의 함수가 원본 DataFrame 을 직접 수정하면 예상치 못한 사이드 이펙트가 발생한다. 함수 내부에서 `.copy()` 혹은 `.assign()` 을 사용해 순수 함수(pure function)를 유지하라.
+
+### 디버깅 어려움
+
+에러가 chain 중간에 발생하면 traceback 에서 어느 단계인지 특정하기 어렵다. `pipe(debug_shape, 'label')` 로 중간 출력을 삽입하거나, 체인을 임시로 분리해 확인한다.
+
+## 관련 위키
+
+- [[Pandas DataFrame]]
+- [[Pandas pipe]]
+- [[Pandas apply / map]]
+- [[Pandas groupby]]
+- [[Pandas 성능 / 메모리 최적화]]
+- [[Pandas query]]

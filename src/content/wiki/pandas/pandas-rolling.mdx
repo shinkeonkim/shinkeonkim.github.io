@@ -3,7 +3,7 @@ title: "[Pandas] rolling / expanding"
 aliases: ["Pandas rolling", "Pandas expanding", "이동 평균", "windowed pandas"]
 tags: [python, pandas, rolling, window, time-series]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-17
 references:
   - id: pandas-docs
     note: "rolling"
@@ -15,7 +15,42 @@ references:
 - **`expanding()`** : 시작부터 누적 윈도우 (cumulative)
 - **`ewm(alpha=)`** : 지수 가중 이동 평균
 
+## 사용 상황
+
+| 상황 | 적합한 방법 |
+|:---|:---|
+| 노이즈 제거, smoothing | `rolling().mean()` |
+| 최근 데이터에 더 큰 가중치 | `ewm(alpha=...)` |
+| 전체 기간 누적 추세 파악 | `expanding().mean()` |
+| 이상치 탐지 | `rolling().std()` + z-score |
+| Bollinger Band 계산 | `rolling().mean()` + `rolling().std()` |
+| 실시간 누적 집계 | `expanding().sum()` |
+| 그룹별 이동 집계 | `groupby().rolling()` |
+
 ## 시각화
+
+세 가지 윈도우 방식 비교:
+
+```mermaid
+flowchart LR
+    Input["시계열 Series"] --> R["rolling(N)"]
+    Input --> E["expanding()"]
+    Input --> W["ewm(alpha=)"]
+    R --> R1["고정 크기 슬라이딩, 처음 N-1개 NaN"]
+    E --> E1["시작부터 현재까지 누적, 크기 증가"]
+    W --> W1["지수 가중 이동 평균, 최근 강조"]
+```
+
+시계열 분석 파이프라인:
+
+```mermaid
+flowchart TD
+    Raw["원시 시계열 데이터"] --> MA["이동 평균: rolling(7).mean()"]
+    Raw --> Std["이동 표준편차: rolling(30).std()"]
+    MA --> Z["z-score 계산"]
+    Std --> Z
+    Z --> Out["이상치 탐지 결과"]
+```
 
 ```anim:pandas-rolling-window
 {}
@@ -134,6 +169,61 @@ s.rolling(window=5).apply(lambda x: x.max() - x.min(), raw=True)
 # raw=True 면 numpy array 가 전달되어 빠름
 ```
 
+### rolling z-score 이상치 탐지
+
+```python
+roll_mean = df['value'].rolling(30).mean()
+roll_std  = df['value'].rolling(30).std()
+df['z_score'] = (df['value'] - roll_mean) / roll_std
+outliers = df[df['z_score'].abs() > 3]
+```
+
+### 두 시리즈 이동 상관계수
+
+```python
+df['x'].rolling(30).corr(df['y'])
+# 30일 구간의 이동 상관계수, -1.0 ~ 1.0
+```
+
+### step 으로 건너뛰며 집계
+
+```python
+# pandas 1.5+
+s.rolling(window=6, step=2).mean()
+# 2 칸씩 건너뛰며 집계, 결과 크기 절반
+```
+
+## rolling 집계 함수 목록
+
+| 메서드 | 설명 |
+|:---|:---|
+| `.mean()` | 이동 평균 |
+| `.sum()` | 이동 합 |
+| `.std()` / `.var()` | 이동 표준편차 / 분산 |
+| `.min()` / `.max()` | 이동 최솟값 / 최댓값 |
+| `.median()` | 이동 중앙값 |
+| `.count()` | NaN 제외 유효 수 |
+| `.corr(other)` | 이동 상관계수 |
+| `.cov(other)` | 이동 공분산 |
+| `.apply(func)` | 사용자 함수 |
+| `.quantile(q)` | 이동 분위수 |
+| `.rank()` | 이동 순위 |
+| `.skew()` | 이동 왜도 |
+| `.kurt()` | 이동 첨도 |
+
+## 성능 팁
+
+```python
+# 1. numba engine (pandas 1.3+)
+s.rolling(window=50).mean(engine='numba')
+
+# 2. raw=True 로 apply 속도 개선
+s.rolling(5).apply(np.mean, raw=True)  # numpy array 전달, 빠름
+
+# 3. 큰 윈도우 + 큰 데이터에서 polars 고려
+# polars: df.lazy().with_columns(pl.col('x').rolling_mean(7))
+```
+
 ## 함정
 
 ### 1. window 가 너무 커서 NaN 만
@@ -160,8 +250,40 @@ s.shift(1).rolling(3).mean()    # 이전 3 개 (오늘 제외)
 - 큰 데이터 + 큰 윈도우: 느림
 - `numba` engine 사용: `s.rolling(window=10).mean(engine='numba')` (pandas 1.x+)
 
-## 참고
+### 4. closed 파라미터
+
+```python
+s.rolling(3, closed='left').mean()    # 현재 제외, 이전 3개
+s.rolling(3, closed='right').mean()   # 기본 (현재 포함)
+s.rolling(3, closed='both').mean()    # 양쪽 포함
+```
+
+> [!WARNING]
+> `closed` 는 DatetimeIndex 기반 time-based rolling 에서만 유효. 정수 index 에서는 무시된다.
+
+### 5. groupby + rolling 의 MultiIndex
+
+```python
+result = df.groupby('cat')['val'].rolling(3).mean()
+# (cat, original_index) 의 MultiIndex
+result = result.reset_index(level=0, drop=True)  # 원래 index 복원
+```
+
+### 6. expanding 과 cumsum 의 차이
+
+```python
+s.expanding().sum()   # expanding 집계, NaN 고려
+s.cumsum()            # 단순 누적합, 빠름
+```
+
+`NaN` 이 포함된 데이터에서는 `expanding().sum()` 이 `cumsum()` 보다 안전. `skipna=True` 가 기본.
+
+## 관련 위키
 
 - [[Pandas resample]]
 - [[Pandas groupby]]
 - [[Pandas DataFrame]]
+- [[Pandas shift / diff]]
+- [[Pandas expanding]]
+- [[Pandas interpolate]]
+- [[Pandas cumulative]]

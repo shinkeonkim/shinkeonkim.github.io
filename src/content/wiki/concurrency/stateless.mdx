@@ -3,7 +3,7 @@ title: "Stateless"
 aliases: ["stateless", "무상태", "Stateless 서버", "stateless server"]
 tags: [architecture, network, scaling]
 category: concurrency
-updated: 2026-06-13
+updated: 2026-07-15
 references:
   - title: "Roy Fielding, REST 박사 학위 논문"
     url: "https://www.ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm"
@@ -26,6 +26,24 @@ references:
 | **장애 복원** | 서버 교체 시 사용자 무영향 |
 | **인증 정보** | 매 요청마다 토큰/키 첨부 |
 | **캐싱** | URL 기반 캐시 매우 효율적 |
+
+## 수평 확장 아키텍처
+
+```mermaid
+flowchart LR
+    C1[Client 1] --> LB[Load Balancer]
+    C2[Client 2] --> LB
+    C3[Client N] --> LB
+    LB --> S1[Server 1]
+    LB --> S2[Server 2]
+    LB --> S3[Server N]
+    S1 & S2 & S3 --> Redis[(Redis)]
+    S1 & S2 & S3 --> DB[(Database)]
+```
+
+모든 서버가 동일한 Redis 와 DB 를 바라본다. LB 가 어느 서버로 요청을 보내도 같은 결과가 나온다. 서버 추가는 인스턴스 수만 늘리면 끝이다.
+
+Health check 로 고장 난 서버를 풀에서 제거해도 나머지 서버가 즉시 트래픽을 흡수한다. 사용자에게는 무영향이다.
 
 ## 어떻게 stateless 를 유지하는가
 
@@ -60,6 +78,27 @@ GET /products?cursor=eyJpZCI6MTIzfQ&limit=20
 
 서버는 cursor 만 읽고 응답.
 
+## JWT 인증 플로우
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Server
+    participant DB
+
+    C->>S: POST /login, credentials
+    S->>DB: SELECT user
+    DB-->>S: user found
+    S-->>C: 200 OK, JWT signed
+    Note over C: 클라이언트 JWT 보관
+    C->>S: GET /api/profile, Authorization Bearer JWT
+    S->>S: JWT 서명 검증
+    S-->>C: 200 OK, profile
+```
+
+서버는 요청 사이에 아무것도 기억하지 않는다. JWT 서명 키만 있으면 어느 인스턴스든 동일한 검증이 가능하다.
+
 ## 실무 예시
 
 ### REST API
@@ -84,6 +123,93 @@ GET /static/main.css
 
 함수 실행마다 컨테이너가 새로 만들어질 수 있음 → stateless 가 강제됨.
 세션은 DynamoDB / Redis 등에 위임 필수.
+
+## Redis 세션 스토어 구현
+
+JWT 대신 서버 측 세션 ID 를 유지해야 할 때도, 외부 store 에 세션을 두면 서버 자체는 stateless 로 운영할 수 있다.
+
+```python
+import uuid, json
+import redis
+
+r = redis.Redis(host="redis-host", port=6379)
+TTL = 3600  # 1 hour
+
+def create_session(user_id: str) -> str:
+    sid = str(uuid.uuid4())
+    r.setex(f"session:{sid}", TTL, json.dumps({"user_id": user_id}))
+    return sid
+
+def get_session(sid: str) -> dict | None:
+    raw = r.get(f"session:{sid}")
+    return json.loads(raw) if raw else None
+
+def delete_session(sid: str) -> None:
+    r.delete(f"session:{sid}")
+```
+
+Redis Sentinel 또는 Redis Cluster 로 단일 장애점을 제거해야 한다. Redis 다운 = 전체 서비스 인증 불능이 되기 때문이다.
+
+```yaml
+# Redis Sentinel docker-compose 간략 예시
+services:
+  redis-master:
+    image: redis:7
+  redis-replica:
+    image: redis:7
+    command: redis-server --replicaof redis-master 6379
+  redis-sentinel:
+    image: redis:7
+    command: redis-sentinel /etc/sentinel.conf
+```
+
+## Kubernetes에서의 Stateless
+
+Stateless 서버는 Kubernetes `Deployment` 로 운영한다. [[k8s-statefulset]] 이 필요 없다.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    spec:
+      containers:
+        - name: api-server
+          image: myapp:latest
+          env:
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: url
+```
+
+HPA 로 CPU / RPS 기반 자동 스케일도 가능하다.
+
+```bash
+kubectl autoscale deployment api-server --cpu-percent=70 --min=2 --max=20
+```
+
+pod 에 순서나 안정적인 네트워크 ID 가 없어도 상관없다. stateless 서버에는 이게 오히려 장점이다.
+
+## 언제 Stateless를 선택하는가
+
+| 상황 | 권장 |
+|:---|:---|
+| REST API, 배치 처리 | Stateless |
+| 퍼블릭 마이크로서비스 | Stateless |
+| Serverless / Lambda | Stateless |
+| 실시간 채팅, 게임 서버 | [[Stateful]] 고려 |
+| 비디오 스트리밍 세션 | [[Stateful]] 고려 |
+| P2P 협업 도구 | [[Stateful]] 고려 |
+
+수평 확장·배포 단순성이 목표면 stateless 가 기본 선택이다. 저지연 양방향 통신이 핵심이면 [[Stateful]] 을 고려한다.
 
 ## 함정과 한계
 
@@ -116,4 +242,9 @@ JWT 는 만료 전까지 유효. 사용자 권한 변경/로그아웃을 즉시 
 
 - [[Stateful]]
 - [[Sticky Session]], Stateful 의 회피책
-- [[Stateless vs Stateful]] (전체 비교, 애니메이션 포함)
+- [[Stateless vs Stateful]], 전체 비교
+- [[connection-pool]], 외부 store 연결 관리
+- [[rate-limiting]], Stateless API 보호
+- [[jwt]], 클라이언트 측 상태 토큰
+- [[redis]], 외부 세션 스토어
+- [[k8s-statefulset]], Stateful 워크로드용 K8s 리소스

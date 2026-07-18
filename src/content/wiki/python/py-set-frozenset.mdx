@@ -180,9 +180,147 @@ unchanged = old & new    # {"b", "c"}
 | 해시 가능한 불변 모음 | `frozenset` |
 | 순서 + 중복 제거 | `dict.fromkeys()` |
 
+## 시간 복잡도
+
+| 연산 | 평균 | 최악 |
+|------|------|------|
+| `x in s` | O(1) | O(n) |
+| `s.add(x)` | O(1) | O(n) |
+| `s.remove(x)` | O(1) | O(n) |
+| `s \| t` | O(len(s) + len(t)) | O(len(s) + len(t)) |
+| `s & t` | O(min(len(s), len(t))) | O(len(s) * len(t)) |
+| `s - t` | O(len(s)) | O(len(s)) |
+
+> [!NOTE]
+> 최악(O(n))은 해시 충돌이 극단적으로 많을 때. 실무에서는 거의 O(1).
+
+## 내부 구조: Hash Table
+
+```mermaid
+flowchart LR
+    subgraph SBOX["set: 1, 2, 3, 4"]
+        H0["slot 0: empty"]
+        H1["slot 1: 1"]
+        H2["slot 2: 2"]
+        H3["slot 3: 3"]
+        H4["slot 4: 4"]
+        H5["slot 5: empty"]
+        H6["slot 6: empty"]
+        H7["slot 7: empty"]
+    end
+    X["x in s"] -->|"hash(x) % n → slot"| H1
+```
+
+- dict 에서 value 슬롯을 제거한 구조.
+- 부하율 2/3 초과 시 *자동 resize* (2배).
+- 원소가 해시 불가능 (list, dict) 이면 `TypeError`.
+
+## set vs list 멤버십 성능
+
+```python
+import timeit
+
+data = list(range(1_000_000))
+as_list = data
+as_set  = set(data)
+
+t_list = timeit.timeit(lambda: 999_999 in as_list, number=1000)
+t_set  = timeit.timeit(lambda: 999_999 in as_set,  number=1000)
+
+# t_list: ~40ms (선형 탐색)
+# t_set:  ~0.05ms (해시 탐색)
+```
+
+> [!TIP]
+> `in` 연산 반복 사용 시 list 대신 `set`으로 변환 후 사용. 100만 원소 기준 ~800배 차이.
+
+## hashability 규칙
+
+```python
+# 해시 가능 (set 원소로 OK)
+{1, 3.14, "abc", (1, 2), frozenset({1})}
+
+# 해시 불가 (set 원소로 불가)
+{[1, 2]}            # TypeError: unhashable type: 'list'
+{{1: 2}}            # TypeError: unhashable type: 'dict'
+{{1, 2}}            # TypeError: unhashable type: 'set'
+
+# 커스텀 클래스: __hash__ + __eq__ 구현 필요
+class Point:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+    def __hash__(self):
+        return hash((self.x, self.y))
+    def __eq__(self, other):
+        return (self.x, self.y) == (other.x, other.y)
+
+pts = {Point(1, 2), Point(1, 2)}  # len == 1
+```
+
+## 고급 패턴
+
+### 그래프 무방향 엣지 중복 제거
+
+```python
+edges = set()
+pairs = [(1, 2), (2, 1), (3, 4), (4, 3)]
+
+for u, v in pairs:
+    edges.add(frozenset({u, v}))
+
+print(len(edges))  # 2 (중복 제거)
+```
+
+### 권한 집합 체크
+
+```python
+REQUIRED = frozenset({"read", "write"})
+user_perms = frozenset({"read", "write", "admin"})
+
+if REQUIRED.issubset(user_perms):
+    print("접근 허용")
+```
+
+### 슬라이딩 윈도우 유일 문자 체크
+
+```python
+def has_all_unique(s: str, k: int) -> bool:
+    """길이 k 의 윈도우가 모두 유일한 문자인지"""
+    window = []
+    for ch in s:
+        window.append(ch)
+        if len(window) == k:
+            if len(set(window)) == k:
+                return True
+            window.pop(0)
+    return False
+
+has_all_unique("abcadce", 3)  # True ("abc")
+```
+
+## set vs frozenset 선택
+
+```mermaid
+flowchart LR
+    Q["set vs frozenset?"]
+    Q --> A{"변경 필요?"}
+    A -->|"Yes"| S["set<br/>(가변, hashable 아님)"]
+    A -->|"No"| B{"dict 키 또는<br/>다른 set 원소?"}
+    B -->|"Yes"| FS["frozenset<br/>(불변, hashable)"]
+    B -->|"No"| S2["set or frozenset<br/>(둘 다 OK)"]
+```
+
 ## 함정 정리
 
 - `{}`는 dict, 빈 set은 `set()`
-- set은 **순서 없음**(3.7+ dict와 달리 보장 안 함)
+- set은 **순서 없음** (3.7+ dict와 달리 보장 안 함)
 - 원소는 해시 가능해야 함 (list, dict 불가)
 - set 자체는 hashable 아님 (frozenset만)
+- 연산자 `|`, `&` 등은 양쪽 모두 set 타입 필요; 메서드는 iterable 허용
+
+## 관련 위키
+
+- [[py-dict]]
+- [[py-list]]
+- [[py-tuple]]
+- [[py-collections]]

@@ -3,7 +3,7 @@ title: "[Javascript] BigInt"
 aliases: ["JS BigInt", "JavaScript BigInt", "임의 정밀도 정수"]
 tags: [javascript, primitive, bigint, number]
 category: javascript
-updated: 2026-06-18
+updated: 2026-07-17
 references:
   - id: mdn-web-docs
     note: "BigInt"
@@ -18,6 +18,18 @@ const big = 12345678901234567890n;   // 끝에 'n'
 const fromCtor = BigInt('12345678901234567890');
 typeof big      // 'bigint'
 ```
+
+## 사용 상황
+
+| 상황 | 권장 타입 |
+|:---|:---|
+| 64-bit 정수 ID (DB의 BIGINT 컬럼) | `BigInt` 또는 `string` |
+| 금융 계산 (cent 단위 정수) | `BigInt` |
+| 암호화 (RSA, ECC 큰 소수 연산) | `BigInt` |
+| 비트 연산 (64-bit 이상) | `BigInt` |
+| 일반 정수 연산 (2^53 미만) | `Number` |
+| JSON 인터페이스 경계 | `string` |
+| 부동소수점 계산 | `Number` |
 
 ## 왜 필요한가
 
@@ -116,6 +128,23 @@ const FLAG_ADMIN = 1n << 63n;     // 64-bit 비트 위치
 flags | FLAG_ADMIN
 ```
 
+### 4. 암호화 모듈러 거듭제곱
+
+```javascript
+// RSA 등에서 사용하는 모듈러 거듭제곱
+function modPow(base, exp, mod) {
+  let result = 1n;
+  base = base % mod;
+  while (exp > 0n) {
+    if (exp % 2n === 1n) result = (result * base) % mod;
+    exp = exp / 2n;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+modPow(2n, 10n, 1000n);  // 24n
+```
+
 ## Math 함수와 호환 안 됨
 
 ```javascript
@@ -129,6 +158,19 @@ abs(-5n)             // 5n
 
 ## Number vs BigInt 선택
 
+```mermaid
+flowchart TD
+    Q["정수가 2의 53승 - 1을 넘을 수 있는가?"]
+    Q -->|"yes"| B1["BigInt 사용"]
+    Q -->|"no"| N1["Number 충분"]
+    B1 --> J["JSON 직렬화 필요?"]
+    J -->|"yes"| S["string 으로 변환 후 저장"]
+    J -->|"no"| BI2["BigInt 그대로 사용"]
+    N1 --> F["부동소수점 필요?"]
+    F -->|"yes"| NUM["Number float64"]
+    F -->|"no"| NUM2["Number 정수 범위 내"]
+```
+
 | 시나리오 | 권장 |
 |:---|:---|
 | 일반 정수 (< 2^53) | Number |
@@ -137,6 +179,39 @@ abs(-5n)             // 5n
 | 부동소수점 | Number |
 | 비트 연산 (64-bit+) | BigInt |
 | JSON 인터페이스 | string |
+
+## BigInt 와 TypeScript
+
+TypeScript 는 `bigint` 타입을 기본 지원.
+
+```typescript
+const id: bigint = 123n;
+const huge: bigint = BigInt('9007199254740993');
+
+// 함수 시그니처
+function factorial(n: bigint): bigint {
+  return n <= 1n ? 1n : n * factorial(n - 1n);
+}
+
+// JSON 경계에서는 string 으로
+type SafeId = bigint | string;
+```
+
+`bigint` 와 `number` 는 TypeScript 에서도 자동 변환이 안 된다. 명시적 `Number(big)` / `BigInt(num)` 필요.
+
+## 성능 고려사항
+
+BigInt 연산은 Number 보다 느리다. 특히 곱셈, 나눗셈에서 차이가 크다.
+
+```javascript
+// 루프 카운터에 BigInt 사용하면 불필요한 오버헤드
+for (let i = 0n; i < 1000n; i++) { /* 느림 */ }
+for (let i = 0; i < 1000; i++) { /* 빠름 */ }
+```
+
+- BigInt 는 Number 보다 3-10배 느린 연산 속도 (엔진에 따라 차이)
+- 암호화나 임의 정밀도 연산이 아니라면 Number 범위 내에서 처리
+- `BigInt` 를 Number 범위 내 값에 쓰는 것은 불필요한 타입 복잡도
 
 ## 함정
 
@@ -153,7 +228,7 @@ abs(-5n)             // 5n
 ### 2. Math.pow
 
 ```javascript
-2n ** 100n       // BigInt 거듭제곱
+2n ** 100n       // BigInt 거듭제곱 (정확)
 Math.pow(2, 100) // 1.2676506002282294e+30 (Number, 정확도 손실)
 ```
 
@@ -163,7 +238,18 @@ Math.pow(2, 100) // 1.2676506002282294e+30 (Number, 정확도 손실)
 new Set([1n, 1])      // {1n, 1}  (다른 키로 취급)
 ```
 
-## 참고
+### 4. 조건문에서 0n 은 falsy
 
-- [[JS Number]]
-- [[JS 타입 변환]]
+```javascript
+Boolean(0n)   // false
+Boolean(1n)   // true
+if (0n) { /* 실행 안 됨 */ }
+```
+
+Number 의 `0` 과 동일하게 falsy. 혼합 비교 시 주의.
+
+## 관련 위키
+
+- [[js-number|JS Number]]
+- [[js-type-coercion|JS 타입 변환]]
+- [[js-json|JS JSON]]

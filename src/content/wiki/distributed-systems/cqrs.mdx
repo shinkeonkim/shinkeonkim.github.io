@@ -160,6 +160,71 @@ flowchart LR
 - *materialized view* 또는 *summary table*.
 - 별도 인프라 없이 *80% 의 효과*.
 
+## Projection 구현 패턴
+
+projection 은 write model 의 event 를 소비해 read model 을 갱신하는 컴포넌트다. 구현 방법은 크게 3 가지.
+
+### 1. Synchronous (트랜잭션 내)
+
+```sql
+BEGIN;
+  INSERT INTO orders (...) VALUES (...);
+  INSERT INTO order_items (...) VALUES (...);
+  -- 같은 트랜잭션에서 read model 도 갱신
+  INSERT INTO order_summary_view (order_id, user_name, total, ...)
+    SELECT o.id, u.name, SUM(oi.price * oi.qty), ...
+    FROM orders o
+    JOIN users u ON o.user_id = u.id
+    JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.id = NEW.id
+    GROUP BY o.id, u.name;
+COMMIT;
+```
+
+- 장점: *즉각적 일관성*, read-your-writes 문제 없음.
+- 단점: write latency 증가, read model 이 여러 개면 트랜잭션 커짐.
+
+### 2. Asynchronous (outbox + event bus)
+
+```
+orders 테이블 INSERT
+  → outbox 에 OrderCreated event INSERT (같은 트랜잭션)
+  → outbox relay 가 Kafka/NATS 에 발행
+  → projection consumer 가 구독 → read model 갱신
+```
+
+- 장점: write path 가 가볍다, read model 독립 배포 가능.
+- 단점: *projection lag* 발생, idempotency 필수.
+
+### 3. Catch-up (재구성)
+
+```bash
+# event store 를 처음부터 재생 → read model 처음부터 재구성
+projection rebuild --from-event-store --target order_summary_view
+```
+
+- event sourcing 을 쓸 때 강점.
+- 새 read model 추가, 버그 수정 후 재계산에 유용.
+
+## Idempotent Projection
+
+projection 은 반드시 idempotent 이어야 한다. 같은 event 가 두 번 들어와도 결과가 같아야 함.
+
+```sql
+-- upsert 패턴
+INSERT INTO order_summary_view (order_id, total, status, updated_at)
+VALUES (:order_id, :total, :status, :ts)
+ON CONFLICT (order_id)
+DO UPDATE SET
+  total      = EXCLUDED.total,
+  status     = EXCLUDED.status,
+  updated_at = EXCLUDED.updated_at
+WHERE order_summary_view.updated_at < EXCLUDED.updated_at;  -- 순서 보장
+```
+
+- `updated_at` 비교로 *out-of-order event* 도 안전하게 처리.
+- 자세히는 [[idempotency-keys]].
+
 ## 흔한 함정
 
 > [!WARNING]
@@ -167,6 +232,18 @@ flowchart LR
 > 2. **Projection 동기 실행** = read model 갱신이 *write 막음*. async + idempotent.
 > 3. **Read-your-writes 무시** = 사용자가 *방금 한 일을 못 봄* UX.
 > 4. **Read model 재구성 어려움** = event log 없으면 *replay 불가*. ES + CQRS 가 자주 묶이는 이유.
+> 5. **Projection 스키마 변경** = 기존 event 로 재구성 가능한지 확인 필요.
+
+## 테스트 전략
+
+| 레이어 | 테스트 대상 | 도구 |
+|---|---|---|
+| Command Handler | 비즈니스 규칙, 검증, event 발행 | 단위 테스트 |
+| Projection | idempotency, 특정 event sequence 후 상태 | 단위 테스트 |
+| Read Model | 쿼리 결과, 인덱스 | 통합 테스트 |
+| End-to-End | eventual consistency 타이밍 | 통합/E2E |
+
+eventual consistency E2E: `awaitility` (Java) 같은 polling assertion 사용.
 
 ## 관련 위키
 
@@ -174,4 +251,4 @@ flowchart LR
 - [[outbox-pattern]]
 - [[saga-pattern]]
 - [[microservices-vs-monolith]]
-- [[Redis Cache Patterns]] (read model 캐시)
+- [[idempotency-keys]]

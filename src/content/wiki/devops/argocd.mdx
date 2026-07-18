@@ -171,9 +171,113 @@ flowchart LR
 > 3. **거대한 단일 App** = 부분 sync 어려움. 작은 App 으로.
 > 4. **Webhook 미설정** = 3분 polling 지연. GitHub webhook 권장.
 
+## RBAC / Projects
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: team-backend
+  namespace: argocd
+spec:
+  sourceRepos:
+    - 'https://github.com/myorg/*'
+  destinations:
+    - namespace: backend
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+  roles:
+    - name: developer
+      description: deploy 권한
+      policies:
+        - p, proj:team-backend:developer, applications, sync, team-backend/*, allow
+```
+
+> *Project = 권한 경계*. namespace / repo / 리소스 종류 제한. Multi-team 환경에서 필수.
+
+## Sync Wave & Hooks
+
+```yaml
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"     # wave 번호: 낮을수록 먼저 sync
+    argocd.argoproj.io/hook: PreSync       # PreSync / Sync / PostSync / SyncFail
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+```
+
+```mermaid
+flowchart LR
+    W0["Wave 0: CRD, Namespace"] --> W1["Wave 1: ConfigMap, Secret"]
+    W1 --> W2["Wave 2: Deployment"]
+    W2 --> W3["Wave 3: Ingress"]
+```
+
+> wave 번호 낮은 것부터 sync. 같은 wave 내 리소스는 병렬. Hook 은 lifecycle 지점 지정.
+
+## Health Check
+
+ArgoCD 가 리소스 상태를 *Healthy / Progressing / Degraded* 로 자동 판단. 커스텀 health check:
+
+```yaml
+# argocd-cm ConfigMap
+resource.customizations.health.mygroup_myresource: |
+  hs = {}
+  if obj.status.ready == true then
+    hs.status = "Healthy"
+  else
+    hs.status = "Progressing"
+  end
+  return hs
+```
+
+| 상태 | 의미 |
+|---|---|
+| Healthy | 리소스 정상 |
+| Progressing | 업데이트 중 |
+| Degraded | 오류, 복구 필요 |
+| Suspended | 일시 중단 |
+| Missing | 클러스터에 없음 |
+
+## Argo Image Updater
+
+```yaml
+annotations:
+  argocd-image-updater.argoproj.io/image-list: web=myrepo/web
+  argocd-image-updater.argoproj.io/web.update-strategy: semver
+  argocd-image-updater.argoproj.io/write-back-method: git
+```
+
+> *container image 새 버전 자동 감지* → *git 에 commit* → ArgoCD sync. CI 파이프라인 마지막 단계 자동화.
+
+## Notification Controller
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+data:
+  template.app-sync-succeeded: |
+    slack:
+      attachments: |
+        [{
+          "color": "#18be52",
+          "title": "{{.app.metadata.name}} 배포 완료"
+        }]
+  trigger.on-sync-succeeded: |
+    - when: app.status.operationState.phase in ['Succeeded']
+      send: [app-sync-succeeded]
+```
+
+> 배포 완료 / 실패 / drift 를 Slack / Teams / PagerDuty 로 알림. `argocd-notifications-secret` 에 webhook URL 저장.
+
 ## 관련 위키
 
 - [[gitops-patterns]]
 - [[github-actions]]
 - [[k8s-deployment]]
 - [[helm]]
+- [[k8s-rbac]]
+- [[zero-downtime-deployment]]

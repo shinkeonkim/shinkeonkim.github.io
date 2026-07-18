@@ -171,9 +171,96 @@ receivers:
 > 3. **Counter reset 인식 못함** = `rate()` 가 자동. `increase()` 와 차이.
 > 4. **Push 가 필요한 경우** = Pushgateway 사용 (batch job 등). 일반 service 는 *pull*.
 
+## Prometheus Operator / ServiceMonitor
+
+Kubernetes 환경에서 *kube-prometheus-stack* (helm chart) 가 표준.
+
+```yaml
+# ServiceMonitor: app 의 /metrics 를 자동 scrape
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+```
+
+> `prometheus.io/scrape: "true"` annotation 방식은 레거시. Operator 환경에서는 *ServiceMonitor / PodMonitor* 를 사용.
+
+## Pushgateway (Batch Job 메트릭)
+
+```mermaid
+flowchart LR
+    Job["Batch Job (짧은 수명)"] -->|push metrics| PG[Pushgateway]
+    PG -.scrape.-> Prom[Prometheus]
+    Prom --> Grafana
+```
+
+> 일반 service = pull. Batch job 처럼 *짧게 실행 후 종료* = Pushgateway push.
+
+> [!WARNING]
+> Pushgateway 는 SPOF: job 실패해도 metrics 가 남음. *TTL 설정 또는 job 완료 후 delete API* 호출 필수.
+
+## PromQL 핵심 함수
+
+| 함수 | 설명 | 예시 |
+|---|---|---|
+| `rate(v[d])` | 초당 평균 변화율 | `rate(http_requests_total[5m])` |
+| `irate(v[d])` | 순간 변화율 (최근 2점) | 스파이크 민감 탐지 |
+| `increase(v[d])` | 범위 내 총 증가량 | `increase(errors_total[1h])` |
+| `sum by(label)` | 레이블로 집계 | `sum by (service)` |
+| `topk(n, v)` | 상위 N 시리즈 | `topk(5, rate(rps[5m]))` |
+| `absent(v)` | 시리즈 없을 때 1 반환 | 서비스 다운 감지 |
+| `histogram_quantile` | bucket 에서 quantile 계산 | p99 latency |
+| `avg_over_time` | 시간 범위 평균 | 가용성 계산 |
+
+## Histogram vs Summary
+
+| 항목 | Histogram | Summary |
+|---|---|---|
+| 다중 인스턴스 집계 | *가능* (서버 집계) | 불가 (클라이언트 계산) |
+| 정확도 | bucket 오차 존재 | *정확* |
+| quantile 변경 | 재배포 없이 변경 가능 | 재배포 필요 |
+| 권장 상황 | *대부분*, 다중 인스턴스 | 단일 인스턴스 정확 측정 |
+
+> [!IMPORTANT]
+> 인스턴스 여러 개 = *Histogram 필수*. Summary quantile 은 인스턴스 간 집계 불가.
+
+## Long-term Storage 선택
+
+```mermaid
+flowchart LR
+    Prom[Prometheus] -->|remote_write| TH[Thanos / Mimir]
+    TH --> S3[(S3: 무제한)]
+    TH --> GQ["Grafana (통합 쿼리)"]
+```
+
+| 방식 | 설명 |
+|---|---|
+| Federation | 상위 Prometheus 가 하위 scrape (레거시) |
+| Remote Write | Prometheus → 외부 저장소 전송 (표준) |
+| Agent Mode | scrape + remote write 만, local TSDB 없음 |
+
+```yaml
+# Remote Write (Thanos Receiver)
+remote_write:
+  - url: http://thanos-receive:19291/api/v1/receive
+    queue_config:
+      max_samples_per_send: 10000
+```
+
 ## 관련 위키
 
 - [[opentelemetry]]
 - [[slo-sli-error-budget]]
 - [[aws-cloudwatch]]
 - [[k8s-pod]]
+- [[latency-percentiles]]

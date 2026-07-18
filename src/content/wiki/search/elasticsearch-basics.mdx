@@ -162,6 +162,79 @@ shard = hash(routing) % number_of_primary_shards
 - *같은 routing → 같은 shard*.
 - *멀티 테넌트* 에서 `routing = tenant_id` 로 *데이터 locality*.
 
+## Analyzer 파이프라인
+
+문서를 인덱싱하거나 검색어를 처리할 때, ES 는 *Analyzer* 를 통해 텍스트를 *token* 의 스트림으로 변환한다.
+
+```mermaid
+flowchart LR
+    Raw["원문 텍스트<br/>e.g. 'Elastic Search 2024!'"] --> CT[Character Filter]
+    CT --> TOK[Tokenizer]
+    TOK --> TF[Token Filter]
+    TF --> Tokens["tokens<br/>[elastic, search, 2024]"]
+```
+
+| 단계 | 역할 | 예 |
+|---|---|---|
+| Character Filter | 문자 수준 변환 | HTML strip, 특수문자 치환 |
+| Tokenizer | 텍스트를 token 으로 분리 | `standard`, `whitespace`, `nori` (한국어) |
+| Token Filter | token 변환/추가/삭제 | lowercase, stopwords, synonym, stemmer |
+
+```json
+PUT /my-index
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "my_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "stop"]
+        }
+      }
+    }
+  }
+}
+```
+
+한국어 분석은 [[elasticsearch-korean-indexing]] 참고.
+
+## Mapping: 스키마 정의
+
+RDB 의 DDL 에 해당. dynamic mapping 으로 자동 추론되지만 프로덕션에서는 명시적 mapping 을 쓴다.
+
+```json
+PUT /products/_mapping
+{
+  "properties": {
+    "name":  { "type": "text",    "analyzer": "standard" },
+    "price": { "type": "double" },
+    "tags":  { "type": "keyword" },
+    "created_at": { "type": "date", "format": "yyyy-MM-dd" }
+  }
+}
+```
+
+| 필드 타입 | 설명 |
+|---|---|
+| `text` | 분석 후 역색인. 전문 검색용 |
+| `keyword` | 분석 없이 그대로 인덱싱. 정렬, aggregation, 정확 매치 |
+| `date` | 날짜/시간. ISO 8601 또는 custom format |
+| `double` / `long` | 숫자. range 쿼리, 집계 |
+| `nested` | 배열 내 객체를 독립 문서처럼 처리 |
+| `dense_vector` | 벡터 검색 (kNN) 용 |
+
+자세히는 [[elasticsearch-mapping]].
+
+## 흔한 함정
+
+> [!WARNING]
+> 1. **`text` vs `keyword` 혼동** = `text` 는 집계/정렬 불가. `.keyword` sub-field 사용.
+> 2. **Dynamic mapping 무제한** = 스키마 폭발 (`_doc_count_error`). mapping explosion 방지 설정 필요.
+> 3. **Shard 과다** = 1000개 이상 shard 는 오히려 느림. shard per node 기준 고려.
+> 4. **refresh 빈번** = `_refresh` 를 수동으로 자주 부르면 segment 급증 → merge pressure.
+> 5. **update = delete + reindex** = ES 의 update 는 내부적으로 기존 doc 를 soft delete 후 새 doc 생성. 잦은 update 시 segment 비대해짐.
+
 ## 자세한 영역
 
 - *인덱싱 흐름 + mapping*: [[elasticsearch-indexing]]
@@ -169,10 +242,11 @@ shard = hash(routing) % number_of_primary_shards
 - *cluster, shard*: [[elasticsearch-infrastructure]]
 - *BM25*: [[elasticsearch-relevance-scoring]]
 - *한국어 분석*: [[elasticsearch-korean-indexing]]
+- *aggregation*: [[elasticsearch-aggregations]]
 
 ## 관련 위키
 
 - [[elasticsearch]] (개요)
 - [[btree-indexing]] (RDB 인덱스 비교)
-- [[Redis Vector Search]] (대안)
+- [[database-internals/redis-vector-search|Redis Vector Search]] (대안)
 - [[trie]] (FST 의 토대)

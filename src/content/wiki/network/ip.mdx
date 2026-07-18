@@ -195,6 +195,82 @@ ping -M do -s 1472 google.com   # 1472 + 28 (IP+ICMP) = 1500
 
 ISP 의 Carrier-Grade NAT 환경에서 같은 IP 가 수천 명 공유. P2P / inbound 어려움. IPv6 보급 가속 이유.
 
+## IP 라우팅 흐름
+
+```mermaid
+flowchart LR
+    A["호스트 A (192.168.1.10)"] -->|"1. 패킷 생성"| R1["Router/NAT"]
+    R1 -->|"2. public IP 변환"| ISP[인터넷 라우터]
+    ISP -->|"3. longest prefix match"| R2[Edge Router]
+    R2 -->|"4. TTL 감소 후 전달"| B["호스트 B (8.8.8.8)"]
+    ISP -->|"TTL=0, ICMPv4 반환"| A
+```
+
+각 hop 에서 라우터 동작:
+1. 목적지 IP 의 라우팅 테이블 **longest prefix match** 조회
+2. 매칭 경로 없으면 **default route** (`0.0.0.0/0`) 사용
+3. TTL 1 감소. 0 이면 패킷 폐기 + ICMP Time Exceeded 반환
+
+## 서브넷 / CIDR
+
+**CIDR (Classless Inter-Domain Routing)**: 가변 길이 prefix 로 IP 대역 표현.
+
+```
+192.168.1.0/24
+          └─ prefix 24 bit → subnet mask 255.255.255.0
+               → 192.168.1.0 ~ 192.168.1.255 (256개 주소)
+               → 사용 가능: 192.168.1.1 ~ 192.168.1.254 (네트워크 주소/브로드캐스트 제외)
+```
+
+| Prefix | 주소 수 | 사용 가능 | 용도 |
+|:---|---:|---:|:---|
+| /30 | 4 | 2 | P2P 링크 |
+| /29 | 8 | 6 | 소규모 |
+| /24 | 256 | 254 | 일반 LAN |
+| /22 | 1024 | 1022 | 중규모 |
+| /16 | 65536 | 65534 | 대규모 VPC |
+
+### Subnetting 계산
+
+```
+10.0.0.0/8 (Class A private) 를 /24 로 쪼개면:
+  10.0.0.0/24, 10.0.1.0/24, ..., 10.255.255.0/24 → 65536 개 서브넷
+
+AWS VPC 설계 예:
+  10.0.0.0/16
+    ├── Public:  10.0.1.0/24
+    ├── Private: 10.0.2.0/24
+    └── DB:      10.0.3.0/24
+```
+
+bitwise AND 로 네트워크 주소 계산:
+
+```
+IP:   192.168.1.100 = 11000000.10101000.00000001.01100100
+Mask: 255.255.255.0 = 11111111.11111111.11111111.00000000
+AND:  192.168.1.0   = 11000000.10101000.00000001.00000000
+```
+
+## ARP (Address Resolution Protocol)
+
+**IPv4 에서 L3 → L2 변환**: IP 주소 → MAC 주소 결정.
+
+```
+송신: ARP Request (broadcast)  "192.168.1.1 의 MAC 주소는?"
+수신: ARP Reply (unicast)       "내 MAC 은 aa:bb:cc:dd:ee:ff"
+캐싱: ARP 테이블에 IP-MAC 매핑 저장 (보통 TTL ~20분)
+```
+
+```bash
+# ARP 테이블 확인
+arp -n
+
+# IPv6 NDP 테이블 (Neighbor Discovery Protocol)
+ip -6 neigh
+```
+
+IPv6 에서는 **NDP (Neighbor Discovery Protocol)** 가 ARP 대체. ICMPv6 기반, Solicited-Node Multicast 사용 → broadcast 불필요.
+
 ## 함정과 베스트 프랙티스
 
 - **항상 dual-stack 고려**: IPv4 + IPv6 동시 지원

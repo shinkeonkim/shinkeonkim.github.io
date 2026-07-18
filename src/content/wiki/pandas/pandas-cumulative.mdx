@@ -172,8 +172,92 @@ df['cumulative_growth'] = (1 + df['return']).cumprod()
 # 수치가 너무 작거나 클 경우 부동소수점 오차
 ```
 
+## expanding vs rolling vs cumsum 비교
+
+| 방법 | 윈도우 | 사용 상황 |
+|---|---|---|
+| `cumsum()` | 처음부터 현재 | 누적 합: 빠르고 단순 |
+| `expanding().sum()` | 처음부터 현재 | cumsum 과 동일 결과 |
+| `expanding().mean()` | 처음부터 현재 | 누적 평균: cumsum 으로는 불가 |
+| `rolling(n).sum()` | 최근 n개 | 이동 합계 |
+| `rolling(n).mean()` | 최근 n개 | 이동 평균 |
+
+```mermaid
+flowchart LR
+    Raw["원본: [100, 200, 150, 300]"]
+    Raw --> CS["cumsum: [100, 300, 450, 750]"]
+    Raw --> RM["rolling(2).mean(): [NaN, 150, 175, 225]"]
+    CS --> UC["누적 매출 차트 (우상향)"]
+    RM --> TR["이동 평균 차트 (평활화)"]
+```
+
+## 시계열 실전 패턴
+
+### 월별 누적 집계
+
+```python
+df['date'] = pd.to_datetime(df['date'])
+df = df.set_index('date')
+
+# 월별 합계 후 누적
+monthly = df['revenue'].resample('ME').sum()
+cumulative = monthly.cumsum()
+```
+
+### 코호트별 누적 (cohort analysis)
+
+```python
+# 첫 구매 달 기준 코호트
+df['cohort'] = (
+    df.groupby('user_id')['order_date']
+    .transform('min')
+    .dt.to_period('M')
+)
+df['period_number'] = (
+    df['order_date'].dt.to_period('M') - df['cohort']
+).apply(lambda x: x.n)
+
+# 코호트별 nth 주문
+df['nth_order'] = df.groupby('user_id').cumcount() + 1
+```
+
+### Drawdown 계산 (포트폴리오)
+
+```python
+prices = df['price']
+peak = prices.cummax()              # 이전 최고점
+drawdown = (prices - peak) / peak   # 최고점 대비 하락률
+
+max_drawdown = drawdown.min()
+print(f"최대 낙폭: {max_drawdown:.2%}")
+```
+
+## SQL 비교
+
+| Pandas | SQL 등가 |
+|---|---|
+| `df['amount'].cumsum()` | `SUM(amount) OVER (ORDER BY date)` |
+| `df.groupby('u')['amount'].cumsum()` | `SUM(amount) OVER (PARTITION BY u ORDER BY date)` |
+| `df.groupby('u').cumcount()` | `ROW_NUMBER() OVER (PARTITION BY u ORDER BY date) - 1` |
+| `df['price'].cummax()` | `MAX(price) OVER (ORDER BY date)` |
+
+## 성능 팁
+
+```python
+# 대용량: category 타입으로 groupby 속도 개선
+df['user_id'] = df['user_id'].astype('category')
+df['user_cum'] = df.groupby('user_id')['amount'].cumsum()
+
+# numpy 직접: 단순 Series 누적합에서 약간 빠름
+import numpy as np
+arr = np.cumsum(df['amount'].values)
+```
+
+> `cumsum()` 은 내부 C 레벨 연산으로 대부분 상황에서 충분히 빠름. 초대형 데이터는 Polars / Dask 고려.
+
 ## 참고
 
 - [[Pandas rolling]]
 - [[Pandas groupby]]
 - [[Pandas shift / diff]]
+- [[Pandas expanding]]

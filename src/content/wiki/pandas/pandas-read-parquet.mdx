@@ -3,7 +3,7 @@ title: "[Pandas] read_parquet / to_parquet"
 aliases: ["Pandas read_parquet", "Pandas to_parquet", "Parquet pandas", "Apache Parquet"]
 tags: [python, pandas, io, parquet, arrow]
 category: pandas
-updated: 2026-06-18
+updated: 2026-07-16
 references:
   - id: pandas-docs
     note: "read_parquet"
@@ -19,6 +19,37 @@ references:
 df.to_parquet('out.parquet')
 df = pd.read_parquet('out.parquet')
 ```
+
+## CSV vs Parquet 저장 구조
+
+```mermaid
+flowchart LR
+    subgraph "CSV (행 지향)"
+        R1["row1: id=1, name=A, val=10"]
+        R2["row2: id=2, name=B, val=20"]
+        R3["row3: id=3, name=C, val=30"]
+    end
+
+    subgraph "Parquet (열 지향)"
+        C1["id col: 1, 2, 3"]
+        C2["name col: A, B, C"]
+        C3["val col: 10, 20, 30"]
+    end
+
+    CSV --> P1["컬럼 선택 읽기 시 전체 파싱 필요"]
+    Parquet --> P2["필요 컬럼만 읽기 가능"]
+```
+
+## 사용 상황
+
+| 상황 | CSV | Parquet |
+|:---|:---:|:---:|
+| 사람이 직접 열어 봐야 함 | ✓ | ✗ |
+| 반복 분석 / 대용량 | ✗ | ✓ |
+| dtype 그대로 유지 | ✗ | ✓ |
+| 컬럼 일부만 읽기 | ✗ | ✓ |
+| 빠른 IO | 느림 | 빠름 |
+| 스트리밍 / Arrow 파이프라인 | ✗ | ✓ |
 
 ## 왜 CSV 가 아닌가
 
@@ -73,7 +104,6 @@ df.to_parquet('out.parquet', compression=None)
 df.to_parquet('events/', partition_cols=['year', 'month'])
 # events/year=2024/month=01/part-0.parquet
 # events/year=2024/month=02/part-0.parquet
-# ...
 ```
 
 읽을 때 자동으로 필터링.
@@ -119,16 +149,69 @@ df = pd.read_parquet('out.parquet', dtype_backend='pyarrow')
 
 [[Pandas pyarrow backend]] 참고.
 
-## DataFrame 의 columnar 활용
+## 대용량 파일 전략
 
-Parquet 은 column 별 저장이라 **필요한 컬럼만 읽기** 가 자연스럽다.
+### 컬럼 선택 읽기
 
 ```python
 # 100 컬럼 중 3 컬럼만 읽어도 그 3 컬럼 비용만
-df = pd.read_parquet('big.parquet', columns=['a', 'b', 'c'])
+df = pd.read_parquet('big.parquet', columns=['user_id', 'event', 'ts'])
 ```
 
 CSV 는 전체를 파싱해야 함.
+
+### row group 필터 (pyarrow)
+
+```python
+import pyarrow.parquet as pq
+
+# 스캔 없이 조건 필터 (row group 수준)
+table = pq.read_table(
+    'events.parquet',
+    filters=[('date', '>=', '2024-01-01'), ('date', '<', '2024-02-01')],
+)
+df = table.to_pandas()
+```
+
+### 반복 청크 처리
+
+```python
+import pyarrow.parquet as pq
+
+pf = pq.ParquetFile('large.parquet')
+for batch in pf.iter_batches(batch_size=100_000):
+    chunk = batch.to_pandas()
+    # 청크 단위 처리
+```
+
+## pandas 2.x 권장 패턴
+
+```python
+# pyarrow backend + nullable dtype 통합
+df = pd.read_parquet('data.parquet', dtype_backend='pyarrow')
+# 모든 컬럼이 arrow dtype
+# string[pyarrow], int64[pyarrow], bool[pyarrow] 등
+
+# 처리 후 저장
+df.to_parquet('result.parquet', compression='zstd', index=False)
+```
+
+## S3 / 클라우드 활용
+
+```python
+import s3fs
+
+# S3 에서 읽기
+df = pd.read_parquet('s3://bucket/prefix/data.parquet')
+
+# S3 에 쓰기
+df.to_parquet('s3://bucket/prefix/output.parquet')
+
+# partitioned S3
+df.to_parquet('s3://bucket/events/', partition_cols=['year', 'month'])
+```
+
+`s3fs` 패키지만 설치하면 pandas 가 자동 감지.
 
 ## 자주 만나는 함정
 
@@ -144,21 +227,61 @@ pd.read_parquet('data.parquet').to_csv('data.csv', index=False)
 
 ```python
 df.to_parquet('out.parquet')
-# category, period, sparse 등은 일부 변환 / 미지원
+# category, period, sparse 등은 일부 변환 또는 미지원
 ```
 
 `engine='pyarrow'` 가 가장 호환성 좋음.
 
-### 3. partitioned 컬럼이 다시 안 들어옴
+### 3. partitioned 컬럼이 string 으로 복원
 
 ```python
 df.to_parquet('events/', partition_cols=['year'])
 # 읽을 때 'year' 는 string dtype 으로 복원 (path 파싱이므로)
 pd.read_parquet('events/').dtypes
 # year: object (string)
+
+# 수동으로 복원
+df['year'] = df['year'].astype('int64')
 ```
 
-## 참고
+### 4. index 포함 여부
+
+```python
+df.to_parquet('out.parquet', index=True)   # 기본: index 포함
+df.to_parquet('out.parquet', index=False)  # index 제외 (불필요한 컬럼 회피)
+```
+
+RangeIndex 는 어차피 재생성 가능하므로 `index=False` 권장.
+
+### 5. row group size 와 필터 효율
+
+```python
+# 기본 row group 크기 (pyarrow: 약 128MB)
+# 필터링 효율은 row group 이 작을수록 좋음
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+table = pa.Table.from_pandas(df)
+pq.write_table(table, 'out.parquet', row_group_size=50_000)
+```
+
+### 6. 스키마 불일치
+
+```python
+# 여러 parquet 파일을 합칠 때 스키마가 달라 오류 가능
+pd.read_parquet('dir/')  # schema 불일치 시 ArrowInvalid
+
+# 강제 합치기
+import pyarrow.dataset as ds
+dataset = ds.dataset('dir/', format='parquet')
+df = dataset.to_table(schema=...).to_pandas()
+```
+
+## 관련 위키
 
 - [[Pandas read_csv]]
 - [[Pandas pyarrow backend]]
+- [[Pandas Nullable Types (Int64, boolean, string[pyarrow])]]
+- [[Pandas DataFrame]]
+- [[Pandas info / memory_usage / describe]]

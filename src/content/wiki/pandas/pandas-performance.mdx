@@ -13,6 +13,35 @@ references:
 
 pandas 의 흔한 성능 함정과 최적화 패턴. **벡터화 + dtype 선택 + 알고리즘** 의 조합이 핵심.
 
+## 사용 상황
+
+| 상황 | 권장 접근 |
+|:---|:---|
+| 단순 사칙연산 느림 | 벡터화, 내장 메서드 사용 |
+| 메모리 부족 (OOM) | dtype 변환, `category` 활용 |
+| CSV 로드 병목 | Parquet 전환, `usecols` 지정 |
+| 수치 루프 피할 수 없음 | `numba.jit` |
+| 수억 행 이상 처리 | dask / polars / modin 검토 |
+| groupby / join 느림 | 키 dtype 통일, 정렬 선행 |
+
+## 최적화 의사결정 흐름
+
+```mermaid
+flowchart TD
+    A[성능 문제 감지] --> B{프로파일 결과}
+    B -->|"Python 루프 / apply"| C[벡터화로 교체]
+    B -->|메모리 부족| D["dtype + category 변환"]
+    B -->|"I/O 병목"| E["Parquet + usecols"]
+    C --> F{여전히 느림?}
+    D --> F
+    E --> F
+    F -->|수치 루프 불가피| G["numba.jit"]
+    F -->|메모리 초과| H["dask / chunked"]
+    F -->|해결됨| I[완료]
+    G --> I
+    H --> I
+```
+
 ## 1. 벡터 연산 우선
 
 ```python
@@ -161,6 +190,79 @@ df.memory_usage(deep=True).sort_values(ascending=False)
 ```
 
 어느 컬럼이 메모리를 많이 쓰는지 확인.
+
+## 13. 성능 측정 도구
+
+```python
+import time
+
+# 단순 타이밍
+start = time.perf_counter()
+result = df.groupby('x')['y'].sum()
+print(f"elapsed: {time.perf_counter() - start:.4f}s")
+
+# cProfile
+import cProfile
+cProfile.run(
+    "df.groupby('x')['y'].agg(['sum', 'mean'])",
+    sort='cumulative'
+)
+
+# 컬럼별 메모리 내림차순
+df.memory_usage(deep=True).sort_values(ascending=False)
+```
+
+Jupyter 에서는 `%timeit`, `%time` 셀 매직이 더 편리하다.
+`memory_usage(deep=True)` 로 병목 컬럼을 파악하고 dtype 최적화 대상을 선정.
+
+## 14. numba (수치 루프 가속)
+
+Python 루프가 꼭 필요하고 벡터화 표현이 불가능한 경우:
+
+```python
+from numba import njit
+import numpy as np
+
+@njit(cache=True)
+def rolling_ratio(arr, window):
+    n = len(arr)
+    out = np.empty(n)
+    for i in range(n):
+        total = 0.0
+        cnt = 0
+        for j in range(max(0, i - window + 1), i + 1):
+            total += arr[j]
+            cnt += 1
+        out[i] = total / cnt if cnt else 0.0
+    return out
+
+# 첫 호출: JIT 컴파일, 이후 호출: C 수준 속도
+df['rolling_avg'] = rolling_ratio(df['value'].to_numpy(), window=7)
+```
+
+- `cache=True` 로 컴파일 결과를 디스크에 저장해 재기동 시 재컴파일 생략
+- GPU 가속이 필요하면 RAPIDS cuDF 검토
+- 함수 시그니처가 바뀌면 캐시 무효화됨
+
+## 15. Dask (메모리 초과 대용량 처리)
+
+단일 머신 메모리를 넘는 데이터:
+
+```python
+import dask.dataframe as dd
+
+# 여러 CSV 를 lazy 로드
+ddf = dd.read_csv('data/*.csv', dtype={'id': 'int32'})
+
+# pandas 와 유사한 API
+result = ddf.groupby('city')['revenue'].sum().compute()
+
+# Parquet 파티셔닝 출력
+ddf.to_parquet('out/', partition_on=['year'])
+```
+
+`compute()` 호출 전까지 실제 연산은 발생하지 않음 (lazy evaluation).
+`dask.distributed` 로 클러스터 분산 처리도 가능.
 
 ## 함정
 
