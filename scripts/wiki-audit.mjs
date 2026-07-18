@@ -68,7 +68,8 @@ async function main() {
     const files = await walk(dir);
     for (const file of files) {
       const raw = await fs.readFile(file, 'utf-8');
-      let fm = {}, body = '';
+      let fm;
+      let body;
       try {
         const parsed = parseFrontmatter(raw);
         fm = parsed.frontmatter ?? {};
