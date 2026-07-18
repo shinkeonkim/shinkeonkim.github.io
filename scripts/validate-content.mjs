@@ -13,6 +13,21 @@ const args = new Set(process.argv.slice(2));
 const STRICT = args.has('--strict');
 const JSON_OUT = args.has('--json');
 
+// Strip fenced code blocks (``` ... ```), inline code (`...`), and the
+// template-literal-valued JSX props used by <CodeWithOutput code={`...`}
+// output={`...`} />, so wikilink-like tokens inside code samples (e.g.
+// Pandas `df[['a', 'b']]`, TOML `[[users]]`, Bash `[[ -f $x ]]`) are not
+// flagged as broken links. Also unescape the GFM table pipe escape `\|`
+// so a wikilink written as `[[slug\|display]]` inside a table cell
+// parses correctly.
+function stripCode(body) {
+  return body
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/\b(?:code|output|result)=\{`[\s\S]*?`\}/g, '')
+    .replace(/`[^`\n]*`/g, '')
+    .replace(/\\\|/g, '|');
+}
+
 async function walk(dir) {
   const out = [];
   let entries;
@@ -237,9 +252,10 @@ async function main() {
     }
 
     if (e.body && e.body.includes('[[')) {
+      const scanned = stripCode(e.body);
       const re = new RegExp(WIKILINK_RE.source, WIKILINK_RE.flags);
       let match;
-      while ((match = re.exec(e.body)) !== null) {
+      while ((match = re.exec(scanned)) !== null) {
         const target = match[1] ? normKey(match[1].trim()) : '';
         if (!target) continue;
         if (!slugMap.has(target)) {
