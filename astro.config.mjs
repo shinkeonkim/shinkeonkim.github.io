@@ -123,6 +123,7 @@ export default defineConfig({
     AutoImport({
       imports: [
         './src/features/code-with-output/ui/CodeWithOutput.astro',
+        './src/features/url-preview/ui/UrlPreview.astro',
         './src/widgets/chart-js/ChartJs.tsx',
       ],
     }),
