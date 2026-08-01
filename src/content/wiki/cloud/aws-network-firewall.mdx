@@ -2,19 +2,24 @@
 title: "[AWS] Network Firewall"
 aliases:
   - "AWS Network Firewall"
-  - "Network Firewall"
   - "ANF"
   - "Suricata AWS"
   - "AWS 네트워크 방화벽"
-  - "Gateway Load Balancer Firewall"
+  - "Network Firewall FQDN filtering"
 tags: [aws, cloud, security, firewall, network, vpc]
 category: cloud
-updated: 2026-07-07
+updated: 2026-07-30
 references:
   - title: "AWS Network Firewall Developer Guide"
     url: "https://docs.aws.amazon.com/network-firewall/latest/developerguide/what-is-aws-network-firewall.html"
+  - title: "Stateful Rule Groups (IPS)"
+    url: "https://docs.aws.amazon.com/network-firewall/latest/developerguide/stateful-rule-groups-ips.html"
+  - title: "Domain List Rule Groups"
+    url: "https://docs.aws.amazon.com/network-firewall/latest/developerguide/stateful-rule-groups-domain-names.html"
   - title: "Suricata Rule Format"
     url: "https://suricata.readthedocs.io/en/latest/rules/"
+  - title: "TLS SNI (RFC 6066)"
+    url: "https://datatracker.ietf.org/doc/html/rfc6066#section-3"
 ---
 
 ## 정의
@@ -91,18 +96,208 @@ drop ip any any -> [$MALICIOUS_IPS] any (msg:"Known bad IP"; sid:1000003;)
 **action**: `alert`, `drop`, `pass`, `reject`.
 **direction**: `->` (단방향), `<>` (양방향).
 
-### 도메인 리스트 (간편)
+## FQDN 기반 필터링 (Deep Dive)
 
-Suricata 대신 도메인 리스트로 필터:
+**FQDN (Fully Qualified Domain Name)** 필터링은 *IP 대신 도메인 이름으로* 트래픽을 허용/차단하는 능력. `example.com`, `*.malicious.net`, `internal.corp.local` 같은 규칙을 쓸 수 있다.
+
+**왜 중요한가**: IP 만으로는 부족한 이유들.
+
+- **CDN / 클라우드 서비스**: `github.com`, `s3.amazonaws.com` 등은 수천 IP → CIDR 로는 불가능
+- **동적 IP**: 서비스가 IP 를 자주 바꿈
+- **정책의 표현력**: "우리 회사는 github 만 허용" 이 IP 대역 스캔보다 명확
+- **감사**: "어느 도메인으로 나갔는지" 가 IP 보다 이해하기 쉬움
+
+### 도메인 리스트 (Domain List) 규칙
+
+Suricata 문법 없이 관리자 친화적 방식.
 
 ```yaml
 RulesSourceList:
-  Targets: ['bad.example.com', '.malware.net']
-  TargetTypes: ['HTTP_HOST', 'TLS_SNI']
-  GeneratedRulesType: DENYLIST
+  Targets:
+    - 'example.com'          # 정확한 도메인
+    - '.github.com'          # 서브도메인 포함 (github.com + *.github.com)
+    - 'api.stripe.com'
+  TargetTypes:
+    - 'HTTPS'                # TLS SNI 기반
+    - 'HTTP'                 # HTTP Host header 기반
+  GeneratedRulesType: ALLOWLIST   # 또는 DENYLIST
 ```
 
-**HTTP Host** (평문) 와 **TLS SNI** (HTTPS 도메인) 로 감지.
+**동작 방식**:
+- **ALLOWLIST**: 리스트의 도메인만 허용, 나머지 차단
+- **DENYLIST**: 리스트의 도메인만 차단, 나머지 허용
+
+**Wildcard**:
+- `.github.com` = `github.com` + `*.github.com` (모든 서브도메인)
+- `github.com` = 정확히 이 도메인만
+
+### 어떻게 도메인을 감지하는가 (프로토콜별)
+
+Network Firewall 은 트래픽의 **평문 부분** 에서 도메인 정보를 추출.
+
+#### HTTP (평문 80)
+
+**HTTP Host 헤더** 를 파싱.
+
+```
+GET /api/data HTTP/1.1
+Host: api.example.com          ← 여기 매칭
+User-Agent: ...
+```
+
+- 각 HTTP 요청마다 Host 확인
+- 명확하고 확실 (평문이므로)
+
+#### HTTPS (TLS 443)
+
+**TLS ClientHello 안의 SNI (Server Name Indication) 확장** 을 파싱.
+
+```
+Client → Server: TCP SYN
+Server → Client: TCP SYN-ACK
+Client → Server: TCP ACK
+Client → Server: TLS ClientHello
+  ├─ Cipher suites
+  ├─ Extensions:
+  │   └─ server_name: "api.example.com"  ← SNI (평문 노출!)
+  └─ ...
+Server → Client: TLS ServerHello + Certificate
+... (이후 완전 암호화)
+```
+
+**핵심**: SNI 는 TLS handshake 초반 (평문) 에 노출됨. 브라우저가 어느 사이트에 접속하려는지 서버가 알아야 (multi-tenant hosting) 하기 때문. Network Firewall 은 이 SNI 만 보고 결정.
+
+**중요한 함의**:
+- 실제 응답 데이터는 여전히 암호화. Network Firewall 은 **못 봄** (TLS Inspection 옵션 없이는)
+- SNI 필터링은 **connection 초기** 에 결정 → 이후 데이터는 통과
+- 하나의 도메인 (예: github.com) 이 여러 IP 로 서빙되어도 SNI 하나로 감지
+
+### 상세 흐름 예시
+
+```mermaid
+sequenceDiagram
+    participant C as Client (VPC)
+    participant NF as Network Firewall
+    participant S as bad.example.com
+
+    Note over NF: Domain List DENYLIST:<br/>[".bad.example.com"]
+
+    C->>NF: DNS 조회 (bad.example.com → 1.2.3.4)
+    Note over NF: DNS 는 통과 (별도 필터)
+
+    C->>NF: TCP SYN → 1.2.3.4:443
+    NF->>NF: 5-tuple 매칭, connection 시작
+
+    C->>NF: TLS ClientHello (SNI = bad.example.com)
+    NF->>NF: SNI 파싱 → DENYLIST 매칭
+    NF-->>C: RST (drop, msg logged)
+
+    Note over C,S: 연결 성립 실패
+```
+
+### Wildcard 패턴 예제
+
+| 규칙 | 매칭 |
+|:---|:---|
+| `example.com` | `example.com` 정확히 (서브도메인 X) |
+| `.example.com` | `example.com` + `www.example.com` + `api.example.com` + ... |
+| `api.example.com` | 정확히 그 서브도메인만 |
+| `.` (dot only) | 모든 도메인 (사실상 all) |
+
+**주의**: `*.example.com` 형식은 지원 X. 리딩 dot (`.`) 이 표준.
+
+### FQDN 필터링의 근본적 한계
+
+**우회 가능한 경우들**:
+
+#### 1. Encrypted DNS (DoH / DoT)
+
+- DoH (DNS over HTTPS, `443` 위), DoT (DNS over TLS, `853`)
+- 클라이언트가 DNS 조회를 암호화된 채로 external resolver (Cloudflare 1.1.1.1, Google 8.8.8.8) 에 보냄
+- Network Firewall 은 도메인 결정 자체를 못 봄
+- **완화**: 조직 정책으로 DoH/DoT 를 차단 (특정 IP/포트) + 사내 DNS 강제
+
+#### 2. Encrypted Client Hello (ECH)
+
+- TLS 1.3 확장. SNI 를 암호화해서 전송
+- Network Firewall 이 도메인을 못 알아냄
+- **완화**: ECH 사용 트래픽 차단 (미묘, 미래에 확산될 것)
+
+#### 3. IP 직접 접근
+
+- 클라이언트가 도메인 없이 IP 로 접근 (`https://1.2.3.4/`)
+- SNI 없음 (SNI 는 선택적 확장이지만, 대부분 있음)
+- **완화**: SNI 없는 TLS 를 차단하는 stateful 규칙
+
+#### 4. Fronting (도메인 위장)
+
+- 공격자가 SNI 에 `legit.example.com` 을 쓰고 실제로는 `bad.example.com` 로 요청 (CDN 뒤에서)
+- Legit CDN 은 실제 Host 헤더 기반 라우팅
+- **완화**: TLS Inspection 으로 실제 Host 확인 (성능/프라이버시 트레이드오프)
+
+### TLS Inspection (도메인 이상의 검사)
+
+TLS 를 복호화해 내부 콘텐츠까지 검사. Network Firewall 이 관리형으로 지원 (2023+).
+
+**동작**:
+1. Network Firewall 이 자체 CA 인증서로 TLS 종단 (MITM)
+2. 클라이언트 → Firewall (Firewall CA 신뢰 필요)
+3. Firewall → Server (기존 TLS)
+4. 사이에서 평문 검사
+
+**요구**:
+- 클라이언트가 Firewall CA 신뢰
+- 인증서 관리 부담
+- SSL Pinning 하는 앱은 실패
+
+**의미**: FQDN 필터링을 넘어 **실제 페이로드까지** 검사. 하지만 프라이버시/성능/관리 비용 증가.
+
+### FQDN 필터링 vs Route 53 Resolver DNS Firewall
+
+AWS 는 두 가지 도메인 기반 방화벽을 제공. 원리가 다름.
+
+| 축 | Network Firewall FQDN | Route 53 Resolver DNS Firewall |
+|:---|:---|:---|
+| **작동 지점** | TCP/TLS 트래픽 (연결 시도 시점) | DNS 조회 시점 |
+| **감지 방법** | HTTP Host / TLS SNI | DNS query 도메인 |
+| **차단 방식** | RST / drop packet | DNS 응답 조작 (NXDOMAIN) |
+| **암호화 DNS 우회** | 우회 가능 | 사내 DNS 강제 시 효과 |
+| **적용 대상** | VPC 를 지나는 모든 트래픽 | VPC 안 DNS 요청 |
+| **성능 부담** | 각 세션 SNI 파싱 | DNS 조회당 |
+
+**조합 권장**:
+- Route 53 DNS Firewall → 조회 자체 차단 (빠름, 근본적)
+- Network Firewall FQDN → DNS 로 해결된 후 실제 연결 시도 차단 (이중 방어)
+
+### Managed Domain List (AWS 제공)
+
+AWS 가 유지하는 도메인 리스트 subscribe 가능:
+- **MalwareDomainsActionOrder**: 알려진 malware 배포 도메인
+- **BotNetCommandAndControlDomainsActionOrder**: C2 서버
+- **AbusedLegitDomainsActionOrder**: 남용되는 정상 도메인
+
+자동 업데이트. 자체 관리 부담 감소.
+
+## Suricata 로 FQDN 규칙 직접 작성
+
+Domain List 대신 Suricata 규칙으로 더 세밀한 제어.
+
+```
+# TLS SNI 정확 매칭
+drop tls any any -> any 443 (msg:"Block bad site"; \
+  tls.sni; content:"bad.example.com"; nocase; \
+  sid:2001; rev:1;)
+
+# HTTP Host 헤더 매칭 (서브도메인 포함)
+drop http any any -> any 80 (msg:"Block subdomain"; \
+  http.host; content:".malware.net"; endswith; nocase; \
+  sid:2002; rev:1;)
+
+# 조건부 (특정 소스만)
+drop tls $INTERNAL_NET any -> any 443 (msg:"Internal client blocked"; \
+  tls.sni; content:"gambling.site"; nocase; \
+  sid:2003;)
+```
 
 ## 관리형 Rule Groups (AWS)
 
