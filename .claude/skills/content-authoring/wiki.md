@@ -138,40 +138,103 @@ references:                                      # ReferenceItem[]
 
 ## Aliases 작성 (위키링크 매칭의 핵심)
 
-`aliases`는 wikilink가 이 페이지를 찾을 때 쓰는 대체 이름들.
+`aliases`는 wikilink가 이 페이지를 찾을 때 쓰는 대체 이름들. **잘못 걸면 다른 문서의 wikilink 를 조용히 훔쳐옴** → wikilink 해석 이상의 주범.
 
-### 예: `js-function.mdx`
+### 해석 규칙 (반드시 이해)
+
+wikilink `[[X]]` 는 다음 우선순위로 매칭 (모두 NFC + lowercase 정규화 후):
+
+1. **파일 경로** (`network/tcp`) → 해당 파일
+2. **파일명** (`tcp`) → 같은 이름 파일 (여러 개면 first-come-first-served)
+3. **Frontmatter `title`** (`TCP`)
+4. **Frontmatter `aliases`** 배열의 각 항목
+
+같은 key 가 여러 문서에서 등록되면 **파일 walk 순서상 첫 번째로 등록된 것이 승** ("first wins"). 나머지 문서는 조용히 실패.
+
+**결과**: 문서 A 에 alias `Foo` 를 걸었는데, 이미 문서 B 가 alias `Foo` 를 갖고 있으면, 모든 `[[Foo]]` 는 B 로 감. A 는 절대 도달 불가.
+
+### Alias 작성 규칙 (NON-NEGOTIABLE)
+
+**금지 사항** (`validate:aliases` 로 검출됨, hard error):
+
+1. **Cross-file 충돌**: 이미 다른 문서가 slug / filename / title / alias 로 소유한 이름을 alias 로 등록 X
+2. **자체 파일 내 중복**: 대소문자 다르게 (`Parquet`, `parquet`) 등록해도 정규화 후 같은 것으로 취급되어 중복
+3. **자기 파일의 title / filename / slug 와 동일한 alias 무의미**: 자동 매칭되므로 등록해도 이득 없음, 리팩터링 여지 생김
+
+**소프트 금지** (soft warning, 신규 작성 시 안 나오게):
+
+4. **너무 일반적인 단일 단어 금지**: `state`, `manager`, `store`, `config`, `session`, `user`, `event`, `api`, `service`, `access`, `network`, `security`, `auth`, `plan` 등 → 다른 문서와 필연 충돌 (blocklist 는 `scripts/validate-aliases.mjs` 의 `GENERIC_BLOCKLIST` 참조)
+5. **10 개 초과**: `aliases` 는 3-8개가 관용. 너무 많으면 다른 문서와 충돌 확률 증가
+
+### 좋은 예: `js-function.mdx`
 
 ```yaml
 ---
 title: "[Javascript] function"
 aliases:
-  - "function"                # 영문 원형
-  - "함수"                    # 한국어 일반
-  - "JS function"             # 컨텍스트 명시
-  - "JavaScript function"     # 표준 명
-  - "function declaration"    # 변형
-  - "function expression"     # 변형
+  - "JS function"              # 서비스/언어 접두로 유일
+  - "JavaScript function"      # 명시적 언어 명시
+  - "function declaration"     # JS 특화 용어
+  - "function expression"      # JS 특화 용어
+  # 금지: "function" (다른 언어와 충돌), "함수" (너무 일반)
 ---
 ```
 
-이렇게 하면 모든 글에서 다음 모두 같은 페이지로 연결:
-- `[[function]]`
-- `[[함수]]`
-- `[[JS function]]`
-- `[[JavaScript function]]`
-- `[[function declaration]]`
+**패턴**:
+- 언어/서비스 접두로 unique 하게 (`JS function`, `Spring @Async`, `SSM Parameter Store`)
+- 도메인 특화 용어 (`function declaration`) 는 자연스러움
+- 일반 한국어 (`함수`) 는 다른 언어 위키가 있으면 충돌 위험 → 명시적 언어 접두 (`자바스크립트 함수`) 권장
 
-### 예: `redis.md`
+### 좋은 예: `redis.md`
 
 ```yaml
 ---
 title: "Redis"
 aliases:
-  - "redis"                   # 소문자
-  - "레디스"                  # 한국어
+  - "레디스"                   # 한국어 (다른 언어와 충돌 없는 특유 명칭)
 ---
 ```
+
+**설명**: filename 이 `redis` 이므로 `[[redis]]` 는 자동으로 매칭. title `"Redis"` 도 자동. alias 로 굳이 `redis` 를 다시 등록하는 것은 self-redundant.
+
+### 나쁜 예 (실제 검출된 것)
+
+```yaml
+# 나쁨: aws-secrets-manager.mdx 가 Parameter Store 을 alias 로 주장
+# → 실제 dedicated wiki 인 aws-ssm-parameter-store.mdx 로 가는 링크가 조용히 여기로 감
+aliases:
+  - "AWS Secrets Manager"
+  - "Secrets Manager"
+  - "Parameter Store"          # ❌ 다른 dedicated wiki 소유
+  - "SSM Parameter Store"      # ❌ 다른 dedicated wiki 소유
+```
+
+```yaml
+# 나쁨: 같은 이름의 대소문자 다른 버전
+aliases:
+  - "Parquet"       # ✓
+  - "parquet"       # ❌ 정규화 후 "Parquet" 와 동일 → 중복
+```
+
+```yaml
+# 나쁨: 자기 title / filename 과 동일
+# filename: etl.mdx / title: "ETL / ELT"
+aliases:
+  - "ETL"           # ❌ filename 이 이미 매칭됨, alias 무의미
+  - "ELT"           # ✓ (title 에 있지만 slash 로 결합된 부분)
+```
+
+### 작성 후 반드시 실행
+
+```bash
+bun run validate:aliases
+```
+
+- Hard error (충돌, 자체 중복): **exit 1**
+- Soft warning (self-redundant, excessive, generic, broken): 리포트만
+- 신규 wiki 작성 시 → hard error 0 건 + soft warning 도 새로 생기지 않게
+
+`bun run validate:aliases:strict` 는 soft warning 도 실패 처리.
 
 ## 위키링크 문법 (모든 컨텐츠 공통)
 

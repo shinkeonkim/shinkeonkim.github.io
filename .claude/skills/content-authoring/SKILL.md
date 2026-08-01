@@ -69,6 +69,33 @@ shinkeonkim.com 블로그(Astro 6 + MDX + GitHub Pages)의 모든 컨텐츠 작�
 
 깨진 링크는 `<a class="wikilink broken" aria-disabled="true">`로 렌더링됨, 빌드는 통과하지만 `validate:content`가 WARN. 자세히는 [wiki.md](wiki.md), [markdown-syntax.md](markdown-syntax.md).
 
+### 4-1. Alias 는 신중하게 (매우 중요)
+
+**같은 이름을 여러 문서가 alias 로 주장하면 wikilink 는 첫 번째 등록된 문서로만 연결됨** (해석 우선순위 slug > filename > title > alias 중 첫 등장자 승, "first wins"). 나머지 문서로 가는 링크는 조용히 엉뚱한 곳으로 감. 이걸 방지하기 위해 alias 는 다음 규칙 준수.
+
+**금지 사항 (NON-NEGOTIABLE)**:
+1. **Cross-file 충돌 금지** - 이미 다른 문서가 title / filename / alias 로 소유한 이름을 alias 로 등록 X
+2. **자체 파일 내 중복 alias 금지** - 대소문자 다르게 (`Parquet`, `parquet`) 등록해도 정규화 후 같은 것으로 취급되어 중복
+3. **자기 파일의 title / filename / slug 와 동일한 alias 금지** - 자동 매칭되므로 무의미
+4. **너무 일반적인 단일 단어 alias 금지** - `state`, `manager`, `store`, `config`, `session`, `user`, `event`, `api`, `service`, `access` 등은 다른 문서와 필연 충돌
+5. **`aliases` 개수 10개 초과 금지** - 정말 필요한 3-8개만
+
+**권장 패턴**:
+- 서비스별 접두 명시: `SSM Parameter Store` O, `Parameter Store` 는 dedicated wiki 만
+- 한국어/영어 원형 + 확장어 (3-6개 정도)
+- 부분 개념/하위 기능은 별도 wiki 를 만들고 그 쪽에서 소유
+
+**작성 후 반드시 실행**:
+```bash
+bun run validate:aliases
+```
+
+- 이 스크립트는 **cross-file 충돌 / 자체 중복 / self-redundant / excessive / broken wikilink** 를 종합 감지.
+- **Hard error (충돌, 자체 중복) 는 exit 1**. 새 wiki 작성 시 반드시 0건 유지.
+- Soft warning (self-redundant, excessive, generic) 은 리팩터링 대상. 신규 작성 시 안 나오게.
+
+자세히는 [wiki.md#alias-작성-규칙](wiki.md#alias-작성-규칙).
+
 ### 5. MDX에서만 가능한 것 vs .md에서도 가능한 것
 
 | 기능 | .md | .mdx |
@@ -143,6 +170,8 @@ bun run validate:animations           # animation JSON 검증
 bun run validate:wiki-category        # wiki 폴더 vs category 정합성
 bun run validate:content              # WARN까지 표시
 bun run validate:content:strict       # WARN도 실패
+bun run validate:aliases              # alias 충돌 / broken 검사 (prebuild 미포함, 수동 실행)
+bun run validate:aliases:strict       # 위 + soft warning 도 실패
 bun run audit:alt                     # 이미지 alt 감사 (prebuild 미포함, 수동 실행)
 bun astro check                       # 타입 검증
 ```
@@ -164,6 +193,7 @@ bun astro check                       # 타입 검증
 - [ ] Wiki 파일은 폴더와 `category` frontmatter 일치 → `bun run validate:wiki-category`
 - [ ] Animation JSON 은 스키마 + 참조 무결성 통과 → `bun run validate:animations`
 - [ ] `bun run validate:content` 통과
+- [ ] **`bun run validate:aliases` 새 collision / 새 broken wikilink 없음** (신규 wiki 작성 시 반드시)
 - [ ] `bun astro check` 통과
 
 ## VSCode 스니펫
