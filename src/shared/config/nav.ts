@@ -8,8 +8,8 @@ export const NAV_ITEMS = [
 ] as const;
 
 export const EXTERNAL_NAV_ITEMS = [
-  { href: 'https://shinkeonkim.com/my-resume', label: '이력서' },
-  { href: 'https://shinkeonkim.com/my-portfolio', label: '포트폴리오' },
+  { href: 'https://resume.shinkeonkim.com/', label: '이력서' },
+  { href: 'https://portfolio.shinkeonkim.com/', label: '포트폴리오' },
 ] as const;
 
 export const DEV_NAV_ITEMS = [
@@ -52,9 +52,9 @@ export const FOOTER_NAV_GROUPS = [
   {
     title: '외부',
     links: [
-      { href: 'https://shinkeonkim.com/my-resume', label: '이력서', external: true },
-      { href: 'https://shinkeonkim.com/my-portfolio', label: '포트폴리오', external: true },
-      { href: 'https://shinkeonkim.com/my-cv', label: 'CV', external: true },
+      { href: 'https://resume.shinkeonkim.com/', label: '이력서', external: true },
+      { href: 'https://portfolio.shinkeonkim.com/', label: '포트폴리오', external: true },
+      { href: 'https://cv.shinkeonkim.com/', label: 'CV', external: true },
       { href: 'https://github.com/shinkeonkim', label: 'GitHub', external: true },
     ],
   },
