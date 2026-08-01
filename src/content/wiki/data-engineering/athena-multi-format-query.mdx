@@ -1,0 +1,447 @@
+---
+title: "Athena 다중 포맷 쿼리: JSON, CSV, Parquet, Iceberg"
+aliases:
+  - "Athena JSON query"
+  - "Athena Parquet query"
+  - "Athena SerDe"
+  - "Athena nested query"
+  - "Athena multi-format"
+  - "Athena UNNEST"
+  - "Athena JSON_EXTRACT"
+  - "Athena Iceberg query"
+  - "Athena CTAS conversion"
+tags: [aws, athena, data-engineering, json, parquet, serde, iceberg]
+category: data-engineering
+updated: 2026-07-30
+references:
+  - title: "Athena Supported SerDes and Data Formats"
+    url: "https://docs.aws.amazon.com/athena/latest/ug/supported-serdes.html"
+  - title: "Athena JSON SerDe"
+    url: "https://docs.aws.amazon.com/athena/latest/ug/json-serde.html"
+  - title: "Athena Nested JSON"
+    url: "https://docs.aws.amazon.com/athena/latest/ug/reading-nested-arrays.html"
+  - title: "Athena CTAS 개요"
+    url: "https://docs.aws.amazon.com/athena/latest/ug/ctas.html"
+  - title: "Athena Iceberg Support"
+    url: "https://docs.aws.amazon.com/athena/latest/ug/querying-iceberg.html"
+---
+
+## 정의
+
+[[aws-athena|Amazon Athena]] 는 하나의 SQL 인터페이스에서 *[[aws-s3|S3]] 에 저장된 여러 포맷의 데이터를 그대로 조회* 할 수 있음. 각 포맷은 **SerDe** (Serializer/Deserializer) 로 해석되며, 파일 종류별로 다른 문법과 성능 트레이드오프가 있음. 이 페이지는 실전에서 가장 자주 만나는 **JSON, CSV, [[apache-parquet|Parquet]], Iceberg** 를 다중 포맷 관점에서 정리.
+
+## 지원 파일 포맷 & SerDe 매핑
+
+| 포맷 | SerDe (기본) | 특징 | 스캔 비용 (상대) |
+|:---|:---|:---|:---|
+| **CSV / TSV** | `LazySimpleSerDe`, `OpenCSVSerDe` | 사람이 읽기 편함, 대용량 부적합 | 100 (기준) |
+| **JSON** | `Hive JsonSerDe`, `OpenX JsonSerDe` | 반정형, 유연 | ~80 |
+| **[[apache-parquet\|Parquet]]** | 네이티브 (Trino) | 컬럼형 + 압축 | ~1-10 |
+| **ORC** | 네이티브 | 컬럼형 + 인덱스 | ~1-10 |
+| **Avro** | `AvroSerDe` | 로우형 + 스키마 | ~40 |
+| **Ion** | 네이티브 | Amazon Ion | ~40 |
+| **RegexSerDe** | `RegexSerDe` | 로그 파싱 (ALB, CloudFront, Apache) | ~100 |
+| **Grok** | `GrokSerDe` | 로그 패턴 매칭 | ~100 |
+| **Apache Iceberg** | 네이티브 (Parquet 기반) | ACID + Time travel | ~1-10 |
+| **Delta Lake** | 네이티브 (2024+) | ACID | ~1-10 |
+| **Apache Hudi** | 네이티브 | Incremental | ~1-10 |
+
+> [!IMPORTANT]
+> 스캔 비용 상대 지표는 **CSV 대비 대략**. 실제로 Parquet + 컬럼 프로젝션 + 파티션 프루닝 조합은 CSV 대비 **100-400배 저렴** 하기도.
+
+## CSV / TSV 쿼리
+
+### 기본 (LazySimpleSerDe)
+
+```sql
+CREATE EXTERNAL TABLE raw.access_log_csv (
+  timestamp STRING,
+  ip STRING,
+  method STRING,
+  path STRING,
+  status_code INT,
+  bytes BIGINT
+)
+ROW FORMAT DELIMITED
+  FIELDS TERMINATED BY ','
+  LINES TERMINATED BY '\n'
+STORED AS TEXTFILE
+LOCATION 's3://logs/access/'
+TBLPROPERTIES ('skip.header.line.count'='1');   -- 헤더 skip
+```
+
+### 인용부호 있는 CSV (OpenCSVSerDe)
+
+```sql
+CREATE EXTERNAL TABLE raw.customers_csv (
+  id INT,
+  name STRING,
+  address STRING   -- 콤마 포함 가능
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  'separatorChar' = ',',
+  'quoteChar' = '"',
+  'escapeChar' = '\\'
+)
+LOCATION 's3://raw/customers/';
+```
+
+> [!WARNING]
+> **`OpenCSVSerde` 는 모든 컬럼을 STRING 으로 읽음**. 숫자 컬럼은 쿼리 시 `CAST()` 필요. `LazySimpleSerDe` 는 스키마 대로 타입 캐스팅.
+
+## JSON 쿼리
+
+### JSON 데이터 예 (line-delimited JSON, NDJSON)
+
+```json
+{"user_id": 42, "event": "click", "ts": "2026-07-30T15:00:00Z", "props": {"page": "/home", "duration_ms": 320}}
+{"user_id": 43, "event": "view",  "ts": "2026-07-30T15:00:01Z", "props": {"page": "/products/1", "duration_ms": 5120}}
+```
+
+### 기본 (Hive JsonSerDe)
+
+```sql
+CREATE EXTERNAL TABLE raw.events_json (
+  user_id BIGINT,
+  event   STRING,
+  ts      STRING,
+  props   STRUCT<page: STRING, duration_ms: INT>
+)
+ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+LOCATION 's3://raw/events/';
+```
+
+### OpenX JsonSerDe (더 유연)
+
+```sql
+CREATE EXTERNAL TABLE raw.events_openx (
+  user_id BIGINT,
+  event   STRING,
+  ts      STRING,
+  props   MAP<STRING, STRING>
+)
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+WITH SERDEPROPERTIES (
+  'ignore.malformed.json' = 'true',              -- 파싱 실패 row skip
+  'dots.in.keys' = 'true',                       -- "user.id" 같은 키 허용
+  'case.insensitive' = 'true',                   -- 대소문자 무시
+  'mapping.userid' = 'user_id'                   -- 원본 -> 컬럼명 매핑
+)
+LOCATION 's3://raw/events/';
+```
+
+### 중첩 필드 접근
+
+```sql
+SELECT user_id,
+       event,
+       props.page AS page,
+       props.duration_ms AS duration
+FROM raw.events_json
+WHERE props.duration_ms > 1000;
+```
+
+### JSON_EXTRACT (SerDe 없이 raw string)
+
+컬럼을 STRING 으로 두고 필요할 때만 파싱:
+
+```sql
+CREATE EXTERNAL TABLE raw.events_raw (
+  payload STRING
+)
+LOCATION 's3://raw/events/';
+
+SELECT JSON_EXTRACT_SCALAR(payload, '$.user_id') AS user_id,
+       JSON_EXTRACT_SCALAR(payload, '$.props.page') AS page,
+       CAST(JSON_EXTRACT_SCALAR(payload, '$.props.duration_ms') AS INT) AS duration
+FROM raw.events_raw;
+```
+
+**장점**: 스키마 진화 자유. **단점**: 매번 파싱 (느림, 비쌈).
+
+### Array UNNEST
+
+```json
+{"user_id": 42, "tags": ["premium", "kr", "beta"]}
+```
+
+```sql
+CREATE EXTERNAL TABLE raw.users_json (
+  user_id BIGINT,
+  tags    ARRAY<STRING>
+)
+ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+LOCATION 's3://raw/users/';
+
+-- ARRAY 를 row 로 풀기
+SELECT u.user_id, tag
+FROM raw.users_json u, UNNEST(u.tags) AS t(tag);
+```
+
+### 중첩 ARRAY OF STRUCT
+
+```json
+{"order_id": 1, "items": [{"sku": "A", "qty": 2}, {"sku": "B", "qty": 1}]}
+```
+
+```sql
+CREATE EXTERNAL TABLE raw.orders_json (
+  order_id BIGINT,
+  items    ARRAY<STRUCT<sku: STRING, qty: INT>>
+)
+ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+LOCATION 's3://raw/orders/';
+
+-- UNNEST + STRUCT 필드 접근
+SELECT o.order_id, item.sku, item.qty
+FROM raw.orders_json o, UNNEST(o.items) AS t(item);
+```
+
+## [[apache-parquet|Parquet]] 쿼리
+
+### 기본
+
+```sql
+CREATE EXTERNAL TABLE curated.orders (
+  order_id BIGINT,
+  user_id BIGINT,
+  amount DECIMAL(10, 2),
+  order_ts TIMESTAMP
+)
+PARTITIONED BY (year INT, month INT)
+STORED AS PARQUET
+LOCATION 's3://curated/orders/'
+TBLPROPERTIES ('parquet.compression' = 'ZSTD');
+
+ALTER TABLE curated.orders ADD
+  PARTITION (year=2026, month=7)
+    LOCATION 's3://curated/orders/year=2026/month=7/';
+```
+
+### 컬럼 프로젝션 + 파티션 프루닝
+
+```sql
+-- 스캔 = 필요한 컬럼 × 필요한 파티션
+SELECT SUM(amount)
+FROM curated.orders
+WHERE year = 2026 AND month = 7;
+
+-- 전체 스캔 (파티션 프루닝 실패)
+SELECT SUM(amount) FROM curated.orders WHERE order_ts >= '2026-07-01';
+```
+
+> [!IMPORTANT]
+> 파티션 컬럼은 원본 그대로 (`year = 2026`), 함수/캐스팅 wrap 금지. 자세히: [[aws-athena|Athena]] 함정 섹션.
+
+### Parquet 중첩 필드
+
+Parquet 은 중첩 struct/list 를 컬럼형으로 저장. SQL 은 JSON 과 동일:
+
+```sql
+SELECT o.order_id, item.sku, item.qty
+FROM curated.orders_nested o, UNNEST(o.items) AS t(item);
+```
+
+## Apache Iceberg 쿼리
+
+```sql
+CREATE TABLE lakehouse.orders (
+  order_id BIGINT,
+  user_id BIGINT,
+  amount DECIMAL(10, 2),
+  order_date DATE
+)
+PARTITIONED BY (order_date)
+LOCATION 's3://lakehouse/orders/'
+TBLPROPERTIES (
+  'table_type' = 'ICEBERG',
+  'format' = 'parquet',
+  'write_compression' = 'zstd'
+);
+
+-- ACID
+INSERT INTO lakehouse.orders VALUES (1, 42, 100.00, DATE '2026-07-30');
+UPDATE lakehouse.orders SET amount = 200.00 WHERE order_id = 1;
+DELETE FROM lakehouse.orders WHERE order_id = 1;
+MERGE INTO lakehouse.orders AS t USING staging AS s
+  ON t.order_id = s.order_id
+  WHEN MATCHED THEN UPDATE SET amount = s.amount
+  WHEN NOT MATCHED THEN INSERT VALUES (s.order_id, s.user_id, s.amount, s.order_date);
+
+-- Time travel
+SELECT * FROM lakehouse.orders FOR TIMESTAMP AS OF TIMESTAMP '2026-07-01 00:00:00';
+SELECT * FROM lakehouse.orders FOR VERSION AS OF 12345;
+```
+
+자세히: [[aws-athena|Athena]] Iceberg 섹션.
+
+## 다중 포맷 조인 (같은 쿼리)
+
+Athena 는 서로 다른 포맷의 테이블을 자유롭게 조인.
+
+```sql
+SELECT
+  d.customer_name,          -- Parquet dimension
+  SUM(f.amount) AS revenue  -- Parquet fact
+FROM curated.customers d    -- Parquet
+JOIN raw.orders_json f      -- JSON raw
+  ON d.customer_id = f.user_id
+WHERE f.event = 'purchase'
+  AND d.country = 'KR'
+GROUP BY d.customer_name;
+```
+
+Athena 내부 (Trino) 가 각 SerDe 로 읽고 컬럼형으로 변환해 조인.
+
+## CTAS: 포맷 변환
+
+원본 CSV/JSON 을 [[apache-parquet|Parquet]] 로 승격.
+
+```sql
+CREATE TABLE curated.events_parquet
+WITH (
+  format = 'PARQUET',
+  parquet_compression = 'ZSTD',
+  external_location = 's3://curated/events/',
+  partitioned_by = ARRAY['year', 'month', 'day']
+)
+AS
+SELECT
+  user_id,
+  event,
+  CAST(from_iso8601_timestamp(ts) AS TIMESTAMP) AS event_ts,
+  props.page,
+  props.duration_ms,
+  YEAR(from_iso8601_timestamp(ts)) AS year,
+  MONTH(from_iso8601_timestamp(ts)) AS month,
+  DAY(from_iso8601_timestamp(ts)) AS day
+FROM raw.events_json
+WHERE from_iso8601_timestamp(ts) >= TIMESTAMP '2026-07-01';
+```
+
+**결과**:
+- 원본 JSON 대비 5-10 배 압축
+- 컬럼 프루닝 가능
+- 파티션 프루닝 가능
+- 이후 쿼리 요금 대폭 절감
+
+**주의**: CTAS 는 한 번에 최대 100 파티션. 대량이면 `INSERT INTO ... SELECT` 로 청크 분할.
+
+## INSERT INTO (증분 적재)
+
+```sql
+INSERT INTO curated.events_parquet
+SELECT ...
+FROM raw.events_json
+WHERE from_iso8601_timestamp(ts) >= DATE '2026-07-30'
+  AND from_iso8601_timestamp(ts) < DATE '2026-07-31';
+```
+
+Iceberg 이면 트랜잭션 with duplicate protection 도 가능 (MERGE).
+
+## 로그 파싱 (RegexSerDe)
+
+ALB/CloudFront/S3 access log 처럼 정해진 텍스트 로그:
+
+```sql
+CREATE EXTERNAL TABLE raw.alb_logs (
+  type STRING,
+  time STRING,
+  elb STRING,
+  client_ip STRING,
+  target STRING,
+  request_processing_time DOUBLE,
+  target_processing_time DOUBLE,
+  response_processing_time DOUBLE,
+  elb_status_code STRING,
+  target_status_code STRING,
+  received_bytes BIGINT,
+  sent_bytes BIGINT,
+  request STRING
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+WITH SERDEPROPERTIES (
+  'serialization.format' = '1',
+  'input.regex' = '([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*):([0-9]*) ([^ ]*)[:-]([0-9]*) ([-.0-9]*) ([-.0-9]*) ([-.0-9]*) (|[-0-9]*) (-|[-0-9]*) ([-0-9]*) ([-0-9]*) \"([^ ]*) (.*)\" ...'
+)
+LOCATION 's3://alb-logs/AWSLogs/123/elasticloadbalancing/us-east-1/2026/07/';
+```
+
+Athena 콘솔 안에 ALB / CloudFront / VPC Flow Logs 등 정형 CREATE TABLE snippet 이 있음.
+
+## 파일 포맷 선택 가이드
+
+| 시나리오 | 포맷 |
+|:---|:---|
+| 원본 이벤트 스트림 raw 저장 | JSON (스키마 진화 유연) |
+| 로그 원본 (외부 제공) | 그대로 (Parquet 변환 검토) |
+| 정제 후 분석 | **[[apache-parquet\|Parquet]] + ZSTD + partition** |
+| ACID 트랜잭션 필요 | Iceberg / Delta |
+| 사람이 읽기 필요 | CSV (임시), 아니면 Parquet + BI |
+| 사이즈 최적화 | Parquet + ZSTD (또는 GZIP) |
+| ML 학습 tensor | Parquet |
+
+## 스캔 비용 실제 (동일 데이터, 다른 포맷)
+
+원본 4 TB 로그 (uncompressed CSV, 100 컬럼) 를 컬럼 하나만 쿼리:
+
+| 포맷 | 스캔량 | 비용 (Athena $5/TB) |
+|:---|:---|:---|
+| CSV (uncompressed) | 4 TB | $20 |
+| CSV + GZIP | ~1.3 TB | $6.50 |
+| JSON (unc.) | ~3.2 TB | $16 |
+| Parquet (SNAPPY, 100 컬럼 -> 1 컬럼 프로젝션) | ~10 GB | $0.05 |
+| Parquet (ZSTD, 프로젝션 + 파티션 프루닝 90%) | ~1 GB | $0.005 |
+
+즉 **Parquet + partition + projection 조합은 CSV 대비 4000 배** 저렴.
+
+## 스키마 진화 다루기
+
+**JSON**:
+- OpenX SerDe + `ignore.malformed.json=true` 로 새 필드 자동 무시
+- 새 컬럼 추가 시 `ALTER TABLE ADD COLUMNS`
+
+**Parquet**:
+- 새 컬럼 추가 -> 옛 파일은 NULL 반환
+- 컬럼 타입 변경은 안전하지 않음 (Iceberg 로 승격 검토)
+
+**Iceberg**:
+- Schema evolution 이 first-class. 컬럼 추가/제거/이름 변경/타입 승격 모두 트랜잭션.
+
+## 함정
+
+> [!WARNING]
+> **`SELECT *` 로 JSON/CSV** = 전체 컬럼 파싱, 비용 폭탄. 필요 컬럼만 SELECT.
+
+> [!CAUTION]
+> **OpenCSVSerDe 는 모두 STRING**. 숫자/날짜 컬럼은 쿼리마다 CAST -> 느림. LazySimpleSerDe 로 스키마 지정 또는 [[apache-parquet|Parquet]] 로 승격.
+
+> [!WARNING]
+> **파티션 컬럼에 함수 적용** = 파티션 프루닝 실패. `WHERE year = 2026` 그대로.
+
+> [!IMPORTANT]
+> **JSON 중첩 필드 SerDe 매핑**. Hive JsonSerDe 는 대소문자 민감, OpenX 는 옵션. 소스 케이스 맞춰 SerDe 선택.
+
+> [!CAUTION]
+> **작은 파일 수천 개** = 성능/비용 폭탄. CTAS 로 정기 compaction.
+
+> [!WARNING]
+> **`JSON_EXTRACT` 남용** = 매 쿼리 파싱. 자주 쓰는 필드는 SerDe 로 매핑 또는 Parquet 로 승격.
+
+> [!IMPORTANT]
+> **Iceberg 를 Lake Formation 으로 등록** = DDL 제한. Athena 에서 UPDATE/DELETE 안 되는 경우.
+
+> [!CAUTION]
+> **CTAS 한 번에 100 파티션 초과** = 오류. `INSERT INTO ... SELECT` 로 나눠서.
+
+## 관련 위키
+
+- [[aws-athena|Amazon Athena]] - 상위 서비스
+- [[apache-parquet|Apache Parquet]] - 권장 포맷
+- [[aws-glue|AWS Glue]] - Catalog + Crawler
+- [[aws-s3|S3]] - 데이터 저장
+- [[data-lake|Data Lake]] - 다중 포맷 저장의 근본
+- [[data-warehouse|Data Warehouse]] - 정제 후 소비
+- [[aws-lake-formation|Lake Formation]] - 세분화 권한
+- [[etl|ETL / ELT]] - CTAS 파이프라인
