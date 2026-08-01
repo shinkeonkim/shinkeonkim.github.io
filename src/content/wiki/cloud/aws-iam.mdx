@@ -1,12 +1,16 @@
 ---
 title: "[AWS] IAM: User, Role, Policy, STS"
-aliases: ["IAM", "AWS IAM", "IAM Role", "IAM Policy", "STS", "AssumeRole", "Identity Center", "SSO"]
-tags: [aws, iam, security, auth, cloud]
+aliases: ["IAM", "AWS IAM", "IAM Role", "IAM Policy", "STS", "AssumeRole", "Identity Center", "SSO", "Permission Boundary", "권한 경계"]
+tags: [aws, iam, security, auth, cloud, governance]
 category: cloud
-updated: 2026-07-16
+updated: 2026-07-30
 references:
   - title: "AWS IAM"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html"
+  - title: "IAM 정책 평가 로직"
+    url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html"
+  - title: "IAM 모범 사례"
+    url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"
 ---
 
 ## 정의
@@ -74,32 +78,65 @@ flowchart LR
 
 ## Policy 종류
 
-| 종류 | 의미 |
-|---|---|
-| **AWS Managed** | AWS 가 관리 (`AmazonS3ReadOnlyAccess`) |
-| **Customer Managed** | 사용자 정의, 재사용 가능 |
-| **Inline** | User/Group/Role 에 직접 임베드 (재사용 불가) |
-| **Permission Boundary** | 최대 권한 상한 (Role 이 가질 수 있는 최대) |
-| **Service Control Policy** | Organization 수준 전체 상한 |
-| **Resource-based Policy** | 자원에 붙음 (S3 Bucket Policy, Lambda Permission 등) |
-| **Session Policy** | AssumeRole 시 임시로 줄이는 정책 |
+| 종류 | 부착 대상 | 권한 부여? | 의미 |
+|:---|:---|:---|:---|
+| **AWS Managed** | User/Group/Role | O | AWS 가 관리 (`AmazonS3ReadOnlyAccess`) |
+| **Customer Managed** | User/Group/Role | O | 사용자 정의, 재사용 가능 |
+| **Inline** | User/Group/Role | O | 직접 임베드 (재사용 X) |
+| **Resource-based Policy** | S3/SQS/KMS/Lambda 등 | O | 리소스에 붙음, 교차 계정 허용 |
+| **Permission Boundary** | User/Role | **X (상한만)** | Role 이 가질 수 있는 최대 |
+| **Service Control Policy (SCP)** | Org / OU / Account | **X (상한만)** | 계정 내 principal 최대 권한 |
+| **Resource Control Policy (RCP, 2024+)** | Org / OU / Account | **X (상한만)** | 계정 내 resource 최대 권한 |
+| **Session Policy** | AssumeRole 세션 | **X (상한만)** | 임시 세션에 상한 |
+
+> [!IMPORTANT]
+> 권한을 **부여** 하는 것은 **자격 증명 기반 + 리소스 기반** 정책뿐. 나머지 (**경계 / SCP / RCP / 세션**) 는 **상한만** 정하고 권한을 주지 않음.
 
 ## 권한 평가 알고리즘
 
-```mermaid
-flowchart TD
-    Q1{Explicit Deny?}
-    Q1 -->|예| Deny[DENY]
-    Q1 -->|아니오| Q2{Explicit Allow?}
-    Q2 -->|아니오| Deny
-    Q2 -->|예| Q3{SCP 차단?}
-    Q3 -->|예| Deny
-    Q3 -->|아니오| Q4{Permission Boundary 안?}
-    Q4 -->|아니오| Deny
-    Q4 -->|예| Allow[ALLOW]
+정책 여러 개가 얽힐 때 순서:
+
+```
+① 명시적 Deny 확인 → 있으면 즉시 거부 (short-circuit)
+② RCP (조직 리소스 상한) → 통과해야 함
+③ SCP (조직 계정 상한) → 통과해야 함
+④ 리소스 기반 정책 → 허용 확인
+⑤ 자격 증명 기반 정책 → 허용 확인
+⑥ 권한 경계 (Boundary) → 통과해야 함
+⑦ 세션 정책 → 통과해야 함
+→ 최종: Deny 없고 + 최소 하나의 Allow + 모든 상한 통과 → 허용
 ```
 
-> *Explicit Deny 가 모든 것을 이김*. Organization SCP → Permission Boundary → Identity Policy 순으로 모두 통과해야 Allow.
+```mermaid
+flowchart TD
+    Start[요청] --> Q1{"명시적 Deny?"}
+    Q1 -->|있음| Deny[DENY]
+    Q1 -->|없음| Q2{"RCP 허용?"}
+    Q2 -->|아니오| Deny
+    Q2 -->|예| Q3{"SCP 허용?"}
+    Q3 -->|아니오| Deny
+    Q3 -->|예| Q4{"리소스/자격 Allow?"}
+    Q4 -->|아니오| Deny
+    Q4 -->|예| Q5{"Boundary 안?"}
+    Q5 -->|아니오| Deny
+    Q5 -->|예| Q6{"Session 정책 통과?"}
+    Q6 -->|아니오| Deny
+    Q6 -->|예| Allow[ALLOW]
+```
+
+**대원칙**:
+- **명시적 Deny > 명시적 Allow > 암묵적 Deny**
+- **부여 정책끼리는 합집합 (∪)**: 자격 증명 + 리소스 기반은 둘 중 하나라도 Allow 면 허용
+- **상한 정책은 교집합 (∩)**: SCP · 권한 경계 · 자격 증명 정책 모두 통과해야 실제 허용
+- **명시적 Deny 는 무엇으로도 못 뒤집는다**
+
+## Union vs Intersection (직관)
+
+- 권한을 **주는** 정책은 더할수록 넓어진다 (합집합)
+- 권한을 **제한하는** 정책은 겹칠수록 좁아진다 (교집합)
+- 어디든 명시적 Deny 하나면 결과 = Deny
+
+자세히: [[aws-organizations|AWS Organizations]] SCP/RCP.
 
 ## Role 과 AssumeRole
 
@@ -281,9 +318,13 @@ aws iam get-service-last-accessed-details --job-id <id>
 
 ## 관련 위키
 
+- [[aws-organizations|AWS Organizations]] - SCP/RCP, 다중 계정
+- [[aws-sts-assume-role|STS AssumeRole]] - 임시 자격 증명
+- [[aws-secrets-manager|Secrets Manager]] - 비밀 관리
+- [[aws-systems-manager|Systems Manager]] - Parameter Store, Session Manager
+- [[aws-cloudtrail|CloudTrail]] - IAM 감사 로그
+- [[aws-lake-formation|Lake Formation]] - 데이터 레이크 세분화 권한
+- [[aws-kms|KMS]] - 암호화 키 정책
+- [[aws-eks|EKS]] (IRSA)
 - [[OAuth2]] (비교)
 - [[k8s-rbac]] (대조)
-- [[aws-secrets-manager]]
-- [[aws-sts-assume-role]]
-- [[aws-eks]] (IRSA)
-- [[aws-cloudtrail]] (감사 로그)

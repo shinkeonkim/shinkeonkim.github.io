@@ -44,6 +44,58 @@ references:
 - **즉시 페일오버**: DNS 캐시 무관 (IP 는 그대로, endpoint 만 바뀜)
 - **정적 IP**: 화이트리스트, DNS 변경 없이 endpoint 변경
 
+## Anycast IP 원리 (Deep Dive)
+
+**Anycast** = 같은 IP 주소를 여러 물리 위치에서 광고. BGP 로 사용자와 가장 가까운 위치로 자동 라우팅.
+
+### 일반 IP (Unicast) 와의 차이
+
+```
+Unicast (일반):
+  IP 3.5.140.5 = 서울 리전의 한 서버
+  일본에서 요청 -> 인터넷 hop -> 서울 서버
+  경로: 예측 불가, ISP 별로 다름
+
+Anycast (GA):
+  IP 75.2.60.5 = 도쿄 edge + 서울 edge + 프랑크푸르트 edge + 400+ 곳 모두
+  일본에서 요청 -> BGP 가 도쿄 edge 선택 (가장 가까움)
+  한국에서 같은 IP 요청 -> 서울 edge 선택
+```
+
+### 왜 BGP 가 자동으로 가장 가까운 곳을 선택하나
+
+BGP (Border Gateway Protocol) 는 AS (Autonomous System) 간 경로 광고. 여러 AS 가 같은 IP 대역을 광고하면:
+
+- **AS-path 짧은 것** 우선
+- **MED (Multi-Exit Discriminator)** 낮은 것 우선
+- **로컬 정책** (ISP 별)
+
+결과적으로 사용자에게 가장 가까운 GA edge 가 선택됨.
+
+### DNS 기반 라우팅과의 결정적 차이
+
+| 축 | DNS 기반 (Route 53 latency) | Anycast IP (GA) |
+|:---|:---|:---|
+| **라우팅 결정** | DNS 서버가 IP 선택 | BGP 가 라우팅 |
+| **캐시 문제** | DNS TTL 대기 (60초+) | 없음 (매 패킷마다) |
+| **모바일 이동** | DNS 재조회 필요 | 자동 (다음 hop 이 다른 edge) |
+| **페일오버** | TTL 만료 후 | 즉시 (BGP 재광고) |
+| **정적 IP** | X (DNS name) | O |
+
+### AWS 백본 활용
+
+Anycast IP 로 도착한 트래픽은 **AWS 사설 백본** 을 타고 최종 endpoint 로:
+
+```
+사용자 (도쿄) -> 도쿄 GA edge (TCP+TLS 종단)
+   ↓ AWS 백본 (사설 광케이블)
+서울 리전 ALB
+```
+
+- 일반 인터넷 대비 지연 20-50% 감소
+- 패킷 손실 감소 (BGP flap 회피)
+- Congestion control 최적화
+
 ## 아키텍처
 
 ```mermaid

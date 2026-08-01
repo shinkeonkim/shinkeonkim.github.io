@@ -28,17 +28,65 @@ references:
 | 항목 | REST API | HTTP API | WebSocket API |
 |:---|:---|:---|:---|
 | 출시 | 2015 | 2019 | 2018 |
-| 비용 | $3.50/million | $1.00/million | $1.00/million |
+| 통신 방식 | 요청/응답 (무상태) | 요청/응답 (무상태) | 양방향 상태 유지 |
+| 비용 | $3.50/million | $1.00/million | $1.00/million (+ 연결 시간) |
 | 지연시간 | 높음 | 낮음 | - |
-| JWT authorizer | Lambda만 | *내장* | Lambda만 |
-| WAF 통합 | *가능* | 가능 (v2) | 아니오 |
-| Request validator | *있음* | 없음 | 없음 |
-| Usage Plan/API Key | *있음* | 없음 | 없음 |
-| Response 캐싱 | *있음* | 없음 | - |
-| 프라이빗 endpoint | 가능 | 가능 | - |
+| JWT authorizer | Lambda 만 | **내장** | Lambda 만 |
+| WAF 통합 | **가능** | X | X |
+| Request validator | **있음** | X | X |
+| Usage Plan / API Key | **있음** | X | X |
+| Response 캐싱 | **있음** | X | - |
+| Private endpoint | **있음** | X | - |
+| ALB / Cloud Map 프라이빗 통합 | X | **있음** | - |
+| NLB 프라이빗 통합 | 있음 | 있음 | - |
+| 자동 배포 | X | **있음** | - |
+| 카나리 배포 | 있음 | X | - |
+| X-Ray 추적 | 있음 | X | - |
+| Mock 통합 | 있음 | X | - |
+| 요청 본문 변환 (VTL) | 있음 | X | - |
 
 > [!IMPORTANT]
 > 신규 프로젝트는 **HTTP API 우선 검토**. 기능 격차를 확인 후 REST API 선택.
+>
+> **REST 만의 핵심 기능**: API 키 / 사용량 계획 / WAF / 프라이빗 엔드포인트 / 캐싱 / 요청 검증 / 본문 변환 / 카나리 / X-Ray. 이 중 하나라도 필요하면 REST.
+>
+> **HTTP 만의 핵심 기능**: JWT 오소라이저 / 자동 배포 / ALB · Cloud Map 프라이빗 통합 / 최저 비용 · 지연.
+
+## 엔드포인트 타입 (REST API)
+
+REST API 는 어디에서 노출될지 3가지 유형 중 선택.
+
+| 타입 | 특징 | Use Case |
+|:---|:---|:---|
+| **Edge-optimized** | [[aws-cloudfront-cdn\|CloudFront]] 엣지 경유, 전세계 지연 최소화 (기본값) | 지리적으로 분산된 클라이언트 |
+| **Regional** | 특정 리전에서 직접 제공 (엣지 우회) | 같은 리전 클라이언트, 자체 CloudFront 구성 |
+| **Private** | [[aws-vpc\|VPC]] 내부에서만 (인터페이스 엔드포인트) | 내부 전용 API, 규정 준수 |
+
+> [!IMPORTANT]
+> **Private 엔드포인트는 REST 만** 지원. HTTP API 에는 없음.
+
+## AWS 서비스 직접 통합 (Lambda 생략 패턴)
+
+Lambda 없이 [[aws-sqs|SQS]] / [[aws-sns|SNS]] / [[dynamodb|DynamoDB]] / [[aws-step-functions|Step Functions]] / [[aws-kinesis-data-streams|Kinesis]] 직접 호출. 비용/지연/관리 최소화.
+
+**예: 요청 -> SQS 큐 (Lambda 없음)**
+
+```yaml
+integration:
+  type: AWS
+  integrationHttpMethod: POST
+  uri: "arn:aws:apigateway:us-east-1:sqs:path/123456789/my-queue"
+  credentials: "arn:aws:iam::123:role/apigw-sqs-role"
+  requestParameters:
+    "integration.request.header.Content-Type": "'application/x-www-form-urlencoded'"
+  requestTemplates:
+    "application/json": "Action=SendMessage&MessageBody=$util.urlEncode($input.body)"
+```
+
+**언제 유리**:
+- API 는 단순히 요청을 수집만 하고, 실제 처리는 비동기
+- 트래픽 급증 시 SQS 로 버퍼링
+- Lambda 를 없애 콜드 스타트 회피 + 비용 절감
 
 ## 아키텍처: Lambda 프록시 통합
 

@@ -85,13 +85,83 @@ references:
 
 ## 스토리지
 
-| 타입 | 특성 |
-|:---|:---|
-| **General Purpose SSD (gp2, gp3)** | 대부분 워크로드. gp3 는 IOPS/throughput 독립 설정 |
-| **Provisioned IOPS (io1, io2)** | 예측 가능한 고성능 (수십만 IOPS) |
-| **Magnetic** | Legacy, 사용 안 함 |
+RDS 는 볼륨 **타입 + 용량 + IOPS** 를 사용자가 선택 (엔진 밖 스토리지는 EBS). Aurora 는 다른 세계 (자체 분산 스토리지).
 
-**Storage Autoscaling**: 자동 확장 (권장). 초기 크기 + 상한 지정.
+### RDS 스토리지 타입 4종
+
+| 특성 | gp2 (이전) | **gp3** (권장) | io1 (이전) | **io2 Block Express** (권장) |
+|:---|:---|:---|:---|:---|
+| 계열 | 범용 SSD | 범용 SSD | Provisioned IOPS | Provisioned IOPS |
+| 크기 | 20 GiB - 64 TiB | 20 GiB - 64 TiB | 100 GiB - 64 TiB | 100 GiB - 64 TiB |
+| IOPS 결정 | **용량 종속** (3 IOPS/GiB) | **독립 프로비저닝** | 독립 프로비저닝 | 독립 프로비저닝 |
+| 기본 성능 | 3 IOPS/GiB (최소 100, 버스트 3,000) | **기본 3,000 IOPS / 125 MiB/s** | 없음 (전량 프로비저닝) | 없음 (전량 프로비저닝) |
+| 최대 IOPS (MySQL/PG) | 64,000 (용량 클 때) | 64,000 | 256,000 | **256,000** |
+| 최대 처리량 | 1,000 MB/s | 4,000 MB/s | 4,000 MB/s | 4,000 MB/s |
+| 지연 | 한 자릿수 ms | 한 자릿수 ms | 한 자릿수 ms | **1 ms 미만** (99.9%) |
+| 대표 용도 | 개발/테스트, 소규모 | **대부분 워크로드 (기본)** | 고IOPS OLTP | 초고성능 OLTP (SAP HANA) |
+
+### 볼륨 타입 선택 흐름
+
+```
+랜덤 I/O (DB, 부팅) 인가?
+├ 초고성능 (< 1ms, 256K IOPS) 필수 → io2 Block Express
+├ 일반 IOPS 필요 → gp3 (기본 3,000 IOPS 로 충분한 경우)
+└ 매우 저부하 개발/테스트 → gp2 (또는 gp3)
+
+* magnetic 는 2026-04-30 폐기 → 항상 오답
+```
+
+### gp2 vs gp3 (실무 감각)
+
+- **gp3 는 gp2 대비 저렴 + 유연**. 신규는 gp3 가 기본
+- gp2 는 IOPS 를 올리려면 **불필요하게 용량 키워야 함** (3 IOPS/GiB)
+- gp3 는 용량과 무관하게 IOPS/처리량 독립 조정
+
+### RDS 스토리지 비용 감각 (us-east-1, 2026)
+
+| 타입 | 대략 GB-월 단가 | IOPS 별도 과금 |
+|:---|:---|:---|
+| RDS gp2 | ~$0.115 | 없음 (용량 포함) |
+| RDS gp3 | ~$0.115 | 3,000 초과 IOPS 만 별도 |
+| RDS io2 | ~$0.125 | 프로비저닝 IOPS 전량 별도 |
+
+> [!IMPORTANT]
+> **RDS gp3 단가 ≠ [[aws-ec2\|EC2]] EBS gp3 단가** (RDS 가 더 비쌈). 별개 서비스로 요금표 별도.
+
+**Storage Autoscaling**: 자동 확장 권장. 초기 크기 + 상한 지정.
+
+### 프로비저닝 IOPS 제약 (Nitro 기준)
+
+- **IOPS : 용량 (GiB) 비율** = 0.5 - 1,000 -> 256,000 IOPS 필요 시 최소 256 GiB
+- gp3 의 **처리량 : IOPS** 최대 비율 = 0.25
+- 볼륨 최대 IOPS 를 잡아도 **인스턴스 클래스 EBS 대역폭 한계** 가 더 낮으면 그만큼만
+
+## Aurora 스토리지 (완전 다른 패러다임)
+
+Aurora 는 EBS 를 쓰지 않음. AWS 전용 **분산 공유 스토리지**.
+
+### 아키텍처
+
+- 데이터를 **3 AZ × 6 사본** 자동 복제
+- **10 GB 단위 자동 확장** (최대 128 TiB), 사용자 프로비저닝 불필요
+- 컴퓨트 (DB 인스턴스) 와 스토리지가 **분리**
+- 쓰기 4/6, 읽기 3/6 쿼럼으로 손상 자동 복구
+
+> Aurora 에는 "gp3 냐 io2 냐" 같은 **볼륨 타입 선택이 없다**. 스토리지 성능은 아키텍처가 자동 제공.
+
+### Aurora Standard vs I/O-Optimized (비용 구성)
+
+| 구분 | Aurora Standard | Aurora I/O-Optimized |
+|:---|:---|:---|
+| 과금 | 인스턴스 + 스토리지 + **I/O 요청당** | 인스턴스 + 스토리지 (**I/O 요청 과금 없음**) |
+| 스토리지/인스턴스 단가 | 낮음 | 높음 |
+| I/O 비용 | 요청 100만 건당 | 0 |
+| 예측 가능성 | 변동 | 완전 예측 가능 |
+| 손익분기 | I/O 비용이 총액의 **25% 미만** 시 유리 | I/O 비용이 총액의 **25% 이상** 시 유리 (최대 40% 절감) |
+| 전환 | Standard -> IO-Optimized: 30일 1회 | IO-Optimized -> Standard: 언제든 |
+
+> [!IMPORTANT]
+> **I/O 비용이 전체 Aurora 비용의 25% 이상 -> I/O-Optimized**. 미만이면 Standard.
 
 ## Multi-AZ Deployments
 

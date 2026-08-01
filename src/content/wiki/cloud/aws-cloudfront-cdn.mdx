@@ -1,19 +1,196 @@
 ---
 title: "[AWS] CloudFront: CDN, origin, behavior, signed URL"
-aliases: ["CloudFront", "CDN", "edge location", "origin", "cache behavior", "signed URL", "OAC", "Lambda@Edge", "CloudFront Functions", "Origin Access Control"]
-tags: [aws, cloudfront, cdn, edge, cloud]
+aliases: ["CloudFront", "CDN", "edge location", "origin", "cache behavior", "signed URL", "OAC", "Lambda@Edge", "CloudFront Functions", "Origin Access Control", "Origin Shield", "Regional Edge Cache", "PoP", "CloudFront 원리", "CDN 원리"]
+tags: [aws, cloudfront, cdn, edge, cloud, network]
 category: cloud
-updated: 2026-07-16
+updated: 2026-07-30
 references:
   - title: "CloudFront Developer Guide"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html"
   - title: "CloudFront Pricing"
     url: "https://aws.amazon.com/cloudfront/pricing/"
+  - title: "CloudFront Global Network"
+    url: "https://aws.amazon.com/cloudfront/features/"
+  - title: "Origin Shield"
+    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-shield.html"
 ---
 
 ## 정의
 
-**CloudFront** = AWS 의 *글로벌 CDN*. 전세계 ~600 PoP (Points of Presence) 에서 사용자에게 가까운 edge 로 콘텐츠 제공. 지연 감소 + origin 부하 감소.
+**CloudFront** 는 AWS 의 *글로벌 CDN* (Content Delivery Network). 전 세계 **600+ PoP (Points of Presence)** + **13 Regional Edge Cache** 를 통해 사용자에게 가장 가까운 edge 에서 콘텐츠 제공. 지연 감소, origin 부하 감소, DDoS 완화가 목적.
+
+## CloudFront 는 어떻게 동작하는가 (원리)
+
+### 1. 글로벌 네트워크 계층
+
+CloudFront 는 **3계층 캐시 구조** + **AWS 백본 네트워크** 로 동작:
+
+```mermaid
+flowchart LR
+    Client["사용자<br/>(서울)"]
+
+    subgraph Tier1["1차 캐시 (PoP)"]
+        Edge1["Edge Location<br/>ICN61 (서울)"]
+    end
+
+    subgraph Tier2["2차 캐시 (Regional)"]
+        REC["Regional Edge Cache<br/>(도쿄)"]
+    end
+
+    subgraph Tier3["3차 캐시 (선택)"]
+        Shield["Origin Shield<br/>(us-east-1)"]
+    end
+
+    Origin["Origin<br/>(S3 / ALB / Custom)"]
+
+    Client -->|"1. DNS: cf-xxx.cloudfront.net<br/>(anycast IP)"| Edge1
+    Edge1 -->|"MISS"| REC
+    REC -->|"MISS"| Shield
+    Shield -->|"MISS"| Origin
+
+    Origin -.->|"응답"| Shield
+    Shield -.-> REC
+    REC -.-> Edge1
+    Edge1 -.-> Client
+```
+
+| 계층 | 위치 | 역할 | 개수 |
+|:---|:---|:---|:---|
+| **Edge Location (PoP)** | 600+ 도시 | 사용자와 가장 가까움, 첫 캐시 | 매우 많음 (콘텐츠 소량) |
+| **Regional Edge Cache** | 13 리전 | PoP 미스 시 상위 캐시, 콘텐츠 대량 | 큰 캐시 |
+| **Origin Shield** | 특정 리전 (선택) | 최상위 통합 캐시, origin 요청 정리 | 사용자 지정 |
+| **Origin** | S3/ALB/EC2/Custom | 실제 데이터 | 1개 (또는 origin group) |
+
+### 2. DNS 기반 라우팅 (Anycast)
+
+사용자가 `d111.cloudfront.net` 을 조회하면:
+
+1. **[[aws-route53|Route 53]]** (또는 사용자 DNS) 이 CloudFront 의 anycast IP 반환
+2. **BGP anycast**: 같은 IP 를 전 세계 모든 PoP 이 광고 -> ISP 는 가장 가까운 PoP 으로 라우팅
+3. **Latency-based / Geo-based** 조합: 정확한 지연 측정 결과와 지리적 위치를 함께 사용
+
+**Global Accelerator 와 차이**: [[aws-global-accelerator|Global Accelerator]] 는 anycast IP 2개를 사용자에게 제공 (정적 IP 필요 시), CloudFront 는 도메인 기반 라우팅 + HTTP/HTTPS 콘텐츠 캐싱에 특화.
+
+### 3. TCP + TLS 종단 (Termination at Edge)
+
+**핵심 성능 이점**: TCP handshake + TLS handshake 가 사용자와 가장 가까운 edge 에서 완료.
+
+```
+사용자 (서울) -> ICN61 PoP (서울): TCP + TLS handshake (~5-10 ms RTT)
+ICN61 PoP -> Origin (us-east-1): AWS 백본 (지속 연결, keep-alive)
+```
+
+- 일반 인터넷 대비 handshake 지연 100 ms+ 절감 가능
+- Origin 연결은 **persistent connection** 재사용
+- **HTTP/2, HTTP/3 (QUIC)** 지원 -> multiplexing, 0-RTT resumption
+
+### 4. AWS Global Backbone 활용
+
+Edge -> Origin 구간은 **인터넷이 아닌 AWS 사설 백본** 을 타고 감. BGP flap / peering 문제 없음.
+
+- Global backbone: 100+ Tbps 용량
+- 여러 대륙 간 전용 광케이블
+- 원본이 [[aws-s3|S3]] / ALB 인 경우 데이터 전송 완전 내부 (인터넷 hop 0)
+
+### 5. Cache 계층 (Cache Tier Hierarchy)
+
+**세 레벨 조회 순서** (miss 시 상위로):
+
+```
+1) Edge (PoP) 캐시 확인       → HIT: 즉시 응답 (~10 ms)
+2) MISS → Regional Edge Cache 조회
+3) MISS → Origin Shield 조회 (활성화 시)
+4) MISS → Origin fetch → 각 계층에 캐싱
+```
+
+**왜 계층 캐시가 유리한가**:
+- PoP 이 600+ 개 -> 각 PoP 은 콘텐츠의 일부만 캐시 (용량 제한)
+- 인기 콘텐츠는 PoP 에서 처리
+- 롱테일 콘텐츠는 Regional Edge Cache 에서 흡수 (Origin 요청 감소)
+
+### 6. Origin Shield (선택 최상위 캐시)
+
+**Origin Shield** 는 사용자가 지정하는 *하나의 리전* 을 최상위 통합 캐시로 사용.
+
+```mermaid
+flowchart TB
+    subgraph NoShield["Origin Shield 없음"]
+        REC1["Regional 도쿄"] --> Origin1["Origin"]
+        REC2["Regional 프랑크푸르트"] --> Origin1
+        REC3["Regional 상파울루"] --> Origin1
+        Note1["여러 REC 이 origin 을 동시에 fetch<br/>= origin 부하 증가"]
+    end
+
+    subgraph WithShield["Origin Shield 있음"]
+        REC4["Regional 도쿄"] --> Shield["Origin Shield<br/>(us-east-1)"]
+        REC5["Regional 프랑크푸르트"] --> Shield
+        REC6["Regional 상파울루"] --> Shield
+        Shield --> Origin2["Origin"]
+        Note2["단 하나의 Origin Shield 가 origin fetch<br/>= 통합, 중복 제거"]
+    end
+```
+
+**이점**:
+- Origin 부하 감소 (같은 콘텐츠를 여러 REC 이 각자 fetch 하는 문제 해결)
+- Cache hit rate 상승 (전역 통합)
+- Custom origin (온프레미스) 의 대역폭 절감
+
+**과금**: Origin Shield 요청 수 × 요금 (data-out 은 origin 요금과 통합).
+
+**언제 켜나**:
+- Origin 이 다중 리전에서 동시에 요청받아 부담될 때
+- Origin 이 온프레미스 / 자체 서버
+- Cache hit rate 를 최대화 (인기 콘텐츠가 여러 지역에 균등 분포)
+
+### 7. 요청 흐름 (완전판)
+
+```mermaid
+sequenceDiagram
+    participant U as 사용자 (서울)
+    participant DNS as Route 53
+    participant Edge as ICN61 PoP
+    participant REC as 도쿄 Regional Edge
+    participant Shield as Origin Shield (us-east-1)
+    participant Origin as Origin (S3 us-east-1)
+
+    U->>DNS: d111.cloudfront.net?
+    DNS-->>U: anycast IP (서울 근처)
+    U->>Edge: TCP + TLS handshake
+    U->>Edge: GET /image.jpg
+
+    alt Edge HIT
+        Edge-->>U: 응답 (~10 ms)
+    else Edge MISS
+        Edge->>REC: 상위 fetch
+        alt REC HIT
+            REC-->>Edge: 응답
+            Edge-->>U: 응답
+        else REC MISS
+            REC->>Shield: 상위 fetch
+            alt Shield HIT
+                Shield-->>REC: 응답
+                REC-->>Edge: 응답
+                Edge-->>U: 응답
+            else Shield MISS
+                Shield->>Origin: fetch (AWS 백본)
+                Origin-->>Shield: 응답 + Cache-Control
+                Shield-->>REC: 응답 + 캐싱
+                REC-->>Edge: 응답 + 캐싱
+                Edge-->>U: 응답 + 캐싱
+            end
+        end
+    end
+```
+
+## 왜 이 아키텍처인가 (설계 결정)
+
+1. **PoP 다수 + 각 PoP 소형 캐시** = 사용자 근접 + 낮은 저장 비용
+2. **REC 소수 + 큰 캐시** = 롱테일 흡수 + PoP 부하 완화
+3. **Origin Shield 선택형** = 필요할 때만 (비용/hit rate 트레이드오프)
+4. **AWS 백본 활용** = 인터넷 라우팅 변동성 회피
+5. **Anycast IP** = 사용자에게 단일 도메인, 내부적으로 최적 PoP 자동 선택
+
+## 동작 흐름
 
 ## 동작 흐름
 
@@ -265,10 +442,12 @@ CloudFront distribution 단위로 WAF WebACL 연결 (us-east-1 에서 생성한 
 
 ## 관련 위키
 
-- [[aws-s3]] - 정적 파일 origin
-- [[aws-alb-nlb]] - 동적 origin
-- [[aws-route53]] - Custom domain DNS
-- [[aws-lambda]] - Lambda@Edge / Function URL origin
-- [[aws-waf]] - 트래픽 필터링
-- [[aws-shield]] - DDoS 방어
-- [[network-http-caching]] - HTTP 캐시 원리
+- [[aws-s3|S3]] - 정적 파일 origin
+- [[aws-alb-nlb|ALB / NLB]] - 동적 origin
+- [[aws-route53|Route 53]] - Custom domain DNS
+- [[aws-lambda|Lambda]] - Lambda@Edge / Function URL origin
+- [[aws-waf|WAF]] - 트래픽 필터링
+- [[aws-shield|Shield]] - DDoS 방어
+- [[aws-global-accelerator|Global Accelerator]] - 비HTTP 대안
+- [[aws-api-gateway|API Gateway]] - Edge-optimized 는 CloudFront 사용
+- [[aws-kms|KMS]] - OAC + SSE-KMS 통합
