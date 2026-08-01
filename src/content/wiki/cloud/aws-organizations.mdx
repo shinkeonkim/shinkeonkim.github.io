@@ -1,0 +1,274 @@
+---
+title: "[AWS] Organizations: 다중 계정 거버넌스"
+aliases:
+  - "AWS Organizations"
+  - "Organizations"
+  - "AWS Org"
+  - "Service Control Policy"
+  - "Resource Control Policy"
+  - "Organizational Unit"
+  - "Consolidated Billing"
+tags: [aws, cloud, organizations, governance, iam, multi-account]
+category: cloud
+updated: 2026-07-30
+references:
+  - title: "AWS Organizations User Guide"
+    url: "https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html"
+  - title: "Service Control Policies (SCP)"
+    url: "https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html"
+  - title: "Resource Control Policies (RCP)"
+    url: "https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_rcps.html"
+  - title: "AWS Control Tower"
+    url: "https://docs.aws.amazon.com/controltower/latest/userguide/what-is-control-tower.html"
+  - title: "IAM 정책 평가 로직"
+    url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html"
+---
+
+## 정의
+
+**AWS Organizations** 는 *여러 AWS 계정을 하나의 조직으로 통합 관리* 하는 서비스. 계정을 계층 (OU) 으로 묶고, 정책 (SCP, RCP, Tag, Backup, AI opt-out) 으로 가드레일을 부여하며, 통합 결제로 비용을 합산.
+
+**핵심 3가지**:
+1. **통합 결제 (Consolidated Billing)** - 볼륨 할인 합산, RI/Savings Plans 공유
+2. **OU (Organizational Unit)** - 계층적 계정 그룹
+3. **정책 가드레일** - SCP (권한 상한), RCP (리소스 상한) 등
+
+## 구성
+
+```
+Organization Root
+├── Management Account (관리 계정, root user 소유)
+│   └── (모든 정책 관리, SCP 적용 안 됨)
+│
+├── OU: Security
+│   ├── LogArchive Account
+│   └── Audit Account
+│
+├── OU: Prod
+│   ├── prod-app-a Account
+│   ├── prod-app-b Account
+│   └── OU: Prod-Sandbox
+│       └── prod-sandbox Account
+│
+└── OU: Dev
+    ├── dev-team-a Account
+    └── dev-team-b Account
+```
+
+- **Management Account**: 조직 생성/정책 관리. **SCP 미적용**.
+- **Member Account**: SCP/RCP 등 정책 적용 대상.
+- **OU**: 최대 5단계 중첩 가능. 계정은 정확히 하나의 OU 에 속함.
+
+## SCP (Service Control Policy)
+
+**주체 (principal)** 의 최대 권한을 정의하는 조직 정책.
+
+```json
+// 특정 리전만 허용 (Deny list 전략)
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyAllOutsideAllowedRegions",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*", "sts:*", "organizations:*",
+        "cloudfront:*", "route53:*", "waf:*",   // 전역 서비스 제외
+        "support:*", "trustedadvisor:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": ["ap-northeast-2", "us-east-1"]
+        }
+      }
+    }
+  ]
+}
+```
+
+**중요 특성**:
+- **권한을 부여하지 않는다** - 허용해도 [[aws-iam|IAM]] 허용이 별도로 필요
+- **관리 계정에는 적용 안 됨**
+- 부착 대상: Root / OU / 계정
+- 두 전략:
+  - **Deny list** (기본): `FullAWSAccess` + 특정 Deny
+  - **Allow list**: 명시 허용만
+
+**대표 시나리오**:
+- 특정 리전 사용 원천 차단 (`aws:RequestedRegion`)
+- 루트 사용자 특정 작업 금지
+- 특정 서비스 전면 차단
+- 태그 없는 리소스 생성 금지
+
+## RCP (Resource Control Policy)
+
+**리소스 (resource)** 의 최대 권한을 정의하는 조직 정책 (2024 도입).
+
+```json
+// 특정 계정 이외의 principal 이 버킷 정책으로 접근 못 하도록
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EnforceOrgIdentities",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["s3:*"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": {
+          "aws:PrincipalOrgID": "o-xxx"
+        }
+      }
+    }
+  ]
+}
+```
+
+**SCP vs RCP**:
+- **SCP** = 계정 안의 IAM principal (누가) 의 상한
+- **RCP** = 계정 안의 resource (무엇에) 의 상한
+
+**대표 시나리오**:
+- OU 전체 S3 버킷이 실수로 퍼블릭 되지 않도록
+- 조직 밖 principal 의 KMS 키 사용 차단
+- 특정 리소스 태그 없이 접근 금지
+
+## 정책 평가 로직 (핵심)
+
+여러 정책이 얽힐 때 허용/거부 결정 순서:
+
+```
+① 명시적 Deny 확인 → 있으면 즉시 거부 (short-circuit)
+② RCP (조직 리소스 상한) → 통과해야 함
+③ SCP (조직 계정 상한) → 통과해야 함
+④ 리소스 기반 정책 → 허용 확인
+⑤ 자격 증명 기반 정책 → 허용 확인
+⑥ 권한 경계 → 통과해야 함
+⑦ 세션 정책 → 통과해야 함
+→ 최종: Deny 없고 + 최소 하나의 Allow + 모든 상한 통과 → 허용
+```
+
+**대원칙**:
+- **명시적 Deny > 명시적 Allow > 암묵적 Deny**
+- **부여 정책** (identity + resource-based) = **합집합**
+- **상한 정책** (SCP, RCP, boundary, session) = **교집합**
+
+자세히: [[aws-iam|IAM]] 정책 평가.
+
+## 정책 종류 비교
+
+| 정책 | 부착 대상 | 권한 부여? | 범위 |
+|:---|:---|:---|:---|
+| **자격 증명 기반** | 사용자/그룹/역할 | O | 개별 주체 |
+| **리소스 기반** | S3, SQS, KMS 등 | O + 교차 계정 | 리소스 |
+| **권한 경계** | 사용자/역할 | X (상한만) | 개별 주체 |
+| **SCP** | Root/OU/계정 | X (상한만) | 계정 내 모든 주체 |
+| **RCP** | Root/OU/계정 | X (상한만) | 계정 내 모든 리소스 |
+| **세션 정책** | 역할 수임 세션 | X (상한만) | 임시 세션 |
+
+> [!IMPORTANT]
+> 권한을 **부여** 하는 것은 자격 증명/리소스 기반 정책뿐. 나머지는 **상한만** 정하고 권한을 주지 않음.
+
+## 조직 정책 종류
+
+| 정책 유형 | 목적 |
+|:---|:---|
+| **SCP** | 주체 권한 상한 |
+| **RCP** | 리소스 정책 상한 (2024+) |
+| **Tag Policy** | 태그 표준화 (강제 태그, 값 형식) |
+| **Backup Policy** | AWS Backup 정책 중앙 관리 |
+| **AI Services Opt-out** | AI 서비스가 데이터를 학습에 사용 못하게 |
+| **Chatbot Policy** | AWS Chatbot 사용 제어 (2024+) |
+| **Declarative** | EC2 IMDSv2 강제 등 서비스별 선언 (2024+) |
+
+## 통합 결제 (Consolidated Billing)
+
+- 모든 멤버 계정 청구서 통합
+- **볼륨 할인 자동 합산** ([[aws-s3|S3]] 등 계층 할인)
+- **RI (Reserved Instance)** 와 **Savings Plans** 자동 공유
+- 세금 목적 개별 계정 청구서도 확인 가능
+
+## AWS Control Tower
+
+Organizations 기반으로 *랜딩 존 (landing zone)* 을 모범 사례대로 자동 구성.
+
+**포함**:
+- Organizations + OU 계층 (Security, Prod, Sandbox 등)
+- [[aws-cloudtrail|CloudTrail]] 조직 전체 활성화
+- [[aws-config|AWS Config]] 규칙 배포
+- LogArchive 계정 + Audit 계정 자동 프로비저닝
+- **가드레일** (Preventive = SCP / Detective = Config Rule) 세트
+
+**결과**: 신규 계정 (Account Factory) 을 요청하면 자동으로 표준 규칙 적용된 상태로 생성.
+
+## 서비스 활성화 (Trusted Access)
+
+조직 안에서 여러 서비스가 계정 간 통합되도록 위임:
+
+| 서비스 | 조직 통합 시 |
+|:---|:---|
+| [[aws-cloudtrail\|CloudTrail]] | 조직 전체 trail 생성 (모든 계정 이벤트 수집) |
+| [[aws-config\|Config]] | 조직 전체 규칙/aggregator |
+| AWS Backup | 정책 중앙 관리 |
+| GuardDuty | Delegated Admin 이 조직 전체 관리 |
+| Security Hub | 조직 전체 통합 대시보드 |
+| [[aws-iam\|IAM]] Identity Center | 중앙 SSO |
+| AWS RAM | 조직 내 리소스 공유 자동 승인 |
+| Service Catalog | 조직 전체 포트폴리오 공유 |
+
+## Delegated Administrator (위임 관리)
+
+관리 계정을 최소한으로 유지하기 위해, 서비스별 관리를 다른 계정에 위임.
+
+```
+Management Account (관리 계정)
+   └── Delegated Admin
+       ├── Security Hub → Audit Account
+       ├── GuardDuty → Audit Account
+       ├── Config Aggregator → Audit Account
+       └── Cost & Usage → Finance Account
+```
+
+일상 운영을 관리 계정에서 안 해도 되어 **보안 위험 감소**.
+
+## 계정 라이프사이클
+
+- **Account Factory** (Control Tower) / **CreateAccount** API 로 프로비저닝
+- Root 이메일/이름 지정
+- 자동으로 조직 가입, 지정된 OU 로 이동
+- SCP/RCP 자동 상속
+- 삭제/이관은 별도 API + 이관 절차
+
+## 함정
+
+> [!WARNING]
+> **SCP 는 관리 계정에 적용 안 됨**. 관리 계정에서 위험한 작업이 가능. 관리 계정은 최소 사용, 위임 관리자 활용.
+
+> [!CAUTION]
+> **SCP 는 권한을 부여하지 않는다**. `Allow` 만 있는 SCP 는 아무 일도 안 일어남 (가드레일일 뿐, IAM Allow 별도 필요).
+
+> [!WARNING]
+> **명시적 Deny 는 무엇으로도 못 뒤집는다**. SCP/RCP/경계/리소스/자격 증명 어디든 Deny 가 있으면 그대로 거부.
+
+> [!IMPORTANT]
+> **전역 서비스 (IAM, CloudFront, Route53) 는 리전 제약 SCP 에서 예외 처리** 필요. 안 하면 IAM 조작 자체가 막힐 수 있음.
+
+> [!CAUTION]
+> **OU 최대 5단계 중첩**. 지나치게 깊은 계층은 관리 부담. 보통 2-3 단계 (Environment / Business Unit).
+
+> [!WARNING]
+> **RCP 는 신규 (2024+)**. 지원 서비스 목록 확인 필수 ([[aws-s3|S3]], [[aws-sqs|SQS]], KMS, Secrets Manager, STS 부터 확장 중).
+
+> [!IMPORTANT]
+> **Control Tower 로 만든 랜딩 존을 임의 수정** = 다음 업데이트에서 롤백. 커스터마이징은 Account Factory Customization Framework (AFT) 로.
+
+## 관련 위키
+
+- [[aws-iam|AWS IAM]] - 계정 내 권한 관리
+- [[aws-sts-assume-role|STS AssumeRole]] - 교차 계정 접근
+- [[aws-cloudtrail|CloudTrail]] - 조직 전체 감사
+- [[aws-config|AWS Config]] - 규정 준수 규칙
+- [[aws-kms|KMS]] - RCP 로 조직 밖 접근 차단
+- [[aws-s3|S3]] - RCP 로 퍼블릭 방지
