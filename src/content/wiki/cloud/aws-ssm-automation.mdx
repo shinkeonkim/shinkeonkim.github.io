@@ -1,0 +1,355 @@
+---
+title: "[AWS] SSM Automation: 운영 워크플로 런북"
+aliases:
+  - "AWS SSM Automation"
+  - "SSM Automation"
+  - "SSM Runbook"
+  - "Automation Runbook"
+  - "AWS Runbook"
+  - "aws:executeAutomation"
+tags: [aws, cloud, ssm, systems-manager, automation, runbook, orchestration]
+category: cloud
+updated: 2026-07-30
+references:
+  - title: "AWS SSM Automation"
+    url: "https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-automation.html"
+  - title: "Automation Runbook 예제"
+    url: "https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-documents.html"
+  - title: "AWS 제공 런북 목록"
+    url: "https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-aws-runbooks.html"
+---
+
+## 정의
+
+**AWS SSM Automation** 은 *여러 단계로 이루어진 운영 워크플로를 런북 (runbook) 이라는 문서로 정의하고 실행* 하는 [[aws-systems-manager|Systems Manager]] 기능. 각 단계는 [[aws-ec2|EC2]] 재시작, AMI 생성, [[aws-iam|IAM]] role 부여, [[aws-lambda|Lambda]] 호출, 다른 SSM 문서 실행 등을 조합할 수 있으며 조건 분기, 재시도, 승인 게이트 (approval), 병렬 실행을 지원.
+
+**한 줄 요약**: *[[aws-step-functions|Step Functions]] 의 인프라 운영 특화 버전*. 서버/AWS API 를 조합한 복잡한 운영 작업을 코드화.
+
+## Automation vs 다른 SSM 기능
+
+| 기능 | 성격 | 대표 사용 |
+|:---|:---|:---|
+| **[[aws-ssm-run-command\|Run Command]]** | 단일 스크립트 다중 서버 실행 | "nginx restart 전 서버 일괄" |
+| **[[aws-ssm-state-manager\|State Manager]]** | 원하는 상태 지속 유지 | "SSM Agent 최신 유지" |
+| **Automation** | 여러 단계 + 여러 서비스 조합 | "AMI 생성 → 인스턴스 교체 → DNS 업데이트 → 알림" |
+
+Run Command 는 "명령" 단위, Automation 은 "워크플로" 단위.
+
+## 왜 Automation 인가
+
+수동 운영 워크플로의 문제:
+
+- **여러 서비스 조합** (EC2, EBS, IAM, ELB, Route53, Lambda ...)
+- **오류 시 롤백** 로직 직접 구현
+- **승인 게이트** (프로덕션 변경 전 관리자 승인) 없음
+- **감사** 및 재실행 어려움
+
+Automation 의 답:
+- **런북 (JSON/YAML)** 으로 워크플로 코드화, 버전 관리
+- 각 단계는 **`aws:executeAwsApi`** 로 AWS API 직접 호출 가능
+- **`aws:approve`** 로 인간 승인 스텝 삽입
+- **`aws:branch`** 로 조건 분기
+- 실패 시 **`onFailure: Continue / Abort / RollbackAndContinue`**
+- **CloudTrail** 자동 감사
+
+## 런북 구조
+
+```yaml
+schemaVersion: '0.3'
+description: 'EC2 를 재부팅하고 헬스체크 확인'
+
+# 파라미터 (실행 시 입력)
+parameters:
+  InstanceId:
+    type: String
+    description: 재부팅할 EC2 ID
+  HealthCheckUrl:
+    type: String
+    default: 'https://example.com/healthz'
+
+# 실행할 IAM role (Automation 의 실행 컨텍스트)
+assumeRole: '{{ automation:EXECUTION_ROLE_NAME }}'
+
+# 단계 목록
+mainSteps:
+  - name: StopInstance
+    action: aws:changeInstanceState
+    inputs:
+      InstanceIds: ['{{ InstanceId }}']
+      DesiredState: stopped
+    onFailure: Abort
+
+  - name: WaitForStopped
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds: ['{{ InstanceId }}']
+      PropertySelector: '$.Reservations[0].Instances[0].State.Name'
+      DesiredValues: [stopped]
+
+  - name: StartInstance
+    action: aws:changeInstanceState
+    inputs:
+      InstanceIds: ['{{ InstanceId }}']
+      DesiredState: running
+
+  - name: WaitForRunning
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ec2
+      Api: DescribeInstanceStatus
+      InstanceIds: ['{{ InstanceId }}']
+      PropertySelector: '$.InstanceStatuses[0].InstanceStatus.Status'
+      DesiredValues: [ok]
+
+  - name: HealthCheck
+    action: aws:runCommand
+    inputs:
+      DocumentName: AWS-RunShellScript
+      InstanceIds: ['{{ InstanceId }}']
+      Parameters:
+        commands: ["curl -f {{ HealthCheckUrl }} || exit 1"]
+
+  - name: NotifySlack
+    action: aws:invokeLambdaFunction
+    inputs:
+      FunctionName: notify-slack
+      Payload: '{"message": "EC2 {{ InstanceId }} restart OK"}'
+```
+
+## 주요 액션 (aws:*)
+
+Automation 이 제공하는 빌트인 액션.
+
+| 액션 | 용도 |
+|:---|:---|
+| **`aws:executeAwsApi`** | 임의 AWS API 호출 (가장 범용) |
+| **`aws:runCommand`** | Run Command 실행 (스크립트 배포) |
+| **`aws:changeInstanceState`** | EC2 start/stop/terminate |
+| **`aws:createImage`** | AMI 생성 |
+| **`aws:copyImage`** | AMI 리전 복사 |
+| **`aws:createStack` / `deleteStack`** | CloudFormation 조작 |
+| **`aws:invokeLambdaFunction`** | Lambda 호출 |
+| **`aws:invokeWebhook`** | HTTP 호출 (Slack, Datadog 등) |
+| **`aws:executeStateMachine`** | Step Functions 실행 |
+| **`aws:branch`** | 조건 분기 |
+| **`aws:approve`** | 인간 승인 게이트 |
+| **`aws:pause`** | 특정 시각까지 대기 |
+| **`aws:sleep`** | N 초 대기 |
+| **`aws:waitForAwsResourceProperty`** | 특정 리소스 상태까지 대기 |
+| **`aws:executeAutomation`** | 다른 런북 호출 (재귀 조합) |
+| **`aws:executeScript`** | Python/PowerShell 스크립트 직접 실행 (SSM 안에서) |
+
+## 실전 예제
+
+### 예 1: 정기 AMI (Golden AMI) 생성
+
+```yaml
+schemaVersion: '0.3'
+description: '주간 golden AMI 생성'
+parameters:
+  SourceInstanceId: {type: String}
+  ImageNamePrefix: {type: String, default: 'golden'}
+
+mainSteps:
+  - name: CreateAMI
+    action: aws:createImage
+    inputs:
+      InstanceId: '{{ SourceInstanceId }}'
+      ImageName: '{{ ImageNamePrefix }}-{{ global:DATE_TIME }}'
+      NoReboot: false
+    outputs:
+      - Name: NewAmiId
+        Selector: $.ImageId
+        Type: String
+
+  - name: WaitAMI
+    action: aws:waitForAwsResourceProperty
+    inputs:
+      Service: ec2
+      Api: DescribeImages
+      ImageIds: ['{{ CreateAMI.NewAmiId }}']
+      PropertySelector: '$.Images[0].State'
+      DesiredValues: [available]
+
+  - name: TagAMI
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: CreateTags
+      Resources: ['{{ CreateAMI.NewAmiId }}']
+      Tags:
+        - Key: Type
+          Value: Golden
+        - Key: CreatedBy
+          Value: 'ssm-automation'
+```
+
+[[aws-eventbridge|EventBridge]] 스케줄러 → 매주 이 런북 실행 → 최신 golden AMI 자동 유지.
+
+### 예 2: 승인 게이트가 있는 프로덕션 배포
+
+```yaml
+mainSteps:
+  - name: PreCheck
+    action: aws:runCommand
+    inputs:
+      DocumentName: AWS-RunShellScript
+      Targets: [{Key: 'tag:Env', Values: [prod]}]
+      Parameters:
+        commands: ["./pre-deploy-check.sh"]
+
+  - name: WaitForApproval
+    action: aws:approve
+    inputs:
+      NotificationArn: 'arn:aws:sns:...:deploy-approvers'
+      Message: 'Pre-check 통과. 프로덕션 배포 승인 필요.'
+      MinRequiredApprovals: 2
+      Approvers:
+        - 'arn:aws:iam::123:role/OpsLead'
+        - 'arn:aws:iam::123:role/SREOncall'
+
+  - name: RollingDeploy
+    action: aws:runCommand
+    inputs:
+      DocumentName: 'app-deploy'
+      Targets: [{Key: 'tag:Env', Values: [prod]}]
+      Parameters:
+        version: ['{{ Version }}']
+      MaxConcurrency: '10%'
+      MaxErrors: '20%'
+```
+
+Ops 리더 2명이 승인해야 실제 배포 진행. 승인 대기 중 자동 알림.
+
+### 예 3: 셀프 힐링 (자가 복구)
+
+CloudWatch Alarm → Automation 실행. 예: EBS 볼륨 사용률 80% 초과 → 자동 확장.
+
+```yaml
+mainSteps:
+  - name: GetCurrentSize
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: DescribeVolumes
+      VolumeIds: ['{{ VolumeId }}']
+    outputs:
+      - Name: CurrentSize
+        Selector: '$.Volumes[0].Size'
+        Type: Integer
+
+  - name: CalculateNewSize
+    action: aws:executeScript
+    inputs:
+      Runtime: python3.11
+      Handler: main
+      Script: |
+        def main(events, context):
+            return {'NewSize': int(events['current'] * 1.5)}
+      InputPayload:
+        current: '{{ GetCurrentSize.CurrentSize }}'
+    outputs:
+      - Name: NewSize
+        Selector: $.Payload.NewSize
+        Type: Integer
+
+  - name: ModifyVolume
+    action: aws:executeAwsApi
+    inputs:
+      Service: ec2
+      Api: ModifyVolume
+      VolumeId: '{{ VolumeId }}'
+      Size: '{{ CalculateNewSize.NewSize }}'
+```
+
+## AWS 제공 런북 (사전 정의)
+
+100+ 개의 표준 런북 이미 존재. `AWS-*` 접두사.
+
+| 런북 | 용도 |
+|:---|:---|
+| `AWS-RestartEC2Instance` | EC2 재부팅 |
+| `AWS-StopEC2Instance` | EC2 중지 |
+| `AWS-CreateImage` | AMI 생성 |
+| `AWS-UpdateLinuxAmi` | Linux AMI 패치 후 새 AMI 생성 |
+| `AWS-EnableS3BucketEncryption` | S3 버킷 암호화 활성 |
+| `AWS-DisablePublicAccessForSecurityGroup` | 0.0.0.0/0 규칙 제거 |
+| `AWSSupport-TroubleshootSSH` | SSH 접속 문제 진단 |
+| `AWSSupport-CopyEBSSnapshot` | 스냅샷 복사 |
+| `AWS-RestoreRdsFromSnapshot` | RDS 복원 |
+
+**활용**: [[aws-config|AWS Config]] 규칙 위반 → 자동 remediation 런북 실행 (예: 퍼블릭 SG 발견 → 자동 제거).
+
+## 실행 방법
+
+### 1. AWS 콘솔
+
+SSM → Automation → Execute automation. 폼에 파라미터 입력.
+
+### 2. CLI
+
+```bash
+aws ssm start-automation-execution \
+  --document-name "app-deploy-with-approval" \
+  --parameters "Version=v1.2.3" \
+  --target-parameter-name "InstanceId" \
+  --targets "Key=tag:Env,Values=prod" \
+  --max-concurrency 10 \
+  --max-errors 2
+```
+
+### 3. [[aws-eventbridge|EventBridge]] 트리거
+
+CloudWatch Alarm, S3 이벤트, 스케줄 등 → EventBridge Rule → Automation 실행.
+
+### 4. [[aws-config|AWS Config]] Remediation
+
+Config 규칙 위반 감지 → 자동 remediation 런북 지정.
+
+## 실행 모드
+
+- **AutoApprove**: 승인 게이트 자동 통과 (테스트 / dev)
+- **Rate Control**: 대량 배포 시 concurrency + error threshold
+- **Interactive**: 매 스텝 실행 전 사용자 확인 (조사 목적)
+
+## 요금
+
+- **일부 무료**: 매월 100,000 스텝 무료
+- **초과 시**: 스텝당 $0.002 (예: 스텝 10 개 런북 10 회 = 100 스텝)
+- 하위 서비스 (EC2, Lambda 등) 요금 별도
+
+## 함정
+
+> [!WARNING]
+> **런북 assumeRole 권한 부족** = 스텝 중간 실패. IAM 정책은 사용하는 모든 API (`ec2:*`, `iam:*`, `s3:*` 등) 를 포함해야 함. 최소 권한 유지하되 필요 액션 다.
+
+> [!CAUTION]
+> **`onFailure: Continue` 남용** = 중요 스텝 실패해도 진행 → 반쯤 완료된 상태. 대부분 `Abort` 가 안전.
+
+> [!WARNING]
+> **`aws:approve` timeout** (기본 7일). 승인자 알림 [[aws-sns|SNS]] 필수. 승인자가 놓치면 실행 만료.
+
+> [!IMPORTANT]
+> **`aws:executeScript` 는 Python 3.x / PowerShell** 지원. 무거운 로직은 Lambda 로 분리해 `aws:invokeLambdaFunction` 이 좋음.
+
+> [!CAUTION]
+> **런북 버전** 명시. `--document-version "$LATEST"` 는 재현 불가. 프로덕션은 `"3"` 등 고정.
+
+> [!WARNING]
+> **파라미터 검증 없음** = 잘못된 값 그대로 실행. 스크립트로 사전 검증 스텝 추가.
+
+> [!IMPORTANT]
+> **잘못 만든 런북이 대량 리소스 파괴** 가능. Dev 계정에서 충분히 테스트 후 프로덕션. Config remediation 연결 전 dry-run.
+
+## 관련 위키
+
+- [[aws-systems-manager|Systems Manager (개요)]] - 상위 서비스
+- [[aws-ssm-run-command|SSM Run Command]] - 단일 스크립트 실행
+- [[aws-ssm-state-manager|SSM State Manager]] - 상태 유지
+- [[aws-step-functions|Step Functions]] - 대안 워크플로 (일반 애플리케이션)
+- [[aws-eventbridge|EventBridge]] - 트리거
+- [[aws-config|AWS Config]] - remediation 통합
+- [[aws-lambda|Lambda]] - 커스텀 로직 호출
+- [[aws-iam|IAM]] - 실행 role
