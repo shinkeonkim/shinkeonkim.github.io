@@ -2,7 +2,7 @@
 // Repo-wide lint, parses every animation JSON under public/animations/ against
 // the runtime zod schema and reports drift.
 //
-// Motivation: the animation loader (`src/entities/animation/engine/loader.ts`)
+// Motivation: the shared Clotho loader (`src/entities/animation/loader.ts`)
 // silently returns `null` when a JSON file fails the schema, and the caller
 // falls back to "animation not found". A subtle regex violation like
 // uppercase IDs (see articulation.json before the fix) meant a shipped
@@ -28,7 +28,7 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { animationDefSchema } from '../src/entities/animation/engine/schema/index.ts';
+import { animationDocumentSchema, validateDocument } from '@kokoa/clotho';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const ANIM_DIR = path.join(REPO_ROOT, 'public/animations');
@@ -169,7 +169,7 @@ async function main() {
       pushErr(violations, rel, `json parse error: ${err instanceof Error ? err.message : String(err)}`);
       continue;
     }
-    const parsed = animationDefSchema.safeParse(json);
+    const parsed = animationDocumentSchema.safeParse(json);
     if (!parsed.success) {
       for (const line of formatZodIssues(parsed.error)) {
         pushErr(violations, rel, `schema: ${line}`);
@@ -177,6 +177,11 @@ async function main() {
       continue;
     }
     semanticChecks(parsed.data, rel, violations);
+    for (const finding of validateDocument(parsed.data).findings) {
+      if (finding.severity === 'error') {
+        pushErr(violations, rel, `${finding.path ?? '<root>'}: ${finding.message}`);
+      }
+    }
   }
 
   if (JSON_OUT) {

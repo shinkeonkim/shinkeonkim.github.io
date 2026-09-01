@@ -1,5 +1,5 @@
 import { getCollection } from 'astro:content';
-import { loadAllAnimations } from '@/entities/animation/engine/loader';
+import { loadAllAnimations } from '@/entities/animation/loader';
 import { getPublishedPosts } from './content-queries';
 import { canonicalizeTag, getTagMeta } from '@/data/tags';
 

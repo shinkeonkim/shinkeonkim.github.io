@@ -1,8 +1,8 @@
 import type { APIRoute } from 'astro';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { animationDefSchema, ID_RE } from '@/entities/animation/engine/schema';
-import { ANIM_DIR } from '@/entities/animation/engine/loader';
+import { animationDocumentSchema, isSafeDocumentId } from '@kokoa/clotho';
+import { ANIM_DIR } from '@/entities/animation/animation-directory';
 import { errorResponse, jsonResponse, requireDev } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
@@ -40,7 +40,7 @@ async function loadSummary(fn: string): Promise<AnimationSummary | null> {
   } catch {
     return null;
   }
-  const parsed = animationDefSchema.safeParse(json);
+  const parsed = animationDocumentSchema.safeParse(json);
   if (!parsed.success) return null;
   return {
     id: parsed.data.id,
@@ -70,14 +70,15 @@ export const POST: APIRoute = requireDev(async ({ request }) => {
     await ensureDir();
     const body = await request.json();
     const id: unknown = body?.id;
-    if (typeof id !== 'string' || !ID_RE.test(id)) {
+    if (typeof id !== 'string' || !isSafeDocumentId(id)) {
       return jsonResponse({ error: 'invalid id (lowercase / digits / - / _ only)' }, { status: 400 });
     }
     const filePath = join(ANIM_DIR, `${id}.json`);
     if (await fileExists(filePath)) {
       return jsonResponse({ error: 'animation already exists' }, { status: 409 });
     }
-    const initial = animationDefSchema.parse({
+    const initial = animationDocumentSchema.parse({
+      clothoVersion: 1,
       id,
       title: typeof body?.title === 'string' && body.title ? body.title : id,
       description: typeof body?.description === 'string' ? body.description : '',

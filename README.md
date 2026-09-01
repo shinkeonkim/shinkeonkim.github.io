@@ -22,8 +22,7 @@ src/
 │   └── types/                # 공유 타입 (graph 등)
 ├── entities/                 # 도메인 모델 + 도메인 UI
 │   ├── post/, note/, wiki/, source/
-│   └── animation/            # SVG 애니메이션 엔진 + UI
-│       └── engine/           # schema/, render-elements/, engine.tsx, loader.ts
+│   └── animation/            # Clotho 문서 loader + 공개 player UI
 ├── features/                 # 사용자 인터랙션 단위
 │   ├── search/, theme-toggle/, share/, comments/
 │   ├── url-preview/, code-with-output/, mermaid/
@@ -40,7 +39,7 @@ src/
     ├── shared/               # api-utils, git-utils, path-utils
     ├── api/                  # purpose 별 endpoint (content/, git/, render/, ...)
     ├── editor/               # 마크다운 에디터 모듈
-    └── studio/               # 애니메이션 스튜디오 모듈
+    └── ClothoStudio.tsx      # dev-only Clotho Editor 연결
 scripts/                      # 일회성 유틸 (uv/Python, Node)
 ```
 
@@ -61,6 +60,8 @@ bun run lint          # ESLint 실행
 bun run lint:no-em-dash  # em-dash (U+2014) 사용 금지 검사
 bun astro check       # 타입 검증
 ```
+
+공개 애니메이션은 `@kokoa/clotho`의 schema와 React player를 사용합니다. `public/animations/*.json`은 모두 Clotho v1 문서이며 `bun run validate:animations`에서 package validator로 검사합니다. 개발 서버에서만 열리는 `/_studio`는 `@kokoa/clotho-editor`를 사용하고, 파일 기반 API를 `AnimationRepository`로 연결합니다. production build에는 Studio route가 생성되지 않습니다.
 
 ## 콘텐츠 작성
 

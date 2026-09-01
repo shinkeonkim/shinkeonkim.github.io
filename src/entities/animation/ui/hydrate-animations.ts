@@ -1,16 +1,13 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { createElement } from 'react';
-import {
-  animationDefSchema,
-  type AnimationDef,
-} from '@/entities/animation/engine/schema';
+import { animationDocumentSchema, type AnimationDocument } from '@kokoa/clotho';
 import PlayerWrapper from './AnimationPlayer';
 
 const HYDRATED = new WeakSet<HTMLElement>();
 const ROOTS = new WeakMap<HTMLElement, Root>();
-const CACHE = new Map<string, Promise<AnimationDef | null>>();
+const CACHE = new Map<string, Promise<AnimationDocument | null>>();
 
-async function fetchAnimation(id: string): Promise<AnimationDef | null> {
+async function fetchAnimation(id: string): Promise<AnimationDocument | null> {
   if (CACHE.has(id)) return CACHE.get(id)!;
   const p = (async () => {
     try {
@@ -19,7 +16,7 @@ async function fetchAnimation(id: string): Promise<AnimationDef | null> {
       });
       if (!res.ok) return null;
       const json = await res.json();
-      const parsed = animationDefSchema.safeParse(json);
+      const parsed = animationDocumentSchema.safeParse(json);
       return parsed.success ? parsed.data : null;
     } catch {
       return null;

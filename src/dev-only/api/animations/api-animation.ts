@@ -1,8 +1,8 @@
 import type { APIRoute } from 'astro';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { animationDefSchema, ID_RE } from '@/entities/animation/engine/schema';
-import { ANIM_DIR } from '@/entities/animation/engine/loader';
+import { animationDocumentSchema, isSafeDocumentId } from '@kokoa/clotho';
+import { ANIM_DIR } from '@/entities/animation/animation-directory';
 import { errorResponse, jsonResponse, requireDev } from '@/dev-only/shared/api-utils';
 
 export const prerender = false;
@@ -17,11 +17,11 @@ function invalidId(): Response {
 
 export const GET: APIRoute = requireDev(async ({ params }) => {
   const id = params.id ?? '';
-  if (!ID_RE.test(id)) return invalidId();
+  if (!isSafeDocumentId(id)) return invalidId();
   try {
     const text = await readFile(pathFor(id), 'utf-8');
     const json = JSON.parse(text);
-    const parsed = animationDefSchema.safeParse(json);
+    const parsed = animationDocumentSchema.safeParse(json);
     if (!parsed.success) {
       return jsonResponse({ error: 'invalid stored animation', detail: parsed.error.message }, { status: 500 });
     }
@@ -33,12 +33,12 @@ export const GET: APIRoute = requireDev(async ({ params }) => {
 
 export const PUT: APIRoute = requireDev(async ({ params, request }) => {
   const id = params.id ?? '';
-  if (!ID_RE.test(id)) return invalidId();
+  if (!isSafeDocumentId(id)) return invalidId();
   try {
     await mkdir(ANIM_DIR, { recursive: true });
     const body = await request.json();
     const merged = { ...body, id };
-    const parsed = animationDefSchema.safeParse(merged);
+    const parsed = animationDocumentSchema.safeParse(merged);
     if (!parsed.success) {
       return jsonResponse({ error: 'validation failed', detail: parsed.error.message }, { status: 400 });
     }
@@ -55,7 +55,7 @@ export const PUT: APIRoute = requireDev(async ({ params, request }) => {
 
 export const DELETE: APIRoute = requireDev(async ({ params }) => {
   const id = params.id ?? '';
-  if (!ID_RE.test(id)) return invalidId();
+  if (!isSafeDocumentId(id)) return invalidId();
   try {
     await unlink(pathFor(id));
     return jsonResponse({ ok: true });
